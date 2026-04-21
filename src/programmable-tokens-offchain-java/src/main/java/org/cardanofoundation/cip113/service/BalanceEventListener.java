@@ -27,7 +27,7 @@ import java.util.stream.Collectors;
 public class BalanceEventListener {
 
     private final BalanceService balanceService;
-    private final ProtocolParamsService protocolParamsService;
+    private final Cip113ProtocolParamsService cip113ProtocolParamsService;
     private final UtxoRepository utxoRepository;
 
     @EventListener
@@ -35,7 +35,7 @@ public class BalanceEventListener {
         log.debug("Processing AddressUtxoEvent for balance indexing");
 
         // Get all protocol params to know all programmableLogicBaseScriptHashes
-        List<ProtocolParamsEntity> allProtocolParams = protocolParamsService.getAll();
+        List<ProtocolParamsEntity> allProtocolParams = cip113ProtocolParamsService.getAll();
         if (allProtocolParams.isEmpty()) {
             log.debug("No protocol params loaded yet, skipping balance indexing");
             return;

@@ -15,7 +15,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @Service
 @Slf4j
 @RequiredArgsConstructor
-public class ProtocolParamsService {
+public class Cip113ProtocolParamsService {
 
     private final ProtocolParamsRepository repository;
 

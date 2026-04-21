@@ -6,7 +6,7 @@ import org.cardanofoundation.cip113.entity.RegistryNodeEntity;
 import org.cardanofoundation.cip113.model.ProtocolParams;
 import org.cardanofoundation.cip113.model.RegistryNode;
 import org.cardanofoundation.cip113.model.RegistryNodes;
-import org.cardanofoundation.cip113.service.ProtocolParamsService;
+import org.cardanofoundation.cip113.service.Cip113ProtocolParamsService;
 import org.cardanofoundation.cip113.service.RegistryService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -23,7 +23,7 @@ import java.util.stream.Collectors;
 public class RegistryController {
 
     private final RegistryService registryService;
-    private final ProtocolParamsService protocolParamsService;
+    private final Cip113ProtocolParamsService cip113ProtocolParamsService;
 
     /**
      * Get all registered tokens (across all protocol params versions)
@@ -92,7 +92,7 @@ public class RegistryController {
     public ResponseEntity<List<Map<String, Object>>> getProtocolsWithStats() {
         log.debug("GET /protocols - fetching protocol params with registry stats");
 
-        List<Map<String, Object>> result = protocolParamsService.getAll().stream()
+        List<Map<String, Object>> result = cip113ProtocolParamsService.getAll().stream()
                 .map(pp -> {
                     Map<String, Object> stats = new HashMap<>();
                     stats.put("protocolParamsId", pp.getId());

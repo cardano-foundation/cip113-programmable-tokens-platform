@@ -9,13 +9,12 @@ import org.cardanofoundation.cip113.entity.BalanceLogEntity;
 import org.cardanofoundation.cip113.entity.ProtocolParamsEntity;
 import org.cardanofoundation.cip113.model.TransactionType;
 import org.cardanofoundation.cip113.service.BalanceService;
-import org.cardanofoundation.cip113.service.ProtocolParamsService;
+import org.cardanofoundation.cip113.service.Cip113ProtocolParamsService;
 import org.cardanofoundation.cip113.util.BalanceValueHelper;
 import org.cardanofoundation.conversions.CardanoConverters;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -27,7 +26,7 @@ import java.util.stream.Collectors;
 public class HistoryController {
 
     private final BalanceService balanceService;
-    private final ProtocolParamsService protocolParamsService;
+    private final Cip113ProtocolParamsService cip113ProtocolParamsService;
     private final CardanoConverters cardanoConverters;
     private final ObjectMapper objectMapper;
 
@@ -51,7 +50,7 @@ public class HistoryController {
         // Resolve payment script hash from protocol tx hash if provided
         String paymentScriptHash = null;
         if (protocolTxHash != null && !protocolTxHash.isEmpty()) {
-            Optional<ProtocolParamsEntity> protocolOpt = protocolParamsService.getByTxHash(protocolTxHash);
+            Optional<ProtocolParamsEntity> protocolOpt = cip113ProtocolParamsService.getByTxHash(protocolTxHash);
             if (protocolOpt.isPresent()) {
                 paymentScriptHash = protocolOpt.get().getProgLogicScriptHash();
                 log.debug("Resolved paymentScriptHash={} from protocolTxHash={}", paymentScriptHash, protocolTxHash);

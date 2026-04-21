@@ -16,7 +16,7 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 public class ProtocolParamsEventListener {
 
-    private final ProtocolParamsService protocolParamsService;
+    private final Cip113ProtocolParamsService cip113ProtocolParamsService;
     private final ProtocolParamsParser protocolParamsParser;
     private final AppConfig.ProtocolParamsConfig protocolParamsConfig;
 
@@ -25,8 +25,8 @@ public class ProtocolParamsEventListener {
     public void processEvent(AddressUtxoEvent addressUtxoEvent) {
         log.debug("Processing AddressUtxoEvent with {} transactions", addressUtxoEvent.getTxInputOutputs().size());
 
-        var slot = addressUtxoEvent.getEventMetadata().getSlot();
-        var blockHeight = addressUtxoEvent.getEventMetadata().getBlock();
+        var slot = addressUtxoEvent.getMetadata().getSlot();
+        var blockHeight = addressUtxoEvent.getMetadata().getBlock();
 
         addressUtxoEvent.getTxInputOutputs()
                 .stream()
@@ -52,7 +52,7 @@ public class ProtocolParamsEventListener {
                                                 .blockHeight(blockHeight)
                                                 .build();
 
-                                        protocolParamsService.save(entity);
+                                        cip113ProtocolParamsService.save(entity);
                                         log.info("Successfully saved protocol params from txHash={}", txHash);
                                     },
                                     () -> log.error("Failed to parse protocol params from txHash={}", txHash)

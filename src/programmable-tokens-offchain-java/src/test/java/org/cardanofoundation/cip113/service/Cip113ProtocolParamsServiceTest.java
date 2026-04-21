@@ -15,17 +15,17 @@ import static org.junit.jupiter.api.Assertions.*;
         "spring.jpa.hibernate.ddl-auto=create-drop",
         "spring.flyway.enabled=false"
 })
-class ProtocolParamsServiceTest {
+class Cip113ProtocolParamsServiceTest {
 
     @Autowired
     private ProtocolParamsRepository repository;
 
-    private ProtocolParamsService service;
+    private Cip113ProtocolParamsService service;
 
     @BeforeEach
     void setUp() {
         repository.deleteAll();
-        service = new ProtocolParamsService(repository);
+        service = new Cip113ProtocolParamsService(repository);
     }
 
     @Test

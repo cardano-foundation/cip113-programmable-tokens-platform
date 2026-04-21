@@ -9,7 +9,7 @@ import org.cardanofoundation.cip113.entity.ProtocolParamsEntity;
 import org.cardanofoundation.cip113.model.WalletBalanceResponse;
 import org.cardanofoundation.cip113.service.BalanceService;
 import org.cardanofoundation.cip113.service.BlacklistQueryService;
-import org.cardanofoundation.cip113.service.ProtocolParamsService;
+import org.cardanofoundation.cip113.service.Cip113ProtocolParamsService;
 import org.cardanofoundation.cip113.service.RegistryService;
 import org.cardanofoundation.cip113.util.AddressUtil;
 import org.cardanofoundation.cip113.util.BalanceValueHelper;
@@ -19,7 +19,6 @@ import org.springframework.web.bind.annotation.*;
 import java.math.BigInteger;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 @RestController
 @RequestMapping("${apiPrefix}/balances")
@@ -28,7 +27,7 @@ import java.util.stream.Stream;
 public class BalanceController {
 
     private final BalanceService balanceService;
-    private final ProtocolParamsService protocolParamsService;
+    private final Cip113ProtocolParamsService cip113ProtocolParamsService;
     private final RegistryService registryService;
     private final BlacklistQueryService blacklistQueryService;
 
@@ -302,7 +301,7 @@ public class BalanceController {
             // Filter by protocol version if protocolTxHash is provided
             List<BalanceLogEntity> filteredBalances;
             if (protocolTxHash != null && !protocolTxHash.isEmpty()) {
-                Optional<ProtocolParamsEntity> protocolOpt = protocolParamsService.getByTxHash(protocolTxHash);
+                Optional<ProtocolParamsEntity> protocolOpt = cip113ProtocolParamsService.getByTxHash(protocolTxHash);
                 if (protocolOpt.isEmpty()) {
                     log.warn("Invalid protocol txHash: {}", protocolTxHash);
                     return ResponseEntity.badRequest().build();

@@ -25,7 +25,7 @@ public class RegistryEventListener {
 
     private final RegistryService registryService;
     private final RegistryNodeParser registryNodeParser;
-    private final ProtocolParamsService protocolParamsService;
+    private final Cip113ProtocolParamsService cip113ProtocolParamsService;
 
     @EventListener
     public void processEvent(AddressUtxoEvent addressUtxoEvent) {
@@ -33,7 +33,7 @@ public class RegistryEventListener {
 
         // Get all protocol params to know all registryNodePolicyIds
         // FIXME: this is super slow, list of protocol params should be updated on an event based and kept in memory
-        List<ProtocolParamsEntity> allProtocolParams = protocolParamsService.getAll();
+        List<ProtocolParamsEntity> allProtocolParams = cip113ProtocolParamsService.getAll();
         if (allProtocolParams.isEmpty()) {
             log.debug("No protocol params loaded yet, skipping registry indexing");
             return;
@@ -53,8 +53,8 @@ public class RegistryEventListener {
                 policyIdToProtocolParams.size(),
                 String.join(", ", policyIdToProtocolParams.keySet()));
 
-        var slot = addressUtxoEvent.getEventMetadata().getSlot();
-        var blockHeight = addressUtxoEvent.getEventMetadata().getBlock();
+        var slot = addressUtxoEvent.getMetadata().getSlot();
+        var blockHeight = addressUtxoEvent.getMetadata().getBlock();
 
         // Process each transaction's outputs
         addressUtxoEvent.getTxInputOutputs()

@@ -110,7 +110,7 @@ For a deeper walkthrough of the on-chain design, see the [on-chain repository's 
 
 - **Frontend:** Node.js 18+ (20+ recommended), npm or yarn, Blockfrost API key
 - **Backend:** Java 17+, Gradle
-- **Substandards:** [Aiken](https://aiken-lang.org/installation-instructions) v1.1.13+
+- **Substandards:** [Aiken](https://aiken-lang.org/installation-instructions) — each substandard pins its own compiler in `aiken.toml` (currently `dummy` → v1.1.19, `freeze-and-seize` → v1.1.21)
 
 ### Frontend
 
