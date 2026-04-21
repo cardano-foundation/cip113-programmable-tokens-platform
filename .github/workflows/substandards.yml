@@ -1,0 +1,35 @@
+name: Substandards (Aiken)
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/substandards/**"
+      - ".github/workflows/substandards.yml"
+  pull_request:
+    paths:
+      - "src/substandards/**"
+      - ".github/workflows/substandards.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        substandard:
+          - name: dummy
+            aiken-version: v1.1.19
+          - name: freeze-and-seize
+            aiken-version: v1.1.21
+    defaults:
+      run:
+        working-directory: src/substandards/${{ matrix.substandard.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aiken-lang/setup-aiken@v1
+        with:
+          version: ${{ matrix.substandard.aiken-version }}
+      - run: aiken fmt --check
+      - run: aiken check -D
+      - run: aiken build
