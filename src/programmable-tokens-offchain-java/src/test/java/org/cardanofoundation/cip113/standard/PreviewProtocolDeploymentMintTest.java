@@ -13,6 +13,7 @@ import com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.PlutusData;
 import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.quicktx.Tx;
 import com.bloxbean.cardano.client.transaction.spec.Asset;
@@ -24,12 +25,15 @@ import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.AbstractPreviewTest;
 import org.cardanofoundation.cip113.model.blueprint.Plutus;
 import org.cardanofoundation.cip113.model.bootstrap.*;
+
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
@@ -253,6 +257,34 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 BytesPlutusData.of(HexUtil.decodeHexString(contractParts[0])),
                 BytesPlutusData.of(HexUtil.decodeHexString(contractParts[1])));
 
+        // CIP-171 keys are the UN-parameterised validator hash (i.e. the hash the
+        // verifier reads from validators[].hash after rebuilding from source);
+        // values are the params applied to derive the on-chain parameterised script.
+        // always_fail is deployed twice with different bootstrap hashes — both share
+        // the same un-param hash, and CDDL requires unique keys per record, so we
+        // can't register both. Skipping always_fail.
+        Map<byte[], List<PlutusData>> cip171Params = new LinkedHashMap<>();
+        cip171Params.put(
+                PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(PROTOCOL_PARAMS_CONTRACT, PlutusVersion.v3).getScriptHash(),
+                List.of(utxo1OutputReference, BytesPlutusData.of(parametersAlwaysFailScript.getScriptHash())));
+        cip171Params.put(
+                PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(PROGRAMMABLE_LOGIC_GLOBAL_CONTRACT, PlutusVersion.v3).getScriptHash(),
+                List.of(BytesPlutusData.of(protocolParamsContract.getScriptHash())));
+        cip171Params.put(
+                PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(PROGRAMMABLE_LOGIC_BASE_CONTRACT, PlutusVersion.v3).getScriptHash(),
+                List.of(ConstrPlutusData.of(1, BytesPlutusData.of(programmableLogicGlobalContract.getScriptHash()))));
+        cip171Params.put(
+                PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(ISSUANCE_CBOR_HEX_CONTRACT, PlutusVersion.v3).getScriptHash(),
+                List.of(utxo2OutputReference, BytesPlutusData.of(issuanceAlwaysFailScript.getScriptHash())));
+        cip171Params.put(
+                PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(DIRECTORY_MINT_CONTRACT, PlutusVersion.v3).getScriptHash(),
+                List.of(utxo1OutputReference, BytesPlutusData.of(issuanceContract.getScriptHash())));
+        cip171Params.put(
+                PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(DIRECTORY_SPEND_CONTRACT, PlutusVersion.v3).getScriptHash(),
+                List.of(BytesPlutusData.of(protocolParamsContract.getScriptHash())));
+
+        var cip171Metadata = Cip171BootstrapMetadata.build(cip171Params);
+
         var tx = new Tx()
                 //spend all wallets (coz we need to burn the bootstrap utxo)
                 .collectFrom(walletUtxos)
@@ -273,6 +305,7 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 .payToAddress(refInputAccount.baseAddress(), Amount.ada(1), programmableLogicGlobalContract)
                 .payToAddress(adminAccount.baseAddress(), Amount.ada(50))
                 .payToAddress(adminAccount.baseAddress(), Amount.ada(50))
+                .attachMetadata(cip171Metadata)
                 .withChangeAddress(adminAccount.baseAddress());
 
 //                    .attachRewardValidator(programmableLogicGlobalContract) // global
