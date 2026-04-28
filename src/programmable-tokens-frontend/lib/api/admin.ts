@@ -24,6 +24,7 @@ export interface AdminTokenInfo {
     blacklistNodePolicyId?: string;
     issuerAdminPkh?: string;
     blacklistAdminPkh?: string;
+    globalStatePolicyId?: string;
   };
 }
 

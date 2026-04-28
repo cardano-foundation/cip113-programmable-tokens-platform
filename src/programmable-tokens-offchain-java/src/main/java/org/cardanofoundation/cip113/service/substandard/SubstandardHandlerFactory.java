@@ -6,6 +6,7 @@ import org.cardanofoundation.cip113.service.substandard.capabilities.BlacklistMa
 import org.cardanofoundation.cip113.service.substandard.capabilities.Seizeable;
 import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable;
 import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
+import org.cardanofoundation.cip113.service.substandard.context.KycContext;
 import org.cardanofoundation.cip113.service.substandard.context.SubstandardContext;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
@@ -57,8 +58,8 @@ public class SubstandardHandlerFactory {
         for (SubstandardHandler handler : handlerList) {
             String id = handler.getSubstandardId().toLowerCase();
 
-            // FreezeAndSeizeHandler is prototype-scoped, needs context
-            if (handler instanceof FreezeAndSeizeHandler) {
+            // FreezeAndSeizeHandler and KycSubstandardHandler are prototype-scoped, need context
+            if (handler instanceof FreezeAndSeizeHandler || handler instanceof KycSubstandardHandler) {
                 contextAwareSubstandards.add(id);
                 log.info("Registered context-aware substandard: {}", id);
             } else {
@@ -128,6 +129,19 @@ public class SubstandardHandlerFactory {
             FreezeAndSeizeHandler handler = applicationContext.getBean(FreezeAndSeizeHandler.class);
             handler.setContext(fasContext);
             log.debug("Created FreezeAndSeizeHandler with context: {}", fasContext);
+            return handler;
+        }
+
+        if ("kyc".equals(substandardId)) {
+            if (!(context instanceof KycContext kycContext)) {
+                throw new IllegalArgumentException(
+                        "kyc handler requires KycContext, got: " +
+                        (context != null ? context.getClass().getSimpleName() : "null"));
+            }
+
+            KycSubstandardHandler handler = applicationContext.getBean(KycSubstandardHandler.class);
+            handler.setContext(kycContext);
+            log.debug("Created KycSubstandardHandler with context: {}", kycContext);
             return handler;
         }
 

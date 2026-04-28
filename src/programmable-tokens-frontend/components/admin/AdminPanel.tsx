@@ -1,13 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { Coins, Shield, AlertTriangle, Flame } from "lucide-react";
+import { Coins, Shield, AlertTriangle, Flame, Settings } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { MintSection } from "./MintSection";
 import { BurnSection } from "./BurnSection";
 import { BlacklistSection } from "./BlacklistSection";
 import { SeizeSection } from "./SeizeSection";
+import { GlobalStateSection } from "./GlobalStateSection";
 import { AdminTokenInfo } from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
 
@@ -16,7 +17,7 @@ interface AdminPanelProps {
   adminAddress: string;
 }
 
-type AdminTab = "mint" | "burn" | "blacklist" | "seize";
+type AdminTab = "mint" | "burn" | "blacklist" | "seize" | "global-state";
 
 interface TabInfo {
   id: AdminTab;
@@ -55,6 +56,13 @@ const tabs: TabInfo[] = [
     description: "Seize tokens from blacklisted addresses",
     requiredRole: "ISSUER_ADMIN",
   },
+  {
+    id: "global-state",
+    label: "Global State",
+    icon: <Settings className="h-4 w-4" />,
+    description: "Pause transfers, set mintable amount, and update security info",
+    requiredRole: "ISSUER_ADMIN",
+  },
 ];
 
 export function AdminPanel({ tokens, adminAddress }: AdminPanelProps) {
@@ -65,7 +73,14 @@ export function AdminPanel({ tokens, adminAddress }: AdminPanelProps) {
     return tokens.some((token) => token.roles.includes(role));
   };
 
-  const availableTabs = tabs.filter((tab) => hasRole(tab.requiredRole));
+  const hasKycTokens = tokens.some(
+    (t) => t.substandardId === "kyc" && t.roles.includes("ISSUER_ADMIN")
+  );
+
+  const availableTabs = tabs.filter((tab) => {
+    if (tab.id === "global-state") return hasKycTokens;
+    return hasRole(tab.requiredRole);
+  });
 
   // If no tabs are available, show empty state
   if (availableTabs.length === 0) {
@@ -138,6 +153,9 @@ export function AdminPanel({ tokens, adminAddress }: AdminPanelProps) {
         )}
         {activeTab === "seize" && (
           <SeizeSection tokens={tokens} adminAddress={adminAddress} />
+        )}
+        {activeTab === "global-state" && (
+          <GlobalStateSection tokens={tokens} adminAddress={adminAddress} />
         )}
       </CardContent>
     </Card>

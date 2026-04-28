@@ -22,6 +22,9 @@ blockfrost:
   url: https://cardano-mainnet.blockfrost.io/api/v0/
   key: ""
 
+koios:
+  url: ${KOIOS_URL:https://api.koios.rest/api/v1/}
+
 store:
   cardano:
     host: backbone.mainnet.cardanofoundation.org
@@ -33,6 +36,30 @@ store:
     keep-alive-interval: 1000
 
 apiPrefix: /api/v1
+
+keri:
+  enabled: ${KERI_ENABLED:true}
+  url: ${KERI_URL:http://localhost:3901}
+  booturl: ${KERI_BOOT_URL:http://localhost:3903}
+  identifier:
+    bran: ${KERI_BRAN:0ADF2TpptgqcDE5IQUF1H}
+    name: ${KERI_IDENTIFIER_NAME:identity}
+    role: agent
+    registry-name: kyc-registry
+  schema:
+    base-url: https://cred-issuance.demo.idw-sandboxes.cf-deployments.org/oobi/
+    schemas:
+      USER:
+        said: EL9oOWU_7zQn_rD--Xsgi3giCWnFDaNvFMUGTOZx1ARO
+        label: "Basic KYC"
+      INSTITUTIONAL:
+        said: ${KERI_SCHEMA_INSTITUTIONAL_SAID:ENPXp1vQzRF6JwIuS-mp2U8Uf1MoADoP_GqQ62VsDZWY}
+        label: "Institutional KYC"
+      VLEI:
+        said: ${KERI_SCHEMA_VLEI_SAID:ENPXp1vQzRF6JwIuS-mp2U8Uf1MoADoP_GqQ62VsDZWY}
+        label: "vLEI Credential"
+  signing-mnemonic: ${KERI_SIGNING_MNEMONIC:nest wild farm beyond decide arm chuckle home raven card parrot nothing crazy casino hub broken scan height marine movie gloom village common off}
+  kyc-proof-validity-days: ${KERI_PROOF_VALIDITY_DAYS:30}
 
 management:
   endpoints:
@@ -53,6 +80,9 @@ wallet:
 
 blockfrost:
   url: https://cardano-preprod.blockfrost.io/api/v0/
+
+koios:
+  url: ${KOIOS_URL:https://preprod.koios.rest/api/v1/}
 
 store:
   cardano:
@@ -77,6 +107,9 @@ wallet:
 
 blockfrost:
   url: https://cardano-preview.blockfrost.io/api/v0/
+
+koios:
+  url: ${KOIOS_URL:https://preview.koios.rest/api/v1/}
 
 store:
   cardano:

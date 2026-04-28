@@ -11,13 +11,16 @@ import org.cardanofoundation.cip113.model.TransactionContext.RegistrationResult;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
+import org.cardanofoundation.cip113.repository.KycTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.service.substandard.BafinSubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.DummySubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler;
+import org.cardanofoundation.cip113.service.substandard.KycSubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.SubstandardHandlerFactory;
 import org.cardanofoundation.cip113.service.substandard.capabilities.BasicOperations;
 import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
+import org.cardanofoundation.cip113.service.substandard.context.KycContext;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -41,6 +44,8 @@ public class TokenOperationsService {
     private final BlacklistInitRepository blacklistInitRepository;
 
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeTokenRegistrationRepository;
+
+    private final KycTokenRegistrationRepository kycTokenRegistrationRepository;
 
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
@@ -73,6 +78,15 @@ public class TokenOperationsService {
                 var basicOps = (BasicOperations<FreezeAndSeizeRegisterRequest>) handler.asBasicOperations()
                         .orElseThrow(() -> new UnsupportedOperationException("freeze-and-seize does not support basic operations"));
                 yield basicOps.buildPreRegistrationTransaction(fasRequest, protocolParams);
+            }
+            case KycRegisterRequest kycRequest -> {
+                var handler = handlerFactory.getHandler("kyc", KycContext.builder()
+                        .issuerAdminPkh(kycRequest.getAdminPubKeyHash())
+                        .globalStatePolicyId(kycRequest.getGlobalStatePolicyId())
+                        .build());
+                var basicOps = (BasicOperations<KycRegisterRequest>) handler.asBasicOperations()
+                        .orElseThrow(() -> new UnsupportedOperationException("kyc does not support basic operations"));
+                yield basicOps.buildPreRegistrationTransaction(kycRequest, protocolParams);
             }
             default -> throw new UnsupportedOperationException(
                     "Unknown request type: " + request.getClass().getSimpleName());
@@ -113,6 +127,15 @@ public class TokenOperationsService {
                 var basicOps = (BasicOperations<FreezeAndSeizeRegisterRequest>) handler.asBasicOperations()
                         .orElseThrow(() -> new UnsupportedOperationException("freeze-and-seize does not support basic operations"));
                 yield basicOps.buildRegistrationTransaction(fasRequest, protocolParams);
+            }
+            case KycRegisterRequest kycRequest -> {
+                var handler = handlerFactory.getHandler("kyc", KycContext.builder()
+                        .issuerAdminPkh(kycRequest.getAdminPubKeyHash())
+                        .globalStatePolicyId(kycRequest.getGlobalStatePolicyId())
+                        .build());
+                var basicOps = (BasicOperations<KycRegisterRequest>) handler.asBasicOperations()
+                        .orElseThrow(() -> new UnsupportedOperationException("kyc does not support basic operations"));
+                yield basicOps.buildRegistrationTransaction(kycRequest, protocolParams);
             }
             default -> throw new UnsupportedOperationException(
                     "Unknown request type: " + request.getClass().getSimpleName());
@@ -164,6 +187,18 @@ public class TokenOperationsService {
                         .blacklistNodePolicyId(blacklistInitEntity.getBlacklistNodePolicyId())
                         .build();
             }
+            case "kyc" -> {
+                var kycData = kycTokenRegistrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId())
+                        .orElseThrow(() -> new RuntimeException("could not find KYC token registration data"));
+                yield KycContext.builder()
+                        .issuerAdminPkh(kycData.getIssuerAdminPkh())
+                        .globalStatePolicyId(kycData.getGlobalStateInit().getGlobalStatePolicyId())
+                        .globalStateInitTxInput(TransactionInput.builder()
+                                .transactionId(kycData.getGlobalStateInit().getTxHash())
+                                .index(kycData.getGlobalStateInit().getOutputIndex())
+                                .build())
+                        .build();
+            }
 
             default -> null;
         };
@@ -177,6 +212,8 @@ public class TokenOperationsService {
                     freezeAndSeizeHandler.buildMintTransaction(request, protocolParams);
             case BafinSubstandardHandler bafinSubstandardHandler ->
                     bafinSubstandardHandler.buildMintTransaction(request, protocolParams);
+            case KycSubstandardHandler kycSubstandardHandler ->
+                    kycSubstandardHandler.buildMintTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
 
@@ -226,6 +263,18 @@ public class TokenOperationsService {
                         .blacklistNodePolicyId(blacklistInitEntity.getBlacklistNodePolicyId())
                         .build();
             }
+            case "kyc" -> {
+                var kycData = kycTokenRegistrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId())
+                        .orElseThrow(() -> new RuntimeException("could not find KYC token registration data"));
+                yield KycContext.builder()
+                        .issuerAdminPkh(kycData.getIssuerAdminPkh())
+                        .globalStatePolicyId(kycData.getGlobalStateInit().getGlobalStatePolicyId())
+                        .globalStateInitTxInput(TransactionInput.builder()
+                                .transactionId(kycData.getGlobalStateInit().getTxHash())
+                                .index(kycData.getGlobalStateInit().getOutputIndex())
+                                .build())
+                        .build();
+            }
 
             default -> null;
         };
@@ -239,6 +288,8 @@ public class TokenOperationsService {
                     freezeAndSeizeHandler.buildBurnTransaction(request, protocolParams);
             case BafinSubstandardHandler bafinSubstandardHandler ->
                     bafinSubstandardHandler.buildBurnTransaction(request, protocolParams);
+            case KycSubstandardHandler kycSubstandardHandler ->
+                    kycSubstandardHandler.buildBurnTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
 
@@ -291,6 +342,18 @@ public class TokenOperationsService {
                         .blacklistNodePolicyId(blacklistInitEntity.getBlacklistNodePolicyId())
                         .build();
             }
+            case "kyc" -> {
+                var kycData = kycTokenRegistrationRepository.findByProgrammableTokenPolicyId(programmableToken.policyId())
+                        .orElseThrow(() -> new RuntimeException("could not find KYC token registration data"));
+                yield KycContext.builder()
+                        .issuerAdminPkh(kycData.getIssuerAdminPkh())
+                        .globalStatePolicyId(kycData.getGlobalStateInit().getGlobalStatePolicyId())
+                        .globalStateInitTxInput(TransactionInput.builder()
+                                .transactionId(kycData.getGlobalStateInit().getTxHash())
+                                .index(kycData.getGlobalStateInit().getOutputIndex())
+                                .build())
+                        .build();
+            }
 
             default -> null;
         };
@@ -304,9 +367,10 @@ public class TokenOperationsService {
                     freezeAndSeizeHandler.buildTransferTransaction(request, protocolParams);
             case BafinSubstandardHandler bafinSubstandardHandler ->
                     bafinSubstandardHandler.buildTransferTransaction(request, protocolParams);
+            case KycSubstandardHandler kycSubstandardHandler ->
+                    kycSubstandardHandler.buildTransferTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
-
 
         log.info("Transfer transaction built successfully for substandard: {}", substandardId);
 
