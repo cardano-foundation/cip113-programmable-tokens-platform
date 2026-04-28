@@ -121,4 +121,45 @@ public class UtxoProvider {
 
     }
 
+    /**
+     * Find UTxOs containing tokens from a given policy ID.
+     * Uses Blockfrost Asset API to locate addresses holding the policy's assets,
+     * then retrieves UTxOs at those addresses.
+     *
+     * @param policyId The minting policy ID
+     * @return List of UTxOs containing tokens from this policy
+     */
+    public List<Utxo> findUtxosByPolicy(String policyId) {
+        try {
+            var assetService = bfBackendService.getAssetService();
+
+            var assetsResult = assetService.getAllPolicyAssets(policyId);
+            if (!assetsResult.isSuccessful() || assetsResult.getValue().isEmpty()) {
+                log.warn("No assets found for policy: {}", policyId);
+                return List.of();
+            }
+
+            var firstAssetUnit = assetsResult.getValue().getFirst().getAsset();
+
+            var addressesResult = assetService.getAssetAddresses(firstAssetUnit, 1, 1);
+            if (!addressesResult.isSuccessful() || addressesResult.getValue().isEmpty()) {
+                log.warn("No addresses found for asset: {}", firstAssetUnit);
+                return List.of();
+            }
+
+            var address = addressesResult.getValue().getFirst().getAddress();
+
+            var utxoResult = bfBackendService.getUtxoService().getUtxos(address, firstAssetUnit, 100, 1);
+            if (utxoResult.isSuccessful()) {
+                return utxoResult.getValue();
+            }
+
+            log.warn("No UTxOs found for asset {} at address {}", firstAssetUnit, address);
+            return List.of();
+
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to find UTxOs by policy: " + policyId, e);
+        }
+    }
+
 }

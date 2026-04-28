@@ -10,11 +10,13 @@ package org.cardanofoundation.cip113.model;
  * @param assetName        The asset name (hex-encoded)
  * @param quantity         The quantity to mint (positive) or burn (negative)
  * @param recipientAddress The recipient address for minted tokens (defaults to feePayerAddress if null)
+ * @param attestation      Optional CIP-170 attestation data (nullable)
  */
 public record MintTokenRequest(
         String feePayerAddress,
         String tokenPolicyId,
         String assetName,
         String quantity,
-        String recipientAddress) {
+        String recipientAddress,
+        Cip170AttestationData attestation) {
 }

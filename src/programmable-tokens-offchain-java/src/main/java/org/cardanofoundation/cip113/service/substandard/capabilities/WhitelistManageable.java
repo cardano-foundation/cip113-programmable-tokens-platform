@@ -23,14 +23,24 @@ public interface WhitelistManageable {
      * Requires the token to be already registered in the programmable token registry.
      */
     record WhitelistInitRequest(
-            /** The policy ID of the programmable token (used to resolve substandard) */
+            /** The policy ID of the programmable token (used to resolve substandard, optional if substandardId is provided) */
             String tokenPolicyId,
+            /** The substandard ID (e.g., "kyc") - used when token is not yet registered */
+            String substandardId,
             /** The admin address that will manage this whitelist */
             String adminAddress,
             /** Bootstrap UTxO transaction hash */
             String bootstrapTxHash,
             /** Bootstrap UTxO output index */
-            int bootstrapOutputIndex
+            int bootstrapOutputIndex,
+            /** Optional: initial trusted entity vkeys (64 hex chars each) to pre-populate in the list */
+            java.util.List<String> initialVkeys,
+            /** Optional: initial transfers_paused value (default: false) */
+            Boolean initialTransfersPaused,
+            /** Optional: initial mintable_amount value (default: 0) */
+            Long initialMintableAmount,
+            /** Optional: initial security_info as hex bytes */
+            String initialSecurityInfo
     ) {}
 
     /**

@@ -52,3 +52,20 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+  keria:
+    image: weboftrust/keria:latest
+    ports:
+      - "3901:3901"
+      - "3902:3902"
+      - "3903:3903"
+    volumes:
+      - ./keri-config/keria.json:/keria/config/keri/cf/keria.json
+  witness-demo:
+    image: weboftrust/keri-witness:latest
+    ports:
+      - "5642:5642"
+      - "5643:5643"
+      - "5644:5644"
+      - "5645:5645"
+      - "5646:5646"
+      - "5647:5647"

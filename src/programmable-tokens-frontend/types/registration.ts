@@ -201,9 +201,18 @@ export interface FreezeAndSeizeRegistrationData extends BaseRegistrationData {
 }
 
 /**
+ * KYC substandard registration data
+ */
+export interface KycRegistrationData extends BaseRegistrationData {
+  substandardId: 'kyc';
+  adminPubKeyHash: string;
+  globalStatePolicyId: string;
+}
+
+/**
  * Union type for all registration requests
  */
-export type RegistrationRequest = DummyRegistrationData | FreezeAndSeizeRegistrationData;
+export type RegistrationRequest = DummyRegistrationData | FreezeAndSeizeRegistrationData | KycRegistrationData;
 
 // ============================================================================
 // Step-Specific Data Types

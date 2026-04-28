@@ -11,10 +11,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.entity.BlacklistInitEntity;
 import org.cardanofoundation.cip113.entity.FreezeAndSeizeTokenRegistrationEntity;
+import org.cardanofoundation.cip113.entity.KycTokenRegistrationEntity;
 import org.cardanofoundation.cip113.entity.ProgrammableTokenRegistryEntity;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
+import org.cardanofoundation.cip113.repository.KycTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.service.ProtocolBootstrapService;
 import org.cardanofoundation.cip113.service.UtxoProvider;
@@ -38,6 +40,7 @@ import static java.math.BigInteger.ZERO;
 public class AdminController {
 
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeRepo;
+    private final KycTokenRegistrationRepository kycTokenRegistrationRepo;
     private final BlacklistInitRepository blacklistInitRepo;
     private final ProtocolBootstrapService protocolBootstrapService;
     private final ProgrammableTokenRegistryRepository programmableTokenRepo;
@@ -92,7 +95,8 @@ public class AdminController {
             AdminTokenDetails details = new AdminTokenDetails(
                     blacklistInit != null ? blacklistInit.getBlacklistNodePolicyId() : null,
                     token.getIssuerAdminPkh(),
-                    blacklistInit != null ? blacklistInit.getAdminPkh() : null
+                    blacklistInit != null ? blacklistInit.getAdminPkh() : null,
+                    null
             );
 
             tokenMap.put(policyId, new AdminTokenInfo(
@@ -145,7 +149,8 @@ public class AdminController {
                     AdminTokenDetails details = new AdminTokenDetails(
                             blacklistPolicyId,
                             token.getIssuerAdminPkh(),
-                            blacklistInit.getAdminPkh()
+                            blacklistInit.getAdminPkh(),
+                            null
                     );
 
                     tokenMap.put(policyId, new AdminTokenInfo(
@@ -160,7 +165,41 @@ public class AdminController {
             }
         }
 
-        // 3. For dummy tokens - include ALL registered dummy tokens (anyone can mint)
+        // 3. Query KYC tokens where user is issuer admin
+        List<KycTokenRegistrationEntity> kycIssuerTokens = kycTokenRegistrationRepo.findByIssuerAdminPkh(pkh);
+
+        for (KycTokenRegistrationEntity token : kycIssuerTokens) {
+            String policyId = token.getProgrammableTokenPolicyId();
+
+            if (!tokenMap.containsKey(policyId)) {
+                Optional<ProgrammableTokenRegistryEntity> registryEntry =
+                        programmableTokenRepo.findByPolicyId(policyId);
+
+                String assetName = registryEntry.map(ProgrammableTokenRegistryEntity::getAssetName).orElse("");
+                String assetNameDisplay = hexToString(assetName);
+                String substandardId = registryEntry.map(ProgrammableTokenRegistryEntity::getSubstandardId).orElse("kyc");
+
+                String globalStatePolicyId = token.getGlobalStateInit() != null ? token.getGlobalStateInit().getGlobalStatePolicyId() : null;
+
+                AdminTokenDetails details = new AdminTokenDetails(
+                        null,
+                        token.getIssuerAdminPkh(),
+                        null,
+                        globalStatePolicyId
+                );
+
+                tokenMap.put(policyId, new AdminTokenInfo(
+                        policyId,
+                        assetName,
+                        assetNameDisplay,
+                        substandardId,
+                        List.of("ISSUER_ADMIN"),
+                        details
+                ));
+            }
+        }
+
+        // 4. For dummy tokens - include ALL registered dummy tokens (anyone can mint)
         List<ProgrammableTokenRegistryEntity> dummyTokens =
                 programmableTokenRepo.findBySubstandardId("dummy");
 
@@ -178,7 +217,7 @@ public class AdminController {
                         assetNameDisplay,
                         "dummy",
                         List.of(),  // Empty roles - anyone can mint dummy tokens
-                        new AdminTokenDetails(null, null, null)
+                        new AdminTokenDetails(null, null, null, null)
                 ));
             }
         }
@@ -325,7 +364,8 @@ public class AdminController {
     public record AdminTokenDetails(
             String blacklistNodePolicyId,   // For freeze-and-seize
             String issuerAdminPkh,
-            String blacklistAdminPkh
+            String blacklistAdminPkh,
+            String globalStatePolicyId       // For kyc
     ) {
     }
 

@@ -70,7 +70,8 @@ public interface BasicOperations<R extends RegisterTokenRequest> {
                 request.tokenPolicyId(),
                 request.assetName(),
                 new java.math.BigInteger(request.quantity()).negate().toString(),
-                request.feePayerAddress()
+                request.feePayerAddress(),
+                null
         );
         return buildMintTransaction(mintRequest, protocolParams);
     }

@@ -3,6 +3,7 @@ package org.cardanofoundation.cip113.service.substandard;
 import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
 import org.cardanofoundation.cip113.service.substandard.capabilities.BasicOperations;
 import org.cardanofoundation.cip113.service.substandard.capabilities.BlacklistManageable;
+import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable;
 import org.cardanofoundation.cip113.service.substandard.capabilities.Seizeable;
 import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable;
 
@@ -96,5 +97,19 @@ public interface SubstandardHandler {
      */
     default Optional<Seizeable> asSeizeable() {
         return this instanceof Seizeable s ? Optional.of(s) : Optional.empty();
+    }
+
+    /**
+     * Check if this handler supports global state management.
+     */
+    default boolean supportsGlobalStateManagement() {
+        return this instanceof GlobalStateManageable;
+    }
+
+    /**
+     * Get this handler as GlobalStateManageable if supported.
+     */
+    default Optional<GlobalStateManageable> asGlobalStateManageable() {
+        return this instanceof GlobalStateManageable mgr ? Optional.of(mgr) : Optional.empty();
     }
 }
