@@ -1,6 +1,8 @@
-# CIP-113 Programmable Tokens Frontend
+# CIP-113 Programmable Tokens — Frontend
 
-A Next.js web application for interacting with CIP-113 programmable tokens on Cardano.
+A Next.js reference web application for interacting with CIP-113 programmable tokens on Cardano.
+
+Part of the [CIP-113 platform repository](../../README.md). The on-chain Aiken implementation lives in [cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2).
 
 ## Features
 
@@ -23,31 +25,36 @@ A Next.js web application for interacting with CIP-113 programmable tokens on Ca
 
 ### Prerequisites
 
-- Node.js 18+ (20+ recommended)
-- npm or yarn
+- Node.js 20+ (matches `.nvmrc`)
+- npm
 - Blockfrost API key for Preview testnet
 
 ### Installation
 
-1. Clone the repository
+1. From the repository root, enter this directory:
+
+   ```bash
+   cd src/programmable-tokens-frontend
+   ```
+
 2. Install dependencies:
 
-```bash
-npm install
-```
+   ```bash
+   npm install
+   ```
 
-3. Create environment file:
+3. Create an environment file:
 
-```bash
-cp .env.preview.example .env.preview
-```
+   ```bash
+   cp .env.preview.example .env.preview
+   ```
 
 4. Add your Blockfrost API key to `.env.preview`:
 
-```
-NEXT_PUBLIC_BLOCKFROST_API_KEY=your_preview_api_key_here
-NEXT_PUBLIC_NETWORK=preview
-```
+   ```
+   NEXT_PUBLIC_BLOCKFROST_API_KEY=your_preview_api_key_here
+   NEXT_PUBLIC_NETWORK=preview
+   ```
 
 ### Development
 
@@ -59,6 +66,10 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
+### Docker
+
+See [DOCKER.md](./DOCKER.md) for container-based development and deployment.
+
 ## Project Structure
 
 ```
@@ -66,42 +77,36 @@ programmable-tokens-frontend/
 ├── app/                    # Next.js app router
 │   ├── layout.tsx
 │   ├── page.tsx
-│   ├── deploy/
+│   ├── admin/
 │   ├── dashboard/
 │   ├── mint/
 │   ├── transfer/
-│   └── blacklist/
+│   └── register/
 ├── components/
-│   ├── ui/                 # Reusable UI components
-│   ├── wallet/             # Wallet connection
-│   ├── forms/              # Form components
-│   └── layout/             # Layout components
-├── lib/
-│   ├── mesh/               # Mesh SDK utilities
-│   ├── contracts/          # Smart contract interactions
-│   ├── config/             # Configuration management
-│   └── utils/              # Helper functions
+│   ├── admin/              # Admin panel (mint / burn / blacklist / seize)
+│   ├── layout/             # Layout components
+│   └── ui/                 # Reusable UI components
 ├── config/
 │   ├── cip113-blueprint.json
 │   ├── protocol-bootstrap.example.json
 │   └── substandards/
-│       └── simple-transfer.json
+├── contexts/
+├── hooks/
+├── lib/
 └── public/
 ```
 
 ## Configuration
 
-### Network Configuration
-
-The app supports multiple networks. Set the network in your `.env` file:
+### Network
 
 ```bash
-NEXT_PUBLIC_NETWORK=preview  # or preprod, mainnet
+NEXT_PUBLIC_NETWORK=preview   # or preprod, mainnet
 ```
 
 ### CIP-113 Blueprint
 
-The main CIP-113 smart contract definitions are in `config/cip113-blueprint.json`.
+Core CIP-113 contract blueprints live in `config/cip113-blueprint.json`.
 
 ### Protocol Bootstrap
 
@@ -109,23 +114,25 @@ After deploying the protocol, a `protocol-bootstrap.json` file is generated with
 
 ### Substandards
 
-Transfer logic configurations are in `config/substandards/`:
-- `simple-transfer.json` - Basic transfer validation
-- More to be added (blacklist, whitelist, etc.)
+Transfer-logic configurations live in `config/substandards/`. For the on-chain substandard implementations, see [`../substandards/`](../substandards/).
 
-## Development Phases
+## Testing
 
-- [x] Phase 1: Setup & Foundation
-- [ ] Phase 2: Core UI Components
-- [ ] Phase 3: Protocol Deployment
-- [ ] Phase 4: Simple Transfer Substandard
-- [ ] Phase 5: Blacklist Substandard
-- [ ] Phase 6: Dashboard & Token Details
-- [ ] Phase 7: Testing & Polish
+```bash
+npm run lint
+# add test runner commands here as tests are introduced
+```
+
+## Related
+
+- Platform overview: [root README](../../README.md)
+- Off-chain backend: [../programmable-tokens-offchain-java/](../programmable-tokens-offchain-java/)
+- Substandards: [../substandards/](../substandards/)
+- On-chain core: [cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2)
 
 ## License
 
-Apache License 2.0 - see the [LICENSE](../LICENSE) file for details.
+Apache License 2.0 — see the [LICENSE](../../LICENSE) file for details.
 
 Copyright 2024 Cardano Foundation
 
