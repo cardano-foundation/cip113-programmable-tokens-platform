@@ -11,8 +11,10 @@ import com.bloxbean.cardano.client.api.model.Utxo;
 import com.bloxbean.cardano.client.backend.api.DefaultProtocolParamsSupplier;
 import com.bloxbean.cardano.client.backend.api.DefaultScriptSupplier;
 import com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService;
+import com.bloxbean.cardano.client.backend.koios.KoiosBackendService;
 import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.service.CostModelOverlayProtocolParamsSupplier;
 import org.cardanofoundation.cip113.service.HybridUtxoSupplier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -31,8 +33,13 @@ public class YaciConfiguration {
     }
 
     @Bean
-    public ProtocolParamsSupplier protocolParamsSupplier(BFBackendService bfBackendService) {
-        return new DefaultProtocolParamsSupplier(bfBackendService.getEpochService());
+    public ProtocolParamsSupplier protocolParamsSupplier(BFBackendService bfBackendService,
+                                                         KoiosBackendService koiosBackendService) {
+        var primary = new DefaultProtocolParamsSupplier(bfBackendService.getEpochService());
+        // Pass Koios as a full BackendService so the overlay can look up the CURRENT epoch
+        // (Koios's no-arg /epoch_params returns a stale finalized epoch on preview, which on
+        // 2026-04-17 caused PPViewHashesDontMatch — see CostModelOverlayProtocolParamsSupplier).
+        return new CostModelOverlayProtocolParamsSupplier(primary, koiosBackendService);
     }
 
     //    @Bean

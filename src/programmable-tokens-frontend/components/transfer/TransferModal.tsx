@@ -5,14 +5,16 @@ import { useWallet } from "@/hooks/use-wallet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { X, Send, CheckCircle, ExternalLink } from "lucide-react";
+import { X, Send, CheckCircle, ExternalLink, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { transferToken } from "@/lib/api";
+import { transferToken, getTokenContext } from "@/lib/api";
 import { TransferTokenRequest, ParsedAsset } from "@/types/api";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useCIP113 } from "@/contexts/cip113-context";
 import { useToast } from "@/components/ui/use-toast";
 import { getExplorerTxUrl } from "@/lib/utils";
+import { KycVerificationFlow } from "./KycVerificationFlow";
+import { getKycProof, clearKycProof, type KycProofCookie } from "@/lib/utils/kyc-cookie";
 
 type TransactionBuilder = "sdk" | "backend";
 
@@ -23,7 +25,7 @@ interface TransferModalProps {
   senderAddress: string;
 }
 
-type TransferStep = "form" | "signing" | "success";
+type TransferStep = "form" | "kyc-verify" | "signing" | "success";
 
 export function TransferModal({
   isOpen,
@@ -46,12 +48,17 @@ export function TransferModal({
   const [isBuilding, setIsBuilding] = useState(false);
   const [isSigning, setIsSigning] = useState(false);
   const [txHash, setTxHash] = useState<string | null>(null);
+
+  // KYC state
+  const [isKycToken, setIsKycToken] = useState(false);
+  const [kycProof, setKycProofState] = useState<KycProofCookie | null>(null);
+
   const [errors, setErrors] = useState({
     quantity: "",
     recipientAddress: "",
   });
 
-  // Reset state when modal opens/closes
+  // Reset state and detect KYC tokens when modal opens
   useEffect(() => {
     if (isOpen) {
       setStep("form");
@@ -59,8 +66,26 @@ export function TransferModal({
       setRecipientAddress("");
       setTxHash(null);
       setErrors({ quantity: "", recipientAddress: "" });
+      setKycProofState(null);
+      setIsKycToken(false);
+
+      // Check if this is a KYC token and if we have a cached proof
+      const tokenPolicyId = asset.unit.substring(0, 56);
+      getTokenContext(tokenPolicyId)
+        .then((ctx) => {
+          if (ctx.substandardId === "kyc") {
+            setIsKycToken(true);
+            const cachedProof = getKycProof(tokenPolicyId);
+            if (cachedProof) {
+              setKycProofState(cachedProof);
+            }
+          }
+        })
+        .catch(() => {
+          // Not a registered token or error — proceed without KYC
+        });
     }
-  }, [isOpen]);
+  }, [isOpen, asset.unit]);
 
   const handleSetMax = () => {
     setQuantity(asset.amount.toString());
@@ -103,7 +128,11 @@ export function TransferModal({
 
       let unsignedCborTx: string;
 
-      if (transactionBuilder === "sdk") {
+      // KYC substandard is not yet implemented in @easy1staking/cip113-sdk-ts;
+      // route KYC tokens through the backend which has a full KYC handler.
+      const useSdk = transactionBuilder === "sdk" && !isKycToken;
+
+      if (useSdk) {
         // ----- Client-side tx building via CIP-113 SDK -----
         showToast({
           title: "Building Transaction",
@@ -139,6 +168,11 @@ export function TransferModal({
           unit: asset.unit,
           quantity,
           recipientAddress: recipientAddress.trim(),
+          // Include KYC proof fields if available
+          ...(kycProof && {
+            kycPayload: kycProof.payloadHex,
+            kycSignature: kycProof.signatureHex,
+          }),
         };
 
         unsignedCborTx = await transferToken(request, selectedVersion?.txHash);
@@ -148,8 +182,8 @@ export function TransferModal({
       setStep("signing");
       setIsSigning(true);
 
-      // Sign and submit transaction
-      const signedTx = await wallet.signTx(unsignedCborTx);
+      // Sign and submit transaction (partial signing for KYC tokens — Plutus scripts present)
+      const signedTx = await wallet.signTx(unsignedCborTx, isKycToken);
       const submittedTxHash = await wallet.submitTx(signedTx);
 
       setTxHash(submittedTxHash);
@@ -215,8 +249,87 @@ export function TransferModal({
 
         {/* Content */}
         <div className="p-6">
+          {/* KYC Verification Step */}
+          {step === "kyc-verify" && (
+            <KycVerificationFlow
+              policyId={asset.unit.substring(0, 56)}
+              senderAddress={senderAddress}
+              onComplete={(proof) => {
+                setKycProofState(proof);
+                setStep("form");
+              }}
+              onBack={() => setStep("form")}
+            />
+          )}
+
           {step === "form" && (
             <form onSubmit={handleSubmit} className="space-y-5">
+              {/* KYC Status Badge */}
+              {isKycToken && (
+                <div className="flex items-center justify-between px-4 py-3 bg-dark-900 rounded-lg border border-dark-700">
+                  <div className="flex items-center gap-2">
+                    <Shield className="h-4 w-4 text-primary-400" />
+                    <span className="text-xs text-dark-300">KYC Verification</span>
+                  </div>
+                  {kycProof ? (
+                    <div className="flex items-center gap-2">
+                      <div className="relative group">
+                        <Badge variant="success" size="sm" className="cursor-help">Verified</Badge>
+                        <div className="absolute right-0 top-full mt-2 w-80 p-3 bg-dark-900 border border-dark-700 rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 z-50">
+                          <p className="text-xs font-semibold text-white mb-2">KYC Proof Details</p>
+                          <div className="space-y-1.5">
+                            <div>
+                              <p className="text-[10px] text-dark-500 uppercase tracking-wide">Role</p>
+                              <p className="text-xs text-white">{kycProof.roleName} ({kycProof.role})</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-dark-500 uppercase tracking-wide">Valid Until</p>
+                              <p className="text-xs text-white">{new Date(kycProof.validUntilMs).toLocaleString()}</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-dark-500 uppercase tracking-wide">Payload</p>
+                              <p className="text-[10px] text-primary-400 font-mono break-all">{kycProof.payloadHex}</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-dark-500 uppercase tracking-wide">Signature</p>
+                              <p className="text-[10px] text-primary-400 font-mono break-all">{kycProof.signatureHex}</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-dark-500 uppercase tracking-wide">Entity Vkey</p>
+                              <p className="text-[10px] text-primary-400 font-mono break-all">{kycProof.entityVkeyHex}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearKycProof(asset.unit.substring(0, 56));
+                          setKycProofState(null);
+                          // Clear KERI session so the flow restarts fresh
+                          if (typeof sessionStorage !== "undefined") {
+                            sessionStorage.removeItem("keri-session-id");
+                          }
+                          setStep("kyc-verify");
+                        }}
+                        className="text-xs text-dark-400 hover:text-primary-400 transition-colors"
+                      >
+                        Re-verify
+                      </button>
+                    </div>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-7 text-xs px-3"
+                      onClick={() => setStep("kyc-verify")}
+                    >
+                      Verify KYC
+                    </Button>
+                  )}
+                </div>
+              )}
+
               {/* Transaction Builder Toggle */}
               <div className="flex items-center justify-between px-3 py-2 bg-dark-900 rounded-lg">
                 <span className="text-xs text-dark-400">Tx Builder</span>
@@ -324,9 +437,9 @@ export function TransferModal({
                   variant="primary"
                   className="flex-1"
                   isLoading={isBuilding}
-                  disabled={isBuilding}
+                  disabled={isBuilding || (isKycToken && !kycProof)}
                 >
-                  {isBuilding ? "Building..." : "Transfer"}
+                  {isBuilding ? "Building..." : isKycToken && !kycProof ? "KYC Required" : "Transfer"}
                 </Button>
               </div>
             </form>

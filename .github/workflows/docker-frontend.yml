@@ -1,0 +1,130 @@
+name: Docker Frontend
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches: ["main"]
+    paths:
+      - "src/programmable-tokens-frontend/**"
+      - ".github/workflows/docker-frontend.yml"
+  workflow_dispatch:
+    inputs:
+      networks:
+        description: "Networks to build"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - preview
+          - preprod
+          # - mainnet  # enable when ready
+
+env:
+  DOCKER_REPO: cardanofoundation/cip113-frontend
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Add `mainnet` here (and to the include block below) when ready to publish it.
+        network: [preview, preprod]
+        include:
+          - network: preview
+            blockfrost_url: https://cardano-preview.blockfrost.io/api/v0
+            api_base_url_default: https://preview-indexer.programmabletokens.xyz
+          - network: preprod
+            blockfrost_url: https://cardano-preprod.blockfrost.io/api/v0
+            api_base_url_default: https://preprod-indexer.programmabletokens.xyz
+
+    steps:
+      - name: Skip if network not selected
+        id: gate
+        run: |
+          requested="${{ github.event.inputs.networks }}"
+          if [ -n "$requested" ] && [ "$requested" != "all" ] && [ "$requested" != "${{ matrix.network }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.skip == 'false'
+        with:
+          fetch-depth: 0  # required for git describe --tags
+
+      - name: Compute version tag
+        if: steps.gate.outputs.skip == 'false'
+        id: version
+        working-directory: src/programmable-tokens-frontend
+        run: |
+          GIT_TAG=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+          echo "git_tag=${GIT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Version: ${GIT_TAG}-${{ matrix.network }}"
+
+      - name: Resolve API base URL
+        if: steps.gate.outputs.skip == 'false'
+        id: urls
+        run: |
+          case "${{ matrix.network }}" in
+            preview) api="${{ vars.NEXT_PUBLIC_API_BASE_URL_PREVIEW }}" ; base="${{ vars.NEXT_PUBLIC_BASE_URL_PREVIEW }}" ;;
+            preprod) api="${{ vars.NEXT_PUBLIC_API_BASE_URL_PREPROD }}" ; base="${{ vars.NEXT_PUBLIC_BASE_URL_PREPROD }}" ;;
+            mainnet) api="${{ vars.NEXT_PUBLIC_API_BASE_URL_MAINNET }}" ; base="${{ vars.NEXT_PUBLIC_BASE_URL_MAINNET }}" ;;
+          esac
+          [ -z "$api" ] && api="${{ matrix.api_base_url_default }}"
+          echo "api_base_url=${api}" >> "$GITHUB_OUTPUT"
+          echo "base_url=${base}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve Blockfrost API key
+        if: steps.gate.outputs.skip == 'false'
+        id: secrets
+        env:
+          BLOCKFROST_PREVIEW_API_KEY: ${{ secrets.BLOCKFROST_PREVIEW_API_KEY }}
+          BLOCKFROST_PREPROD_API_KEY: ${{ secrets.BLOCKFROST_PREPROD_API_KEY }}
+          BLOCKFROST_MAINNET_API_KEY: ${{ secrets.BLOCKFROST_MAINNET_API_KEY }}
+        run: |
+          case "${{ matrix.network }}" in
+            preview) key="$BLOCKFROST_PREVIEW_API_KEY" ;;
+            preprod) key="$BLOCKFROST_PREPROD_API_KEY" ;;
+            mainnet) key="$BLOCKFROST_MAINNET_API_KEY" ;;
+          esac
+          if [ -z "$key" ]; then
+            echo "::error::Blockfrost API key for ${{ matrix.network }} is not set"
+            exit 1
+          fi
+          echo "::add-mask::$key"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.gate.outputs.skip == 'false'
+
+      - name: Login to Docker Hub
+        if: steps.gate.outputs.skip == 'false'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        if: steps.gate.outputs.skip == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: src/programmable-tokens-frontend
+          file: src/programmable-tokens-frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCKER_REPO }}:${{ steps.version.outputs.git_tag }}-${{ matrix.network }}
+            ${{ env.DOCKER_REPO }}:${{ matrix.network }}
+          build-args: |
+            NEXT_PUBLIC_NETWORK=${{ matrix.network }}
+            NEXT_PUBLIC_BLOCKFROST_API_KEY=${{ steps.secrets.outputs.key }}
+            NEXT_PUBLIC_BLOCKFROST_URL=${{ matrix.blockfrost_url }}
+            NEXT_PUBLIC_API_BASE_URL=${{ steps.urls.outputs.api_base_url }}
+            NEXT_PUBLIC_BASE_URL=${{ steps.urls.outputs.base_url }}
+          cache-from: type=gha,scope=frontend-${{ matrix.network }}
+          cache-to: type=gha,scope=frontend-${{ matrix.network }},mode=max

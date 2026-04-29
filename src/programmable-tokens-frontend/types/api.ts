@@ -45,8 +45,16 @@ export interface FreezeAndSeizeRegisterRequest extends BaseRegisterTokenRequest 
   blacklistNodePolicyId: string;   // From blacklist initialization step
 }
 
+/** KYC substandard - requires Global State policy ID */
+export interface KycRegisterRequest extends BaseRegisterTokenRequest {
+  substandardId: 'kyc';
+  adminPubKeyHash: string;         // Payment key hash derived from feePayerAddress
+  globalStatePolicyId: string;     // Global State policy ID
+  attestation?: Cip170AttestationData;  // Optional CIP-170 attestation
+}
+
 /** Discriminated union of all registration request types */
-export type RegisterTokenRequest = DummyRegisterRequest | FreezeAndSeizeRegisterRequest;
+export type RegisterTokenRequest = DummyRegisterRequest | FreezeAndSeizeRegisterRequest | KycRegisterRequest;
 
 export interface RegisterTokenResponse {
   policyId: string;              // Generated policy ID
@@ -57,12 +65,20 @@ export interface RegisterTokenResponse {
 // Minting (Admin - mint to existing registered token)
 // ============================================================================
 
+export interface Cip170AttestationData {
+  signerAid: string;
+  digest: string;
+  seqNumber: string;
+  cipVersion: string;
+}
+
 export interface MintTokenRequest {
   feePayerAddress: string;      // Issuer admin's wallet address
   tokenPolicyId: string;        // Policy ID of registered token
   assetName: string;            // HEX ENCODED token name
   quantity: string;             // Amount as string to handle large numbers
   recipientAddress: string;     // Recipient address
+  attestation?: Cip170AttestationData;  // Optional CIP-170 attestation
 }
 
 // Backend returns plain text CBOR hex string (not JSON)
@@ -137,6 +153,9 @@ export interface TransferTokenRequest {
   unit: string;               // Full unit (policyId + assetName hex)
   quantity: string;           // Amount to transfer
   recipientAddress: string;   // Recipient's address
+  // KYC fields (optional, used by KYC substandard)
+  kycPayload?: string;        // Hex-encoded 37-byte KYC payload: user_pkh(28) || role(1) || valid_until(8)
+  kycSignature?: string;      // Hex-encoded 64-byte Ed25519 signature over kycPayload
 }
 
 // Backend returns plain text CBOR hex string (not JSON)

@@ -12,6 +12,13 @@ package org.cardanofoundation.cip113.model;
 public record TransferTokenRequest(String senderAddress,
                                    String unit,
                                    String quantity,
-                                   String recipientAddress) {
+                                   String recipientAddress,
+                                   // KYC fields (optional, used by KYC substandard)
+                                   /** Hex-encoded 37-byte KYC payload: user_pkh(28) || role(1) || valid_until(8) */
+                                   String kycPayload,
+                                   /** Hex-encoded 64-byte Ed25519 signature over kycPayload */
+                                   String kycSignature,
+                                   /** Index of the trusted entity vkey in the global state list (default 0) */
+                                   Integer kycVkeyIndex) {
 
 }
