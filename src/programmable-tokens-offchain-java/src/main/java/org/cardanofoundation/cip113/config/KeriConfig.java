@@ -84,20 +84,20 @@ public class KeriConfig {
         Object id = null;
         String eid = "";
 
-        AvailableWitnesses availableWitnesses = getAvailableWitnesses(client);
-        List<String> witnessIds = availableWitnesses.witnesses().stream()
-                .map(WitnessInfo::eid)
-                .toList();
+        // AvailableWitnesses availableWitnesses = getAvailableWitnesses(client);
+        // List<String> witnessIds = availableWitnesses.witnesses().stream()
+        //         .map(WitnessInfo::eid)
+        //         .toList();
 
         CreateIdentifierArgs kArgs = CreateIdentifierArgs.builder().build();
-        kArgs.setToad(availableWitnesses.toad());
-        kArgs.setWits(witnessIds);
+        // kArgs.setToad(availableWitnesses.toad());
+        // kArgs.setWits(witnessIds);
 
         Optional<HabState> optionalIdentifier = client.identifiers().get(name);
         if (optionalIdentifier.isPresent()) {
             id = optionalIdentifier.get().getPrefix();
         } else {
-            log.info("Creating identifier {} with toad {} and witnesses {}", name, availableWitnesses.toad(), witnessIds);
+            // log.info("Creating identifier {} with toad {} and witnesses {}", name, availableWitnesses.toad(), witnessIds);
             EventResult result = client.identifiers().create(name, kArgs);
             Object op = result.op();
             op = client.operations().wait(Operation.fromObject(op));
