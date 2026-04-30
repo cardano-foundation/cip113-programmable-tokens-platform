@@ -26,7 +26,8 @@ import lombok.experimental.SuperBuilder;
 @JsonSubTypes({
         @JsonSubTypes.Type(value = DummyRegisterRequest.class, name = "dummy"),
         @JsonSubTypes.Type(value = FreezeAndSeizeRegisterRequest.class, name = "freeze-and-seize"),
-        @JsonSubTypes.Type(value = KycRegisterRequest.class, name = "kyc")
+        @JsonSubTypes.Type(value = KycRegisterRequest.class, name = "kyc"),
+        @JsonSubTypes.Type(value = KycExtendedRegisterRequest.class, name = "kyc-extended")
 })
 @Data
 @SuperBuilder

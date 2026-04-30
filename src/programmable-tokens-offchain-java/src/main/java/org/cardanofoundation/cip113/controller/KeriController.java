@@ -181,6 +181,34 @@ public class KeriController {
         }
     }
 
+    /**
+     * Bind the session to a kyc-extended programmable token. After binding, the next
+     * KERI proof generation will auto-upsert the user's PKH into the per-policy MPF tree.
+     *
+     * Body: {@code { "policyId": "<56-hex-chars>" }}.
+     * 204 on success; 400 if the policy isn't a kyc-extended token; 401 if no session.
+     */
+    @PostMapping("/session/bound-token")
+    public ResponseEntity<?> bindSessionToToken(
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
+            @RequestBody Map<String, String> body) {
+        if (sessionId == null) {
+            return ResponseEntity.status(401).body(Map.of("error", "Unknown session"));
+        }
+        String policyId = body.get("policyId");
+        if (policyId == null || policyId.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "policyId is required"));
+        }
+        try {
+            keriService.bindSessionToToken(sessionId, policyId);
+            return ResponseEntity.noContent().build();
+        } catch (NoSuchElementException e) {
+            return ResponseEntity.status(401).body(Map.of("error", "Unknown session"));
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
     // ── KYC proof generation ──────────────────────────────────────────────────
 
     @PostMapping("/kyc-proof/generate")

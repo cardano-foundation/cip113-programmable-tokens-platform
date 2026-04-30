@@ -101,8 +101,11 @@ export type WhitelistOperationResponse = TransactionContextResponse<void>;
 // ============================================================================
 
 export interface GlobalStateInitRequest {
-  substandardId: string;              // e.g. "kyc"
-  adminAddress: string;               // admin that owns the global state
+  substandardId: string;              // e.g. "kyc" | "kyc-extended"
+  adminAddress: string;               // fee-payer address (user's wallet)
+  /** Optional explicit admin PKH for the entity that will sign future admin
+   *  operations. When absent the backend derives it from adminAddress. */
+  adminPkh?: string;
   initialVkeys?: string[];            // initial trusted entity vkeys (64 hex chars each)
   initialTransfersPaused?: boolean;   // start with transfers paused (default: false)
   initialMintableAmount?: number;     // initial mintable amount cap (default: 0)

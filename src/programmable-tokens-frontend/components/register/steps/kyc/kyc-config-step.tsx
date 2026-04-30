@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Card } from '@/components/ui/card';
 import { useToast } from '@/components/ui/use-toast';
 import { getSigningEntityVkey } from '@/lib/api/keri';
+import { getKycExtendedAdminPkh } from '@/lib/api/kyc-extended';
 import { useProtocolVersion } from '@/contexts/protocol-version-context';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import type { StepComponentProps } from '@/types/registration';
@@ -43,6 +44,7 @@ export function KycConfigStep({
   onComplete,
   onBack,
 }: StepComponentProps<KycConfigData>) {
+  const isKycExtendedFlow = wizardState.flowId === 'kyc-extended';
   const { wallet, rawApi } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
@@ -186,10 +188,23 @@ export function KycConfigStep({
       setStatusMessage('Building Global State transaction...');
       const { initGlobalState } = await import('@/lib/api/compliance');
 
+      const isKycExtended = wizardState.flowId === 'kyc-extended';
+      const flowSubstandardId = isKycExtended ? 'kyc-extended' : 'kyc';
+
+      // kyc-extended must parameterise the global-state script with the backend's
+      // signing key PKH so the backend can autonomously sign UpdateMemberRootHash.
+      let adminPkh: string | undefined;
+      if (isKycExtended) {
+        setStatusMessage('Fetching backend admin key…');
+        const adminInfo = await getKycExtendedAdminPkh();
+        adminPkh = adminInfo.adminPkh;
+      }
+
       const response = await initGlobalState(
         {
-          substandardId: 'kyc',
+          substandardId: flowSubstandardId,
           adminAddress,
+          adminPkh,
           initialVkeys: trustedEntities,
           initialTransfersPaused: false,
           initialMintableAmount: mintableAmount ? parseInt(mintableAmount, 10) : 0,
@@ -293,6 +308,12 @@ export function KycConfigStep({
             <span className="text-primary-400 font-mono text-xs mt-0.5">security_info</span>
             <span>Arbitrary compliance/regulation metadata stored on-chain</span>
           </li>
+          {isKycExtendedFlow && (
+            <li className="flex items-start gap-2">
+              <span className="text-primary-400 font-mono text-xs mt-0.5">member_root_hash</span>
+              <span>Blake2b-256 root of the Merkle Patricia Forestry allowlist. Updated automatically by the backend whenever a user completes KYC. Transfers to recipients not in the tree are rejected on-chain.</span>
+            </li>
+          )}
         </ul>
       </Card>
 

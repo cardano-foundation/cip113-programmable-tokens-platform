@@ -49,6 +49,7 @@ dependencies {
 	implementation('com.bloxbean.cardano:cardano-client-backend-ogmios:0.8.0-pre3')
 	implementation('com.bloxbean.cardano:cardano-client-backend-koios:0.8.0-pre3')
 
+    implementation('com.bloxbean.cardano:cardano-client-merkle-patricia-forestry:0.8.0-pre3')
     implementation('com.bloxbean.cardano:aiken-java-binding:0.1.0')
 	implementation('org.scalus:scalus-bloxbean-cardano-client-lib_3:0.10.4')
 

@@ -10,6 +10,7 @@ import org.cardanofoundation.cip113.entity.ProgrammableTokenRegistryEntity;
 import org.cardanofoundation.cip113.model.BlacklistInitResponse;
 import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
+import org.cardanofoundation.cip113.repository.KycExtendedTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.KycTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.repository.GlobalStateInitRepository;
@@ -27,9 +28,11 @@ import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalState
 import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable.AddToWhitelistRequest;
 import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable.RemoveFromWhitelistRequest;
 import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable.WhitelistInitRequest;
+import org.cardanofoundation.cip113.service.substandard.KycExtendedSubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.KycSubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
 import org.cardanofoundation.cip113.service.substandard.context.KycContext;
+import org.cardanofoundation.cip113.service.substandard.context.KycExtendedContext;
 import org.cardanofoundation.cip113.service.substandard.context.SubstandardContext;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.ResponseEntity;
@@ -63,6 +66,7 @@ public class ComplianceController {
 
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeTokenRegistrationRepository;
     private final KycTokenRegistrationRepository kycTokenRegistrationRepository;
+    private final KycExtendedTokenRegistrationRepository kycExtendedTokenRegistrationRepository;
     private final GlobalStateInitRepository globalStateInitRepository;
 
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
@@ -456,6 +460,7 @@ public class ComplianceController {
 
             var context = switch (substandardId) {
                 case "kyc" -> KycContext.emptyContext();
+                case "kyc-extended" -> KycExtendedContext.emptyContext();
                 default -> (SubstandardContext) null;
             };
 
@@ -513,6 +518,7 @@ public class ComplianceController {
                                     .build())
                             .build();
                 }
+                case "kyc-extended" -> buildKycExtendedContext(request.policyId());
                 default -> (SubstandardContext) null;
             };
 
@@ -570,6 +576,7 @@ public class ComplianceController {
                                     .build())
                             .build();
                 }
+                case "kyc-extended" -> buildKycExtendedContext(request.policyId());
                 default -> (SubstandardContext) null;
             };
 
@@ -607,6 +614,14 @@ public class ComplianceController {
         log.info("GET /compliance/global-state/read - policyId: {}", policyId);
 
         try {
+            var substandardId = resolveSubstandardId(policyId);
+            if ("kyc-extended".equals(substandardId)) {
+                var ctx = buildKycExtendedContext(policyId);
+                var handler = applicationContext.getBean(KycExtendedSubstandardHandler.class);
+                handler.setContext((KycExtendedContext) ctx);
+                var result = handler.readGlobalState(policyId);
+                return result.isPresent() ? ResponseEntity.ok(result.get()) : ResponseEntity.notFound().build();
+            }
             var handler = applicationContext.getBean(KycSubstandardHandler.class);
             var result = handler.readGlobalState(policyId);
 
@@ -620,6 +635,29 @@ public class ComplianceController {
             log.error("Error reading global state for policyId={}", policyId, e);
             return ResponseEntity.internalServerError().body(e.getMessage());
         }
+    }
+
+    /**
+     * Build a kyc-extended context (issuer + global-state init UTxO) from the
+     * registration row. Mirrors {@code TokenOperationsService.buildKycExtendedContext}.
+     */
+    private SubstandardContext buildKycExtendedContext(String policyId) {
+        var reg = kycExtendedTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId)
+                .orElseThrow(() -> new RuntimeException(
+                        "could not find kyc-extended token registration data for policy: " + policyId));
+        var initEntity = globalStateInitRepository.findByGlobalStatePolicyId(reg.getTelPolicyId())
+                .orElseThrow(() -> new RuntimeException(
+                        "could not find kyc-extended global state init for policy: " + reg.getTelPolicyId()));
+        return KycExtendedContext.builder()
+                .issuerAdminPkh(reg.getIssuerAdminPkh())
+                .globalStatePolicyId(reg.getTelPolicyId())
+                .globalStateInitTxInput(TransactionInput.builder()
+                        .transactionId(initEntity.getTxHash())
+                        .index(initEntity.getOutputIndex())
+                        .build())
+                .memberRootHashOnchain(reg.getMemberRootHashOnchain())
+                .memberRootHashLocal(reg.getMemberRootHashLocal())
+                .build();
     }
 
     /**
@@ -650,7 +688,7 @@ public class ComplianceController {
                     }
                     var kycData = kycDataOpt.get();
                     var gsInit = kycData.getGlobalStateInit();
-                    yield KycContext.builder()
+                    yield (SubstandardContext) KycContext.builder()
                             .issuerAdminPkh(kycData.getIssuerAdminPkh())
                             .globalStatePolicyId(gsInit.getGlobalStatePolicyId())
                             .globalStateInitTxInput(TransactionInput.builder()
@@ -659,6 +697,7 @@ public class ComplianceController {
                                     .build())
                             .build();
                 }
+                case "kyc-extended" -> buildKycExtendedContext(request.policyId());
                 default -> null;
             };
 

@@ -6,13 +6,14 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { TokenName } from "@/components/ui/token-name";
-import { Copy, LogOut, Wallet, Coins, RefreshCw, Send, Snowflake } from "lucide-react";
+import { Copy, LogOut, Wallet, Coins, RefreshCw, Snowflake } from "lucide-react";
 import { truncateAddress, formatADAWithSymbol, getNetworkDisplayName } from "@/lib/utils";
 import { useToast } from "@/components/ui/toast";
 import { getWalletBalance, parseWalletBalance } from "@/lib/api";
 import { ParsedBalance, ParsedAsset } from "@/types/api";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { TransferModal } from "@/components/transfer/TransferModal";
+import { TokenSendAction } from "@/components/portfolio/TokenSendAction";
 
 const WALLET_STORAGE_KEY = 'connectedWallet';
 
@@ -303,13 +304,12 @@ export function WalletInfo() {
                                   <Snowflake className="h-4 w-4 text-blue-400" />
                                 </div>
                               ) : (
-                                <button
-                                  onClick={() => handleOpenTransferModal(asset)}
-                                  className="p-1.5 hover:bg-dark-700 rounded transition-colors"
-                                  title={`Transfer ${asset.assetName || asset.assetNameHex}`}
-                                >
-                                  <Send className="h-4 w-4 text-primary-400 hover:text-primary-300" />
-                                </button>
+                                <TokenSendAction
+                                  policyId={asset.policyId}
+                                  tokenName={asset.assetName || asset.assetNameHex}
+                                  walletAddress={address || null}
+                                  onSend={() => handleOpenTransferModal(asset)}
+                                />
                               )}
                             </div>
                           </div>
