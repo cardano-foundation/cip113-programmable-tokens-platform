@@ -19,7 +19,7 @@ jobs:
       matrix:
         substandard:
           - name: dummy
-            aiken-version: v1.1.19
+            aiken-version: v1.1.21
           - name: freeze-and-seize
             aiken-version: v1.1.21
           - name: kyc
