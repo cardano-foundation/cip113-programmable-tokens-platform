@@ -128,4 +128,31 @@ public class AddressUtil {
         }
         return paymentHash;
     }
+
+    /** Extract the 28-byte payment credential hash from a Cardano address. */
+    public static byte[] extractPaymentCredHashFromAddress(String bech32Address) {
+        try {
+            return new com.bloxbean.cardano.client.address.Address(bech32Address)
+                    .getPaymentCredentialHash()
+                    .orElse(null);
+        } catch (Exception e) {
+            log.warn("Failed to extract payment credential hash from address: {}", bech32Address, e);
+            return null;
+        }
+    }
+
+    /** Extract the 28-byte stake (delegation) credential hash from a base address.
+     *  This is the user's identity in the programmable-token context — prog-token
+     *  UTxOs have the prog-base script as payment credential and this hash as stake
+     *  credential, which is what the on-chain validators extract as the witness. */
+    public static byte[] extractStakeCredHashFromAddress(String bech32Address) {
+        try {
+            return new com.bloxbean.cardano.client.address.Address(bech32Address)
+                    .getDelegationCredentialHash()
+                    .orElse(null);
+        } catch (Exception e) {
+            log.warn("Failed to extract stake credential hash from address: {}", bech32Address, e);
+            return null;
+        }
+    }
 }

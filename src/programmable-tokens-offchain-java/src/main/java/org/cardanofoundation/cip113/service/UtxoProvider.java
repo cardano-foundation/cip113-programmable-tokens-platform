@@ -72,13 +72,23 @@ public class UtxoProvider {
 
     }
 
+    /** Fetch UTxOs straight from Blockfrost, bypassing the YACI cache — used by paths
+     *  that cannot tolerate stale indexer state (e.g. the autonomous root-sync job). */
+    public List<Utxo> findUtxosFromBlockfrost(String address) {
+        return getBlockfrostUtxos(address);
+    }
+
     private List<Utxo> getBlockfrostUtxos(String address) {
         try {
             var utxoResult = bfBackendService.getUtxoService().getUtxos(address, 100, 1);
             if (utxoResult.isSuccessful()) {
                 return utxoResult.getValue();
             } else {
-                log.warn("error: {}", utxoResult.getResponse());
+                if (utxoResult.code() == 404) {
+                    log.debug("No UTxOs at address {} (404)", address);
+                } else {
+                    log.warn("Blockfrost UTxO lookup failed for address {}: {}", address, utxoResult.getResponse());
+                }
                 return List.of();
             }
         } catch (ApiException e) {
