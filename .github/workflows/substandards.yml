@@ -22,6 +22,8 @@ jobs:
             aiken-version: v1.1.19
           - name: freeze-and-seize
             aiken-version: v1.1.21
+          - name: kyc
+            aiken-version: v1.1.21
     defaults:
       run:
         working-directory: src/substandards/${{ matrix.substandard.name }}

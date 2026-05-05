@@ -3,7 +3,6 @@
 /// The global state UTxO holds mutable per-token state including the Trusted
 /// Entity List (TEL), transfer pause flag, mintable amount cap, and arbitrary
 /// security/compliance metadata.
-
 /// Datum stored in the global state UTxO.
 pub type GlobalStateDatum {
   /// If true, no transfer can be executed
