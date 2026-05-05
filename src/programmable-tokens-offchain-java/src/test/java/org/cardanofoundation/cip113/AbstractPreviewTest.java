@@ -12,7 +12,7 @@ import org.cardanofoundation.cip113.model.blueprint.Validator;
 import java.util.List;
 
 import static com.bloxbean.cardano.client.backend.blockfrost.common.Constants.BLOCKFROST_PREVIEW_URL;
-import static org.cardanofoundation.cip113.PreviewConstants.BLOCKFROST_KEY;
+import static org.cardanofoundation.cip113.PreviewConstants.BLOCKFROST_KEY_PREVIEW;
 
 @Slf4j
 public abstract class AbstractPreviewTest {
@@ -38,7 +38,7 @@ public abstract class AbstractPreviewTest {
         log.info("Wipe Address: {}", userWipeAccount.baseAddress());
     }
 
-    protected final BFBackendService bfBackendService = new BFBackendService(BLOCKFROST_PREVIEW_URL, BLOCKFROST_KEY);
+    protected final BFBackendService bfBackendService = new BFBackendService(BLOCKFROST_PREVIEW_URL, BLOCKFROST_KEY_PREVIEW);
 
     protected final QuickTxBuilder quickTxBuilder = new QuickTxBuilder(bfBackendService);
 

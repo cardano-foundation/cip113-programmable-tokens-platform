@@ -5,6 +5,8 @@ public interface PreviewConstants {
 //    String ADMIN_MNEMONIC = System.getenv("WALLET_MNEMONIC");
     String ADMIN_MNEMONIC = "custom quarter neither roast where middle already outer iron double garlic glad robot alpha fun vacant exact waste slogan tornado wire casual sand genuine";
 
-    String BLOCKFROST_KEY = System.getenv("BLOCKFROST_KEY");
+    String BLOCKFROST_KEY_PREVIEW = System.getenv("BLOCKFROST_KEY_PREVIEW");
+
+    String BLOCKFROST_KEY_PREPROD = System.getenv("BLOCKFROST_KEY_PREPROD");
 
 }
