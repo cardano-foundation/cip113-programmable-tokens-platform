@@ -35,6 +35,8 @@ function getFlowEnvVar(flowId: string): string | undefined {
       return process.env.NEXT_PUBLIC_FLOW_FREEZE_AND_SEIZE_ENABLED;
     case 'kyc':
       return process.env.NEXT_PUBLIC_FLOW_KYC_ENABLED;
+    case 'kyc-extended':
+      return process.env.NEXT_PUBLIC_FLOW_KYC_EXTENDED_ENABLED;
     default:
       return undefined;
   }

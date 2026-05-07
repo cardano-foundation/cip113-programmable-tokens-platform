@@ -23,7 +23,8 @@ import {
 } from '@/lib/api/keri';
 import { getPaymentKeyHash } from '@/lib/utils/address';
 import { getExplorerTxUrl } from '@/lib/utils/format';
-import type { KycRegisterRequest, Cip170AttestationData } from '@/types/api';
+import { getKycExtendedAdminPkh } from '@/lib/api/kyc-extended';
+import type { KycRegisterRequest, KycExtendedRegisterRequest, Cip170AttestationData } from '@/types/api';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
 import { Shield, Copy, QrCode } from 'lucide-react';
 
@@ -168,9 +169,20 @@ export function KycBuildSignSubmitStep({
       if (!addresses?.[0]) throw new Error('No wallet address found');
       const adminAddress = addresses[0];
 
-      const adminPubKeyHash = getPaymentKeyHash(adminAddress);
-      const regRequest: KycRegisterRequest = {
-        substandardId: 'kyc',
+      const isKycExtended = wizardState.flowId === 'kyc-extended';
+
+      // kyc-extended: issuerAdminPkh must be the backend's signing key PKH so the
+      // backend can autonomously sign UpdateMemberRootHash transactions.
+      let adminPubKeyHash: string;
+      if (isKycExtended) {
+        const adminInfo = await getKycExtendedAdminPkh();
+        adminPubKeyHash = adminInfo.adminPkh;
+      } else {
+        adminPubKeyHash = getPaymentKeyHash(adminAddress);
+      }
+
+      const regRequest: KycRegisterRequest | KycExtendedRegisterRequest = {
+        substandardId: isKycExtended ? 'kyc-extended' : 'kyc',
         feePayerAddress: adminAddress,
         assetName: stringToHex(tokenDetails.assetName),
         quantity: tokenDetails.quantity,
@@ -509,10 +521,13 @@ export function KycBuildSignSubmitStep({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <div>
-                <p className="text-blue-300 font-medium text-sm">KYC Token Registration</p>
+                <p className="text-blue-300 font-medium text-sm">
+                  {wizardState.flowId === 'kyc-extended' ? 'KYC Token (Extended) Registration' : 'KYC Token Registration'}
+                </p>
                 <p className="text-blue-200/70 text-sm mt-1">
-                  This will register a programmable token that requires KYC attestation for transfers.
-                  Transfers must include a valid signature from a trusted entity in the Global State.
+                  {wizardState.flowId === 'kyc-extended'
+                    ? 'This will register a kyc-extended programmable token. Receivers must be in an on-chain MPF allowlist (managed by the backend) to receive transfers; senders only need a KYC attestation.'
+                    : 'This will register a programmable token that requires KYC attestation for transfers. Transfers must include a valid signature from a trusted entity in the Global State.'}
                 </p>
               </div>
             </div>

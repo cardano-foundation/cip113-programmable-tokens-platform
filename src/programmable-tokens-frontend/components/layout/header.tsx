@@ -20,6 +20,9 @@ const navigation = [
   { name: "Register Token", href: "/register" },
   { name: "Admin", href: "/admin" },
   { name: "Dashboard", href: "/dashboard" },
+  ...(process.env.NEXT_PUBLIC_FLOW_KYC_EXTENDED_ENABLED?.toLowerCase() !== "false"
+    ? [{ name: "Verify", href: "/verify" }]
+    : []),
   { name: "Contributors", href: "/contributors" },
 ];
 

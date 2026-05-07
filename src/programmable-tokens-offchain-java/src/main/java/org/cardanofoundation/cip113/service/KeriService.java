@@ -26,7 +26,10 @@ import org.cardanofoundation.cip113.model.keri.KycProofResponse;
 import org.cardanofoundation.cip113.model.keri.SchemaItem;
 import org.cardanofoundation.cip113.model.keri.SessionResponse;
 import org.cardanofoundation.cip113.repository.KycSessionRepository;
+import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
+import org.cardanofoundation.cip113.util.AddressUtil;
 import org.cardanofoundation.cip113.util.CESRStreamUtil;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.cardanofoundation.cip113.util.IpexNotificationHelper;
 import org.cardanofoundation.signify.app.Exchanging;
 import org.cardanofoundation.signify.app.clienting.SignifyClient;
@@ -105,6 +108,12 @@ public class KeriService {
     private final String network;
 
     private final ConcurrentHashMap<String, Thread> activePresentations = new ConcurrentHashMap<>();
+
+    @Autowired(required = false)
+    private MpfTreeService mpfTreeService;
+
+    @Autowired(required = false)
+    private ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
     public KeriService(
             IdentifierConfig identifierConfig,
@@ -450,6 +459,28 @@ public class KeriService {
         kycSessionRepository.save(kyc);
     }
 
+    /**
+     * Bind the session to a kyc-extended programmable token policy. After binding, the next
+     * KERI proof generation will auto-upsert the session's PKH into the per-policy MPF tree.
+     *
+     * @throws IllegalArgumentException if the policy is not a kyc-extended token
+     */
+    public void bindSessionToToken(String sessionId, String policyId) {
+        KycSessionEntity kyc = kycSessionRepository.findById(sessionId)
+                .orElseThrow(() -> new NoSuchElementException("Session not found: " + sessionId));
+        if (programmableTokenRegistryRepository == null) {
+            throw new IllegalStateException("kyc-extended discovery not available");
+        }
+        var reg = programmableTokenRegistryRepository.findByPolicyId(policyId)
+                .orElseThrow(() -> new IllegalArgumentException("Token not registered: " + policyId));
+        if (!"kyc-extended".equals(reg.getSubstandardId())) {
+            throw new IllegalArgumentException("Token substandard is not 'kyc-extended': " + reg.getSubstandardId());
+        }
+        kyc.setBoundTokenPolicyId(policyId);
+        kycSessionRepository.save(kyc);
+        log.info("Session {} bound to kyc-extended token {}", sessionId, policyId);
+    }
+
     // ── KYC proof generation ──────────────────────────────────────────────────
 
     public KycProofResponse generateKycProof(String sessionId) {
@@ -472,7 +503,37 @@ public class KeriService {
         kyc.setKycProofValidUntil(proof.validUntilPosixMs());
         kycSessionRepository.save(kyc);
 
+        autoUpsertMpfMember(kyc, proof);
+
         return proof;
+    }
+
+    private void autoUpsertMpfMember(KycSessionEntity kyc, KycProofResponse proof) {
+        String boundPolicyId = kyc.getBoundTokenPolicyId();
+        if (boundPolicyId == null) return;
+        if (kyc.getCardanoAddress() == null) return;
+        if (mpfTreeService == null || programmableTokenRegistryRepository == null) return;
+
+        var regOpt = programmableTokenRegistryRepository.findByPolicyId(boundPolicyId);
+        if (regOpt.isEmpty() || !"kyc-extended".equals(regOpt.get().getSubstandardId())) return;
+
+        // Identity in the kyc-extended MPF tree is the stake credential — the on-chain
+        // transfer validator extracts witnesses from prog-token outputs' stake credential.
+        byte[] pkh = AddressUtil.extractStakeCredHashFromAddress(kyc.getCardanoAddress());
+        if (pkh == null) {
+            log.warn("Cannot derive stake-cred PKH from address {} for auto-upsert (base address required)",
+                    kyc.getCardanoAddress());
+            return;
+        }
+        try {
+            mpfTreeService.putMember(boundPolicyId, pkh, proof.validUntilPosixMs(),
+                    kyc.getCardanoAddress(), kyc.getSessionId());
+            log.info("Auto-upserted member into kyc-extended MPF tree: policy={}, sessionId={}",
+                    boundPolicyId, kyc.getSessionId());
+        } catch (Exception e) {
+            log.warn("Failed to auto-upsert MPF member for policy {} session {}: {}",
+                    boundPolicyId, kyc.getSessionId(), e.getMessage());
+        }
     }
 
     // ── CIP-170 credential chain publishing & attestation ─────────────────────

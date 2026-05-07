@@ -61,6 +61,16 @@ keri:
   signing-mnemonic: ${KERI_SIGNING_MNEMONIC:nest wild farm beyond decide arm chuckle home raven card parrot nothing crazy casino hub broken scan height marine movie gloom village common off}
   kyc-proof-validity-days: ${KERI_PROOF_VALIDITY_DAYS:30}
 
+# kyc-extended autonomous root-sync job. Signing reuses keri.signing-mnemonic
+# (which carries full TEL authority — future hardening would scope this key to
+# root updates only via a separate root_hash_updater_pkh in the global state).
+kycExtended:
+  enabled: ${KYC_EXTENDED_ENABLED:true}
+  rootHashUpdateIntervalSeconds: ${KYC_EXTENDED_ROOT_UPDATE_INTERVAL_SECONDS:30}
+  memberValidityDays: ${KYC_EXTENDED_MEMBER_VALIDITY_DAYS:30}
+  postInsertSyncDelayMs: ${KYC_EXTENDED_POST_INSERT_SYNC_DELAY_MS:5000}
+  postInsertCoalesceMs: ${KYC_EXTENDED_POST_INSERT_COALESCE_MS:30000}
+
 management:
   endpoints:
     web:

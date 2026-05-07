@@ -10,24 +10,45 @@
  * @returns Hex-encoded payment key hash (56 characters)
  * @throws Error if payment key hash cannot be extracted
  */
+/** Alias of {@link getPaymentKeyHash}. Returns the 56-hex-char (28-byte) payment credential. */
+export const extractPaymentCredHashFromAddress = (address: string): string =>
+  getPaymentKeyHash(address);
+
+/** Stake (delegation) credential hash from a base address — the user's identity in
+ *  the programmable-token context (prog-token outputs use it as their stake credential
+ *  and the on-chain validators extract witnesses from it). */
+export const extractStakeCredHashFromAddress = (address: string): string =>
+  getStakeKeyHash(address);
+
 export function getPaymentKeyHash(address: string): string {
   try {
-    // Bech32 decode: strip the prefix (addr_test1 or addr1)
-    // The simplest approach: use the fact that CIP-30 wallet APIs
-    // return hex-encoded addresses, or parse bech32 manually.
-
-    // For Shelley addresses, the payment credential is bytes 1-28 of the raw address.
-    // We can extract it by decoding bech32.
     const decoded = bech32Decode(address);
     if (decoded.length < 29) {
       throw new Error("Address too short to contain a payment credential");
     }
-    // Skip header byte (byte 0), take next 28 bytes
     const pkh = bytesToHex(decoded.slice(1, 29));
     return pkh;
   } catch (e) {
     throw new Error(
       `Could not extract payment key hash from address: ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+}
+
+/** Stake credential hash from a Shelley base address. Throws on enterprise/script addresses. */
+export function getStakeKeyHash(address: string): string {
+  try {
+    const decoded = bech32Decode(address);
+    if (decoded.length < 57) {
+      throw new Error(
+        "Address too short to contain a stake credential — base address required"
+      );
+    }
+    const skh = bytesToHex(decoded.slice(29, 57));
+    return skh;
+  } catch (e) {
+    throw new Error(
+      `Could not extract stake key hash from address: ${e instanceof Error ? e.message : String(e)}`
     );
   }
 }

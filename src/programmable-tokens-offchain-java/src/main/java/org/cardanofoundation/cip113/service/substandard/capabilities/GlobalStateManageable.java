@@ -27,8 +27,13 @@ public interface GlobalStateManageable {
     record GlobalStateInitRequest(
             /** Substandard ID (e.g., "kyc") — used when the token is not yet registered */
             String substandardId,
-            /** Admin address that will own and update the global state */
+            /** Fee-payer address (user's wallet — provides UTxOs and receives change) */
             String adminAddress,
+            /** Optional explicit hex PKH for the entity that will sign future admin operations.
+             *  When present, parameterizes the global-state script with this PKH instead of the
+             *  one derived from adminAddress — used by kyc-extended so the backend signing key
+             *  can autonomously sign UpdateMemberRootHash. */
+            String adminPkh,
             /** Optional initial trusted entity vkeys (64 hex chars / 32 bytes each) */
             java.util.List<String> initialVkeys,
             /** Whether transfers start paused (default: false) */

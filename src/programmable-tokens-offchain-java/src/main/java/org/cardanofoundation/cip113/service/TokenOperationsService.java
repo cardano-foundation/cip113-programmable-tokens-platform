@@ -11,16 +11,20 @@ import org.cardanofoundation.cip113.model.TransactionContext.RegistrationResult;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
+import org.cardanofoundation.cip113.repository.GlobalStateInitRepository;
+import org.cardanofoundation.cip113.repository.KycExtendedTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.KycTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.service.substandard.BafinSubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.DummySubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler;
+import org.cardanofoundation.cip113.service.substandard.KycExtendedSubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.KycSubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.SubstandardHandlerFactory;
 import org.cardanofoundation.cip113.service.substandard.capabilities.BasicOperations;
 import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
 import org.cardanofoundation.cip113.service.substandard.context.KycContext;
+import org.cardanofoundation.cip113.service.substandard.context.KycExtendedContext;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -46,6 +50,10 @@ public class TokenOperationsService {
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeTokenRegistrationRepository;
 
     private final KycTokenRegistrationRepository kycTokenRegistrationRepository;
+
+    private final KycExtendedTokenRegistrationRepository kycExtendedTokenRegistrationRepository;
+
+    private final GlobalStateInitRepository globalStateInitRepository;
 
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
@@ -87,6 +95,15 @@ public class TokenOperationsService {
                 var basicOps = (BasicOperations<KycRegisterRequest>) handler.asBasicOperations()
                         .orElseThrow(() -> new UnsupportedOperationException("kyc does not support basic operations"));
                 yield basicOps.buildPreRegistrationTransaction(kycRequest, protocolParams);
+            }
+            case KycExtendedRegisterRequest kxRequest -> {
+                var handler = handlerFactory.getHandler("kyc-extended", KycExtendedContext.builder()
+                        .issuerAdminPkh(kxRequest.getAdminPubKeyHash())
+                        .globalStatePolicyId(kxRequest.getGlobalStatePolicyId())
+                        .build());
+                var basicOps = (BasicOperations<KycExtendedRegisterRequest>) handler.asBasicOperations()
+                        .orElseThrow(() -> new UnsupportedOperationException("kyc-extended does not support basic operations"));
+                yield basicOps.buildPreRegistrationTransaction(kxRequest, protocolParams);
             }
             default -> throw new UnsupportedOperationException(
                     "Unknown request type: " + request.getClass().getSimpleName());
@@ -136,6 +153,15 @@ public class TokenOperationsService {
                 var basicOps = (BasicOperations<KycRegisterRequest>) handler.asBasicOperations()
                         .orElseThrow(() -> new UnsupportedOperationException("kyc does not support basic operations"));
                 yield basicOps.buildRegistrationTransaction(kycRequest, protocolParams);
+            }
+            case KycExtendedRegisterRequest kxRequest -> {
+                var handler = handlerFactory.getHandler("kyc-extended", KycExtendedContext.builder()
+                        .issuerAdminPkh(kxRequest.getAdminPubKeyHash())
+                        .globalStatePolicyId(kxRequest.getGlobalStatePolicyId())
+                        .build());
+                var basicOps = (BasicOperations<KycExtendedRegisterRequest>) handler.asBasicOperations()
+                        .orElseThrow(() -> new UnsupportedOperationException("kyc-extended does not support basic operations"));
+                yield basicOps.buildRegistrationTransaction(kxRequest, protocolParams);
             }
             default -> throw new UnsupportedOperationException(
                     "Unknown request type: " + request.getClass().getSimpleName());
@@ -199,6 +225,7 @@ public class TokenOperationsService {
                                 .build())
                         .build();
             }
+            case "kyc-extended" -> buildKycExtendedContext(request.tokenPolicyId());
 
             default -> null;
         };
@@ -214,6 +241,8 @@ public class TokenOperationsService {
                     bafinSubstandardHandler.buildMintTransaction(request, protocolParams);
             case KycSubstandardHandler kycSubstandardHandler ->
                     kycSubstandardHandler.buildMintTransaction(request, protocolParams);
+            case KycExtendedSubstandardHandler kxHandler ->
+                    kxHandler.buildMintTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
 
@@ -275,6 +304,7 @@ public class TokenOperationsService {
                                 .build())
                         .build();
             }
+            case "kyc-extended" -> buildKycExtendedContext(request.tokenPolicyId());
 
             default -> null;
         };
@@ -290,6 +320,8 @@ public class TokenOperationsService {
                     bafinSubstandardHandler.buildBurnTransaction(request, protocolParams);
             case KycSubstandardHandler kycSubstandardHandler ->
                     kycSubstandardHandler.buildBurnTransaction(request, protocolParams);
+            case KycExtendedSubstandardHandler kxHandler ->
+                    kxHandler.buildBurnTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
 
@@ -354,6 +386,7 @@ public class TokenOperationsService {
                                 .build())
                         .build();
             }
+            case "kyc-extended" -> buildKycExtendedContext(programmableToken.policyId());
 
             default -> null;
         };
@@ -369,12 +402,36 @@ public class TokenOperationsService {
                     bafinSubstandardHandler.buildTransferTransaction(request, protocolParams);
             case KycSubstandardHandler kycSubstandardHandler ->
                     kycSubstandardHandler.buildTransferTransaction(request, protocolParams);
+            case KycExtendedSubstandardHandler kxHandler ->
+                    kxHandler.buildTransferTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
 
         log.info("Transfer transaction built successfully for substandard: {}", substandardId);
 
         return txContext;
+    }
+
+    /**
+     * Build a {@link KycExtendedContext} for the given kyc-extended policy id, looking up the
+     * registration entity and resolving the global-state init parameters from the linked
+     * {@link org.cardanofoundation.cip113.entity.GlobalStateInitEntity}.
+     */
+    private KycExtendedContext buildKycExtendedContext(String policyId) {
+        var reg = kycExtendedTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId)
+                .orElseThrow(() -> new RuntimeException("could not find kyc-extended token registration data for policy: " + policyId));
+        var initEntity = globalStateInitRepository.findByGlobalStatePolicyId(reg.getTelPolicyId())
+                .orElseThrow(() -> new RuntimeException("could not find kyc-extended global state init for policy: " + reg.getTelPolicyId()));
+        return KycExtendedContext.builder()
+                .issuerAdminPkh(reg.getIssuerAdminPkh())
+                .globalStatePolicyId(reg.getTelPolicyId())
+                .globalStateInitTxInput(TransactionInput.builder()
+                        .transactionId(initEntity.getTxHash())
+                        .index(initEntity.getOutputIndex())
+                        .build())
+                .memberRootHashOnchain(reg.getMemberRootHashOnchain())
+                .memberRootHashLocal(reg.getMemberRootHashLocal())
+                .build();
     }
 
     /**

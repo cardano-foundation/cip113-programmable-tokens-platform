@@ -36,52 +36,81 @@ public class YaciConfiguration {
     public ProtocolParamsSupplier protocolParamsSupplier(BFBackendService bfBackendService,
                                                          KoiosBackendService koiosBackendService) {
         var primary = new DefaultProtocolParamsSupplier(bfBackendService.getEpochService());
-        // Pass Koios as a full BackendService so the overlay can look up the CURRENT epoch
-        // (Koios's no-arg /epoch_params returns a stale finalized epoch on preview, which on
-        // 2026-04-17 caused PPViewHashesDontMatch — see CostModelOverlayProtocolParamsSupplier).
+        // Koios's no-arg /epoch_params can return a stale finalized epoch on preview,
+        // causing PPViewHashesDontMatch — overlay forces the current epoch's cost model.
         return new CostModelOverlayProtocolParamsSupplier(primary, koiosBackendService);
     }
 
-    //    @Bean
-//    public TransactionEvaluator scalusTransactionEvaluator(HybridUtxoSupplier hybridUtxoSupplier,
-//                                                     ProtocolParamsSupplier protocolParamsSupplier,
-//                                                     BFBackendService bfBackendService) {
-//
-//        var scriptSupplier = new ScriptSupplier() {
-//            @Override
-//            public PlutusScript getScript(String scriptHash) {
-//                if (scriptHash != null) {
-//                    try {
-//                        var result = bfBackendService.getScriptService().getPlutusScript(scriptHash);
-//                        if (result.isSuccessful()) {
-//                            return result.getValue();
-//                        } else {
-//                            log.warn("could not find script for {}", scriptHash);
-//                            return null;
-//                        }
-//                    } catch (ApiException e) {
-//                        log.warn("could not find script for {}", scriptHash);
-//                        return null;
-//                    }
-//                } else {
-//                    return null;
-//                }
-//            }
-//        };
-//
-//        return new ScalusTransactionEvaluator(protocolParamsSupplier.getProtocolParams(),
-//                hybridUtxoSupplier,
-//                scriptSupplier);
-//
-//    }
     @Bean
     public TransactionEvaluator aikenTransactionEvaluator(HybridUtxoSupplier hybridUtxoSupplier,
                                                           ProtocolParamsSupplier protocolParamsSupplier,
                                                           BFBackendService bfBackendService) {
 
         var scriptSupplier = new DefaultScriptSupplier(bfBackendService.getScriptService());
+        var aikenEvaluator = new AikenTransactionEvaluator(hybridUtxoSupplier, protocolParamsSupplier, scriptSupplier);
 
-        return new AikenTransactionEvaluator(hybridUtxoSupplier, protocolParamsSupplier, scriptSupplier);
+        // Three-tier evaluator: aiken-java-binding → Blockfrost → ceiling-cost fallback.
+        // aiken-java-binding 0.1.0 doesn't yet handle Aiken MPF v2.1.0 proofs that pass
+        // `aiken check`; Blockfrost can occasionally fail; the ceiling fallback lets the
+        // build complete and lets the chain be the final arbiter for valid scripts.
+        return new TransactionEvaluator() {
+            @Override
+            public Result<List<EvaluationResult>> evaluateTx(byte[] cbor, Set<Utxo> inputUtxos) throws ApiException {
+                try {
+                    var result = aikenEvaluator.evaluateTx(cbor, inputUtxos);
+                    if (result != null && result.isSuccessful()) {
+                        return result;
+                    }
+                    log.debug("Local Aiken evaluator unsuccessful, falling back to Blockfrost. Reason: {}",
+                            result != null ? result.getResponse() : "null");
+                } catch (Exception e) {
+                    log.debug("Local Aiken evaluator threw {}, falling back to Blockfrost", e.toString());
+                }
+                try {
+                    var bfResult = bfBackendService.getTransactionService().evaluateTx(cbor);
+                    if (bfResult != null && bfResult.isSuccessful()) {
+                        return bfResult;
+                    }
+                    log.debug("Blockfrost evaluator unsuccessful: {}",
+                            bfResult != null ? bfResult.getResponse() : "null");
+                } catch (Exception e) {
+                    log.debug("Blockfrost evaluator threw {}", e.toString());
+                }
+                return ceilingCostFallback(cbor);
+            }
+        };
+    }
+
+    /** Last-resort evaluator: synthesise a generous ceiling cost per redeemer (1.5M mem,
+     *  800M cpu) so the build completes when local + Blockfrost evaluators both fail. */
+    private Result<List<EvaluationResult>> ceilingCostFallback(byte[] txCbor) {
+        try {
+            var tx = com.bloxbean.cardano.client.transaction.spec.Transaction.deserialize(txCbor);
+            var redeemers = tx.getWitnessSet() != null ? tx.getWitnessSet().getRedeemers() : null;
+            if (redeemers == null || redeemers.isEmpty()) {
+                log.warn("ceilingCostFallback: no redeemers in tx, returning empty");
+                return Result.success("ceilingCostFallback: no redeemers")
+                        .withValue(List.<EvaluationResult>of());
+            }
+            var results = new java.util.ArrayList<EvaluationResult>(redeemers.size());
+            for (var r : redeemers) {
+                var er = new EvaluationResult();
+                er.setRedeemerTag(r.getTag());
+                er.setIndex(r.getIndex().intValue());
+                var ex = new com.bloxbean.cardano.client.plutus.spec.ExUnits(
+                        java.math.BigInteger.valueOf(1_500_000L),    // mem ceiling
+                        java.math.BigInteger.valueOf(800_000_000L)); // cpu ceiling
+                er.setExUnits(ex);
+                results.add(er);
+            }
+            log.warn("ceilingCostFallback: synthesised {} redeemer cost(s) at ceiling (mem=1.5M, cpu=800M)",
+                    results.size());
+            return Result.success("ceilingCostFallback").withValue(results);
+        } catch (Exception e) {
+            log.error("ceilingCostFallback failed to synthesise costs: {}", e.toString());
+            return Result.error("ceilingCostFallback failed: " + e.getMessage())
+                    .withValue(List.<EvaluationResult>of());
+        }
 
     }
 

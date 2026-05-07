@@ -13,12 +13,22 @@ public record TransferTokenRequest(String senderAddress,
                                    String unit,
                                    String quantity,
                                    String recipientAddress,
-                                   // KYC fields (optional, used by KYC substandard)
+                                   // KYC fields (optional, used by KYC + KYC-Extended substandards)
                                    /** Hex-encoded 37-byte KYC payload: user_pkh(28) || role(1) || valid_until(8) */
                                    String kycPayload,
                                    /** Hex-encoded 64-byte Ed25519 signature over kycPayload */
                                    String kycSignature,
                                    /** Index of the trusted entity vkey in the global state list (default 0) */
-                                   Integer kycVkeyIndex) {
+                                   Integer kycVkeyIndex,
+                                   // KYC-Extended sender fast-path: Membership proof for sender (replaces Attestation)
+                                   /** Hex CBOR of the sender MPF inclusion proof (Aiken mpf.Proof Plutus Data) */
+                                   String senderMpfProofCborHex,
+                                   /** Sender leaf valid_until (8-byte BE millis) — must match the leaf encoded value */
+                                   Long senderMpfValidUntilMs,
+                                   // KYC-Extended receiver-side proofs (kyc-extended only): one entry per prog-base output
+                                   /** Hex CBOR of the recipient MPF inclusion proof (Aiken mpf.Proof Plutus Data) */
+                                   String mpfProofCborHex,
+                                   /** Recipient leaf valid_until (8-byte BE millis) — must match the leaf encoded value */
+                                   Long mpfValidUntilMs) {
 
 }

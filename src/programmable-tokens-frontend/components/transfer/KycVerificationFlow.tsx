@@ -31,6 +31,7 @@ import {
   type AvailableRole,
 } from "@/lib/api/keri";
 import { setKycProof, type KycProofCookie } from "@/lib/utils/kyc-cookie";
+import { getKeriSessionIdForWallet } from "@/lib/utils/keri-session";
 
 type KycStep = 1 | 2 | 3 | 4;
 
@@ -39,16 +40,10 @@ interface KycVerificationFlowProps {
   senderAddress: string;
   onComplete: (proof: KycProofCookie) => void;
   onBack: () => void;
-}
-
-function getSessionId(): string {
-  if (typeof sessionStorage === "undefined") return crypto.randomUUID();
-  let id = sessionStorage.getItem("keri-session-id");
-  if (!id) {
-    id = crypto.randomUUID();
-    sessionStorage.setItem("keri-session-id", id);
-  }
-  return id;
+  /** When true, ignore any cached KERI session / KYC proof and start fresh at step 1.
+   *  Set on entrypoints where the user explicitly came to (re-)verify (e.g. /verify page),
+   *  so a stale cached proof from a prior transfer flow doesn't auto-complete the flow. */
+  forceFresh?: boolean;
 }
 
 export function KycVerificationFlow({
@@ -56,11 +51,15 @@ export function KycVerificationFlow({
   senderAddress,
   onComplete,
   onBack,
+  forceFresh = false,
 }: KycVerificationFlowProps) {
   const [step, setStep] = useState<KycStep>(1);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const sessionIdRef = useRef(getSessionId());
+  // Per-wallet session id: switching wallets in the same tab yields a fresh
+  // session, so the backend's cached credential / KYC proof from a previous
+  // wallet cannot be inherited by the new one.
+  const sessionIdRef = useRef(getKeriSessionIdForWallet(senderAddress));
 
   // Step 1: OOBI
   const [oobiUrl, setOobiUrl] = useState<string | null>(null);
@@ -90,8 +89,9 @@ export function KycVerificationFlow({
   const [isIssuing, setIsIssuing] = useState(false);
   const [issueError, setIssueError] = useState<string | null>(null);
 
-  // Restore session on mount
+  // Restore session on mount (skipped when caller asked for a fresh flow).
   useEffect(() => {
+    if (forceFresh) return;
     const sessionId = sessionIdRef.current;
     getSession(sessionId)
       .then((data) => {
@@ -111,7 +111,7 @@ export function KycVerificationFlow({
               role: data.credentialRole ?? 0,
               roleName: data.credentialRoleName ?? "USER",
             };
-            setKycProof(policyId, proof);
+            setKycProof(policyId, senderAddress, proof);
             onComplete(proof);
           } else {
             setStep(4);
@@ -121,7 +121,7 @@ export function KycVerificationFlow({
       .catch(() => {
         // No session — start from step 1
       });
-  }, [policyId, onComplete]);
+  }, [policyId, onComplete, forceFresh]);
 
   // Cleanup camera on unmount
   useEffect(() => {
@@ -339,7 +339,7 @@ export function KycVerificationFlow({
         role: proofResponse.role,
         roleName: proofResponse.roleName,
       };
-      setKycProof(policyId, proof);
+      setKycProof(policyId, senderAddress, proof);
       onComplete(proof);
     } catch (err) {
       setError(

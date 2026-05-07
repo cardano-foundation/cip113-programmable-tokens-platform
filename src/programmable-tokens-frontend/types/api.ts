@@ -53,8 +53,20 @@ export interface KycRegisterRequest extends BaseRegisterTokenRequest {
   attestation?: Cip170AttestationData;  // Optional CIP-170 attestation
 }
 
+/** KYC-Extended substandard - basic kyc + on-chain receiver allowlist (MPF root in global state) */
+export interface KycExtendedRegisterRequest extends BaseRegisterTokenRequest {
+  substandardId: 'kyc-extended';
+  adminPubKeyHash: string;
+  globalStatePolicyId: string;
+  attestation?: Cip170AttestationData;
+}
+
 /** Discriminated union of all registration request types */
-export type RegisterTokenRequest = DummyRegisterRequest | FreezeAndSeizeRegisterRequest | KycRegisterRequest;
+export type RegisterTokenRequest =
+  | DummyRegisterRequest
+  | FreezeAndSeizeRegisterRequest
+  | KycRegisterRequest
+  | KycExtendedRegisterRequest;
 
 export interface RegisterTokenResponse {
   policyId: string;              // Generated policy ID
@@ -153,9 +165,17 @@ export interface TransferTokenRequest {
   unit: string;               // Full unit (policyId + assetName hex)
   quantity: string;           // Amount to transfer
   recipientAddress: string;   // Recipient's address
-  // KYC fields (optional, used by KYC substandard)
+  // Sender — Attestation path (basic-kyc style). Mutually exclusive with the
+  // sender-MPF fields below; backend prefers Membership when both are present.
   kycPayload?: string;        // Hex-encoded 37-byte KYC payload: user_pkh(28) || role(1) || valid_until(8)
   kycSignature?: string;      // Hex-encoded 64-byte Ed25519 signature over kycPayload
+  kycVkeyIndex?: number;      // Optional index into the trusted entity list (default 0)
+  // Sender — Membership path (kyc-extended fast path). Both fields go together.
+  senderMpfProofCborHex?: string;
+  senderMpfValidUntilMs?: number;
+  // Receiver — kyc-extended only; recipient's MPF inclusion proof.
+  mpfProofCborHex?: string;
+  mpfValidUntilMs?: number;
 }
 
 // Backend returns plain text CBOR hex string (not JSON)

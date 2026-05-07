@@ -7,6 +7,7 @@ import org.cardanofoundation.cip113.service.substandard.capabilities.Seizeable;
 import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable;
 import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
 import org.cardanofoundation.cip113.service.substandard.context.KycContext;
+import org.cardanofoundation.cip113.service.substandard.context.KycExtendedContext;
 import org.cardanofoundation.cip113.service.substandard.context.SubstandardContext;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
@@ -58,8 +59,10 @@ public class SubstandardHandlerFactory {
         for (SubstandardHandler handler : handlerList) {
             String id = handler.getSubstandardId().toLowerCase();
 
-            // FreezeAndSeizeHandler and KycSubstandardHandler are prototype-scoped, need context
-            if (handler instanceof FreezeAndSeizeHandler || handler instanceof KycSubstandardHandler) {
+            // FreezeAndSeizeHandler / KycSubstandardHandler / KycExtendedSubstandardHandler are prototype-scoped, need context
+            if (handler instanceof FreezeAndSeizeHandler
+                    || handler instanceof KycSubstandardHandler
+                    || handler instanceof KycExtendedSubstandardHandler) {
                 contextAwareSubstandards.add(id);
                 log.info("Registered context-aware substandard: {}", id);
             } else {
@@ -142,6 +145,19 @@ public class SubstandardHandlerFactory {
             KycSubstandardHandler handler = applicationContext.getBean(KycSubstandardHandler.class);
             handler.setContext(kycContext);
             log.debug("Created KycSubstandardHandler with context: {}", kycContext);
+            return handler;
+        }
+
+        if ("kyc-extended".equals(substandardId)) {
+            if (!(context instanceof KycExtendedContext kycExtCtx)) {
+                throw new IllegalArgumentException(
+                        "kyc-extended handler requires KycExtendedContext, got: " +
+                        (context != null ? context.getClass().getSimpleName() : "null"));
+            }
+
+            KycExtendedSubstandardHandler handler = applicationContext.getBean(KycExtendedSubstandardHandler.class);
+            handler.setContext(kycExtCtx);
+            log.debug("Created KycExtendedSubstandardHandler with context: {}", kycExtCtx);
             return handler;
         }
 

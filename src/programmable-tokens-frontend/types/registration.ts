@@ -210,9 +210,22 @@ export interface KycRegistrationData extends BaseRegistrationData {
 }
 
 /**
+ * KYC-Extended substandard registration data — receiver allowlist via on-chain MPF root.
+ */
+export interface KycExtendedRegistrationData extends BaseRegistrationData {
+  substandardId: 'kyc-extended';
+  adminPubKeyHash: string;
+  globalStatePolicyId: string;
+}
+
+/**
  * Union type for all registration requests
  */
-export type RegistrationRequest = DummyRegistrationData | FreezeAndSeizeRegistrationData | KycRegistrationData;
+export type RegistrationRequest =
+  | DummyRegistrationData
+  | FreezeAndSeizeRegistrationData
+  | KycRegistrationData
+  | KycExtendedRegistrationData;
 
 // ============================================================================
 // Step-Specific Data Types
