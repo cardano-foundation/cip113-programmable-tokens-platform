@@ -107,8 +107,8 @@ jobs:
         if: steps.gate.outputs.skip == 'false'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ secrets.HUB_DOCKER_COM_USER }}
+          password: ${{ secrets.HUB_DOCKER_COM_PASS }}
 
       - name: Build and push
         if: steps.gate.outputs.skip == 'false'
