@@ -7,7 +7,7 @@
 
 This repository is the **companion to the on-chain implementation**. The Aiken validators for the CIP-113 core framework live in a separate repository:
 
-👉 **[cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2)**
+👉 **[cardano-foundation/cip113-programmable-tokens](https://github.com/cardano-foundation/cip113-programmable-tokens)**
 
 ---
 
