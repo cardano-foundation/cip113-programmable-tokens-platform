@@ -6,6 +6,7 @@ validator issue {
     trace @"withdraw"
     redeemer == 100
   }
+
   else(_) {
     trace @"fallback"
     False
@@ -17,6 +18,7 @@ validator transfer {
     trace @"withdraw"
     redeemer == 200
   }
+
   else(_) {
     trace @"fallback"
     False

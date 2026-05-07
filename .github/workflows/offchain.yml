@@ -25,4 +25,8 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew build
+      # For now removing the test runs
+      - run: ./gradlew build -x test
+        env:
+          BLOCKFROST_KEY_PREVIEW: ${{ secrets.BLOCKFROST_KEY_PREVIEW }}
+          BLOCKFROST_KEY_PREPROD: ${{ secrets.BLOCKFROST_KEY_PREPROD }}

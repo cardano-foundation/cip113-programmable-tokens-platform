@@ -126,8 +126,7 @@ fn is_rewarding_script(
 validator issue(_tel_policy_id: ByteArray, permitted_cred: Credential) {
   withdraw(_redeemer: Data, _account: Credential, self: Transaction) {
     when permitted_cred is {
-      VerificationKey(pkh) ->
-        list.has(self.extra_signatories, pkh)
+      VerificationKey(pkh) -> list.has(self.extra_signatories, pkh)
       Script(script_hash) -> {
         let script_cred = Script(script_hash)
         list.any(

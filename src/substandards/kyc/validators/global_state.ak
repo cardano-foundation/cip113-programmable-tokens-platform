@@ -95,7 +95,7 @@ validator global_state(
       }
       PauseTransfers { transfers_paused } -> {
         let expected_datum =
-          GlobalStateDatum { ..input_datum, transfers_paused: transfers_paused }
+          GlobalStateDatum { ..input_datum, transfers_paused }
         and {
           must_be_signed_by_credential(self, owner_credential_hash),
           global_state_output.address.payment_credential == own_input.output.address.payment_credential,
