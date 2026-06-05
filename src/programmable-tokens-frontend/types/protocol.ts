@@ -87,4 +87,7 @@ export interface TokenContext {
   issuerAdminPkh?: string;
   blacklistInitTxHash?: string;
   blacklistInitOutputIndex?: number;
+  /** Security-token only: whether the on-chain validator requires the recipient
+   *  to be in the allowlist. `null` for substandards that don't carry this flag. */
+  requiresReceiverKyc?: boolean | null;
 }

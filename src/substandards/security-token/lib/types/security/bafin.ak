@@ -1,0 +1,25 @@
+// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
+pub type SecurityInfo {
+  isin: ByteArray,
+  term_of_issue: ByteArray,
+  security_type: ByteArray,
+  security_form: ByteArray,
+  security_class: ByteArray,
+  record_keeping: ByteArray,
+  entry_type: ByteArray,
+  without_voting_rights: Bool,
+  transfer_restrictions: Bool,
+  third_party_rights: Bool,
+  company_consent: Bool,
+  participate_settlement: Bool,
+  payment_bond: ByteArray,
+  dividend_payment_frequency: ByteArray,
+  //total number of tokens
+  volume_of_issuance: Int,
+  nominal_amount: Int,
+  issuer_name: ByteArray,
+  issuer_registration: ByteArray,
+  crypto_security_register: ByteArray,
+  share_custodian: ByteArray,
+  token_custodian: ByteArray,
+}

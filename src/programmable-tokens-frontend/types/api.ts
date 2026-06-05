@@ -61,12 +61,24 @@ export interface KycExtendedRegisterRequest extends BaseRegisterTokenRequest {
   attestation?: Cip170AttestationData;
 }
 
+/** Security-token (BaFin) substandard - same shape as kyc-extended for the registration
+ *  step. The backend's SecurityTokenSubstandardHandler.buildRegistrationTransaction
+ *  builds a combined tx (stake-cred registrations + CIP-113 directory insert +
+ *  MintSecurity + initial token mint) — the user signs once. */
+export interface SecurityTokenRegisterRequest extends BaseRegisterTokenRequest {
+  substandardId: 'security-token';
+  adminPubKeyHash: string;
+  globalStatePolicyId: string;
+  attestation?: Cip170AttestationData;
+}
+
 /** Discriminated union of all registration request types */
 export type RegisterTokenRequest =
   | DummyRegisterRequest
   | FreezeAndSeizeRegisterRequest
   | KycRegisterRequest
-  | KycExtendedRegisterRequest;
+  | KycExtendedRegisterRequest
+  | SecurityTokenRegisterRequest;
 
 export interface RegisterTokenResponse {
   policyId: string;              // Generated policy ID

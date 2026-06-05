@@ -8,6 +8,7 @@ import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistMa
 import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
 import org.cardanofoundation.cip113.service.substandard.context.KycContext;
 import org.cardanofoundation.cip113.service.substandard.context.KycExtendedContext;
+import org.cardanofoundation.cip113.service.substandard.context.SecurityTokenContext;
 import org.cardanofoundation.cip113.service.substandard.context.SubstandardContext;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
@@ -59,10 +60,11 @@ public class SubstandardHandlerFactory {
         for (SubstandardHandler handler : handlerList) {
             String id = handler.getSubstandardId().toLowerCase();
 
-            // FreezeAndSeizeHandler / KycSubstandardHandler / KycExtendedSubstandardHandler are prototype-scoped, need context
+            // Prototype-scoped handlers that require runtime context.
             if (handler instanceof FreezeAndSeizeHandler
                     || handler instanceof KycSubstandardHandler
-                    || handler instanceof KycExtendedSubstandardHandler) {
+                    || handler instanceof KycExtendedSubstandardHandler
+                    || handler instanceof SecurityTokenSubstandardHandler) {
                 contextAwareSubstandards.add(id);
                 log.info("Registered context-aware substandard: {}", id);
             } else {
@@ -158,6 +160,20 @@ public class SubstandardHandlerFactory {
             KycExtendedSubstandardHandler handler = applicationContext.getBean(KycExtendedSubstandardHandler.class);
             handler.setContext(kycExtCtx);
             log.debug("Created KycExtendedSubstandardHandler with context: {}", kycExtCtx);
+            return handler;
+        }
+
+        if ("security-token".equals(substandardId)) {
+            if (!(context instanceof SecurityTokenContext stCtx)) {
+                throw new IllegalArgumentException(
+                        "security-token handler requires SecurityTokenContext, got: " +
+                        (context != null ? context.getClass().getSimpleName() : "null"));
+            }
+
+            SecurityTokenSubstandardHandler handler =
+                    applicationContext.getBean(SecurityTokenSubstandardHandler.class);
+            handler.setContext(stCtx);
+            log.debug("Created SecurityTokenSubstandardHandler with context: {}", stCtx);
             return handler;
         }
 

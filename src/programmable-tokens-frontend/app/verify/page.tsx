@@ -4,14 +4,18 @@ import { useEffect, useState, useMemo } from "react";
 import { PageContainer } from "@/components/layout/page-container";
 import { Input } from "@/components/ui/input";
 import { useWallet } from "@/hooks/use-wallet";
-import { listKycExtendedTokens, type KycExtendedTokenSummary } from "@/lib/api/kyc-extended";
-import { TokenRowVerify } from "@/components/verify/TokenRowVerify";
+import { listKycExtendedTokens } from "@/lib/api/kyc-extended";
+import { listSecurityTokens } from "@/lib/api/security-token";
+import {
+  TokenRowVerify,
+  type VerifiableTokenSummary,
+} from "@/components/verify/TokenRowVerify";
 import { EmptyState } from "@/components/verify/EmptyState";
 
 export default function VerifyIndexPage() {
   const { connected, wallet } = useWallet();
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
-  const [tokens, setTokens] = useState<KycExtendedTokenSummary[] | null>(null);
+  const [tokens, setTokens] = useState<VerifiableTokenSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
@@ -36,13 +40,44 @@ export default function VerifyIndexPage() {
     };
   }, [connected, wallet]);
 
-  // Load token list once on mount.
+  // Load both kyc-extended AND security-token registrations in parallel and
+  // merge into a single list tagged with `kind`. Failure on one list doesn't
+  // hide rows from the other — surface a partial-error notice instead.
   useEffect(() => {
     let cancelled = false;
-    listKycExtendedTokens()
-      .then((list) => {
+    Promise.allSettled([listKycExtendedTokens(), listSecurityTokens()])
+      .then(([kycExtRes, secTokRes]) => {
         if (cancelled) return;
-        setTokens(list);
+        const merged: VerifiableTokenSummary[] = [];
+        if (kycExtRes.status === "fulfilled") {
+          for (const t of kycExtRes.value) {
+            merged.push({
+              policyId: t.policyId,
+              displayName: t.displayName,
+              description: t.description,
+              kind: "kyc-extended",
+            });
+          }
+        }
+        if (secTokRes.status === "fulfilled") {
+          for (const t of secTokRes.value) {
+            merged.push({
+              policyId: t.policyId,
+              displayName: t.displayName,
+              description: t.description,
+              kind: "security-token",
+              requiresReceiverKyc: t.requiresReceiverKyc,
+            });
+          }
+        }
+        setTokens(merged);
+        if (kycExtRes.status === "rejected" && secTokRes.status === "rejected") {
+          setError("Failed to load tokens from both lists");
+        } else if (kycExtRes.status === "rejected") {
+          setError("Could not load kyc-extended tokens (security-tokens shown).");
+        } else if (secTokRes.status === "rejected") {
+          setError("Could not load security-tokens (kyc-extended shown).");
+        }
       })
       .catch((e) => {
         if (cancelled) return;
@@ -71,8 +106,9 @@ export default function VerifyIndexPage() {
         <header className="space-y-2">
           <h1 className="text-3xl font-bold text-white">Verify for a Token</h1>
           <p className="text-sm text-dark-300">
-            Browse all kyc-extended tokens registered on this network. Pick one to
-            complete KYC — you don&apos;t need to own the token to verify.
+            Browse every token that supports on-chain KYC enrollment (kyc-extended
+            and security-token). Pick one to complete KYC — you don&apos;t need to
+            own the token to verify.
           </p>
         </header>
 
@@ -83,25 +119,29 @@ export default function VerifyIndexPage() {
           onChange={(e) => setSearch(e.target.value)}
         />
 
-        {error && (
+        {error && tokens === null && (
           <EmptyState message={`Error loading tokens: ${error}`} />
+        )}
+
+        {error && tokens !== null && tokens.length > 0 && (
+          <p className="text-xs text-orange-400 -mt-2">{error}</p>
         )}
 
         {!error && filtered === null && (
           <EmptyState message="Loading…" />
         )}
 
-        {!error && filtered && filtered.length === 0 && (
+        {filtered && filtered.length === 0 && (
           <EmptyState message={tokens && tokens.length === 0
-            ? "No kyc-extended tokens registered yet."
+            ? "No kyc-extended or security-token registrations on this network yet."
             : "No tokens match your search."} />
         )}
 
-        {!error && filtered && filtered.length > 0 && (
+        {filtered && filtered.length > 0 && (
           <div className="space-y-3">
             {filtered.map((token) => (
               <TokenRowVerify
-                key={token.policyId}
+                key={`${token.kind}:${token.policyId}`}
                 token={token}
                 walletAddress={walletAddress}
               />

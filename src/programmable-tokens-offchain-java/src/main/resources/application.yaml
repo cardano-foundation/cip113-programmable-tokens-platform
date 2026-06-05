@@ -71,6 +71,14 @@ kycExtended:
   postInsertSyncDelayMs: ${KYC_EXTENDED_POST_INSERT_SYNC_DELAY_MS:5000}
   postInsertCoalesceMs: ${KYC_EXTENDED_POST_INSERT_COALESCE_MS:30000}
 
+# security-token autonomous root-sync job. Same admin-signing-key reuse caveat
+# as the kyc-extended block above.
+securityToken:
+  enabled: ${SECURITY_TOKEN_ENABLED:true}
+  rootHashUpdateIntervalSeconds: ${SECURITY_TOKEN_ROOT_UPDATE_INTERVAL_SECONDS:30}
+  memberValidityDays: ${SECURITY_TOKEN_MEMBER_VALIDITY_DAYS:30}
+  postInsertSyncDelayMs: ${SECURITY_TOKEN_POST_INSERT_SYNC_DELAY_MS:5000}
+
 management:
   endpoints:
     web:

@@ -3,10 +3,18 @@
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { CheckCircle, AlertCircle, Loader2, Shield } from "lucide-react";
-import type { KycExtendedTokenSummary } from "@/lib/api/kyc-extended";
+
+/** Common shape used by the verify view across substandards. Both
+ *  {@code KycExtendedTokenSummary} and {@code SecurityTokenSummary} satisfy
+ *  this shape. */
+export interface VerifyTokenDisplay {
+  policyId: string;
+  displayName: string;
+  description?: string | null;
+}
 
 interface Props {
-  token: KycExtendedTokenSummary;
+  token: VerifyTokenDisplay;
   status: "not-verified" | "verified" | "expired" | "publish-pending";
   validUntilMs?: number;
   showRenew?: boolean;

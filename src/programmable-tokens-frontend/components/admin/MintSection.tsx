@@ -15,7 +15,11 @@ import {
   QrCode,
 } from "lucide-react";
 import { AdminTokenSelector } from "./AdminTokenSelector";
-import { AdminTokenInfo } from "@/lib/api/admin";
+import {
+  AdminTokenInfo,
+  SecurityTokenCapability,
+  hasSecurityTokenCapability,
+} from "@/lib/api/admin";
 import { decodeAssetNameDisplay } from "@/lib/utils/cip68";
 import { mintToken } from "@/lib/api";
 import { MintTokenRequest, Cip170AttestationData } from "@/types/api";
@@ -35,6 +39,10 @@ import {
   type AvailableRole,
   type CredentialResponse,
 } from "@/lib/api/keri";
+import {
+  getSecurityTokenGlobalState,
+  type SecurityTokenGlobalState,
+} from "@/lib/api/security-token";
 
 interface MintSectionProps {
   tokens: AdminTokenInfo[];
@@ -60,15 +68,31 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const { getProtocol, ensureSubstandard, available: sdkAvailable } = useCIP113();
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
 
-  // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize substandards. KYC has no SDK
-  // implementation, so any KYC mint must go through the backend regardless of the toggle.
+  // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize substandards. KYC and
+  // security-token have no SDK implementation, so their mints must go through the
+  // backend regardless of the toggle.
   const sdkAvailableForSelected = (token: AdminTokenInfo | null) =>
-    sdkAvailable && token?.substandardId !== "kyc";
+    sdkAvailable
+    && token?.substandardId !== "kyc"
+    && token?.substandardId !== "security-token";
 
-  // Filter tokens where user has ISSUER_ADMIN role or is a dummy token
-  const mintableTokens = tokens.filter(
-    (t) => t.roles.includes("ISSUER_ADMIN") || t.substandardId === "dummy"
-  );
+  // Per-page capability gate. Show:
+  //   - any token where the wallet has ISSUER_ADMIN (legacy substandards)
+  //   - all dummy tokens (open mint by design)
+  //   - security-tokens where the wallet has MINTER or ADMIN capability
+  //     in the on-chain power-users linked list (BaFin model)
+  // The backend's /admin/tokens endpoint already filters security-tokens by
+  // power-user membership; this just enforces the per-page capability bit so
+  // a token where the wallet is e.g. only PAUSER doesn't show up here.
+  const mintableTokens = tokens.filter((t) => {
+    if (t.substandardId === "security-token") {
+      return hasSecurityTokenCapability(
+        t,
+        SecurityTokenCapability.MINTER | SecurityTokenCapability.ADMIN,
+      );
+    }
+    return t.roles.includes("ISSUER_ADMIN") || t.substandardId === "dummy";
+  });
 
   // Form state
   const [selectedToken, setSelectedToken] = useState<AdminTokenInfo | null>(
@@ -130,6 +154,41 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   });
 
   const isKycToken = selectedToken?.substandardId === "kyc";
+  const isSecurityToken = selectedToken?.substandardId === "security-token";
+
+  // For security-token: fetch the on-chain GS datum whenever the selected
+  // token changes so we can show the admin the remaining mintable_amount
+  // (and warn them before they exceed it). The backend exposes this via
+  // GET /security-token/{policyId}/global-state — it reads the GS UTxO and
+  // parses the 9-field BaFin datum.
+  const [securityTokenGs, setSecurityTokenGs] =
+    useState<SecurityTokenGlobalState | null>(null);
+  const [securityTokenGsError, setSecurityTokenGsError] = useState<string | null>(null);
+  const [securityTokenGsLoading, setSecurityTokenGsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isSecurityToken || !selectedToken) {
+      setSecurityTokenGs(null);
+      setSecurityTokenGsError(null);
+      return;
+    }
+    let cancelled = false;
+    setSecurityTokenGsLoading(true);
+    setSecurityTokenGsError(null);
+    getSecurityTokenGlobalState(selectedToken.policyId)
+      .then((gs) => {
+        if (cancelled) return;
+        setSecurityTokenGs(gs);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setSecurityTokenGsError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setSecurityTokenGsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isSecurityToken, selectedToken]);
 
   const validateForm = (): boolean => {
     const newErrors = {
@@ -148,6 +207,12 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       newErrors.quantity = "Quantity must be a positive number";
     } else if (BigInt(quantity) <= 0) {
       newErrors.quantity = "Quantity must be greater than 0";
+    } else if (isSecurityToken && securityTokenGs !== null
+        && BigInt(quantity) > BigInt(securityTokenGs.mintableAmount)) {
+      // Hard supply cap from the GS datum. The on-chain GS spend's MintSecurity
+      // branch also enforces this (remaining_amount >= 0), but failing here
+      // gives a clearer error than a Plutus eval failure.
+      newErrors.quantity = `Exceeds remaining mintable amount (${securityTokenGs.mintableAmount.toLocaleString()})`;
     }
 
     if (!recipientAddress.trim()) {
@@ -738,6 +803,12 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           KYC tokens are minted via the backend (no SDK substandard available).
         </p>
       )}
+      {isSecurityToken && (
+        <p className="text-xs text-dark-400 -mt-3">
+          Security tokens are minted via the backend (BaFin MintSecurity flow:
+          spends the global-state UTxO and decrements the on-chain supply cap).
+        </p>
+      )}
 
       {/* Token Selector */}
       <div>
@@ -757,6 +828,49 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         )}
       </div>
 
+      {/* Security-token: remaining mintable_amount from the GS datum. The
+          cap is enforced on-chain via the GS spend's MintSecurity branch;
+          showing it here lets the admin size their mint accordingly. */}
+      {isSecurityToken && (
+        <div className="px-4 py-3 bg-dark-900 rounded-lg border border-dark-700">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-xs text-dark-400 uppercase tracking-wide">
+                Remaining mintable
+              </p>
+              {securityTokenGsLoading ? (
+                <p className="mt-1 text-sm text-dark-400 italic">
+                  Loading on-chain global state…
+                </p>
+              ) : securityTokenGsError ? (
+                <p className="mt-1 text-sm text-red-400">
+                  Could not read GS datum: {securityTokenGsError}
+                </p>
+              ) : securityTokenGs ? (
+                <>
+                  <p className="mt-1 text-lg font-semibold text-white">
+                    {securityTokenGs.mintableAmount.toLocaleString()}
+                    <span className="ml-2 text-sm text-dark-400 font-normal">tokens</span>
+                  </p>
+                  {securityTokenGs.transfersPaused && (
+                    <p className="mt-1 text-xs text-orange-400">
+                      Transfers are currently paused on this token.
+                    </p>
+                  )}
+                </>
+              ) : null}
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-dark-500">
+                Each mint spends the GS UTxO with{" "}
+                <span className="font-mono text-dark-400">MintSecurity</span> and
+                decrements this amount on chain.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Quantity */}
       <Input
         label="Quantity"
@@ -769,7 +883,11 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         placeholder="Enter amount to mint"
         disabled={isBuilding || !selectedToken}
         error={errors.quantity}
-        helperText="Number of tokens to mint"
+        helperText={
+          isSecurityToken && securityTokenGs
+            ? `Up to ${securityTokenGs.mintableAmount.toLocaleString()} can be minted before the supply cap is reached`
+            : "Number of tokens to mint"
+        }
       />
 
       {/* Recipient Address */}

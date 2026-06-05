@@ -7,7 +7,11 @@ import { Input } from "@/components/ui/input";
 import { TxBuilderToggle, type TransactionBuilder } from "@/components/ui/tx-builder-toggle";
 import { Shield, Plus, Minus, CheckCircle, ExternalLink } from "lucide-react";
 import { AdminTokenSelector } from "./AdminTokenSelector";
-import { AdminTokenInfo } from "@/lib/api/admin";
+import {
+  AdminTokenInfo,
+  SecurityTokenCapability,
+  hasSecurityTokenCapability,
+} from "@/lib/api/admin";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useCIP113 } from "@/contexts/cip113-context";
 import { useToast } from "@/components/ui/use-toast";
@@ -30,10 +34,17 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
   const network = process.env.NEXT_PUBLIC_NETWORK || "preview";
 
-  // Filter tokens where user has BLACKLIST_MANAGER role
-  const manageableTokens = tokens.filter((t) =>
-    t.roles.includes("BLACKLIST_MANAGER")
-  );
+  // Per-page capability gate. Show:
+  //   - tokens where the wallet has BLACKLIST_MANAGER role (legacy F&S)
+  //   - security-tokens where the wallet has ADMIN capability — BaFin's
+  //     denylist mutations (AddDenylist / RemoveDenylist) are admin-gated
+  //     directly in the GS validator, not a separate PowerUser role
+  const manageableTokens = tokens.filter((t) => {
+    if (t.substandardId === "security-token") {
+      return hasSecurityTokenCapability(t, SecurityTokenCapability.ADMIN);
+    }
+    return t.roles.includes("BLACKLIST_MANAGER");
+  });
 
   const [selectedToken, setSelectedToken] = useState<AdminTokenInfo | null>(null);
   const [action, setAction] = useState<BlacklistAction>("add");
@@ -80,7 +91,13 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
 
       let unsignedCborTx: string;
 
-      if (txBuilder === "sdk") {
+      // SDK (cip113-sdk-ts) only knows about dummy + freeze-and-seize.
+      // security-token MUST go through the backend path (its on-chain denylist
+      // mutations are wired into /compliance/blacklist/{add,remove} now via the
+      // BlacklistManageable interface on SecurityTokenSubstandardHandler).
+      const forceBackend = selectedToken.substandardId === "security-token";
+
+      if (txBuilder === "sdk" && !forceBackend) {
         await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
         const protocol = await getProtocol();
         const params = {

@@ -112,7 +112,9 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
     public TransactionContext<List<String>> buildPreRegistrationTransaction(
             KycRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
-        // KYC uses a combined build flow; pre-registration not needed separately
+        // KYC bundles the substandard stake-credential registration into the
+        // GS-init tx (see buildGlobalStateInitTransaction). The wizard doesn't
+        // call a separate pre-registration step for this substandard.
         return TransactionContext.ok(null, List.of());
     }
 
@@ -844,7 +846,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
 
             // Build issue and transfer scripts to register their stake addresses
             var adminCredential = Credential.fromKey(adminPkh);
-            var globalStatePolicyId =globalStateMintScript.getPolicyId();
+            var globalStatePolicyId = globalStateMintScript.getPolicyId();
             var substandardIssueContract = kycScriptBuilder.buildIssueScript(globalStatePolicyId, adminCredential);
             var substandardIssueAddress = AddressProvider.getRewardAddress(substandardIssueContract, network.getCardanoNetwork());
 

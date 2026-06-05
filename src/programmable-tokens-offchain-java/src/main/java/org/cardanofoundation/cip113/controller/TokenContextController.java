@@ -10,6 +10,8 @@ import org.cardanofoundation.cip113.model.TokenRegistrationRequest;
 import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
+import org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -22,6 +24,10 @@ public class TokenContextController {
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeTokenRegistrationRepository;
     private final BlacklistInitRepository blacklistInitRepository;
+
+    /** Optional — only present when the security-token substandard is enabled. */
+    @Autowired(required = false)
+    private SecurityTokenRegistrationRepository securityTokenRegistrationRepository;
 
     /**
      * Get token context — returns substandardId + init params for a given policy ID.
@@ -42,6 +48,7 @@ public class TokenContextController {
         String issuerAdminPkh = null;
         String blacklistInitTxHash = null;
         Integer blacklistInitOutputIndex = null;
+        Boolean requiresReceiverKyc = null;
 
         if ("freeze-and-seize".equals(substandardId)) {
             var tokenRegistration = freezeAndSeizeTokenRegistrationRepository
@@ -59,6 +66,14 @@ public class TokenContextController {
             }
         }
 
+        if ("security-token".equals(substandardId) && securityTokenRegistrationRepository != null) {
+            var stReg = securityTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId);
+            if (stReg.isPresent()) {
+                issuerAdminPkh = stReg.get().getIssuerAdminPkh();
+                requiresReceiverKyc = stReg.get().isRequiresReceiverKyc();
+            }
+        }
+
         return ResponseEntity.ok(new TokenContextResponse(
                 policyId,
                 substandardId,
@@ -66,7 +81,8 @@ public class TokenContextController {
                 blacklistNodePolicyId,
                 issuerAdminPkh,
                 blacklistInitTxHash,
-                blacklistInitOutputIndex
+                blacklistInitOutputIndex,
+                requiresReceiverKyc
         ));
     }
 

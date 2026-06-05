@@ -7,7 +7,12 @@ import { Button } from "@/components/ui/button";
 import { TxBuilderToggle, type TransactionBuilder } from "@/components/ui/tx-builder-toggle";
 import { Flame, Loader2, ExternalLink, AlertTriangle } from "lucide-react";
 import { UtxoInfo } from "@/types/api";
-import { AdminTokenInfo, getUtxosForBurning } from "@/lib/api/admin";
+import {
+  AdminTokenInfo,
+  getUtxosForBurning,
+  SecurityTokenCapability,
+  hasSecurityTokenCapability,
+} from "@/lib/api/admin";
 import { AdminTokenSelector } from "./AdminTokenSelector";
 import { burnToken } from "@/lib/api/minting";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
@@ -43,8 +48,19 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
     amount: "",
   });
 
-  // Filter tokens to ISSUER_ADMIN only
-  const issuerTokens = adminTokens.filter(t => t.roles.includes("ISSUER_ADMIN"));
+  // Per-page capability gate. Show:
+  //   - tokens where the wallet has ISSUER_ADMIN (legacy substandards)
+  //   - security-tokens where the wallet has BURNER or ADMIN capability
+  //     in the on-chain power-users linked list (BaFin model)
+  const issuerTokens = adminTokens.filter((t) => {
+    if (t.substandardId === "security-token") {
+      return hasSecurityTokenCapability(
+        t,
+        SecurityTokenCapability.BURNER | SecurityTokenCapability.ADMIN,
+      );
+    }
+    return t.roles.includes("ISSUER_ADMIN");
+  });
 
   const handleFetchUtxos = async () => {
     if (!selectedToken || !targetAddress) {
@@ -125,7 +141,16 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
     try {
       let unsignedTx: string;
 
-      if (txBuilder === "sdk") {
+      // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize substandards.
+      // For security-token (and kyc / kyc-extended) the SDK path errors with
+      // "Substandard 'security-token' not registered" — force the backend route
+      // regardless of the toggle for those substandards.
+      const sdkSupportsSelected =
+        selectedToken.substandardId !== "security-token"
+        && selectedToken.substandardId !== "kyc"
+        && selectedToken.substandardId !== "kyc-extended";
+
+      if (txBuilder === "sdk" && sdkSupportsSelected) {
         const substandardId = await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
         const protocol = await getProtocol();
         const result = await protocol.burn({
@@ -166,11 +191,50 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
 
     } catch (error) {
       console.error("Burn failed:", error);
-      showToast({
-        title: "Burn Failed",
-        description: error instanceof Error ? error.message : "Burn failed",
-        variant: "error",
-      });
+      const msg = error instanceof Error ? error.message : "Burn failed";
+      // Auto-trigger the one-shot transferLogic cert registration if the
+      // backend tells us it's missing. Eternl can't sign that cert as part
+      // of the burn tx (Conway tag-7 + multi-script body), so we isolate
+      // it into a structurally tiny tx that signs cleanly.
+      const needsCertRegistration =
+        selectedToken?.substandardId === "security-token"
+        && msg.includes("transferLogic stake credential not yet registered");
+      if (needsCertRegistration && selectedToken) {
+        try {
+          showToast({
+            title: "One-time setup required",
+            description: "Registering transferLogic stake credential...",
+            variant: "info",
+          });
+          const { buildRegisterTransferLogicTx } = await import(
+            "@/lib/api/security-token"
+          );
+          const { unsignedCborTx } = await buildRegisterTransferLogicTx(
+            selectedToken.policyId,
+            feePayerAddress,
+          );
+          const signed = await wallet.signTx(unsignedCborTx);
+          const certTxHash = await wallet.submitTx(signed);
+          showToast({
+            title: "Cert registered",
+            description: `Tx ${certTxHash.slice(0, 12)}... — wait for confirmation, then retry burn.`,
+            variant: "success",
+          });
+        } catch (regErr) {
+          console.error("transferLogic cert registration failed:", regErr);
+          showToast({
+            title: "Cert registration failed",
+            description: regErr instanceof Error ? regErr.message : "register failed",
+            variant: "error",
+          });
+        }
+      } else {
+        showToast({
+          title: "Burn Failed",
+          description: msg,
+          variant: "error",
+        });
+      }
       setStep("form");
     } finally {
       setIsBurning(null);

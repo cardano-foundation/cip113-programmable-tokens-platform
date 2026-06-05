@@ -7,5 +7,8 @@ public record TokenContextResponse(
         String blacklistNodePolicyId,
         String issuerAdminPkh,
         String blacklistInitTxHash,
-        Integer blacklistInitOutputIndex
+        Integer blacklistInitOutputIndex,
+        /** Security-token only: whether the on-chain validator requires the recipient
+         *  to be in the allowlist. Null for substandards that don't carry this flag. */
+        Boolean requiresReceiverKyc
 ) {}

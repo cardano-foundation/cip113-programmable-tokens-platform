@@ -26,6 +26,33 @@ export interface AdminTokenInfo {
     blacklistAdminPkh?: string;
     globalStatePolicyId?: string;
   };
+  /** Security-token only: bitfield of the connected wallet's BaFin power-user
+   *  capabilities for this token. Backed by {@link SecurityTokenCapability}.
+   *  Use {@link hasSecurityTokenCapability} to test specific bits. Null/undefined
+   *  for tokens of other substandards. */
+  securityTokenCapabilities?: number;
+}
+
+/** Bit positions matching the on-chain BaFin PowerUser record. Mirrors
+ *  the backend's {@code SecurityTokenPowerUserCapability} enum. */
+export const SecurityTokenCapability = {
+  ADMIN: 1 << 0,
+  MINTER: 1 << 1,
+  BURNER: 1 << 2,
+  PAUSER: 1 << 3,
+  FORCE_TRANSFER: 1 << 4,
+} as const;
+
+/** True iff the connected wallet has AT LEAST ONE of the given capabilities
+ *  on the given security-token. Returns false for non-security tokens (since
+ *  these capabilities are BaFin-specific). */
+export function hasSecurityTokenCapability(
+  token: AdminTokenInfo,
+  capabilities: number,
+): boolean {
+  if (token.substandardId !== "security-token") return false;
+  const cap = token.securityTokenCapabilities ?? 0;
+  return (cap & capabilities) !== 0;
 }
 
 export interface AdminTokensResponse {

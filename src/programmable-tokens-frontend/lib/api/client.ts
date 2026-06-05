@@ -124,6 +124,76 @@ export async function apiPost<T, R = unknown>(
 }
 
 /**
+ * DELETE request
+ */
+export async function apiDelete<R = unknown>(
+  endpoint: string,
+  options?: FetchOptions
+): Promise<R> {
+  const url = `${API_BASE_URL}${API_PREFIX}${endpoint}`;
+  try {
+    const response = await fetchWithTimeout(url, { ...options, method: 'DELETE' });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new ApiException(
+        errorText || `API request failed: ${response.statusText}`,
+        response.status
+      );
+    }
+    if (response.status === 204) return undefined as R;
+    const contentType = response.headers.get('content-type');
+    if (contentType && contentType.includes('application/json')) {
+      return await response.json();
+    }
+    return (await response.text()) as R;
+  } catch (error) {
+    if (error instanceof ApiException) throw error;
+    throw new ApiException(
+      error instanceof Error ? error.message : 'Unknown error occurred',
+      500,
+      error
+    );
+  }
+}
+
+/**
+ * PATCH request
+ */
+export async function apiPatch<T, R = unknown>(
+  endpoint: string,
+  data: T,
+  options?: FetchOptions
+): Promise<R> {
+  const url = `${API_BASE_URL}${API_PREFIX}${endpoint}`;
+  try {
+    const response = await fetchWithTimeout(url, {
+      ...options,
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new ApiException(
+        errorText || `API request failed: ${response.statusText}`,
+        response.status
+      );
+    }
+    const contentType = response.headers.get('content-type');
+    if (contentType && contentType.includes('application/json')) {
+      return await response.json();
+    }
+    return (await response.text()) as R;
+  } catch (error) {
+    if (error instanceof ApiException) throw error;
+    throw new ApiException(
+      error instanceof Error ? error.message : 'Unknown error occurred',
+      500,
+      error
+    );
+  }
+}
+
+/**
  * Get full API base URL (useful for debugging)
  */
 export function getApiBaseUrl(): string {
