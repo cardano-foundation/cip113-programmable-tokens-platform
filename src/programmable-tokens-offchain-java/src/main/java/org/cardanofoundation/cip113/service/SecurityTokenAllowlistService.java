@@ -57,9 +57,9 @@ public class SecurityTokenAllowlistService {
     }
 
     public TrieSnapshot snapshotForPublish(String policyId) {
-        var leaves = leafRepo.findByProgrammableTokenPolicyId(policyId);
-        var trie = buildTrieFromLeaves(leaves);
-        var ids = leaves.stream()
+        List<SecurityTokenMemberLeafEntity> leaves = leafRepo.findByProgrammableTokenPolicyId(policyId);
+        MpfTrie trie = buildTrieFromLeaves(leaves);
+        java.util.Set<Long> ids = leaves.stream()
                 .map(SecurityTokenMemberLeafEntity::getId)
                 .collect(java.util.stream.Collectors.toSet());
         return new TrieSnapshot(rootBytes(trie), ids);
@@ -76,9 +76,9 @@ public class SecurityTokenAllowlistService {
         String memberPkhHex = HexUtil.encodeHexString(memberPkh);
         // Generate the proof from the trie of *published* leaves only — that trie's root
         // matches what's on-chain, so the proof validates against the datum's member_root_hash.
-        var publishedLeaves = leafRepo.findPublishedByProgrammableTokenPolicyId(policyId);
-        var publishedTrie = buildTrieFromLeaves(publishedLeaves);
-        var leaf = publishedLeaves.stream()
+        List<SecurityTokenMemberLeafEntity> publishedLeaves = leafRepo.findPublishedByProgrammableTokenPolicyId(policyId);
+        MpfTrie publishedTrie = buildTrieFromLeaves(publishedLeaves);
+        Optional<SecurityTokenMemberLeafEntity> leaf = publishedLeaves.stream()
                 .filter(l -> memberPkhHex.equalsIgnoreCase(l.getMemberPkh())
                         && l.getValidUntilMs() >= nowMs)
                 .findFirst();
@@ -107,7 +107,7 @@ public class SecurityTokenAllowlistService {
         if (leafIds == null || leafIds.isEmpty()) return 0;
         Instant now = Instant.now();
         int count = 0;
-        for (var leaf : leafRepo.findAllById(leafIds)) {
+        for (SecurityTokenMemberLeafEntity leaf : leafRepo.findAllById(leafIds)) {
             leaf.setPublishedAt(now);
             leafRepo.save(leaf);
             count++;

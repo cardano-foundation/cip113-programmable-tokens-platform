@@ -33,7 +33,7 @@ public enum SecurityTokenPowerUserCapability {
 
     public static int encode(SecurityTokenPowerUserCapability... caps) {
         int out = 0;
-        for (var c : caps) out |= c.bit;
+        for (SecurityTokenPowerUserCapability c : caps) out |= c.bit;
         return out;
     }
 }

@@ -19,27 +19,31 @@ import { CBOR as EvoCBOR } from "@evolution-sdk/evolution";
 import * as cbor from "cbor";
 
 /**
- * Body-preserving variant of `assembleSignedTx`.
+ * Body-preserving signed-tx assembler for CIP-30 wallets.
  *
- * Evolution SDK's `addVKeyWitnessesHex` (used by the upstream `assembleSignedTx`)
- * decodes the whole tx through a "format tree reconciliation" pass and re-encodes
- * it. In practice the reconciliation isn't byte-perfect for every tx shape — we
- * observed the body bytes changing when merging vkey witnesses into a Conway
- * genesis tx with mints + a RegCert + a publish redeemer. The wallet had signed
- * against the ORIGINAL body hash, so the submitted (re-encoded) body failed
- * verification with `InvalidWitnessesUTXOW`.
+ * Evolution SDK's `addVKeyWitnessesHex` decodes the entire transaction and
+ * re-encodes it through a format-reconciliation pass. For Conway txs that mix
+ * mints + a RegCert + a publish redeemer, the re-encoded body is not byte-for-
+ * byte identical to the input, which invalidates the wallet's signature
+ * (`InvalidWitnessesUTXOW`).
  *
- * This implementation parses the outer 4-element CBOR array
- *   `[body, witnessSet, isValid, auxiliaryData]`
- * and substitutes ONLY the witness-set entry. The body, isValid, and auxData
- * sub-byte-slices are concatenated verbatim, so the body hash the wallet signed
- * still matches what's submitted.
+ * To avoid that we splice at the CBOR-byte level:
+ *   1. Locate the byte ranges of body and witness-set in the unsigned tx's
+ *      outer `[body, witnessSet, isValid, auxiliaryData]` array.
+ *   2. Extract the wallet's vkey-witness value (key 0 — typically
+ *      `Tag(258, [[vkey, sig], …])`) as raw bytes from the wallet's witness
+ *      set CBOR.
+ *   3. Prepend the new (key=0, value=<wallet bytes>) entry to the unsigned
+ *      tx's witness-set map, bumping the entry count by one.
+ *   4. Concatenate `0x84 + body + new witness-set + isValid + auxData` —
+ *      everything except witness-set is kept verbatim, so both the body hash
+ *      (signature target) and the witness-set bytes that script_integrity_hash
+ *      commits to (datums at key 4, redeemers at key 5) remain unchanged.
  *
- * Other witness-set entries (scripts, redeemers, datums) come from the unsigned
- * tx's witness set; the wallet's witness set contributes only the vkey witnesses
- * (key 0).
+ * Assumes the unsigned tx's witness set does NOT already contain key 0 — true
+ * for Bloxbean's QuickTx output, which never pre-signs. If we ever pre-sign on
+ * the backend this throws, prompting a proper merge path.
  */
-/** Decode a CBOR map header: returns (count, bodyStartOffset). */
 function decodeMapHeader(buf: Uint8Array, offset: number): { count: number; bodyStart: number } {
   const firstByte = buf[offset];
   const majorType = (firstByte >> 5) & 0x07;
@@ -47,15 +51,9 @@ function decodeMapHeader(buf: Uint8Array, offset: number): { count: number; body
     throw new Error(`expected CBOR map (major type 5), got major type ${majorType} at offset ${offset}`);
   }
   const additionalInfo = firstByte & 0x1f;
-  if (additionalInfo < 24) {
-    return { count: additionalInfo, bodyStart: offset + 1 };
-  }
-  if (additionalInfo === 24) {
-    return { count: buf[offset + 1], bodyStart: offset + 2 };
-  }
-  if (additionalInfo === 25) {
-    return { count: (buf[offset + 1] << 8) | buf[offset + 2], bodyStart: offset + 3 };
-  }
+  if (additionalInfo < 24) return { count: additionalInfo, bodyStart: offset + 1 };
+  if (additionalInfo === 24) return { count: buf[offset + 1], bodyStart: offset + 2 };
+  if (additionalInfo === 25) return { count: (buf[offset + 1] << 8) | buf[offset + 2], bodyStart: offset + 3 };
   if (additionalInfo === 26) {
     return {
       count: (buf[offset + 1] * 0x1000000) + (buf[offset + 2] << 16) + (buf[offset + 3] << 8) + buf[offset + 4],
@@ -65,7 +63,6 @@ function decodeMapHeader(buf: Uint8Array, offset: number): { count: number; body
   throw new Error(`unsupported CBOR map count encoding: additionalInfo=${additionalInfo}`);
 }
 
-/** Encode a CBOR map header for the given entry count. */
 function encodeMapHeader(count: number): Uint8Array {
   const major = 5 << 5;
   if (count < 24) return Uint8Array.of(major | count);
@@ -76,33 +73,21 @@ function encodeMapHeader(count: number): Uint8Array {
 }
 
 function assembleSignedTxPreservingBody(unsignedTxHex: string, walletWitnessSetHex: string): string {
-  console.log("[assembleSignedTxPreservingBody] starting — unsigned tx length:", unsignedTxHex.length / 2, "bytes");
   const txBytes = Buffer.from(unsignedTxHex, "hex");
   if (txBytes[0] !== 0x84) {
     throw new Error(
       `unsigned tx CBOR must start with 0x84 (4-element array), got 0x${txBytes[0]?.toString(16)}`
     );
   }
-  // Locate byte ranges of body and witnessSet using Evolution's offset-tracking decoder.
   const afterBody = EvoCBOR.decodeItemWithOffset(txBytes, 1).newOffset;
   const bodyBytes = txBytes.subarray(1, afterBody);
   const afterWs = EvoCBOR.decodeItemWithOffset(txBytes, afterBody).newOffset;
-  // rest = isValid (1 byte) + optional auxiliaryData — keep verbatim.
   const restBytes = txBytes.subarray(afterWs);
 
-  // ── Extract wallet's key-0 value BYTES (verbatim) ──
-  // The wallet witness set is a CBOR map. We want the raw bytes that encode
-  // the value at key 0 — `Tag(258, [[vkey, sig], …])` — so we can splice them
-  // directly into the unsigned tx's witness set without re-encoding (which
-  // would change byte representation and break the body's script_integrity_hash).
   const walletWsBytes = Buffer.from(walletWitnessSetHex, "hex");
   const walletHdr = decodeMapHeader(walletWsBytes, 0);
-  if (walletHdr.count === 0) {
-    console.warn("[assembleSignedTxPreservingBody] wallet returned empty witness set map");
-    return unsignedTxHex;
-  }
-  // Find key 0 in the wallet's witness set. CIP-30 signTx returns just vkeys,
-  // so key 0 is typically the FIRST (and only) entry.
+  if (walletHdr.count === 0) return unsignedTxHex;
+
   let walkOff = walletHdr.bodyStart;
   let walletKey0ValueStart = -1;
   let walletKey0ValueEnd = -1;
@@ -118,76 +103,37 @@ function assembleSignedTxPreservingBody(unsignedTxHex: string, walletWitnessSetH
     }
     walkOff = afterValue;
   }
-  if (walletKey0ValueStart < 0) {
-    console.warn("[assembleSignedTxPreservingBody] wallet witness set has no key 0 (vkey_witnesses) — dumping for inspection:",
-      walletWitnessSetHex);
-    return unsignedTxHex;
-  }
+  if (walletKey0ValueStart < 0) return unsignedTxHex;
   const walletKey0ValueBytes = walletWsBytes.subarray(walletKey0ValueStart, walletKey0ValueEnd);
-  console.log("[assembleSignedTxPreservingBody] extracted wallet key-0 value bytes:",
-    walletKey0ValueBytes.length, "bytes");
 
-  // ── Splice key 0 into the unsigned tx's witness set ──
-  // Strategy: assume the unsigned tx's witness set does NOT already have
-  // key 0 (Bloxbean doesn't pre-sign in our flow). We append a new entry
-  // at the START of the map (canonical CBOR sort: 0 sorts before all other
-  // unsigned integer keys), incrementing the entry count by 1. All existing
-  // entries (datums at key 4, redeemers at key 5) are preserved byte-for-byte,
-  // so the body's script_integrity_hash check passes.
   const oldWsHdr = decodeMapHeader(txBytes, afterBody);
   const oldWsBodyBytes = txBytes.subarray(oldWsHdr.bodyStart, afterWs);
 
-  // Defensive: scan for an existing key 0 in the unsigned tx's witness set.
-  // If found we'd need to merge values, which would require re-encoding.
-  // Bloxbean's QuickTx pipeline doesn't pre-sign, so we don't expect this.
-  let unsignedHasKey0 = false;
   let scanOff = oldWsHdr.bodyStart;
   for (let i = 0; i < oldWsHdr.count; i++) {
     const { item: keyVal, newOffset: afterKey } = EvoCBOR.decodeItemWithOffset(txBytes, scanOff);
     const { newOffset: afterVal } = EvoCBOR.decodeItemWithOffset(txBytes, afterKey);
     if (typeof keyVal === "bigint" ? keyVal === BigInt(0) : keyVal === 0) {
-      unsignedHasKey0 = true;
-      break;
+      throw new Error("unsigned tx already has vkey witnesses (key 0) — byte-level splice not supported in this case");
     }
     scanOff = afterVal;
   }
-  if (unsignedHasKey0) {
-    throw new Error("unsigned tx already has vkey witnesses (key 0) — byte-level splice not supported in this case");
-  }
 
-  const newWsHeader = encodeMapHeader(oldWsHdr.count + 1);
-  const keyZeroByte = Uint8Array.of(0x00);
+  // Key 0 sorts before any other unsigned-int key under canonical CBOR map
+  // ordering, so prepending it keeps the witness-set map canonical.
   const newWsBytes = Buffer.concat([
-    newWsHeader,
-    keyZeroByte,
+    encodeMapHeader(oldWsHdr.count + 1),
+    Uint8Array.of(0x00),
     walletKey0ValueBytes,
     oldWsBodyBytes,
   ]);
-  console.log("[assembleSignedTxPreservingBody] witness set: oldCount=", oldWsHdr.count,
-    "newCount=", oldWsHdr.count + 1, "newWsBytes len=", newWsBytes.length);
 
-  const result = Buffer.concat([
+  return Buffer.concat([
     Buffer.from([0x84]),
     bodyBytes,
     newWsBytes,
     restBytes,
   ]).toString("hex");
-
-  // Verify body bytes are preserved by re-parsing the result and comparing
-  // the body sub-slice against the input body sub-slice.
-  const resultBytes = Buffer.from(result, "hex");
-  const resultBodyEnd = EvoCBOR.decodeItemWithOffset(resultBytes, 1).newOffset;
-  const resultBodyBytes = resultBytes.subarray(1, resultBodyEnd);
-  const bodyPreserved = Buffer.compare(bodyBytes, resultBodyBytes) === 0;
-  console.log("[assembleSignedTxPreservingBody] body bytes preserved:", bodyPreserved,
-    "— in body len:", bodyBytes.length, "out body len:", resultBodyBytes.length);
-  if (!bodyPreserved) {
-    console.error("[assembleSignedTxPreservingBody] BODY MUTATED — submission will fail with InvalidWitnesses",
-      "\nin:", bodyBytes.toString("hex").slice(0, 200),
-      "\nout:", resultBodyBytes.toString("hex").slice(0, 200));
-  }
-
-  return result;
 }
 
 // ---------------------------------------------------------------------------

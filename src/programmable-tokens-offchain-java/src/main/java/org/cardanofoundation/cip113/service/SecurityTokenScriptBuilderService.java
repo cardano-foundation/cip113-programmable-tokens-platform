@@ -38,8 +38,8 @@ public class SecurityTokenScriptBuilderService {
     // ── Global state ─────────────────────────────────────────────────────────
 
     public PlutusScript buildGlobalStateMintScript(TransactionInput bootstrapTxInput) {
-        var contract = getContract("global_state.global_state_mint_validator.mint");
-        var params = ListPlutusData.of(
+        SubstandardValidator contract = getContract("global_state.global_state_mint_validator.mint");
+        ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(bootstrapTxInput.getTransactionId())),
                 BigIntPlutusData.of(BigInteger.valueOf(bootstrapTxInput.getIndex()))
         );
@@ -49,8 +49,8 @@ public class SecurityTokenScriptBuilderService {
     public PlutusScript buildGlobalStateSpendScript(String securityAssetNameHex,
                                                     String issuancePolicyId,
                                                     String globalStatePolicyId) {
-        var contract = getContract("global_state.global_state_spend_validator.spend");
-        var params = ListPlutusData.of(
+        SubstandardValidator contract = getContract("global_state.global_state_spend_validator.spend");
+        ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
                 BytesPlutusData.of(HexUtil.decodeHexString(issuancePolicyId)),
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId))
@@ -62,8 +62,8 @@ public class SecurityTokenScriptBuilderService {
 
     public PlutusScript buildDenylistMintScript(String globalStatePolicyId,
                                                 TransactionInput initInputOutRef) {
-        var contract = getContract("denylist.mint.mint");
-        var params = ListPlutusData.of(
+        SubstandardValidator contract = getContract("denylist.mint.mint");
+        ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
                 outputReferenceData(initInputOutRef)
         );
@@ -71,8 +71,8 @@ public class SecurityTokenScriptBuilderService {
     }
 
     public PlutusScript buildDenylistSpendScript(String denylistLinkedListPolicyId) {
-        var contract = getContract("denylist.denylist_validator.spend");
-        var params = ListPlutusData.of(
+        SubstandardValidator contract = getContract("denylist.denylist_validator.spend");
+        ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(denylistLinkedListPolicyId))
         );
         return applyParameters(contract, params, "denylist_spend");
@@ -82,8 +82,8 @@ public class SecurityTokenScriptBuilderService {
 
     public PlutusScript buildPowerUsersMintScript(String globalStatePolicyId,
                                                   TransactionInput initInputOutRef) {
-        var contract = getContract("power_users.mint.mint");
-        var params = ListPlutusData.of(
+        SubstandardValidator contract = getContract("power_users.mint.mint");
+        ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
                 outputReferenceData(initInputOutRef)
         );
@@ -92,8 +92,8 @@ public class SecurityTokenScriptBuilderService {
 
     public PlutusScript buildPowerUsersSpendScript(String globalStatePolicyId,
                                                    String powerUsersLinkedListPolicyId) {
-        var contract = getContract("power_users.power_users_validator.spend");
-        var params = ListPlutusData.of(
+        SubstandardValidator contract = getContract("power_users.power_users_validator.spend");
+        ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
                 BytesPlutusData.of(HexUtil.decodeHexString(powerUsersLinkedListPolicyId))
         );
@@ -106,8 +106,8 @@ public class SecurityTokenScriptBuilderService {
                                                 String globalStatePolicyId,
                                                 String registryPolicyId,
                                                 String powerUsersLinkedListPolicyId) {
-        var contract = getContract("minting_logic_script.minting_logic_validator.withdraw");
-        var params = ListPlutusData.of(
+        SubstandardValidator contract = getContract("minting_logic_script.minting_logic_validator.withdraw");
+        ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
                 BytesPlutusData.of(HexUtil.decodeHexString(registryPolicyId)),
@@ -121,8 +121,8 @@ public class SecurityTokenScriptBuilderService {
     public PlutusScript buildTransferLogicScript(String securityAssetNameHex,
                                                  String globalStatePolicyId,
                                                  String registryPolicyId) {
-        var contract = getContract("transfer_logic_script.transfer_logic_validator.withdraw");
-        var params = ListPlutusData.of(
+        SubstandardValidator contract = getContract("transfer_logic_script.transfer_logic_validator.withdraw");
+        ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
                 BytesPlutusData.of(HexUtil.decodeHexString(registryPolicyId))
@@ -153,7 +153,7 @@ public class SecurityTokenScriptBuilderService {
                                          ListPlutusData params,
                                          String scriptName) {
         try {
-            var parameterizedCode = AikenScriptUtil.applyParamToScript(params, contract.scriptBytes());
+            String parameterizedCode = AikenScriptUtil.applyParamToScript(params, contract.scriptBytes());
             return PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
                     parameterizedCode, PlutusVersion.v3);
         } catch (Exception e) {

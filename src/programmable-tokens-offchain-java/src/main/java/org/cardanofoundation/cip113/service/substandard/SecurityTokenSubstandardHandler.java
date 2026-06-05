@@ -16,7 +16,9 @@ import com.bloxbean.cardano.client.quicktx.Tx;
 import com.bloxbean.cardano.client.transaction.spec.Asset;
 import com.bloxbean.cardano.client.transaction.spec.MultiAsset;
 import com.bloxbean.cardano.client.transaction.spec.Transaction;
+import com.bloxbean.cardano.client.transaction.spec.TransactionBody;
 import com.bloxbean.cardano.client.transaction.spec.TransactionInput;
+import com.bloxbean.cardano.client.transaction.spec.TransactionOutput;
 import com.bloxbean.cardano.client.transaction.spec.Value;
 import com.bloxbean.cardano.client.util.HexUtil;
 import lombok.RequiredArgsConstructor;
@@ -173,44 +175,37 @@ public class SecurityTokenSubstandardHandler
             if (context == null) {
                 return TransactionContext.typedError("security-token context not set — genesis init must run first");
             }
-            var gsPolicy = context.getGlobalStatePolicyId();
-            var puPolicy = context.getPowerUsersPolicyId();
-            var securityAssetNameHex = context.getSecurityAssetNameHex();
-            var adminPkhHex = context.getIssuerAdminPkh();
+            String gsPolicy = context.getGlobalStatePolicyId();
+            String puPolicy = context.getPowerUsersPolicyId();
+            String securityAssetNameHex = context.getSecurityAssetNameHex();
+            String adminPkhHex = context.getIssuerAdminPkh();
             if (gsPolicy == null || puPolicy == null || securityAssetNameHex == null || adminPkhHex == null) {
                 return TransactionContext.typedError(
                         "security-token context is incomplete — re-run the genesis init step (gsPolicy/puPolicy/assetName/adminPkh missing)");
             }
-            var adminCredential = Credential.fromKey(adminPkhHex);
+            Credential adminCredential = Credential.fromKey(adminPkhHex);
 
-            var registryPolicyId = protocolParams.directoryMintParams().scriptHash();
-            var mintingLogicScript = scriptBuilder.buildMintingLogicScript(
+            String registryPolicyId = protocolParams.directoryMintParams().scriptHash();
+            PlutusScript mintingLogicScript = scriptBuilder.buildMintingLogicScript(
                     securityAssetNameHex, gsPolicy, registryPolicyId, puPolicy);
-            var transferLogicScript = scriptBuilder.buildTransferLogicScript(
+            PlutusScript transferLogicScript = scriptBuilder.buildTransferLogicScript(
                     securityAssetNameHex, gsPolicy, registryPolicyId);
-            var issuanceContract = protocolScriptBuilderService.getParameterizedIssuanceMintScript(
+            PlutusScript issuanceContract = protocolScriptBuilderService.getParameterizedIssuanceMintScript(
                     protocolParams, mintingLogicScript);
-            var progTokenPolicyId = issuanceContract.getPolicyId();
-            var mintingLogicRewardAddress = AddressProvider.getRewardAddress(
+            String progTokenPolicyId = issuanceContract.getPolicyId();
+            Address mintingLogicRewardAddress = AddressProvider.getRewardAddress(
                     mintingLogicScript, network.getCardanoNetwork());
-
-            log.info("security-token registration script hashes — issuance={} mintingLogic={} transferLogic={} registryMint={} directoryMint={}",
-                    progTokenPolicyId,
-                    HexUtil.encodeHexString(mintingLogicScript.getScriptHash()),
-                    HexUtil.encodeHexString(transferLogicScript.getScriptHash()),
-                    registryPolicyId,
-                    protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolParams).getPolicyId());
 
             // 1. Fee-payer UTxOs (same selection pattern as kyc-extended).
             List<Utxo> feePayerUtxos;
             if (request.getChainingTransactionCborHex() != null) {
-                var chainingTxBytes = HexUtil.decodeHexString(request.getChainingTransactionCborHex());
-                var chainingTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil.getTxHash(chainingTxBytes);
-                var chainingTx = Transaction.deserialize(chainingTxBytes);
+                byte[] chainingTxBytes = HexUtil.decodeHexString(request.getChainingTransactionCborHex());
+                String chainingTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil.getTxHash(chainingTxBytes);
+                Transaction chainingTx = Transaction.deserialize(chainingTxBytes);
                 Utxo inputUtxo = null;
-                var outs = chainingTx.getBody().getOutputs();
+                List<TransactionOutput> outs = chainingTx.getBody().getOutputs();
                 for (int i = 0; i < outs.size(); i++) {
-                    var output = outs.get(i);
+                    TransactionOutput output = outs.get(i);
                     if (output.getAddress().equals(request.getFeePayerAddress()) &&
                             output.getValue().getCoin().compareTo(BigInteger.valueOf(10_000_000L)) > 0) {
                         inputUtxo = Utxo.builder()
@@ -234,50 +229,50 @@ public class SecurityTokenSubstandardHandler
             }
 
             // 2. CIP-113 protocol bookkeeping (mirrors kyc-extended).
-            var bootstrapTxHash = protocolParams.txHash();
-            var protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
-            var issuanceUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 2);
+            String bootstrapTxHash = protocolParams.txHash();
+            Optional<Utxo> protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
+            Optional<Utxo> issuanceUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 2);
             if (protocolParamsUtxoOpt.isEmpty() || issuanceUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve protocol or issuance params UTxOs");
             }
-            var protocolParamsUtxo = protocolParamsUtxoOpt.get();
-            var issuanceUtxo = issuanceUtxoOpt.get();
+            Utxo protocolParamsUtxo = protocolParamsUtxoOpt.get();
+            Utxo issuanceUtxo = issuanceUtxoOpt.get();
 
-            var directorySpendScript = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
-            var directorySpendAddress = AddressProvider.getEntAddress(directorySpendScript, network.getCardanoNetwork());
-            var directoryMintScript = protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolParams);
-            var directoryMintPolicyId = directoryMintScript.getPolicyId();
+            PlutusScript directorySpendScript = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+            Address directorySpendAddress = AddressProvider.getEntAddress(directorySpendScript, network.getCardanoNetwork());
+            PlutusScript directoryMintScript = protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolParams);
+            String directoryMintPolicyId = directoryMintScript.getPolicyId();
 
             // 3. Linked-list slot lookup for the directory insert.
-            var registryEntries = utxoProvider.findUtxos(directorySpendAddress.getAddress());
-            var nodeAlreadyPresent = linkedListService.nodeAlreadyPresent(progTokenPolicyId, registryEntries,
+            List<Utxo> registryEntries = utxoProvider.findUtxos(directorySpendAddress.getAddress());
+            boolean nodeAlreadyPresent = linkedListService.nodeAlreadyPresent(progTokenPolicyId, registryEntries,
                     utxo -> registryNodeParser.parse(utxo.getInlineDatum()).map(RegistryNode::key));
             if (nodeAlreadyPresent) {
                 return TransactionContext.typedError(
                         "policy " + progTokenPolicyId + " already registered in CIP-113 directory");
             }
-            var nodeToReplaceOpt = linkedListService.findNodeToReplace(progTokenPolicyId, registryEntries,
+            Optional<Utxo> nodeToReplaceOpt = linkedListService.findNodeToReplace(progTokenPolicyId, registryEntries,
                     utxo -> registryNodeParser.parse(utxo.getInlineDatum())
                             .map(node -> new LinkedListNode(node.key(), node.next())));
             if (nodeToReplaceOpt.isEmpty()) {
                 return TransactionContext.typedError("could not find directory slot to insert into");
             }
-            var directoryUtxo = nodeToReplaceOpt.get();
-            var existingNodeOpt = registryNodeParser.parse(directoryUtxo.getInlineDatum());
+            Utxo directoryUtxo = nodeToReplaceOpt.get();
+            Optional<RegistryNode> existingNodeOpt = registryNodeParser.parse(directoryUtxo.getInlineDatum());
             if (existingNodeOpt.isEmpty()) {
                 return TransactionContext.typedError("could not parse existing directory node datum");
             }
-            var existingNode = existingNodeOpt.get();
+            RegistryNode existingNode = existingNodeOpt.get();
 
             // Locate the directory NFT carried by the slot UTxO so we can preserve it on the spend output.
-            var directorySpendAssetOpt = directoryUtxo.getAmount().stream()
+            Optional<Amount> directorySpendAssetOpt = directoryUtxo.getAmount().stream()
                     .filter(a -> a.getQuantity().equals(BigInteger.ONE)
                             && directoryMintPolicyId.equals(AssetType.fromUnit(a.getUnit()).policyId()))
                     .findAny();
             if (directorySpendAssetOpt.isEmpty()) {
                 return TransactionContext.typedError("directory slot UTxO has no directory NFT");
             }
-            var directorySpendAssetName = AssetType.fromUnit(directorySpendAssetOpt.get().getUnit()).assetName();
+            String directorySpendAssetName = AssetType.fromUnit(directorySpendAssetOpt.get().getUnit()).assetName();
 
             // 4. Redeemers.
             //
@@ -285,32 +280,32 @@ public class SecurityTokenSubstandardHandler
             // contract this is a fresh registration, with the new directory entry
             // at output index 2 (preserved-slot=output 1, new-slot=output 2 per
             // kyc-extended convention).
-            var issuanceRedeemer = ConstrPlutusData.of(0,
+            ConstrPlutusData issuanceRedeemer = ConstrPlutusData.of(0,
                     ConstrPlutusData.of(1, BytesPlutusData.of(mintingLogicScript.getScriptHash())),
                     ConstrPlutusData.of(1, BigIntPlutusData.of(2))
             );
             // Directory mint Insert redeemer (carries issuance + substandard hashes).
-            var directoryMintRedeemer = ConstrPlutusData.of(1,
+            ConstrPlutusData directoryMintRedeemer = ConstrPlutusData.of(1,
                     BytesPlutusData.of(issuanceContract.getScriptHash()),
                     BytesPlutusData.of(mintingLogicScript.getScriptHash())
             );
 
             // 5. New + updated directory datums (preserved slot links to new key,
             // new node links to whatever the preserved slot used to link to).
-            var directorySpendDatum = existingNode.toBuilder()
+            RegistryNode directorySpendDatum = existingNode.toBuilder()
                     .next(HexUtil.encodeHexString(issuanceContract.getScriptHash()))
                     .build();
-            var directoryMintDatum = new RegistryNode(
+            RegistryNode directoryMintDatum = new RegistryNode(
                     HexUtil.encodeHexString(issuanceContract.getScriptHash()),
                     existingNode.next(),
                     HexUtil.encodeHexString(transferLogicScript.getScriptHash()),
                     HexUtil.encodeHexString(mintingLogicScript.getScriptHash()),
                     gsPolicy);
 
-            var directorySpendNft = Asset.builder()
+            Asset directorySpendNft = Asset.builder()
                     .name("0x" + directorySpendAssetName)
                     .value(BigInteger.ONE).build();
-            var directoryMintNft = Asset.builder()
+            Asset directoryMintNft = Asset.builder()
                     .name("0x" + issuanceContract.getPolicyId())
                     .value(BigInteger.ONE).build();
 
@@ -345,7 +340,7 @@ public class SecurityTokenSubstandardHandler
                 return TransactionContext.typedError("quantity must be >= 0");
             }
             boolean willMint = mintQuantity.signum() > 0;
-            var programmableToken = Asset.builder()
+            Asset programmableToken = Asset.builder()
                     .name("0x" + request.getAssetName())
                     .value(mintQuantity).build();
             Value programmableTokenValue = Value.builder()
@@ -355,11 +350,11 @@ public class SecurityTokenSubstandardHandler
                             .assets(List.of(programmableToken)).build()))
                     .build();
 
-            var recipient = (request.getRecipientAddress() == null || request.getRecipientAddress().isBlank())
+            String recipient = (request.getRecipientAddress() == null || request.getRecipientAddress().isBlank())
                     ? request.getFeePayerAddress()
                     : request.getRecipientAddress();
-            var recipientAddress = new Address(recipient);
-            var targetAddress = AddressProvider.getBaseAddress(
+            Address recipientAddress = new Address(recipient);
+            Address targetAddress = AddressProvider.getBaseAddress(
                     Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
                     recipientAddress.getDelegationCredential().orElseThrow(() ->
                             new IllegalArgumentException("recipient must be a base address (need stake credential)")),
@@ -379,7 +374,7 @@ public class SecurityTokenSubstandardHandler
             // branch (mint=0 short-circuit) lets the registration succeed without
             // needing GS/PU on chain. When willMint=true we'd need the strict
             // path's inputs — that's the separate MintSecurity tx, not this one.
-            var withdrawRedeemer = ConstrPlutusData.of(0,
+            ConstrPlutusData withdrawRedeemer = ConstrPlutusData.of(0,
                     BigIntPlutusData.of(BigInteger.ZERO),
                     BigIntPlutusData.of(BigInteger.ZERO),
                     BigIntPlutusData.of(willMint ? mintQuantity : BigInteger.ZERO));
@@ -395,7 +390,7 @@ public class SecurityTokenSubstandardHandler
             // would shift to index 1 and the issuance redeemer would need
             // updating — but registration must mint a prog token anyway for
             // the directory mint validator to accept the registration.
-            var tx = new Tx()
+            Tx tx = new Tx()
                     .collectFrom(feePayerUtxos)
                     .collectFrom(directoryUtxo, ConstrPlutusData.of(0))
                     .withdraw(mintingLogicRewardAddress.getAddress(), BigInteger.ZERO, withdrawRedeemer)
@@ -435,9 +430,9 @@ public class SecurityTokenSubstandardHandler
             // the end, so indices 0..3 stay stable for redeemers.
             int gsOutputIdx = -1;
             if (chainedGsUtxoOverride != null && willMint) {
-                var gsSpendScript = scriptBuilder.buildGlobalStateSpendScript(
+                PlutusScript gsSpendScript = scriptBuilder.buildGlobalStateSpendScript(
                         securityAssetNameHex, progTokenPolicyId, gsPolicy);
-                var gsSpendAddress = AddressProvider.getEntAddress(
+                Address gsSpendAddress = AddressProvider.getEntAddress(
                         gsSpendScript, network.getCardanoNetwork());
 
                 long oldMintable = request.getInitialMintableAmount() != null
@@ -490,21 +485,21 @@ public class SecurityTokenSubstandardHandler
                 //   global_state_output_index, action = MintSecurity{ipri} }.
                 // config_ref_input_index is unused by the MintSecurity branch.
                 gsOutputIdx = 3;  // [0]=token, [1]=preservedDir, [2]=newDir, [3]=newGs
-                var gsSpendRedeemer = ConstrPlutusData.of(0,
+                ConstrPlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
                         BigIntPlutusData.of(BigInteger.ZERO),
                         BigIntPlutusData.of(BigInteger.valueOf(gsOutputIdx)),
                         ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(issuancePri))));
 
                 // GS output value must equal the input value verbatim (the GS
                 // spend validator's `value_preserved` invariant).
-                var gsLovelace = chainedGsUtxoOverride.getAmount().stream()
+                BigInteger gsLovelace = chainedGsUtxoOverride.getAmount().stream()
                         .filter(a -> "lovelace".equals(a.getUnit()))
                         .map(com.bloxbean.cardano.client.api.model.Amount::getQuantity)
                         .findFirst().orElseThrow(() -> new IllegalStateException("GS UTxO has no lovelace"));
-                var gsNftAmount = chainedGsUtxoOverride.getAmount().stream()
+                Amount gsNftAmount = chainedGsUtxoOverride.getAmount().stream()
                         .filter(a -> !"lovelace".equals(a.getUnit()))
                         .findFirst().orElseThrow(() -> new IllegalStateException("GS UTxO has no NFT"));
-                var gsValue = Value.builder()
+                Value gsValue = Value.builder()
                         .coin(gsLovelace)
                         .multiAssets(List.of(MultiAsset.builder()
                                 .policyId(gsPolicy)
@@ -521,8 +516,8 @@ public class SecurityTokenSubstandardHandler
                                 ValueUtil.toAmountList(gsValue), newGsDatum);   // output 3
             }
 
-            var firstUtxo = feePayerUtxos.getFirst();
-            var transaction = quickTxBuilder.compose(tx)
+            Utxo firstUtxo = feePayerUtxos.getFirst();
+            Transaction transaction = quickTxBuilder.compose(tx)
                     .withRequiredSigners(adminCredential.getBytes())
                     .feePayer(request.getFeePayerAddress())
                     .mergeOutputs(false)
@@ -533,10 +528,10 @@ public class SecurityTokenSubstandardHandler
                         // Move the fee-payer change output (added by Bloxbean as
                         // the FIRST output) to the END so output indices 0..N
                         // remain stable for our redeemers.
-                        var outputs = txn.getBody().getOutputs();
+                        List<TransactionOutput> outputs = txn.getBody().getOutputs();
                         if (!outputs.isEmpty()
                                 && outputs.getFirst().getAddress().equals(request.getFeePayerAddress())) {
-                            var first = outputs.removeFirst();
+                            TransactionOutput first = outputs.removeFirst();
                             outputs.addLast(first);
                         }
                     })
@@ -638,12 +633,6 @@ public class SecurityTokenSubstandardHandler
                     gsSpendScript, network.getCardanoNetwork());
             Address mintingLogicRewardAddress = AddressProvider.getRewardAddress(
                     mintingLogicScript, network.getCardanoNetwork());
-
-            log.info("security-token mint script hashes — issuance={} mintingLogic={} gsSpend={} registryMint={}",
-                    HexUtil.encodeHexString(issuanceContract.getScriptHash()),
-                    HexUtil.encodeHexString(mintingLogicScript.getScriptHash()),
-                    HexUtil.encodeHexString(gsSpendScript.getScriptHash()),
-                    registryPolicyId);
 
             // ── 4. Resolve all UTxOs the tx needs ──────────────────────────
             // GS UTxO (input — will be spent + recreated with decremented amount).
@@ -949,25 +938,22 @@ public class SecurityTokenSubstandardHandler
             }
             boolean isSelfSend = java.util.Arrays.equals(senderStakeHash, recipientStakeHash);
 
-            // v1: support Membership-only sender proof (Attestation requires the
-            // KERI service to produce BaFin 66-byte payloads, which is a
-            // separate workstream). The fields are the same ones kyc-extended
-            // uses for the sender fast-path.
+            // Sender Membership proof is always required (the validator's
+            // sender-side check is unconditional). Attestation-style sender
+            // proofs would need the KERI service to produce BaFin 66-byte
+            // payloads — a separate workstream — so v1 only supports the
+            // Membership shape, same as the kyc-extended sender fast-path.
             if (request.senderMpfProofCborHex() == null || request.senderMpfProofCborHex().isBlank()
                     || request.senderMpfValidUntilMs() == null) {
                 return TransactionContext.typedError(
                         "security-token sender Membership proof required: senderMpfProofCborHex + senderMpfValidUntilMs");
             }
-            // Recipient Membership proof only required when the GS datum's
-            // requires_receiver_kyc flag is true (and not a self-send).
-            boolean needRecipientProof = reg.isRequiresReceiverKyc() && !isSelfSend;
-            if (needRecipientProof) {
-                if (request.mpfProofCborHex() == null || request.mpfProofCborHex().isBlank()
-                        || request.mpfValidUntilMs() == null) {
-                    return TransactionContext.typedError(
-                            "recipient Membership proof required: mpfProofCborHex + mpfValidUntilMs (token has requires_receiver_kyc=true)");
-                }
-            }
+            // Receiver-proof requirement is decided by the LIVE GS datum's
+            // requires_receiver_kyc field, not by SecurityTokenRegistrationEntity
+            // (the DB cache is set at registration time and isn't refreshed when
+            // the admin runs SetRequiresReceiverKyc on-chain). Validation of
+            // mpfProofCborHex presence is deferred until after the GS UTxO is
+            // fetched and its datum parsed (further below).
 
             // ── 3. Build scripts ───────────────────────────────────────────
             // Transfer doesn't touch the issuance contract (no mint/burn), so
@@ -1044,13 +1030,42 @@ public class SecurityTokenSubstandardHandler
             }
             Utxo funding = fundingUtxos.getFirst();
 
-            // GS UTxO (ref input)
+            // GS UTxO (ref input) — also the source of the live
+            // requires_receiver_kyc flag (DB cache may be stale if the admin
+            // has run SetRequiresReceiverKyc since registration).
             Utxo gsUtxo = utxoProvider.findUtxoByAsset(
                     reg.getGlobalStatePolicyId(),
                     SecurityTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX
             ).orElse(null);
             if (gsUtxo == null) {
                 return TransactionContext.typedError("GS NFT not found on chain");
+            }
+            boolean liveRequiresReceiverKyc;
+            try {
+                PlutusData gsDatum = PlutusData.deserialize(
+                        HexUtil.decodeHexString(gsUtxo.getInlineDatum()));
+                if (!(gsDatum instanceof ConstrPlutusData gsConstr)) {
+                    return TransactionContext.typedError("GS datum is not a Constr");
+                }
+                List<PlutusData> gsFields = gsConstr.getData().getPlutusDataList();
+                if (gsFields.size() < 9) {
+                    return TransactionContext.typedError(
+                            "GS datum has " + gsFields.size() + " fields, expected 9");
+                }
+                // Field 8 is `requires_receiver_kyc: Bool`, encoded as Constr 0
+                // (False) or Constr 1 (True).
+                liveRequiresReceiverKyc = boolFromConstr(gsFields.get(8));
+            } catch (Exception e) {
+                return TransactionContext.typedError(
+                        "could not parse GS datum to read requires_receiver_kyc: " + e.getMessage());
+            }
+            boolean needRecipientProof = liveRequiresReceiverKyc && !isSelfSend;
+            if (needRecipientProof
+                    && (request.mpfProofCborHex() == null || request.mpfProofCborHex().isBlank()
+                        || request.mpfValidUntilMs() == null)) {
+                return TransactionContext.typedError(
+                        "recipient Membership proof required: mpfProofCborHex + mpfValidUntilMs "
+                        + "(token currently has requires_receiver_kyc=true on chain)");
             }
 
             // Denylist root node (ref input) — for an empty denylist (v1 happy
@@ -1255,7 +1270,7 @@ public class SecurityTokenSubstandardHandler
                         // Overpaying is accepted by the ledger (the surplus is
                         // burned); the buffer of 10000 lovelace (0.01 ADA) is
                         // far less than the cost of a failed re-submission.
-                        var body = txn.getBody();
+                        TransactionBody body = txn.getBody();
                         BigInteger feePadding = BigInteger.valueOf(10_000L);
                         BigInteger oldFee = body.getFee() != null ? body.getFee() : BigInteger.ZERO;
                         BigInteger newFee = oldFee.add(feePadding);
@@ -1263,11 +1278,11 @@ public class SecurityTokenSubstandardHandler
                         // Subtract from the largest fee-payer-addressed output
                         // (the change). Without this the tx would be
                         // over-balanced (in - out - fee != 0) → ValueNotConservedUTxO.
-                        var outputs = body.getOutputs();
+                        List<TransactionOutput> outputs = body.getOutputs();
                         com.bloxbean.cardano.client.transaction.spec.TransactionOutput
                                 changeOut = null;
                         BigInteger largestChange = BigInteger.ZERO;
-                        for (var o : outputs) {
+                        for (TransactionOutput o : outputs) {
                             if (!senderAddrBech32.equals(o.getAddress())) continue;
                             BigInteger coin = o.getValue().getCoin();
                             if (coin.compareTo(largestChange) > 0) {
@@ -1286,7 +1301,7 @@ public class SecurityTokenSubstandardHandler
                         if (body.getTotalCollateral() != null && body.getCollateralReturn() != null) {
                             BigInteger collateralBump = feePadding.multiply(BigInteger.valueOf(2));
                             body.setTotalCollateral(body.getTotalCollateral().add(collateralBump));
-                            var ret = body.getCollateralReturn();
+                            TransactionOutput ret = body.getCollateralReturn();
                             BigInteger newReturnCoin = ret.getValue().getCoin().subtract(collateralBump);
                             if (newReturnCoin.signum() > 0) {
                                 ret.getValue().setCoin(newReturnCoin);
@@ -1367,41 +1382,41 @@ public class SecurityTokenSubstandardHandler
             SecurityTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
         try {
-            var adminAddress = request.getFeePayerAddress();
+            String adminAddress = request.getFeePayerAddress();
             if (adminAddress == null || adminAddress.isBlank()) {
                 return TransactionContext.typedError("feePayerAddress is required");
             }
-            var adminPkh = request.getAdminPubKeyHash();
+            String adminPkh = request.getAdminPubKeyHash();
             if (adminPkh == null || adminPkh.length() != 56) {
                 return TransactionContext.typedError("adminPubKeyHash (28-byte hex) is required");
             }
-            var securityAssetNameHex = request.getAssetName();
+            String securityAssetNameHex = request.getAssetName();
             if (securityAssetNameHex == null || securityAssetNameHex.isBlank()) {
                 return TransactionContext.typedError("assetName (hex) is required");
             }
 
             // 1. Select a pure-ADA bootstrap UTxO from the admin's wallet. Its
             // OutputReference is the one-shot nonce for the GS mint + both LL mints.
-            var utilityUtxos = accountService.findAdaOnlyUtxo(adminAddress, 10_000_000L);
+            List<Utxo> utilityUtxos = accountService.findAdaOnlyUtxo(adminAddress, 10_000_000L);
             if (utilityUtxos.isEmpty()) {
                 return TransactionContext.typedError(
                         "no ADA-only UTxOs at admin address (need ~10 ADA for fees + 3x min-utxo)");
             }
-            var bootstrap = utilityUtxos.getFirst();
-            var bootstrapInput = TransactionInput.builder()
+            Utxo bootstrap = utilityUtxos.getFirst();
+            TransactionInput bootstrapInput = TransactionInput.builder()
                     .transactionId(bootstrap.getTxHash())
                     .index(bootstrap.getOutputIndex())
                     .build();
 
             // 2. Build the three mint scripts and derive their policy ids.
-            var gsMintScript = scriptBuilder.buildGlobalStateMintScript(bootstrapInput);
-            var globalStatePolicyId = gsMintScript.getPolicyId();
+            PlutusScript gsMintScript = scriptBuilder.buildGlobalStateMintScript(bootstrapInput);
+            String globalStatePolicyId = gsMintScript.getPolicyId();
 
-            var denylistMintScript = scriptBuilder.buildDenylistMintScript(globalStatePolicyId, bootstrapInput);
-            var denylistPolicyId = denylistMintScript.getPolicyId();
+            PlutusScript denylistMintScript = scriptBuilder.buildDenylistMintScript(globalStatePolicyId, bootstrapInput);
+            String denylistPolicyId = denylistMintScript.getPolicyId();
 
-            var powerUsersMintScript = scriptBuilder.buildPowerUsersMintScript(globalStatePolicyId, bootstrapInput);
-            var powerUsersPolicyId = powerUsersMintScript.getPolicyId();
+            PlutusScript powerUsersMintScript = scriptBuilder.buildPowerUsersMintScript(globalStatePolicyId, bootstrapInput);
+            String powerUsersPolicyId = powerUsersMintScript.getPolicyId();
 
             // 3. Derive the prog-token policy id (= issuance_policy_id for the GS
             //    spend script) by wrapping the BaFin minting_logic_script in the
@@ -1410,49 +1425,49 @@ public class SecurityTokenSubstandardHandler
             //      → minting_logic_script(asset_name, gs_policy, registry_policy_id, pu_policy)
             //      → issuance_mint_script(protocolParams, minting_logic_script) → progTokenPolicyId
             //    All deterministic from the bootstrap UTxO + securityAssetNameHex.
-            var registryPolicyId = protocolParams.directoryMintParams().scriptHash();
-            var mintingLogicScript = scriptBuilder.buildMintingLogicScript(
+            String registryPolicyId = protocolParams.directoryMintParams().scriptHash();
+            PlutusScript mintingLogicScript = scriptBuilder.buildMintingLogicScript(
                     securityAssetNameHex, globalStatePolicyId, registryPolicyId, powerUsersPolicyId);
-            var issuanceMintScript = protocolScriptBuilderService.getParameterizedIssuanceMintScript(
+            PlutusScript issuanceMintScript = protocolScriptBuilderService.getParameterizedIssuanceMintScript(
                     protocolParams, mintingLogicScript);
-            var issuancePolicyId = issuanceMintScript.getPolicyId();
+            String issuancePolicyId = issuanceMintScript.getPolicyId();
 
             // 4. Build the spend scripts and derive their addresses.
-            var gsSpendScript = scriptBuilder.buildGlobalStateSpendScript(
+            PlutusScript gsSpendScript = scriptBuilder.buildGlobalStateSpendScript(
                     securityAssetNameHex, issuancePolicyId, globalStatePolicyId);
-            var gsSpendAddress = AddressProvider.getEntAddress(gsSpendScript, network.getCardanoNetwork());
+            Address gsSpendAddress = AddressProvider.getEntAddress(gsSpendScript, network.getCardanoNetwork());
 
-            var denylistSpendScript = scriptBuilder.buildDenylistSpendScript(denylistPolicyId);
-            var denylistSpendAddress = AddressProvider.getEntAddress(denylistSpendScript, network.getCardanoNetwork());
+            PlutusScript denylistSpendScript = scriptBuilder.buildDenylistSpendScript(denylistPolicyId);
+            Address denylistSpendAddress = AddressProvider.getEntAddress(denylistSpendScript, network.getCardanoNetwork());
 
-            var powerUsersSpendScript = scriptBuilder.buildPowerUsersSpendScript(globalStatePolicyId, powerUsersPolicyId);
-            var powerUsersSpendAddress = AddressProvider.getEntAddress(powerUsersSpendScript, network.getCardanoNetwork());
+            PlutusScript powerUsersSpendScript = scriptBuilder.buildPowerUsersSpendScript(globalStatePolicyId, powerUsersPolicyId);
+            Address powerUsersSpendAddress = AddressProvider.getEntAddress(powerUsersSpendScript, network.getCardanoNetwork());
 
             // 4. Build the three initial datums.
-            var gsDatum = buildInitialGlobalStateDatum(
+            PlutusData gsDatum = buildInitialGlobalStateDatum(
                     adminPkh, powerUsersPolicyId, denylistPolicyId,
                     request.getInitialMintableAmount() != null ? request.getInitialMintableAmount() : 0L,
                     request.isRequiresReceiverKyc(),
                     request.getInitialTrustedEntityVkeys());
-            var linkedListRootDatum = buildLinkedListRootDatum();
+            PlutusData linkedListRootDatum = buildLinkedListRootDatum();
 
             // 5. Build the values for the three NFT outputs.
-            var gsNft = Asset.builder()
+            Asset gsNft = Asset.builder()
                     .name("0x" + SecurityTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX)
                     .value(BigInteger.ONE).build();
-            var emptyAsset = Asset.builder().name("0x").value(BigInteger.ONE).build();
+            Asset emptyAsset = Asset.builder().name("0x").value(BigInteger.ONE).build();
 
-            var gsValue = oneNftValue(globalStatePolicyId, gsNft);
-            var denylistValue = oneNftValue(denylistPolicyId, emptyAsset);
-            var powerUsersValue = oneNftValue(powerUsersPolicyId, emptyAsset);
+            Value gsValue = oneNftValue(globalStatePolicyId, gsNft);
+            Value denylistValue = oneNftValue(denylistPolicyId, emptyAsset);
+            Value powerUsersValue = oneNftValue(powerUsersPolicyId, emptyAsset);
 
             // 6. Compose the genesis tx.
             // Mint redeemers: GS uses Data placeholder (validator accepts anything),
             // denylist + power-users use `Init { root_output_index }` = Constr 0 [Int].
-            var emptyRedeemer = ConstrPlutusData.of(0);
+            ConstrPlutusData emptyRedeemer = ConstrPlutusData.of(0);
             // Output indexes: 0 = GS, 1 = denylist root, 2 = power-users root (then change).
-            var denylistInitRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(1));
-            var powerUsersInitRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(2));
+            ConstrPlutusData denylistInitRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(1));
+            ConstrPlutusData powerUsersInitRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(2));
 
             // Register the mintingLogic withdraw-0 stake credential in this same
             // tx — the downstream registration tx withdraws-0 from it, so the
@@ -1461,7 +1476,7 @@ public class SecurityTokenSubstandardHandler
             // touch it, and (b) including its cert validator pushes the genesis
             // tx over the 16KB size limit. transferLogic gets registered lazily,
             // in the first transfer tx (TODO).
-            var mintingLogicRewardAddress = AddressProvider.getRewardAddress(
+            String mintingLogicRewardAddress = AddressProvider.getRewardAddress(
                     mintingLogicScript, network.getCardanoNetwork()).getAddress();
             boolean mintingLogicCredAlreadyRegistered = stakeRegistrationRepository
                     .findRegistrationsByStakeAddress(mintingLogicRewardAddress)
@@ -1471,7 +1486,7 @@ public class SecurityTokenSubstandardHandler
                     mintingLogicCredAlreadyRegistered ? "already registered" : "will be registered in this tx",
                     mintingLogicRewardAddress);
 
-            var tx = new Tx()
+            Tx tx = new Tx()
                     .collectFrom(utilityUtxos)
                     .mintAsset(gsMintScript, gsNft, emptyRedeemer)
                     .mintAsset(denylistMintScript, emptyAsset, denylistInitRedeemer)
@@ -1490,8 +1505,8 @@ public class SecurityTokenSubstandardHandler
                         .registerStakeAddress(mintingLogicRewardAddress);
             }
 
-            var firstUtilityUtxo = utilityUtxos.getFirst();
-            var transaction = quickTxBuilder.compose(tx)
+            Utxo firstUtilityUtxo = utilityUtxos.getFirst();
+            Transaction transaction = quickTxBuilder.compose(tx)
                     .feePayer(adminAddress)
                     .mergeOutputs(false)
                     .withCollateralInputs(TransactionInput.builder()
@@ -1502,23 +1517,23 @@ public class SecurityTokenSubstandardHandler
                         // for the upstream BaFin pattern). For each StakeRegistration
                         // with a SCRIPT credential, replace with RegCert + inject a
                         // publish redeemer pointing at the cert's index.
-                        var certs = txn.getBody().getCerts();
+                        List<com.bloxbean.cardano.client.transaction.spec.cert.Certificate> certs = txn.getBody().getCerts();
                         if (certs == null) return;
                         for (int i = 0; i < certs.size(); i++) {
                             if (!(certs.get(i)
                                     instanceof com.bloxbean.cardano.client.transaction.spec.cert.StakeRegistration sr)) continue;
-                            var cred = sr.getStakeCredential();
+                            com.bloxbean.cardano.client.transaction.spec.cert.StakeCredential cred = sr.getStakeCredential();
                             if (cred.getType()
                                     != com.bloxbean.cardano.client.transaction.spec.cert.StakeCredType.SCRIPTHASH) continue;
                             certs.set(i, com.bloxbean.cardano.client.transaction.spec.cert.RegCert.builder()
                                     .stakeCredential(cred)
                                     .coin(BigInteger.valueOf(2_000_000L))
                                     .build());
-                            var ws = txn.getWitnessSet();
+                            com.bloxbean.cardano.client.transaction.spec.TransactionWitnessSet ws = txn.getWitnessSet();
                             if (ws.getRedeemers() == null) {
                                 ws.setRedeemers(new ArrayList<>());
                             }
-                            var publishRedeemer = com.bloxbean.cardano.client.plutus.spec.Redeemer.builder()
+                            com.bloxbean.cardano.client.plutus.spec.Redeemer publishRedeemer = com.bloxbean.cardano.client.plutus.spec.Redeemer.builder()
                                     .tag(com.bloxbean.cardano.client.plutus.spec.RedeemerTag.Cert)
                                     .data(com.bloxbean.cardano.client.plutus.spec.PlutusData.unit())
                                     .exUnits(com.bloxbean.cardano.client.plutus.spec.ExUnits.builder()
@@ -1619,7 +1634,7 @@ public class SecurityTokenSubstandardHandler
         // 32-byte vkey → unit metadata (Constr 0 []). Sorting by vkey bytes
         // matches BaFin's on-chain invariant — verify_kyc_proof + AddTrusted
         // both expect lex-ordered keys.
-        var trustedMap = MapPlutusData.builder()
+        MapPlutusData trustedMap = MapPlutusData.builder()
                 .map(new LinkedHashMap<>())
                 .build();
         if (initialTrustedEntityVkeys != null && !initialTrustedEntityVkeys.isEmpty()) {
@@ -1660,7 +1675,7 @@ public class SecurityTokenSubstandardHandler
 
     /** Wrap inner data + link as {@code linked_list.Element}. */
     private static ConstrPlutusData linkedListElement(PlutusData innerData, PlutusData link, boolean isRoot) {
-        var elementData = ConstrPlutusData.of(isRoot ? 0 : 1, innerData);
+        ConstrPlutusData elementData = ConstrPlutusData.of(isRoot ? 0 : 1, innerData);
         return ConstrPlutusData.of(0, elementData, link);
     }
 
@@ -1699,7 +1714,7 @@ public class SecurityTokenSubstandardHandler
     }
 
     private static byte[] concat(byte[] a, byte[] b) {
-        var out = new byte[a.length + b.length];
+        byte[] out = new byte[a.length + b.length];
         System.arraycopy(a, 0, out, 0, a.length);
         System.arraycopy(b, 0, out, a.length, b.length);
         return out;
@@ -1711,13 +1726,13 @@ public class SecurityTokenSubstandardHandler
      *  propagating through the indexer. */
     private com.bloxbean.cardano.client.api.model.Utxo pollForFirstUtxoByPolicy(
             String policyId, String label, java.time.Duration timeout) {
-        var deadline = Instant.now().plus(timeout);
-        var pollInterval = java.time.Duration.ofSeconds(5);
+        Instant deadline = Instant.now().plus(timeout);
+        java.time.Duration pollInterval = java.time.Duration.ofSeconds(5);
         int attempt = 0;
         while (Instant.now().isBefore(deadline)) {
             attempt++;
             try {
-                var utxos = utxoProvider.findUtxosByPolicy(policyId);
+                List<com.bloxbean.cardano.client.api.model.Utxo> utxos = utxoProvider.findUtxosByPolicy(policyId);
                 if (!utxos.isEmpty()) {
                     if (attempt > 1) {
                         log.info("{} appeared on chain after {} attempts", label, attempt);
@@ -1743,7 +1758,7 @@ public class SecurityTokenSubstandardHandler
      *  indices computed off-chain MUST sort the same way. */
     private static int lexIndex(List<com.bloxbean.cardano.client.api.model.Utxo> utxos,
                                 com.bloxbean.cardano.client.api.model.Utxo target) {
-        var sorted = new ArrayList<>(utxos);
+        ArrayList<com.bloxbean.cardano.client.api.model.Utxo> sorted = new ArrayList<>(utxos);
         sorted.sort(java.util.Comparator
                 .comparing(com.bloxbean.cardano.client.api.model.Utxo::getTxHash)
                 .thenComparingInt(com.bloxbean.cardano.client.api.model.Utxo::getOutputIndex));
@@ -1791,11 +1806,11 @@ public class SecurityTokenSubstandardHandler
             com.bloxbean.cardano.client.api.model.Utxo overrideGsUtxo,
             com.bloxbean.cardano.client.api.model.Utxo overrideFunding) {
         try {
-            var regOpt = registrationRepository.findByProgrammableTokenPolicyId(policyId);
+            Optional<SecurityTokenRegistrationEntity> regOpt = registrationRepository.findByProgrammableTokenPolicyId(policyId);
             if (regOpt.isEmpty()) {
                 return TransactionContext.typedError("security-token registration not found for policy " + policyId);
             }
-            var reg = regOpt.get();
+            SecurityTokenRegistrationEntity reg = regOpt.get();
             if (reg.getBootstrapTxHash() == null) {
                 return TransactionContext.typedError("registration has no bootstrap UTxO recorded — was genesis init run?");
             }
@@ -1805,14 +1820,14 @@ public class SecurityTokenSubstandardHandler
             String newNodeAssetNameHex = HexUtil.encodeHexString(newNodeAssetName);
 
             // Rebuild the parameterised scripts from the persisted registration.
-            var bootstrapInput = TransactionInput.builder()
+            TransactionInput bootstrapInput = TransactionInput.builder()
                     .transactionId(reg.getBootstrapTxHash())
                     .index(reg.getBootstrapOutputIndex())
                     .build();
-            var puMintScript = scriptBuilder.buildPowerUsersMintScript(reg.getGlobalStatePolicyId(), bootstrapInput);
-            var puSpendScript = scriptBuilder.buildPowerUsersSpendScript(
+            PlutusScript puMintScript = scriptBuilder.buildPowerUsersMintScript(reg.getGlobalStatePolicyId(), bootstrapInput);
+            PlutusScript puSpendScript = scriptBuilder.buildPowerUsersSpendScript(
                     reg.getGlobalStatePolicyId(), reg.getPowerUsersPolicyId());
-            var puSpendAddress = AddressProvider.getEntAddress(puSpendScript, network.getCardanoNetwork());
+            Address puSpendAddress = AddressProvider.getEntAddress(puSpendScript, network.getCardanoNetwork());
 
             // Resolve PU root, GS, and funding UTxOs. When chain-mode overrides are
             // provided we use them directly (genesis tx isn't on chain yet so the
@@ -1841,7 +1856,7 @@ public class SecurityTokenSubstandardHandler
 
             com.bloxbean.cardano.client.api.model.Utxo funding = overrideFunding;
             if (funding == null) {
-                var fundingUtxos = accountService.findAdaOnlyUtxo(adminAddress, 5_000_000L);
+                List<Utxo> fundingUtxos = accountService.findAdaOnlyUtxo(adminAddress, 5_000_000L);
                 if (fundingUtxos.isEmpty()) {
                     return TransactionContext.typedError(
                             "no confirmed ADA-only UTxO at admin address for fees — " +
@@ -1860,7 +1875,7 @@ public class SecurityTokenSubstandardHandler
             int gsRefIdx = 0;       // GS is the only reference input
 
             // Mint redeemer: AddPowerUser = variant 2 of MintRedeemer.
-            var addPowerUserRedeemer = ConstrPlutusData.of(2,
+            ConstrPlutusData addPowerUserRedeemer = ConstrPlutusData.of(2,
                     BytesPlutusData.of(newPowerUserKey),
                     BigIntPlutusData.of(BigInteger.valueOf(anchorInIdx)),
                     BigIntPlutusData.of(BigInteger.valueOf(anchorOutIdx)),
@@ -1869,26 +1884,26 @@ public class SecurityTokenSubstandardHandler
 
             // Spend redeemer on the root: StateTransition (Constr 0) — delegates
             // shape checks to the mint validator.
-            var rootSpendRedeemer = ConstrPlutusData.of(0);
+            ConstrPlutusData rootSpendRedeemer = ConstrPlutusData.of(0);
 
             // Updated root datum: same Root payload, link now points at new node's key.
-            var updatedRootDatum = linkedListElement(
+            ConstrPlutusData updatedRootDatum = linkedListElement(
                     ConstrPlutusData.of(0),
                     optionSome(BytesPlutusData.of(newPowerUserKey)),
                     /*isRoot=*/ true);
 
             // New node datum: Node(PowerUser{...}), link = None (it's the tail).
-            var newNodeDatum = linkedListElement(
+            ConstrPlutusData newNodeDatum = linkedListElement(
                     powerUserData(newPowerUserKey, capabilities),
                     optionNone(),
                     /*isRoot=*/ false);
 
             // Asset for the new node NFT (asset name = "Node" ++ pkh).
-            var newNodeNft = Asset.builder()
+            Asset newNodeNft = Asset.builder()
                     .name("0x" + newNodeAssetNameHex)
                     .value(BigInteger.ONE).build();
 
-            var puPolicyId = reg.getPowerUsersPolicyId();
+            String puPolicyId = reg.getPowerUsersPolicyId();
 
             // Outputs (must match the indices in addPowerUserRedeemer above):
             //   0: updated LL root — carries the preserved empty-name root NFT
@@ -1906,7 +1921,7 @@ public class SecurityTokenSubstandardHandler
             // datum-less (the mint receiver) and one with the datum — which
             // caused appended_node_output_index=1 to point at the datum-less
             // output and the script to error decoding it as a PowerUser.
-            var rootOutputValue = oneNftValue(puPolicyId,
+            Value rootOutputValue = oneNftValue(puPolicyId,
                     Asset.builder().name("0x").value(BigInteger.ONE).build());
 
             Tx tx = new Tx()
@@ -1997,12 +2012,12 @@ public class SecurityTokenSubstandardHandler
     private TransactionContext<Void> buildDenylistMutation(
             String policyId, String targetAddress, String feePayerAddress, boolean isAdd) {
         try {
-            var regOpt = registrationRepository.findByProgrammableTokenPolicyId(policyId);
+            Optional<SecurityTokenRegistrationEntity> regOpt = registrationRepository.findByProgrammableTokenPolicyId(policyId);
             if (regOpt.isEmpty()) {
                 return TransactionContext.typedError(
                         "security-token registration not found for policy " + policyId);
             }
-            var reg = regOpt.get();
+            SecurityTokenRegistrationEntity reg = regOpt.get();
             if (reg.getBootstrapTxHash() == null) {
                 return TransactionContext.typedError(
                         "registration has no bootstrap UTxO recorded — was genesis init run?");
@@ -2021,14 +2036,14 @@ public class SecurityTokenSubstandardHandler
             String newNodeAssetNameHex = HexUtil.encodeHexString(newNodeAssetName);
 
             // Rebuild parameterised scripts from the persisted registration.
-            var bootstrapInput = TransactionInput.builder()
+            TransactionInput bootstrapInput = TransactionInput.builder()
                     .transactionId(reg.getBootstrapTxHash())
                     .index(reg.getBootstrapOutputIndex())
                     .build();
-            var denylistMintScript = scriptBuilder.buildDenylistMintScript(
+            PlutusScript denylistMintScript = scriptBuilder.buildDenylistMintScript(
                     reg.getGlobalStatePolicyId(), bootstrapInput);
-            var denylistSpendScript = scriptBuilder.buildDenylistSpendScript(reg.getDenylistPolicyId());
-            var denylistSpendAddress = AddressProvider.getEntAddress(
+            PlutusScript denylistSpendScript = scriptBuilder.buildDenylistSpendScript(reg.getDenylistPolicyId());
+            Address denylistSpendAddress = AddressProvider.getEntAddress(
                     denylistSpendScript, network.getCardanoNetwork());
 
             // v1: only first insertion (anchor = root).
@@ -2056,7 +2071,7 @@ public class SecurityTokenSubstandardHandler
             }
 
             // Funding UTxO at fee payer (admin's wallet).
-            var fundingUtxos = accountService.findAdaOnlyUtxo(feePayerAddress, 5_000_000L);
+            List<Utxo> fundingUtxos = accountService.findAdaOnlyUtxo(feePayerAddress, 5_000_000L);
             if (fundingUtxos.isEmpty()) {
                 return TransactionContext.typedError(
                         "no confirmed ADA-only UTxO at fee-payer address for fees + collateral");
@@ -2072,7 +2087,7 @@ public class SecurityTokenSubstandardHandler
 
             // Mint redeemer: AddToDenylist = variant 2 of MintRedeemer (same
             // index as AddPowerUser — see types/denylist.ak vs types/power_users.ak).
-            var addToDenylistRedeemer = ConstrPlutusData.of(2,
+            ConstrPlutusData addToDenylistRedeemer = ConstrPlutusData.of(2,
                     BytesPlutusData.of(targetStakeHash),
                     BigIntPlutusData.of(BigInteger.valueOf(anchorInIdx)),
                     BigIntPlutusData.of(BigInteger.valueOf(anchorOutIdx)),
@@ -2080,10 +2095,10 @@ public class SecurityTokenSubstandardHandler
                     BigIntPlutusData.of(BigInteger.valueOf(gsRefIdx)));
 
             // Spend redeemer on the root: StateTransition (Constr 0).
-            var rootSpendRedeemer = ConstrPlutusData.of(0);
+            ConstrPlutusData rootSpendRedeemer = ConstrPlutusData.of(0);
 
             // Updated root datum: link now points at new node's key (stake hash).
-            var updatedRootDatum = linkedListElement(
+            ConstrPlutusData updatedRootDatum = linkedListElement(
                     ConstrPlutusData.of(0),                    // Root payload
                     optionSome(BytesPlutusData.of(targetStakeHash)),
                     /*isRoot=*/ true);
@@ -2091,15 +2106,15 @@ public class SecurityTokenSubstandardHandler
             // New node datum: Node(Denylist { metadata: () }), link = None.
             // BaFin's on-chain validators don't read the metadata, so unit is fine.
             PlutusData denylistData = ConstrPlutusData.of(0, ConstrPlutusData.of(0));
-            var newNodeDatum = linkedListElement(
+            ConstrPlutusData newNodeDatum = linkedListElement(
                     denylistData,
                     optionNone(),
                     /*isRoot=*/ false);
 
-            var newNodeNft = Asset.builder()
+            Asset newNodeNft = Asset.builder()
                     .name("0x" + newNodeAssetNameHex)
                     .value(BigInteger.ONE).build();
-            var rootOutputValue = oneNftValue(reg.getDenylistPolicyId(),
+            Value rootOutputValue = oneNftValue(reg.getDenylistPolicyId(),
                     Asset.builder().name("0x").value(BigInteger.ONE).build());
 
             // Required signer = the on-chain admin from the GS datum. The
@@ -2263,14 +2278,6 @@ public class SecurityTokenSubstandardHandler
             Transaction genesisTx = Transaction.deserialize(HexUtil.decodeHexString(genesisCbor));
             String genesisTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil
                     .getTxHash(genesisTx.serialize());
-            // Also hash the RAW CBOR bytes returned to the FE (no Bloxbean
-            // deserialize/serialize round-trip). If these two differ, Bloxbean's
-            // round-trip is re-encoding the body, which would invalidate any
-            // signature Eternl produces against the FE-side bytes.
-            String genesisRawTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil
-                    .getTxHash(HexUtil.decodeHexString(genesisCbor));
-            log.info("chain[genesis] tx hash (raw FE bytes)={} hash (Bloxbean round-trip)={} — these MUST match the failed submit tx hash, else the body was mutated post-signing",
-                    genesisRawTxHash, genesisTxHash);
             String progTokenPolicyId = genesisResult.metadata() != null
                     ? genesisResult.metadata().policyId() : null;
             if (progTokenPolicyId == null) {
@@ -2739,7 +2746,7 @@ public class SecurityTokenSubstandardHandler
             // on the directoryEntry value must match for the get_registry_node
             // expect to pass).
             try {
-                var ppUtxoForLog = utxoProvider.findUtxo(bootstrapTxHash, 0).orElse(null);
+                Utxo ppUtxoForLog = utxoProvider.findUtxo(bootstrapTxHash, 0).orElse(null);
                 if (ppUtxoForLog != null) {
                     log.info("  protocolParamsUtxo.amount = {}", ppUtxoForLog.getAmount());
                     log.info("  protocolParamsUtxo.datum = {}", ppUtxoForLog.getInlineDatum());
@@ -2752,7 +2759,7 @@ public class SecurityTokenSubstandardHandler
             // Also try to parse the directory datum so we can verify the
             // substandard hashes match what we computed.
             try {
-                var nodeOpt = registryNodeParser.parse(directoryEntry.getInlineDatum());
+                Optional<RegistryNode> nodeOpt = registryNodeParser.parse(directoryEntry.getInlineDatum());
                 nodeOpt.ifPresent(n -> log.info(
                         "  parsed RegistryNode: key={} next={} transferLogic={} thirdParty(=mintingLogic?)={} gsPolicy={}",
                         n.key(), n.next(), n.transferLogicScript(),
@@ -2936,16 +2943,16 @@ public class SecurityTokenSubstandardHandler
                         // 10000 lovelace, compensate the change output, and
                         // bump total_collateral + shrink collateral_return in
                         // lockstep so the Conway invariants hold.
-                        var body = txn.getBody();
+                        TransactionBody body = txn.getBody();
                         BigInteger feePadding = BigInteger.valueOf(10_000L);
                         BigInteger oldFee = body.getFee() != null ? body.getFee() : BigInteger.ZERO;
                         body.setFee(oldFee.add(feePadding));
                         // Subtract from the largest fee-payer-addressed output (the change).
-                        var outputs = body.getOutputs();
+                        List<TransactionOutput> outputs = body.getOutputs();
                         com.bloxbean.cardano.client.transaction.spec.TransactionOutput
                                 changeOut = null;
                         BigInteger largestChange = BigInteger.ZERO;
-                        for (var o : outputs) {
+                        for (TransactionOutput o : outputs) {
                             if (!feePayerAddress.equals(o.getAddress())) continue;
                             BigInteger coin = o.getValue().getCoin();
                             if (coin.compareTo(largestChange) > 0) {
@@ -2962,7 +2969,7 @@ public class SecurityTokenSubstandardHandler
                         if (body.getTotalCollateral() != null && body.getCollateralReturn() != null) {
                             BigInteger collateralBump = feePadding.multiply(BigInteger.valueOf(2));
                             body.setTotalCollateral(body.getTotalCollateral().add(collateralBump));
-                            var ret = body.getCollateralReturn();
+                            TransactionOutput ret = body.getCollateralReturn();
                             BigInteger newReturnCoin = ret.getValue().getCoin().subtract(collateralBump);
                             if (newReturnCoin.signum() > 0) {
                                 ret.getValue().setCoin(newReturnCoin);
@@ -3104,23 +3111,23 @@ public class SecurityTokenSubstandardHandler
                         // + inject a Cert publish redeemer. Same pattern as the
                         // genesis tx, isolated here so it's the ONLY thing in
                         // the tx.
-                        var certs = txn.getBody().getCerts();
+                        List<com.bloxbean.cardano.client.transaction.spec.cert.Certificate> certs = txn.getBody().getCerts();
                         if (certs != null) {
                             for (int i = 0; i < certs.size(); i++) {
                                 if (!(certs.get(i)
                                         instanceof com.bloxbean.cardano.client.transaction.spec.cert.StakeRegistration sr)) continue;
-                                var cred = sr.getStakeCredential();
+                                com.bloxbean.cardano.client.transaction.spec.cert.StakeCredential cred = sr.getStakeCredential();
                                 if (cred.getType()
                                         != com.bloxbean.cardano.client.transaction.spec.cert.StakeCredType.SCRIPTHASH) continue;
                                 certs.set(i, com.bloxbean.cardano.client.transaction.spec.cert.RegCert.builder()
                                         .stakeCredential(cred)
                                         .coin(BigInteger.valueOf(2_000_000L))
                                         .build());
-                                var ws = txn.getWitnessSet();
+                                com.bloxbean.cardano.client.transaction.spec.TransactionWitnessSet ws = txn.getWitnessSet();
                                 if (ws.getRedeemers() == null) {
                                     ws.setRedeemers(new ArrayList<>());
                                 }
-                                var publishRedeemer = com.bloxbean.cardano.client.plutus.spec.Redeemer.builder()
+                                com.bloxbean.cardano.client.plutus.spec.Redeemer publishRedeemer = com.bloxbean.cardano.client.plutus.spec.Redeemer.builder()
                                         .tag(com.bloxbean.cardano.client.plutus.spec.RedeemerTag.Cert)
                                         .data(com.bloxbean.cardano.client.plutus.spec.PlutusData.unit())
                                         .exUnits(com.bloxbean.cardano.client.plutus.spec.ExUnits.builder()
@@ -3136,7 +3143,7 @@ public class SecurityTokenSubstandardHandler
                         // total_collateral + collateral_return need the final
                         // fee, which isn't computed until after balancing, so
                         // we set those in postBalanceTx below.
-                        var body = txn.getBody();
+                        TransactionBody body = txn.getBody();
                         if (body.getCollateral() == null || body.getCollateral().isEmpty()) {
                             body.setCollateral(new ArrayList<>(List.of(
                                     com.bloxbean.cardano.client.transaction.spec.TransactionInput.builder()
@@ -3154,7 +3161,7 @@ public class SecurityTokenSubstandardHandler
                         // (or in a stale state from the gated path). Compute
                         // both ourselves now so they match the collateral
                         // input we added in preBalanceTx.
-                        var body = txn.getBody();
+                        TransactionBody body = txn.getBody();
                         if (body.getCollateral() == null || body.getCollateral().isEmpty()) return;
                         BigInteger fee = body.getFee() != null ? body.getFee() : BigInteger.ZERO;
                         // The collateral_return output + total_collateral field
@@ -3184,11 +3191,11 @@ public class SecurityTokenSubstandardHandler
                         // otherwise the tx is over-balanced (in - out - fee != 0).
                         // Pick the largest output to the fee payer (the change),
                         // not the 3-ADA self-pay, to cover this.
-                        var outputs = body.getOutputs();
+                        List<TransactionOutput> outputs = body.getOutputs();
                         com.bloxbean.cardano.client.transaction.spec.TransactionOutput
                                 changeOut = null;
                         BigInteger largestChange = BigInteger.ZERO;
-                        for (var o : outputs) {
+                        for (TransactionOutput o : outputs) {
                             if (!feePayerAddress.equals(o.getAddress())) continue;
                             BigInteger coin = o.getValue().getCoin();
                             if (coin.compareTo(largestChange) > 0) {
@@ -3469,37 +3476,73 @@ public class SecurityTokenSubstandardHandler
             Utxo funding = fundingUtxos.getFirst();
             byte[] signerKeyHash = HexUtil.decodeHexString(signerPkh);
 
-            List<String> unsignedCbors = new java.util.ArrayList<>();
-            for (int i = 0; i < changes.size(); i++) {
-                GsChangeSpec change = changes.get(i);
-                ActionAndDatum ad = computeActionAndDatum(change, currentDatum, policyId);
-                if (ad.error != null) {
-                    return TransactionContext.typedError("change[" + i + "]: " + ad.error);
-                }
-
-                TransactionContext<Void> stepCtx = buildSingleGsUpdateTx(
-                        reg, gsSpendScript, gsSpendAddress, gsUtxo, ad.actionRedeemer,
-                        ad.newDatum, funding, feePayerAddress, signerKeyHash);
-                if (!stepCtx.isSuccessful()) {
+            // PauseTransfers' on-chain branch reads the admin's power-user node as a
+            // reference input (validator does safe_list_at(self.reference_inputs, …)
+            // and fails with EmptyList otherwise). Fetch it once up front if any
+            // change needs it; same node is used for every iteration.
+            List<Utxo> pauseTransfersRefInputs = List.of();
+            boolean needsPuRef = changes.stream()
+                    .anyMatch(c -> "PauseTransfers".equals(c.action()));
+            if (needsPuRef) {
+                byte[] adminKeyHash = HexUtil.decodeHexString(reg.getIssuerAdminPkh());
+                byte[] adminNodeAssetName = concat(LL_NODE_KEY_PREFIX, adminKeyHash);
+                String adminNodeAssetNameHex = HexUtil.encodeHexString(adminNodeAssetName);
+                Utxo puNode = utxoProvider.findUtxoByAsset(
+                        reg.getPowerUsersPolicyId(), adminNodeAssetNameHex).orElse(null);
+                if (puNode == null) {
                     return TransactionContext.typedError(
-                            "change[" + i + "] (" + change.action() + "): " + stepCtx.error());
+                            "PauseTransfers requires the admin's power-user node on chain, but it "
+                            + "could not be found (asset: " + reg.getPowerUsersPolicyId()
+                            + "/" + adminNodeAssetNameHex
+                            + "). Run AddPowerUser for the admin first.");
                 }
-                unsignedCbors.add(stepCtx.unsignedCborTx());
+                pauseTransfersRefInputs = List.of(puNode);
+            }
 
-                // Roll forward: next iteration's gsUtxo = THIS tx's output 0 (the
-                // new GS) and next iteration's funding = THIS tx's change output.
-                byte[] builtBytes = HexUtil.decodeHexString(stepCtx.unsignedCborTx());
-                Transaction builtTx = Transaction.deserialize(builtBytes);
-                String nextTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil
-                        .getTxHash(builtBytes);
-                var outs = builtTx.getBody().getOutputs();
-                // After our preBalanceTx swap, GS is at output 0, change at output 1.
-                gsUtxo = utxoFromOutput(nextTxHash, 0, outs.get(0));
-                currentDatum = ad.newDatum;
-                if (outs.size() > 1
-                        && outs.get(1).getAddress().equals(feePayerAddress)) {
-                    funding = utxoFromOutput(nextTxHash, 1, outs.get(1));
+            List<String> unsignedCbors = new java.util.ArrayList<>();
+            try {
+                for (int i = 0; i < changes.size(); i++) {
+                    GsChangeSpec change = changes.get(i);
+                    ActionAndDatum ad = computeActionAndDatum(change, currentDatum, policyId);
+                    if (ad.error != null) {
+                        return TransactionContext.typedError("change[" + i + "]: " + ad.error);
+                    }
+
+                    List<Utxo> refInputs = "PauseTransfers".equals(change.action())
+                            ? pauseTransfersRefInputs
+                            : List.of();
+
+                    TransactionContext<Void> stepCtx = buildSingleGsUpdateTx(
+                            reg, gsSpendScript, gsSpendAddress, gsUtxo, ad.actionRedeemer,
+                            ad.newDatum, funding, feePayerAddress, signerKeyHash, refInputs);
+                    if (!stepCtx.isSuccessful()) {
+                        return TransactionContext.typedError(
+                                "change[" + i + "] (" + change.action() + "): " + stepCtx.error());
+                    }
+                    unsignedCbors.add(stepCtx.unsignedCborTx());
+
+                    // Roll forward: next iteration's gsUtxo = THIS tx's output 0
+                    // (the new GS) and next iteration's funding = THIS tx's change
+                    // output. These synthetic UTxOs aren't on chain yet, so we
+                    // register them with the hybrid supplier so Bloxbean's
+                    // collateral-output builder (and any other supplier-backed
+                    // lookups) can resolve them on the next iteration.
+                    byte[] builtBytes = HexUtil.decodeHexString(stepCtx.unsignedCborTx());
+                    Transaction builtTx = Transaction.deserialize(builtBytes);
+                    String nextTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil
+                            .getTxHash(builtBytes);
+                    List<TransactionOutput> outs = builtTx.getBody().getOutputs();
+                    gsUtxo = utxoFromOutput(nextTxHash, 0, outs.get(0));
+                    currentDatum = ad.newDatum;
+                    if (outs.size() > 1
+                            && outs.get(1).getAddress().equals(feePayerAddress)) {
+                        funding = utxoFromOutput(nextTxHash, 1, outs.get(1));
+                    }
+                    hybridUtxoSupplier.add(gsUtxo);
+                    hybridUtxoSupplier.add(funding);
                 }
+            } finally {
+                hybridUtxoSupplier.clear();
             }
             return new TransactionContext<>(null, unsignedCbors, true, null);
         } catch (Exception e) {
@@ -3534,12 +3577,10 @@ public class SecurityTokenSubstandardHandler
 
         switch (change.action()) {
             case "PauseTransfers" -> {
-                // Constr 1 (Bool transfers_paused, Int power_user_node_ref_input_index)
-                // BaFin's PauseTransfers also references a PU node to authorise the
-                // change. For admin-as-sole-PU setups, this is just the admin's PU
-                // node — same lookup pattern as mint/burn. v1 simplification: pass
-                // index 0 and rely on the admin signature gate (the validator also
-                // checks must_be_signed_by_credential(admin_credential_hash)).
+                // PauseTransfersAction { transfers_paused, power_user_node_ref_input_index }.
+                // The validator does safe_list_at(self.reference_inputs, idx) on this
+                // index, so the orchestrator MUST add the admin's PU node as a ref
+                // input. With a single ref input the index is 0.
                 if (change.transfersPaused() == null) {
                     out.error = "PauseTransfers requires transfersPaused"; return out;
                 }
@@ -3666,7 +3707,14 @@ public class SecurityTokenSubstandardHandler
     }
 
     /** Build a single admin-signed GS spend tx. Continuing GS at output 0 by
-     *  way of the preBalanceTx swap; change at output 1. */
+     *  way of the preBalanceTx swap; change at output 1.
+     *
+     *  <p>{@code refInputs} carries any reference-input UTxOs the action's
+     *  on-chain branch needs to look up. For PauseTransfers this is the
+     *  admin's power-user node (the validator does
+     *  {@code safe_list_at(self.reference_inputs, power_user_node_ref_input_index)}
+     *  and fails with EmptyList without it). Pass an empty list for actions
+     *  that are admin-signature-only. */
     private TransactionContext<Void> buildSingleGsUpdateTx(
             SecurityTokenRegistrationEntity reg,
             PlutusScript gsSpendScript,
@@ -3676,7 +3724,8 @@ public class SecurityTokenSubstandardHandler
             PlutusData newGsDatum,
             Utxo funding,
             String feePayerAddress,
-            byte[] signerKeyHash) {
+            byte[] signerKeyHash,
+            List<Utxo> refInputs) {
         try {
             PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
                     BigIntPlutusData.of(BigInteger.ZERO),                          // config_ref_input_index
@@ -3708,6 +3757,16 @@ public class SecurityTokenSubstandardHandler
                     .attachSpendingValidator(gsSpendScript)
                     .withChangeAddress(feePayerAddress);
 
+            if (refInputs != null && !refInputs.isEmpty()) {
+                TransactionInput[] refTxInputs = refInputs.stream()
+                        .map(u -> TransactionInput.builder()
+                                .transactionId(u.getTxHash())
+                                .index(u.getOutputIndex())
+                                .build())
+                        .toArray(TransactionInput[]::new);
+                tx = tx.readFrom(refTxInputs);
+            }
+
             Transaction transaction = quickTxBuilder.compose(tx)
                     .withRequiredSigners(signerKeyHash)
                     .feePayer(feePayerAddress)
@@ -3720,7 +3779,7 @@ public class SecurityTokenSubstandardHandler
                         List<com.bloxbean.cardano.client.transaction.spec.TransactionOutput> outs =
                                 txn.getBody().getOutputs();
                         if (!outs.isEmpty() && outs.getFirst().getAddress().equals(feePayerAddress)) {
-                            var first = outs.removeFirst();
+                            com.bloxbean.cardano.client.transaction.spec.TransactionOutput first = outs.removeFirst();
                             outs.addLast(first);
                         }
                     })
@@ -3779,24 +3838,24 @@ public class SecurityTokenSubstandardHandler
      *  read-current-state view. */
     public Optional<GlobalStateData> readGlobalState(String policyId) {
         try {
-            var regOpt = registrationRepository.findByProgrammableTokenPolicyId(policyId);
+            Optional<SecurityTokenRegistrationEntity> regOpt = registrationRepository.findByProgrammableTokenPolicyId(policyId);
             if (regOpt.isEmpty()) return Optional.empty();
-            var globalStatePolicyId = regOpt.get().getGlobalStatePolicyId();
+            String globalStatePolicyId = regOpt.get().getGlobalStatePolicyId();
 
             // Look up by exact (policy, asset_name) — see mint/burn flow comments
             // for why the policy-only helper can return the wrong asset.
-            var utxoOpt = utxoProvider.findUtxoByAsset(
+            Optional<Utxo> utxoOpt = utxoProvider.findUtxoByAsset(
                     globalStatePolicyId,
                     SecurityTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX);
             if (utxoOpt.isEmpty()) return Optional.empty();
-            var utxo = utxoOpt.get();
+            Utxo utxo = utxoOpt.get();
 
-            var datumHex = utxo.getInlineDatum();
+            String datumHex = utxo.getInlineDatum();
             if (datumHex == null || datumHex.isBlank()) return Optional.empty();
 
-            var data = PlutusData.deserialize(HexUtil.decodeHexString(datumHex));
+            PlutusData data = PlutusData.deserialize(HexUtil.decodeHexString(datumHex));
             if (!(data instanceof ConstrPlutusData constr)) return Optional.empty();
-            var fields = constr.getData().getPlutusDataList();
+            List<PlutusData> fields = constr.getData().getPlutusDataList();
             if (fields.size() < 9) return Optional.empty();
 
             // BaFin GlobalStateDatum field order — see
@@ -3859,15 +3918,15 @@ public class SecurityTokenSubstandardHandler
      *  {@code Pairs} as either {@code Map} or a list of {@code Constr 0 [k, v]}
      *  depending on the data producer — we handle both. */
     private static List<String> trustedEntitiesFrom(PlutusData d) {
-        var out = new ArrayList<String>();
+        ArrayList<String> out = new ArrayList<String>();
         if (d instanceof MapPlutusData m) {
             m.getMap().forEach((k, v) -> {
                 if (k instanceof BytesPlutusData bk) out.add(HexUtil.encodeHexString(bk.getValue()));
             });
         } else if (d instanceof ListPlutusData l) {
-            for (var entry : l.getPlutusDataList()) {
+            for (PlutusData entry : l.getPlutusDataList()) {
                 if (entry instanceof ConstrPlutusData ec) {
-                    var pair = ec.getData().getPlutusDataList();
+                    List<PlutusData> pair = ec.getData().getPlutusDataList();
                     if (!pair.isEmpty() && pair.get(0) instanceof BytesPlutusData bk) {
                         out.add(HexUtil.encodeHexString(bk.getValue()));
                     }

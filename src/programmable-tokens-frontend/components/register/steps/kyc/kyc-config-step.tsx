@@ -250,7 +250,7 @@ export function KycConfigStep({
           PowerUserCapability.FORCE_TRANSFER;
 
         // ── Phase 1: build the chain on the backend ──
-        setStatusMessage('Phase 1/3 — building the full registration chain (genesis + AddPowerUser + register)…');
+        setStatusMessage('Phase 1/3 — building the registration chain (genesis + AddPowerUser + register + transferLogic cert)…');
         // Seed the GS datum's trusted_entity_vkeys with the wizard's chosen
         // trusted entities (the kyc-config step lets the admin add/remove
         // them). Almost always includes this backend's KERI signing-entity
@@ -267,6 +267,10 @@ export function KycConfigStep({
             ? Buffer.from(tokenDetails.assetName, 'utf8').toString('hex')
             : '',
           adminPubKeyHash: adminPkh!,
+          // Defaults to ON per BaFin's compliance posture: recipients must
+          // hold a fresh KYC attestation to receive tokens. The admin can
+          // toggle this off later from the admin page via the
+          // SetRequiresReceiverKyc global-state action.
           requiresReceiverKyc: true,
           initialMintableAmount: mintableAmount ? parseInt(mintableAmount, 10) : 0,
           bootstrapPowerUserPkh: adminPkh,
@@ -309,8 +313,8 @@ export function KycConfigStep({
           }
         }
 
-        // ── Phase 3: backend submits the chain sequentially ──
-        setStatusMessage('Phase 3/3 — backend submitting the chain (mempool-chained, no confirmation wait)…');
+        // ── Phase 3: backend submits the chain sequentially (mempool-chained) ──
+        setStatusMessage(`Phase 3/3 — submitting ${totalTxs} chained transactions to the network…`);
         const submitResp = await submitTokenChain(signedCbors);
         const submitted = submitResp.txHashes ?? [];
         if (submitted.length < totalTxs || submitResp.error) {
@@ -323,8 +327,8 @@ export function KycConfigStep({
           });
         } else {
           showToast({
-            title: 'Security-token registered',
-            description: `All 3 txs submitted: ${submitted.map(h => h.slice(0, 8)).join(', ')}…`,
+            title: 'Security token registered',
+            description: `All ${submitted.length} transactions submitted: ${submitted.map(h => h.slice(0, 8)).join(', ')}…`,
             variant: 'default',
           });
         }
@@ -368,7 +372,7 @@ export function KycConfigStep({
 
       if (!response.isSuccessful || !response.unsignedCborTx) {
         showToast({
-          title: 'Global State Init Failed',
+          title: 'Global state initialization failed',
           description: response.error || 'Failed to build Global State initialization transaction',
           variant: 'error',
         });
@@ -383,8 +387,8 @@ export function KycConfigStep({
       const globalStatePolicyId = response.metadata?.globalStatePolicyId || '';
 
       showToast({
-        title: 'Global State Submitted',
-        description: `Tx: ${txHash.slice(0, 16)}... — waiting for on-chain confirmation`,
+        title: 'Global state submitted',
+        description: `Tx: ${txHash.slice(0, 16)}… — waiting for on-chain confirmation`,
         variant: 'success',
       });
 
@@ -402,7 +406,7 @@ export function KycConfigStep({
       });
 
       showToast({
-        title: 'Global State Confirmed',
+        title: 'Global state confirmed',
         description: 'On-chain state confirmed and visible. Proceeding to token registration.',
         variant: 'success',
       });
@@ -422,7 +426,7 @@ export function KycConfigStep({
           : error.message;
       }
       showToast({
-        title: 'Global State Setup Failed',
+        title: 'Global state setup failed',
         description: errorMessage,
         variant: 'error',
       });
@@ -446,12 +450,13 @@ export function KycConfigStep({
         <Card className="p-4 space-y-3 border border-primary-700/40 bg-primary-900/10">
           <h4 className="text-sm font-medium text-white">What happens when you click &ldquo;Initialize&rdquo;</h4>
           <p className="text-sm text-dark-300">
-            Setting up a BaFin-style security token is a <span className="text-white">two-transaction</span> flow.
-            Your wallet will prompt you to sign each one in sequence.
+            Setting up a BaFin-style security token chains <span className="text-white">four transactions</span>.
+            The backend builds them all up-front, your wallet signs them as a single batch (CIP-103), and the
+            backend submits them sequentially without waiting for confirmations.
           </p>
           <ol className="text-sm text-dark-300 space-y-2 list-decimal list-inside">
             <li>
-              <span className="text-white">Genesis</span> — mints three NFTs in one tx:
+              <span className="text-white">Genesis</span> — mints three NFTs and registers the minting-logic stake credential:
               <ul className="ml-5 mt-1 list-disc list-inside text-xs text-dark-400 space-y-0.5">
                 <li><span className="font-mono text-primary-400">GlobalState NFT</span> — carries the configuration datum below</li>
                 <li><span className="font-mono text-primary-400">Denylist root NFT</span> — sentinel for the blocked-recipients list (starts empty)</li>
@@ -460,12 +465,18 @@ export function KycConfigStep({
             </li>
             <li>
               <span className="text-white">AddPowerUser</span> — inserts your wallet into the power-users list with
-              all 5 capabilities (admin, mint, burn, pause, force-transfer) so you can drive every subsequent admin action and mint the first tokens.
+              all 5 capabilities (admin, mint, burn, pause, force-transfer).
+            </li>
+            <li>
+              <span className="text-white">Registration</span> — inserts the policy into the CIP-113 directory and mints the initial token supply.
+            </li>
+            <li>
+              <span className="text-white">TransferLogic cert</span> — registers the transfer-logic stake credential (Conway RegCert) so the first transfer can issue a withdraw-0.
             </li>
           </ol>
           <p className="text-xs text-dark-400">
-            Between the two transactions the page will pause while the genesis tx confirms on chain (~20–60s on preview/preprod).
-            The second tx references the NFTs produced by the first, so it can&apos;t be built until the indexer sees them.
+            Each tx feeds the next via mempool chaining — no on-chain confirmation pauses. If your wallet
+            doesn&apos;t support CIP-103 batch signing, the flow falls back to one popup per transaction.
           </p>
         </Card>
       )}
@@ -662,7 +673,7 @@ export function KycConfigStep({
           isLoading={isProcessing}
           disabled={isProcessing}
         >
-          Initialize Global State & Continue
+          {isSecurityTokenFlow ? 'Register Security Token' : 'Initialize Global State & Continue'}
         </Button>
       </div>
     </div>

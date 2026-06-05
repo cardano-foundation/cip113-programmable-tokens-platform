@@ -143,9 +143,13 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
       setTxHash(submittedTxHash);
       setStep("success");
 
+      const isDenylist = selectedToken?.substandardId === "security-token";
+      const listName = isDenylist ? "Denylist" : "Blacklist";
       showToast({
-        title: `${action === "add" ? "Added to" : "Removed from"} Blacklist`,
-        description: `Successfully ${action === "add" ? "blacklisted" : "un-blacklisted"} the address`,
+        title: `${action === "add" ? "Added to" : "Removed from"} ${listName}`,
+        description: action === "add"
+          ? `Recipient added — future transfers to this ${isDenylist ? "stake credential" : "address"} will be rejected on-chain.`
+          : `Recipient removed — transfers to this ${isDenylist ? "stake credential" : "address"} will be allowed again.`,
         variant: "success",
       });
     } catch (error) {
@@ -314,13 +318,16 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
         disabled={isBuilding || !selectedToken}
         error={errors.targetAddress}
         helperText={
-          action === "add"
-            ? "Address to add to the blacklist (will be frozen)"
-            : "Address to remove from the blacklist (will be unfrozen)"
+          selectedToken?.substandardId === "security-token"
+            ? (action === "add"
+                ? "Address whose stake credential will be added to the on-chain denylist. Transfers to it will be rejected."
+                : "Address whose stake credential will be removed from the denylist. Transfers to it will be allowed again.")
+            : (action === "add"
+                ? "Address to add to the blacklist (will be frozen)"
+                : "Address to remove from the blacklist (will be unfrozen)")
         }
       />
 
-      {/* Submit Button */}
       <Button
         type="submit"
         variant={action === "add" ? "danger" : "primary"}
@@ -331,8 +338,8 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
         {isBuilding
           ? "Building Transaction..."
           : action === "add"
-          ? "Add to Blacklist"
-          : "Remove from Blacklist"}
+          ? (selectedToken?.substandardId === "security-token" ? "Add to Denylist" : "Add to Blacklist")
+          : (selectedToken?.substandardId === "security-token" ? "Remove from Denylist" : "Remove from Blacklist")}
       </Button>
     </form>
   );

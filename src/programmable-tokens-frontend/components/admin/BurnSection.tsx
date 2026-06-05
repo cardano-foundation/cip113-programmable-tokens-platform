@@ -290,7 +290,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
           Burn Tokens
         </CardTitle>
         <p className="text-sm text-dark-300 mt-1">
-          Burn programmable tokens from specific UTxOs (requires ISSUER_ADMIN role)
+          Burn programmable tokens from specific UTxOs (requires admin or burner capability)
         </p>
       </CardHeader>
 

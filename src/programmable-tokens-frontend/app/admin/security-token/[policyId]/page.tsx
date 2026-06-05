@@ -295,9 +295,9 @@ function PowerUsersSection({ policyId }: { policyId: string }) {
                   size="sm"
                   onClick={() => handleSyncToChain(u)}
                   disabled={busy || syncingPkh === u.powerUserPkh}
-                  title="Insert this DB-only entry into the on-chain linked list (v1: only works for the first insertion)"
+                  title="Insert this off-chain entry into the on-chain power-users linked list"
                 >
-                  {syncingPkh === u.powerUserPkh ? "Signing…" : "Sync to chain"}
+                  {syncingPkh === u.powerUserPkh ? "Building & signing…" : "Sync to chain"}
                 </Button>
                 <Button
                   type="button"
@@ -412,8 +412,7 @@ function DenylistSection({ policyId }: { policyId: string }) {
     <Card className="p-6 space-y-4">
       <h2 className="text-lg font-semibold text-white">Denylist</h2>
       <p className="text-xs text-dark-400">
-        Off-chain mirror of the on-chain denylist. v1 persists locally only — the
-        on-chain sync ships with the handler-bodies follow-up.
+        Off-chain mirror of the on-chain denylist. Use the Admin → Blacklist section to add or remove entries on chain.
       </p>
 
       <div className="space-y-2">

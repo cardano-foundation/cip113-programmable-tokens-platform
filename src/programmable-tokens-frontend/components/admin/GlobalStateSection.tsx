@@ -250,7 +250,7 @@ export function GlobalStateSection({
 
       setTxHash(lastHash);
       setStep("success");
-      showToast({ title: "Global State Updated", description: `${changes.length} change(s) submitted`, variant: "success" });
+      showToast({ title: "Global state updated", description: `${changes.length} change(s) submitted`, variant: "success" });
     } catch (error) {
       console.error("Global state update error:", error);
       const msg = error instanceof Error
@@ -275,9 +275,9 @@ export function GlobalStateSection({
     return (
       <div className="flex flex-col items-center py-12 px-6">
         <Settings className="h-16 w-16 text-dark-600 mb-4" />
-        <h3 className="text-lg font-semibold text-white mb-2">No KYC Token Management Access</h3>
+        <h3 className="text-lg font-semibold text-white mb-2">No Global-State Management Access</h3>
         <p className="text-sm text-dark-400 text-center">
-          You don&apos;t have issuer admin permissions for any KYC tokens.
+          You don&apos;t hold admin capability for any registered tokens.
         </p>
       </div>
     );
@@ -729,7 +729,7 @@ function SecurityTokenGlobalStatePanel({
       setSubmittedHashes(submit.txHashes);
       showToast({
         title: "Global state updated",
-        description: `${submit.txHashes.length} tx${submit.txHashes.length !== 1 ? "es" : ""} submitted`,
+        description: `${submit.txHashes.length} transaction${submit.txHashes.length !== 1 ? "s" : ""} submitted`,
         variant: "success",
       });
       // If we just published a new member root, notify the backend so it can

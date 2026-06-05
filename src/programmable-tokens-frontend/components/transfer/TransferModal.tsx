@@ -78,6 +78,11 @@ export function TransferModal({
   /** Security-token only: per-token toggle from the global-state datum. Defaults to true
    *  (the safer regulatory-compliance posture) until the token context resolves. */
   const [securityTokenRequiresReceiverKyc, setSecurityTokenRequiresReceiverKyc] = useState(true);
+  /** Security-token only: live `transfers_paused` flag from the global-state datum.
+   *  When true, the on-chain transfer_logic validator rejects every transfer — we
+   *  surface a banner and disable the Send button so the user doesn't burn fees
+   *  on a tx the network will refuse. */
+  const [securityTokenTransfersPaused, setSecurityTokenTransfersPaused] = useState(false);
   const [kycProof, setKycProofState] = useState<KycProofCookie | null>(null);
 
   const [recipientCheckStatus, setRecipientCheckStatus] = useState<RecipientCheckStatus>({ kind: "idle" });
@@ -140,6 +145,7 @@ export function TransferModal({
       setIsKycExtendedToken(false);
       setIsSecurityTokenToken(false);
       setSecurityTokenRequiresReceiverKyc(true);
+      setSecurityTokenTransfersPaused(false);
 
       getTokenContext(policyId)
         .then((ctx) => {
@@ -156,6 +162,7 @@ export function TransferModal({
             setIsKycToken(true);
             setIsSecurityTokenToken(true);
             setSecurityTokenRequiresReceiverKyc(ctx.requiresReceiverKyc ?? true);
+            setSecurityTokenTransfersPaused(ctx.transfersPaused ?? false);
             const cachedProof = getKycProof(policyId, senderAddress);
             if (cachedProof) setKycProofState(cachedProof);
           }
@@ -257,6 +264,19 @@ export function TransferModal({
 
     if (!validateForm()) return;
 
+    // Belt-and-braces guard: the Send button is disabled when transfers are
+    // paused, but an Enter-key submit or dev-tools poke could still reach
+    // here. Surface a clear toast rather than building a tx the on-chain
+    // validator will reject.
+    if (isSecurityTokenToken && securityTokenTransfersPaused) {
+      showToast({
+        title: "Transfers paused",
+        description: "The token admin has paused transfers via the global-state PauseTransfers action. Wait for the admin to re-enable transfers and try again.",
+        variant: "warning",
+      });
+      return;
+    }
+
     try {
       setIsBuilding(true);
 
@@ -332,8 +352,8 @@ export function TransferModal({
       setStep("success");
 
       showToast({
-        title: "Transfer Successful",
-        description: `Transferred ${quantity} ${asset.assetName} tokens`,
+        title: "Transfer submitted",
+        description: `Tx ${submittedTxHash.slice(0, 12)}… — sending ${quantity} ${asset.assetName} tokens to the network. Wait for confirmation.`,
         variant: "success",
       });
     } catch (error) {
@@ -342,10 +362,11 @@ export function TransferModal({
       if (error instanceof Error) {
         errorMessage = error.message.includes("User declined") ? "Transaction was cancelled" : error.message;
       }
-      // Auto-trigger the one-shot transferLogic cert registration if the
-      // backend tells us it's missing — same mechanism BurnSection uses.
-      // Conway withdraw-0 requires the script stake cred to be registered;
-      // we isolate it in a tiny tx so Eternl can sign it without choking.
+      // Auto-trigger the one-shot transfer-logic stake-credential registration
+      // when the backend reports it's missing. Conway requires a script's stake
+      // credential to be registered on-chain before any withdraw-0 against it.
+      // We isolate it in its own tx so Eternl can sign it without choking on
+      // mixed-script signing.
       const needsCertRegistration =
         isSecurityTokenToken
         && errorMessage.includes("transferLogic stake credential not yet registered");
@@ -353,7 +374,7 @@ export function TransferModal({
         try {
           showToast({
             title: "One-time setup required",
-            description: "Registering transferLogic stake credential…",
+            description: "Registering the transfer-logic stake credential on-chain. Your wallet will prompt to sign.",
             variant: "info",
           });
           const { buildRegisterTransferLogicTx } = await import(
@@ -365,20 +386,20 @@ export function TransferModal({
           const signedReg = await wallet.signTx(regCbor);
           const regTxHash = await wallet.submitTx(signedReg);
           showToast({
-            title: "Cert registered",
-            description: `Tx ${regTxHash.slice(0, 12)}… — wait for confirmation, then retry transfer.`,
+            title: "Stake credential registered",
+            description: `Tx ${regTxHash.slice(0, 12)}… — wait for confirmation, then retry the transfer.`,
             variant: "success",
           });
         } catch (regErr) {
           console.error("transferLogic cert registration failed:", regErr);
           showToast({
-            title: "Cert registration failed",
-            description: regErr instanceof Error ? regErr.message : "register failed",
+            title: "Stake-credential registration failed",
+            description: regErr instanceof Error ? regErr.message : "registration failed",
             variant: "error",
           });
         }
       } else {
-        showToast({ title: "Transfer Failed", description: errorMessage, variant: "error" });
+        showToast({ title: "Transfer failed", description: errorMessage, variant: "error" });
       }
       setStep("form");
     } finally {
@@ -470,6 +491,26 @@ export function TransferModal({
 
           {step === "form" && (
             <form onSubmit={handleSubmit} className="space-y-5">
+              {/* Pause notice — fires when the security-token's GS datum has
+                  transfers_paused=true. The on-chain transfer_logic validator
+                  rejects every transfer in this state, so we surface a banner
+                  AND disable the Send button below to spare the user the fees
+                  on a tx the network would refuse anyway. */}
+              {isSecurityTokenToken && securityTokenTransfersPaused && (
+                <div className="flex items-start gap-3 px-4 py-3 bg-warning-900/20 border border-warning-700/40 rounded-lg">
+                  <AlertCircle className="h-5 w-5 text-warning-400 mt-0.5 shrink-0" />
+                  <div className="text-sm">
+                    <p className="font-medium text-warning-200">Transfers are currently paused</p>
+                    <p className="text-warning-300/80 text-xs mt-0.5">
+                      The token admin has paused transfers via the global-state
+                      <span className="font-mono"> PauseTransfers</span> action.
+                      You can&apos;t send this token until the admin re-enables transfers
+                      from the Global State admin tab.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* KYC verification badge. For kyc-extended, allowlist membership shows as
                   secondary info — sender membership is not required to send (validator
                   filters senders out of receiver_witnesses). */}
@@ -679,15 +720,17 @@ export function TransferModal({
                   variant="primary"
                   className="flex-1"
                   isLoading={isBuilding}
-                  disabled={isBuilding || !senderReady || !recipientReady}
+                  disabled={isBuilding || !senderReady || !recipientReady || securityTokenTransfersPaused}
                 >
                   {isBuilding
                     ? "Building..."
-                    : !senderReady
-                      ? "KYC Required"
-                      : !recipientReady
-                        ? "Recipient Unverified"
-                        : "Transfer"}
+                    : securityTokenTransfersPaused
+                      ? "Transfers paused"
+                      : !senderReady
+                        ? "KYC Required"
+                        : !recipientReady
+                          ? "Recipient Unverified"
+                          : "Transfer"}
                 </Button>
               </div>
             </form>

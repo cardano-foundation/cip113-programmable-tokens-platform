@@ -8,6 +8,8 @@ import org.cardanofoundation.cip113.entity.SecurityTokenPowerUserEntity;
 import org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity;
 import org.cardanofoundation.cip113.model.SecurityTokenRegisterRequest;
 import org.cardanofoundation.cip113.model.SecurityTokenSummary;
+import org.cardanofoundation.cip113.model.TransactionContext;
+import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.service.ProtocolBootstrapService;
 import org.cardanofoundation.cip113.service.substandard.SecurityTokenSubstandardHandler;
@@ -100,9 +102,9 @@ public class SecurityTokenController {
             if (adminAddress == null || adminAddress.isBlank()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "adminAddress is required"));
             }
-            var handler = (SecurityTokenSubstandardHandler) handlerFactory
+            SecurityTokenSubstandardHandler handler = (SecurityTokenSubstandardHandler) handlerFactory
                     .getHandler("security-token", SecurityTokenContext.emptyContext());
-            var result = handler.buildAddPowerUserTransaction(
+            TransactionContext<Void> result = handler.buildAddPowerUserTransaction(
                     policyId, powerUserPkh, ((Number) capsObj).intValue(), adminAddress);
             if (!result.isSuccessful()) {
                 return ResponseEntity.badRequest().body(Map.of("error",
@@ -158,7 +160,7 @@ public class SecurityTokenController {
                 ));
             }
 
-            var protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
+            ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
@@ -168,9 +170,9 @@ public class SecurityTokenController {
                             .orElseThrow(() -> new IllegalArgumentException(
                                     "feePayerAddress has no payment credential: " + feePayerAddress)));
 
-            var handler = (SecurityTokenSubstandardHandler) handlerFactory
+            SecurityTokenSubstandardHandler handler = (SecurityTokenSubstandardHandler) handlerFactory
                     .getHandler("security-token", SecurityTokenContext.emptyContext());
-            var result = handler.buildGlobalStateUpdateChain(
+            TransactionContext<List<String>> result = handler.buildGlobalStateUpdateChain(
                     policyId, changes, feePayerAddress, signerPkh, protocolParams);
             if (!result.isSuccessful()) {
                 return ResponseEntity.badRequest().body(Map.of("error",
@@ -202,12 +204,12 @@ public class SecurityTokenController {
                 return ResponseEntity.badRequest().body(Map.of("error",
                         "txHash and newRootHashHex are required"));
             }
-            var regOpt = registrationRepo.findByProgrammableTokenPolicyId(policyId);
+            java.util.Optional<SecurityTokenRegistrationEntity> regOpt = registrationRepo.findByProgrammableTokenPolicyId(policyId);
             if (regOpt.isEmpty()) {
                 return ResponseEntity.status(404).body(Map.of("error",
                         "security-token registration not found for " + policyId));
             }
-            var reg = regOpt.get();
+            SecurityTokenRegistrationEntity reg = regOpt.get();
             reg.setMemberRootHashOnchain(newRootHashHex);
             reg.setMemberRootHashLocal(newRootHashHex);
             reg.setLastRootUpdateTxHash(txHash);
@@ -243,7 +245,7 @@ public class SecurityTokenController {
             if (feePayerAddress == null || feePayerAddress.isBlank()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "feePayerAddress is required"));
             }
-            var protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
+            ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
@@ -256,9 +258,9 @@ public class SecurityTokenController {
                             .orElseThrow(() -> new IllegalArgumentException(
                                     "feePayerAddress has no payment credential: " + feePayerAddress)));
 
-            var handler = (SecurityTokenSubstandardHandler) handlerFactory
+            SecurityTokenSubstandardHandler handler = (SecurityTokenSubstandardHandler) handlerFactory
                     .getHandler("security-token", SecurityTokenContext.emptyContext());
-            var result = handler.buildUpdateMemberRootHashTransaction(
+            TransactionContext<Void> result = handler.buildUpdateMemberRootHashTransaction(
                     policyId, currentLocalRoot, feePayerAddress, signerPkh, protocolParams);
             if (!result.isSuccessful()) {
                 return ResponseEntity.badRequest().body(Map.of("error",
@@ -287,13 +289,13 @@ public class SecurityTokenController {
             if (feePayerAddress == null || feePayerAddress.isBlank()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "feePayerAddress is required"));
             }
-            var protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
+            ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
-            var handler = (SecurityTokenSubstandardHandler) handlerFactory
+            SecurityTokenSubstandardHandler handler = (SecurityTokenSubstandardHandler) handlerFactory
                     .getHandler("security-token", SecurityTokenContext.emptyContext());
-            var result = handler.buildRegisterTransferLogicTransaction(
+            TransactionContext<Void> result = handler.buildRegisterTransferLogicTransaction(
                     policyId, feePayerAddress, protocolParams);
             if (!result.isSuccessful()) {
                 return ResponseEntity.badRequest().body(Map.of("error",
@@ -319,18 +321,18 @@ public class SecurityTokenController {
     @PostMapping("/build-chain")
     public ResponseEntity<?> buildChain(@RequestBody SecurityTokenRegisterRequest request) {
         try {
-            var protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
+            ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
-            var handler = (SecurityTokenSubstandardHandler)
+            SecurityTokenSubstandardHandler handler = (SecurityTokenSubstandardHandler)
                     handlerFactory.getHandler("security-token", SecurityTokenContext.emptyContext());
-            var result = handler.buildFullRegistrationChain(request, protocolParams);
+            TransactionContext<SecurityTokenSubstandardHandler.ChainBuildResult> result = handler.buildFullRegistrationChain(request, protocolParams);
             if (!result.isSuccessful()) {
                 return ResponseEntity.badRequest().body(Map.of(
                         "error", result.error() != null ? result.error() : "chain build failed"));
             }
-            var meta = result.metadata();
+            SecurityTokenSubstandardHandler.ChainBuildResult meta = result.metadata();
             // Use HashMap (Map.of caps at 10 entries; we now have 12).
             // Null-value entries (e.g. the optional 4th tx) are skipped so the
             // JSON response omits them, keeping the wire shape forward-compat.
@@ -359,13 +361,13 @@ public class SecurityTokenController {
     @PostMapping("/init")
     public ResponseEntity<?> initGlobalState(@RequestBody SecurityTokenRegisterRequest request) {
         try {
-            var protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
+            ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
-            var handler = (SecurityTokenSubstandardHandler)
+            SecurityTokenSubstandardHandler handler = (SecurityTokenSubstandardHandler)
                     handlerFactory.getHandler("security-token", SecurityTokenContext.emptyContext());
-            var result = handler.buildGlobalStateInitTransaction(request, protocolParams);
+            TransactionContext<TransactionContext.RegistrationResult> result = handler.buildGlobalStateInitTransaction(request, protocolParams);
             if (!result.isSuccessful()) {
                 return ResponseEntity.badRequest().body(Map.of(
                         "error", result.error() != null ? result.error() : "init failed"));
@@ -374,7 +376,7 @@ public class SecurityTokenController {
             // the value we return here is actually the prog-token (issuance) policy id —
             // that's what the registration tx is keyed on downstream. We also return
             // {programmableTokenPolicyId} explicitly so clients have an unambiguous name.
-            var progTokenPolicyId = result.metadata() != null ? result.metadata().policyId() : null;
+            String progTokenPolicyId = result.metadata() != null ? result.metadata().policyId() : null;
             return ResponseEntity.ok(Map.of(
                     "unsignedCborTx", result.unsignedCborTx(),
                     "globalStatePolicyId", progTokenPolicyId,
@@ -437,7 +439,7 @@ public class SecurityTokenController {
             long now = System.currentTimeMillis();
 
             // 404 not present, 410 expired, 425 not yet published — frontend hooks switch on these.
-            var existing = memberLeafRepo.findByProgrammableTokenPolicyIdAndMemberPkh(policyId, memberPkh);
+            java.util.Optional<org.cardanofoundation.cip113.entity.SecurityTokenMemberLeafEntity> existing = memberLeafRepo.findByProgrammableTokenPolicyIdAndMemberPkh(policyId, memberPkh);
             if (existing.isEmpty()) {
                 return ResponseEntity.status(404).body(Map.of("error", "member not found in allowlist"));
             }
@@ -452,11 +454,11 @@ public class SecurityTokenController {
                         "memberPkh", memberPkh));
             }
 
-            var view = allowlistService.inclusionProof(policyId, pkhBytes, now);
+            java.util.Optional<SecurityTokenAllowlistService.MpfLeafView> view = allowlistService.inclusionProof(policyId, pkhBytes, now);
             if (view.isEmpty()) {
                 return ResponseEntity.status(404).body(Map.of("error", "MPF proof unavailable"));
             }
-            var v = view.get();
+            SecurityTokenAllowlistService.MpfLeafView v = view.get();
             return ResponseEntity.ok(Map.of(
                     "memberPkh", memberPkh,
                     "proofCborHex", HexUtil.encodeHexString(v.proofCbor()),
@@ -530,7 +532,7 @@ public class SecurityTokenController {
         if (denylistRepo.existsByProgrammableTokenPolicyIdAndMemberPkh(policyId, memberPkh)) {
             return ResponseEntity.status(409).body(Map.of("error", "already on denylist"));
         }
-        var entry = SecurityTokenDenylistEntryEntity.builder()
+        SecurityTokenDenylistEntryEntity entry = SecurityTokenDenylistEntryEntity.builder()
                 .programmableTokenPolicyId(policyId)
                 .memberPkh(memberPkh)
                 .reason((String) body.getOrDefault("reason", null))
@@ -543,7 +545,7 @@ public class SecurityTokenController {
 
     @DeleteMapping("/{policyId}/denylist/{memberPkh}")
     public ResponseEntity<?> removeDenylistEntry(@PathVariable String policyId, @PathVariable String memberPkh) {
-        var existing = denylistRepo.findByProgrammableTokenPolicyIdAndMemberPkh(policyId, memberPkh);
+        java.util.Optional<SecurityTokenDenylistEntryEntity> existing = denylistRepo.findByProgrammableTokenPolicyIdAndMemberPkh(policyId, memberPkh);
         if (existing.isEmpty()) {
             return ResponseEntity.notFound().build();
         }
@@ -575,7 +577,7 @@ public class SecurityTokenController {
         if (powerUserRepo.existsByProgrammableTokenPolicyIdAndPowerUserPkh(policyId, pkh)) {
             return ResponseEntity.status(409).body(Map.of("error", "power user already exists"));
         }
-        var entity = SecurityTokenPowerUserEntity.builder()
+        SecurityTokenPowerUserEntity entity = SecurityTokenPowerUserEntity.builder()
                 .programmableTokenPolicyId(policyId)
                 .powerUserPkh(pkh)
                 .capabilities(caps)
@@ -590,11 +592,11 @@ public class SecurityTokenController {
     public ResponseEntity<?> updatePowerUser(@PathVariable String policyId,
                                              @PathVariable String powerUserPkh,
                                              @RequestBody Map<String, Object> body) {
-        var existing = powerUserRepo.findByProgrammableTokenPolicyIdAndPowerUserPkh(policyId, powerUserPkh);
+        java.util.Optional<SecurityTokenPowerUserEntity> existing = powerUserRepo.findByProgrammableTokenPolicyIdAndPowerUserPkh(policyId, powerUserPkh);
         if (existing.isEmpty()) {
             return ResponseEntity.notFound().build();
         }
-        var entity = existing.get();
+        SecurityTokenPowerUserEntity entity = existing.get();
         if (body.get("capabilities") instanceof Number n) entity.setCapabilities(n.intValue());
         if (body.containsKey("label")) entity.setLabel((String) body.get("label"));
         powerUserRepo.save(entity);
@@ -603,7 +605,7 @@ public class SecurityTokenController {
 
     @DeleteMapping("/{policyId}/power-users/{powerUserPkh}")
     public ResponseEntity<?> removePowerUser(@PathVariable String policyId, @PathVariable String powerUserPkh) {
-        var existing = powerUserRepo.findByProgrammableTokenPolicyIdAndPowerUserPkh(policyId, powerUserPkh);
+        java.util.Optional<SecurityTokenPowerUserEntity> existing = powerUserRepo.findByProgrammableTokenPolicyIdAndPowerUserPkh(policyId, powerUserPkh);
         if (existing.isEmpty()) {
             return ResponseEntity.notFound().build();
         }
@@ -614,7 +616,7 @@ public class SecurityTokenController {
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private SecurityTokenSummary toSummary(SecurityTokenRegistrationEntity reg) {
-        var assetName = programmableTokenRegistryRepository.findByPolicyId(reg.getProgrammableTokenPolicyId())
+        String assetName = programmableTokenRegistryRepository.findByPolicyId(reg.getProgrammableTokenPolicyId())
                 .map(p -> p.getAssetName())
                 .orElse("");
         String displayName = decodeAssetNameSafely(assetName);
@@ -632,7 +634,7 @@ public class SecurityTokenController {
     }
 
     private Map<String, Object> denylistEntryToMap(SecurityTokenDenylistEntryEntity e) {
-        var m = new java.util.LinkedHashMap<String, Object>();
+        java.util.LinkedHashMap<String, Object> m = new java.util.LinkedHashMap<String, Object>();
         m.put("memberPkh", e.getMemberPkh());
         m.put("reason", e.getReason());
         m.put("addedByPowerUserPkh", e.getAddedByPowerUserPkh());
@@ -641,7 +643,7 @@ public class SecurityTokenController {
     }
 
     private Map<String, Object> powerUserToMap(SecurityTokenPowerUserEntity e) {
-        var m = new java.util.LinkedHashMap<String, Object>();
+        java.util.LinkedHashMap<String, Object> m = new java.util.LinkedHashMap<String, Object>();
         m.put("powerUserPkh", e.getPowerUserPkh());
         m.put("capabilities", e.getCapabilities());
         m.put("label", e.getLabel());

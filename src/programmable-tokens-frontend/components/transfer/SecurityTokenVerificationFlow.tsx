@@ -100,7 +100,7 @@ export function SecurityTokenVerificationFlow({
     }
 
     if (!recipientAddress || !recipientAddress.startsWith("addr")) {
-      setPhase({ kind: "error", message: "Please enter a valid recipient Cardano address (starting with addr1) before verifying." });
+      setPhase({ kind: "error", message: "Please enter a valid recipient Cardano address (starting with addr1 on mainnet or addr_test1 on a testnet) before verifying." });
       return;
     }
     if (!senderAddress || !senderAddress.startsWith("addr")) {

@@ -11,6 +11,8 @@ import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository;
+import org.cardanofoundation.cip113.service.substandard.SecurityTokenSubstandardHandler;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -28,6 +30,13 @@ public class TokenContextController {
     /** Optional — only present when the security-token substandard is enabled. */
     @Autowired(required = false)
     private SecurityTokenRegistrationRepository securityTokenRegistrationRepository;
+
+    /** Prototype-scoped handler; resolved per request to read the live GS datum.
+     *  {@code ObjectProvider} keeps this singleton controller decoupled from the
+     *  handler's lifecycle. {@code @Autowired(required=false)} so the controller
+     *  still loads when the security-token substandard is disabled. */
+    @Autowired(required = false)
+    private ObjectProvider<SecurityTokenSubstandardHandler> securityTokenHandlerProvider;
 
     /**
      * Get token context — returns substandardId + init params for a given policy ID.
@@ -49,6 +58,7 @@ public class TokenContextController {
         String blacklistInitTxHash = null;
         Integer blacklistInitOutputIndex = null;
         Boolean requiresReceiverKyc = null;
+        Boolean transfersPaused = null;
 
         if ("freeze-and-seize".equals(substandardId)) {
             var tokenRegistration = freezeAndSeizeTokenRegistrationRepository
@@ -70,7 +80,22 @@ public class TokenContextController {
             var stReg = securityTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId);
             if (stReg.isPresent()) {
                 issuerAdminPkh = stReg.get().getIssuerAdminPkh();
+                // The DB column for requiresReceiverKyc is set ONCE at registration
+                // time and isn't refreshed when the admin runs SetRequiresReceiverKyc
+                // on chain. transfersPaused has no DB column at all. Prefer the live
+                // on-chain GS datum for both flags; fall back to the DB cache for
+                // requiresReceiverKyc only when the indexer hasn't seen the GS UTxO.
                 requiresReceiverKyc = stReg.get().isRequiresReceiverKyc();
+                if (securityTokenHandlerProvider != null) {
+                    SecurityTokenSubstandardHandler handler = securityTokenHandlerProvider.getIfAvailable();
+                    if (handler != null) {
+                        var live = handler.readGlobalState(policyId);
+                        if (live.isPresent()) {
+                            requiresReceiverKyc = live.get().requiresReceiverKyc();
+                            transfersPaused = live.get().transfersPaused();
+                        }
+                    }
+                }
             }
         }
 
@@ -82,7 +107,8 @@ public class TokenContextController {
                 issuerAdminPkh,
                 blacklistInitTxHash,
                 blacklistInitOutputIndex,
-                requiresReceiverKyc
+                requiresReceiverKyc,
+                transfersPaused
         ));
     }
 

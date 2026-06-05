@@ -477,7 +477,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           No Minting Access
         </h3>
         <p className="text-sm text-dark-400 text-center">
-          You don&apos;t have issuer admin permissions for any tokens.
+          You don&apos;t hold admin or minter capabilities for any registered tokens.
         </p>
       </div>
     );

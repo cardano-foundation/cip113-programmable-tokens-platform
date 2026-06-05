@@ -90,4 +90,9 @@ export interface TokenContext {
   /** Security-token only: whether the on-chain validator requires the recipient
    *  to be in the allowlist. `null` for substandards that don't carry this flag. */
   requiresReceiverKyc?: boolean | null;
+  /** Security-token only: whether on-chain transfers are currently paused (set
+   *  via the GlobalState {@code PauseTransfers} admin action). When true, the
+   *  TransferModal disables Send and surfaces a notice. `null` for substandards
+   *  that don't carry this flag. */
+  transfersPaused?: boolean | null;
 }
