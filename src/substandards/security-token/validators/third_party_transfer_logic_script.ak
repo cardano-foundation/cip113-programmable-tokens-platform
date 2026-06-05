@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 use aiken/collection/list
 use aiken_design_patterns/linked_list.{get_element_info, run_element_with}
 use cardano/address.{Credential, Inline, Script, VerificationKey}
@@ -39,103 +38,92 @@ validator third_party_transfer_logic_validator(
     credential: Credential,
     self: Transaction,
   ) {
-    let issuance_policy_id =
-      utils.derive_issuance_policy_id_from_registry_node(
-        self.reference_inputs,
-        registry_policy_id,
-        credential,
-        constants.transfer_logic_script_registry_node_index,
-      )
+    let issuance_policy_id = utils.derive_issuance_policy_id_from_registry_node(
+      self.reference_inputs,
+      registry_policy_id,
+      credential,
+      constants.transfer_logic_script_registry_node_index,
+    )
 
     // Pause + GS-datum decode.
-    let gs_input =
-      utils.safe_list_at(
-        self.reference_inputs,
-        redeemer.global_state_ref_input_index,
-      )
-    let transfers_paused =
-      global_state.is_paused(gs_input, global_state_policy_id)
+    let gs_input = utils.safe_list_at(
+      self.reference_inputs,
+      redeemer.global_state_ref_input_index,
+    )
+    let transfers_paused = global_state.is_paused(
+      gs_input,
+      global_state_policy_id,
+    )
     expect InlineDatum(gs_datum_raw) = gs_input.output.datum
     expect gs_datum: GlobalStateDatum = gs_datum_raw
 
     // Unique destination stake-cred hashes from outputs carrying the token.
-    let outputs_user_stake_cred_hash =
-      list.unique(
-        list.foldr(
-          self.outputs,
-          [],
-          fn(output, result) {
-            if quantity_of(
-              output.value,
-              issuance_policy_id,
-              security_asset_name,
-            ) > 0 {
-              expect Some(Inline(stake_cred)) = output.address.stake_credential
-              let credential_hash =
-                when stake_cred is {
-                  VerificationKey(hash) -> hash
-                  Script(hash) -> hash
-                }
-              list.push(result, credential_hash)
-            } else {
-              result
+    let outputs_user_stake_cred_hash = list.unique(
+      list.foldr(
+        self.outputs,
+        [],
+        fn(output, result) {
+          if quantity_of(output.value, issuance_policy_id, security_asset_name) > 0 {
+            expect Some(Inline(stake_cred)) = output.address.stake_credential
+            let credential_hash = when stake_cred is {
+              VerificationKey(hash) -> hash
+              Script(hash) -> hash
             }
-          },
-        ),
-      )
-
-    // Per-destination: KYC proof + denylist absence.
-    let all_destinations_ok =
-      list.indexed_foldr(
-        outputs_user_stake_cred_hash,
-        True,
-        fn(index, dest_pkh, acc) {
-          expect acc
-          let action = utils.safe_list_at(redeemer.destination_actions, index)
-          let kyc_ok =
-            verify_kyc_proof(
-              action.destination_proof,
-              dest_pkh,
-              gs_datum,
-              issuance_policy_id,
-              env.network_id,
-              self,
-            )
-          let denylist_ok =
-            verify_denylist_absence(
-              dest_pkh,
-              action.destination_denylist_covering_ref_input_index,
-              self.reference_inputs,
-              gs_datum.denylist_linked_list_policy_id,
-            )
-          and {
-            kyc_ok,
-            denylist_ok,
+            list.push(result, credential_hash)
+          } else {
+            result
           }
         },
-      )
+      ),
+    )
+
+    // Per-destination: KYC proof + denylist absence.
+    let all_destinations_ok = list.indexed_foldr(
+      outputs_user_stake_cred_hash,
+      True,
+      fn(index, dest_pkh, acc) {
+        expect acc
+        let action = utils.safe_list_at(redeemer.destination_actions, index)
+        let kyc_ok = verify_kyc_proof(
+          action.destination_proof,
+          dest_pkh,
+          gs_datum,
+          issuance_policy_id,
+          env.network_id,
+          self,
+        )
+        let denylist_ok = verify_denylist_absence(
+          dest_pkh,
+          action.destination_denylist_covering_ref_input_index,
+          self.reference_inputs,
+          gs_datum.denylist_linked_list_policy_id,
+        )
+        and {
+          kyc_ok,
+          denylist_ok,
+        }
+      },
+    )
 
     // Admin-authorised power user with can_force_transfer.
-    let power_user_ref_input =
-      utils.safe_list_at(
-        self.reference_inputs,
-        redeemer.power_user_node_ref_input_index,
-      )
-    let (power_user_node_key, power_user_data) =
-      get_element_info(
-        power_user_ref_input.output,
-        fn(_lovelace, node_key, data, _link) {
-          expect Some(key) = node_key
-          expect power_user_data: PowerUser = data
-          (key, power_user_data)
-        },
-      )
-        |> run_element_with(
-            power_users_linked_list_policy_id,
-            constants.linked_list_root_key,
-            constants.linked_list_node_key_prefix,
-            constants.linked_list_node_key_prefix_length,
-          )
+    let power_user_ref_input = utils.safe_list_at(
+      self.reference_inputs,
+      redeemer.power_user_node_ref_input_index,
+    )
+    let (power_user_node_key, power_user_data) = get_element_info(
+      power_user_ref_input.output,
+      fn(_lovelace, node_key, data, _link) {
+        expect Some(key) = node_key
+        expect power_user_data: PowerUser = data
+        (key, power_user_data)
+      },
+    )
+      |> run_element_with(
+          power_users_linked_list_policy_id,
+          constants.linked_list_root_key,
+          constants.linked_list_node_key_prefix,
+          constants.linked_list_node_key_prefix_length,
+        )
 
     and {
       transfers_paused == False,

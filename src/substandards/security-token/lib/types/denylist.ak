@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 /// A node in the denylist linked list. Presence of a node keyed by a user's
 /// PKH means that user is sanctioned — they cannot send OR receive security
 /// tokens (enforced by transfer_logic and third_party_transfer_logic).

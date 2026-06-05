@@ -7,10 +7,13 @@ import com.bloxbean.cardano.client.api.util.ValueUtil;
 import com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.ExUnits;
 import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.MapPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.PlutusData;
 import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
+import com.bloxbean.cardano.client.plutus.spec.Redeemer;
+import com.bloxbean.cardano.client.plutus.spec.RedeemerTag;
 import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.quicktx.Tx;
 import com.bloxbean.cardano.client.transaction.spec.Asset;
@@ -19,7 +22,12 @@ import com.bloxbean.cardano.client.transaction.spec.Transaction;
 import com.bloxbean.cardano.client.transaction.spec.TransactionBody;
 import com.bloxbean.cardano.client.transaction.spec.TransactionInput;
 import com.bloxbean.cardano.client.transaction.spec.TransactionOutput;
+import com.bloxbean.cardano.client.transaction.spec.TransactionWitnessSet;
 import com.bloxbean.cardano.client.transaction.spec.Value;
+import com.bloxbean.cardano.client.transaction.spec.cert.RegCert;
+import com.bloxbean.cardano.client.transaction.spec.cert.StakeCredType;
+import com.bloxbean.cardano.client.transaction.spec.cert.StakeCredential;
+import com.bloxbean.cardano.client.transaction.spec.cert.StakeRegistration;
 import com.bloxbean.cardano.client.util.HexUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
@@ -1443,7 +1451,7 @@ public class SecurityTokenSubstandardHandler
             PlutusScript powerUsersSpendScript = scriptBuilder.buildPowerUsersSpendScript(globalStatePolicyId, powerUsersPolicyId);
             Address powerUsersSpendAddress = AddressProvider.getEntAddress(powerUsersSpendScript, network.getCardanoNetwork());
 
-            // 4. Build the three initial datums.
+            // 4. Build the initial datums.
             PlutusData gsDatum = buildInitialGlobalStateDatum(
                     adminPkh, powerUsersPolicyId, denylistPolicyId,
                     request.getInitialMintableAmount() != null ? request.getInitialMintableAmount() : 0L,
@@ -1521,22 +1529,22 @@ public class SecurityTokenSubstandardHandler
                         if (certs == null) return;
                         for (int i = 0; i < certs.size(); i++) {
                             if (!(certs.get(i)
-                                    instanceof com.bloxbean.cardano.client.transaction.spec.cert.StakeRegistration sr)) continue;
-                            com.bloxbean.cardano.client.transaction.spec.cert.StakeCredential cred = sr.getStakeCredential();
+                                    instanceof StakeRegistration sr)) continue;
+                            StakeCredential cred = sr.getStakeCredential();
                             if (cred.getType()
-                                    != com.bloxbean.cardano.client.transaction.spec.cert.StakeCredType.SCRIPTHASH) continue;
-                            certs.set(i, com.bloxbean.cardano.client.transaction.spec.cert.RegCert.builder()
+                                    != StakeCredType.SCRIPTHASH) continue;
+                            certs.set(i, RegCert.builder()
                                     .stakeCredential(cred)
                                     .coin(BigInteger.valueOf(2_000_000L))
                                     .build());
-                            com.bloxbean.cardano.client.transaction.spec.TransactionWitnessSet ws = txn.getWitnessSet();
+                            TransactionWitnessSet ws = txn.getWitnessSet();
                             if (ws.getRedeemers() == null) {
                                 ws.setRedeemers(new ArrayList<>());
                             }
-                            com.bloxbean.cardano.client.plutus.spec.Redeemer publishRedeemer = com.bloxbean.cardano.client.plutus.spec.Redeemer.builder()
-                                    .tag(com.bloxbean.cardano.client.plutus.spec.RedeemerTag.Cert)
-                                    .data(com.bloxbean.cardano.client.plutus.spec.PlutusData.unit())
-                                    .exUnits(com.bloxbean.cardano.client.plutus.spec.ExUnits.builder()
+                            Redeemer publishRedeemer = Redeemer.builder()
+                                    .tag(RedeemerTag.Cert)
+                                    .data(PlutusData.unit())
+                                    .exUnits(ExUnits.builder()
                                             .mem(BigInteger.valueOf(1_000_000))
                                             .steps(BigInteger.valueOf(500_000_000))
                                             .build())
@@ -1802,9 +1810,9 @@ public class SecurityTokenSubstandardHandler
             String powerUserPkhHex,
             int capabilities,
             String adminAddress,
-            com.bloxbean.cardano.client.api.model.Utxo overridePuRoot,
-            com.bloxbean.cardano.client.api.model.Utxo overrideGsUtxo,
-            com.bloxbean.cardano.client.api.model.Utxo overrideFunding) {
+            Utxo overridePuRoot,
+            Utxo overrideGsUtxo,
+            Utxo overrideFunding) {
         try {
             Optional<SecurityTokenRegistrationEntity> regOpt = registrationRepository.findByProgrammableTokenPolicyId(policyId);
             if (regOpt.isEmpty()) {
@@ -1833,7 +1841,7 @@ public class SecurityTokenSubstandardHandler
             // provided we use them directly (genesis tx isn't on chain yet so the
             // poll-by-policy paths would time out). Otherwise fall back to on-chain
             // discovery — the admin-page "Sync to chain" button uses that path.
-            com.bloxbean.cardano.client.api.model.Utxo puRoot = overridePuRoot;
+            Utxo puRoot = overridePuRoot;
             if (puRoot == null) {
                 puRoot = pollForFirstUtxoByPolicy(reg.getPowerUsersPolicyId(),
                         "power-users linked-list root NFT", java.time.Duration.ofSeconds(90));
@@ -1844,7 +1852,7 @@ public class SecurityTokenSubstandardHandler
                 }
             }
 
-            com.bloxbean.cardano.client.api.model.Utxo gsUtxo = overrideGsUtxo;
+            Utxo gsUtxo = overrideGsUtxo;
             if (gsUtxo == null) {
                 gsUtxo = pollForFirstUtxoByPolicy(reg.getGlobalStatePolicyId(),
                         "global-state NFT", java.time.Duration.ofSeconds(30));
@@ -1854,7 +1862,7 @@ public class SecurityTokenSubstandardHandler
                 }
             }
 
-            com.bloxbean.cardano.client.api.model.Utxo funding = overrideFunding;
+            Utxo funding = overrideFunding;
             if (funding == null) {
                 List<Utxo> fundingUtxos = accountService.findAdaOnlyUtxo(adminAddress, 5_000_000L);
                 if (fundingUtxos.isEmpty()) {
@@ -2179,82 +2187,7 @@ public class SecurityTokenSubstandardHandler
             String registerTransferLogicTxHash) {}
 
     /** Build the full security-token registration chain in one call.
-     *
-     *  <h3>Chain shape</h3>
-     *  Three txs, deterministically chained at build time, signed in one wallet
-     *  popup and submitted via {@code POST /issue-token/submit-chain} (which
-     *  submits sequentially through the backend's submission service so the
-     *  wallet's own backend never sees the chain and can't reject mempool-
-     *  chained txs):
-     *
-     *  <pre>
-     *    ┌──────────────────┐      genesis change          ┌──────────────────┐
-     *    │ 1. GENESIS TX    │  ─────────────────────────▶  │ 2. ADDPOWERUSER  │
-     *    │   mints:         │                              │   spends:        │
-     *    │     • GS NFT     │  PU root NFT + GS NFT (ref)  │     PU root      │
-     *    │     • DL root    │  ───────────────────────────▶│   mints:         │
-     *    │     • PU root    │                              │     new PU node  │
-     *    │   pays back:     │                              │   pays back:     │
-     *    │     • 3 NFTs to  │                              │     updated PU   │
-     *    │       script ad- │                              │     root + new   │
-     *    │       dresses    │                              │     node + chg   │
-     *    │   change → admin │                              └─────────┬────────┘
-     *    └──────────────────┘                                        │
-     *                                                                │ addPu change
-     *                                                                ▼
-     *                                                       ┌──────────────────┐
-     *                                                       │ 3. REGISTRATION  │
-     *                                                       │   spends:        │
-     *                                                       │     • dir slot   │
-     *                                                       │     • GS         │
-     *                                                       │   mints:         │
-     *                                                       │     • dir NFT    │
-     *                                                       │     • prog tokens│
-     *                                                       │   withdraws-0:   │
-     *                                                       │     mintingLogic │
-     *                                                       │   pays back:     │
-     *                                                       │     2× dir slot, │
-     *                                                       │     prog tokens, │
-     *                                                       │     new GS w/    │
-     *                                                       │     decremented  │
-     *                                                       │     mintable_amt │
-     *                                                       └──────────────────┘
-     *  </pre>
-     *
-     *  <h3>Why this shape</h3>
-     *  <ul>
-     *    <li>Genesis must be first: it consumes the bootstrap UTxO that
-     *        parameterises the three mint scripts (one-shot nonce).</li>
-     *    <li>AddPowerUser must come before registration: the registration tx's
-     *        BaFin {@code minting_logic_script.withdraw} runs in registration
-     *        mode (detected by the directory NFT mint) but the on-chain mint
-     *        flow that follows will need the admin power-user node to exist on
-     *        chain to validate subsequent {@code MintSecurity} actions.</li>
-     *    <li>Registration mints the initial security-token supply AND spends GS
-     *        with {@code MintSecurity}, so the supply cap is enforced on the
-     *        first mint as well.</li>
-     *  </ul>
-     *
-     *  <h3>Chaining mechanics</h3>
-     *  <ul>
-     *    <li>Each subsequent tx's funding input is the previous tx's change
-     *        output at the admin address — discovered by walking outputs and
-     *        matching by address.</li>
-     *    <li>Each subsequent tx's anchor inputs (PU root, GS) are the previous
-     *        tx's script-locked outputs — discovered the same way, then
-     *        injected into {@link HybridUtxoSupplier} so Bloxbean's
-     *        UTxO-by-(hash,index) lookups resolve them as mempool UTxOs.</li>
-     *    <li>Inline datums are preserved when wrapping outputs as {@link Utxo}s
-     *        — Plutus scripts that {@code expect InlineDatum(d) = …} crash with
-     *        {@code EvaluationFailure} if the supplier returns null.</li>
-     *  </ul>
-     *
-     *  <p>Caller contract: populate the request with {@code feePayerAddress},
-     *  {@code adminPubKeyHash}, hex {@code assetName}, {@code requiresReceiverKyc},
-     *  optional {@code initialMintableAmount}, {@code bootstrapPowerUserPkh},
-     *  {@code bootstrapPowerUserCapabilities}, {@code quantity} (initial mint
-     *  size; defaults to "1" if blank). Returns a typed error when any phase
-     *  fails so the wizard can retry from scratch. */
+      */
     public TransactionContext<ChainBuildResult> buildFullRegistrationChain(
             SecurityTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {

@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 pub type SecurityInfo {
   isin: ByteArray,
   term_of_issue: ByteArray,

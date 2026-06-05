@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 use aiken/builtin
 use aiken_design_patterns/linked_list.{get_element_info, run_element_with}
 use cardano/transaction.{Input}
@@ -19,17 +18,14 @@ pub fn covers_key(
   covering_link: Option<ByteArray>,
   target_pkh: ByteArray,
 ) -> Bool {
-  let covers_from_below =
-    when covering_key_opt is {
-      None -> True
-      Some(covering_key) ->
-        builtin.less_than_bytearray(covering_key, target_pkh)
-    }
-  let covers_from_above =
-    when covering_link is {
-      None -> True
-      Some(next_key) -> builtin.less_than_bytearray(target_pkh, next_key)
-    }
+  let covers_from_below = when covering_key_opt is {
+    None -> True
+    Some(covering_key) -> builtin.less_than_bytearray(covering_key, target_pkh)
+  }
+  let covers_from_above = when covering_link is {
+    None -> True
+    Some(next_key) -> builtin.less_than_bytearray(target_pkh, next_key)
+  }
   covers_from_below && covers_from_above
 }
 
@@ -54,20 +50,21 @@ pub fn verify_denylist_absence(
   reference_inputs: List<Input>,
   denylist_policy_id: ByteArray,
 ) -> Bool {
-  let covering_ref =
-    utils.safe_list_at(reference_inputs, covering_ref_input_index)
+  let covering_ref = utils.safe_list_at(
+    reference_inputs,
+    covering_ref_input_index,
+  )
 
-  let (covering_key_opt, covering_link) =
-    get_element_info(
-      covering_ref.output,
-      fn(_lovelace, node_key, _data, link) { (node_key, link) },
-    )
-      |> run_element_with(
-          denylist_policy_id,
-          constants.linked_list_root_key,
-          constants.linked_list_node_key_prefix,
-          constants.linked_list_node_key_prefix_length,
-        )
+  let (covering_key_opt, covering_link) = get_element_info(
+    covering_ref.output,
+    fn(_lovelace, node_key, _data, link) { (node_key, link) },
+  )
+    |> run_element_with(
+        denylist_policy_id,
+        constants.linked_list_root_key,
+        constants.linked_list_node_key_prefix,
+        constants.linked_list_node_key_prefix_length,
+      )
 
   covers_key(covering_key_opt, covering_link, target_pkh)
 }

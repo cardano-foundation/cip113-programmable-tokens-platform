@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 /// Withdraw redeemer for the minting_logic_script.
 ///
 /// Under the Track 4 refactor, GS is minted at `initCompliance` (not at

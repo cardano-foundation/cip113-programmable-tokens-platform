@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 use aiken/builtin
 use aiken/collection/dict
 use aiken/collection/pairs
@@ -49,66 +48,60 @@ pub fn verify_attestation_proof(
   // 1. Structural lengths. Short-circuit if malformed — subsequent slices
   // would otherwise risk out-of-bounds panics.
   let lengths_ok = and {
-      bytearray.length(payload) == payload_length,
-      bytearray.length(signature) == signature_length,
-      bytearray.length(issuer_vkey) == issuer_vkey_length,
-    }
+    bytearray.length(payload) == payload_length,
+    bytearray.length(signature) == signature_length,
+    bytearray.length(issuer_vkey) == issuer_vkey_length,
+  }
 
   // 2–6. Payload field checks (guarded).
-  let fields_ok =
-    if lengths_ok {
-      // bytearray.slice takes (start, end_inclusive), so end = start+width-1.
-      let payload_user_pkh =
-        bytearray.slice(
-          payload,
-          offset_user_pkh,
-          offset_user_pkh + width_user_pkh - 1,
-        )
-      let payload_tier = builtin.index_bytearray(payload, offset_user_kyc_tier)
-      let payload_ttl =
-        bytearray.to_int_big_endian(
-          bytearray.slice(
-            payload,
-            offset_valid_until_ms,
-            offset_valid_until_ms + width_valid_until_ms - 1,
-          ),
-        )
-      let payload_policy =
-        bytearray.slice(
-          payload,
-          offset_security_policy_id,
-          offset_security_policy_id + width_security_policy_id - 1,
-        )
-      let payload_network = builtin.index_bytearray(payload, offset_network_id)
+  let fields_ok = if lengths_ok {
+    // bytearray.slice takes (start, end_inclusive), so end = start+width-1.
+    let payload_user_pkh = bytearray.slice(
+      payload,
+      offset_user_pkh,
+      offset_user_pkh + width_user_pkh - 1,
+    )
+    let payload_tier = builtin.index_bytearray(payload, offset_user_kyc_tier)
+    let payload_ttl = bytearray.to_int_big_endian(
+      bytearray.slice(
+        payload,
+        offset_valid_until_ms,
+        offset_valid_until_ms + width_valid_until_ms - 1,
+      ),
+    )
+    let payload_policy = bytearray.slice(
+      payload,
+      offset_security_policy_id,
+      offset_security_policy_id + width_security_policy_id - 1,
+    )
+    let payload_network = builtin.index_bytearray(payload, offset_network_id)
 
-      let ttl_ok =
-        when tx.validity_range.upper_bound.bound_type is {
-          Finite(tx_upper) -> tx_upper <= payload_ttl
-          _ -> False
-        }
-
-      and {
-        payload_user_pkh == expected_user_pkh,
-        payload_tier != tier_invalid,
-        ttl_ok,
-        payload_policy == security_policy_id,
-        payload_network == network_id,
-      }
-    } else {
-      False
+    let ttl_ok = when tx.validity_range.upper_bound.bound_type is {
+      Finite(tx_upper) -> tx_upper <= payload_ttl
+      _ -> False
     }
+
+    and {
+      payload_user_pkh == expected_user_pkh,
+      payload_tier != tier_invalid,
+      ttl_ok,
+      payload_policy == security_policy_id,
+      payload_network == network_id,
+    }
+  } else {
+    False
+  }
 
   // 7. Issuer membership in TEL.
   let issuer_ok = pairs.has_key(gs_datum.trusted_entity_vkeys, issuer_vkey)
 
   // 8. Ed25519 signature (only invoked when prior gates pass — saves gas on
   // the sad path where lengths/membership already failed).
-  let sig_ok =
-    if lengths_ok && issuer_ok {
-      verify_ed25519_signature(issuer_vkey, payload, signature)
-    } else {
-      False
-    }
+  let sig_ok = if lengths_ok && issuer_ok {
+    verify_ed25519_signature(issuer_vkey, payload, signature)
+  } else {
+    False
+  }
 
   and {
     lengths_ok,
@@ -360,12 +353,11 @@ test encode_valid_until_encodes_value_big_endian() {
 // fields, so TEL contents and TTL are irrelevant in these tests.
 
 test attestation_fails_when_payload_too_short() {
-  let proof =
-    AttestationProof {
-      payload: #"aabb",
-      signature: test_invalid_signature,
-      issuer_vkey: test_issuer_vkey,
-    }
+  let proof = AttestationProof {
+    payload: #"aabb",
+    signature: test_invalid_signature,
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -377,20 +369,18 @@ test attestation_fails_when_payload_too_short() {
 }
 
 test attestation_fails_when_payload_too_long() {
-  let valid =
-    make_payload(
-      test_user_pkh,
-      1,
-      test_ttl_ms,
-      test_security_policy_id,
-      test_network_id,
-    )
-  let proof =
-    AttestationProof {
-      payload: bytearray.concat(valid, #"ff"),
-      signature: test_invalid_signature,
-      issuer_vkey: test_issuer_vkey,
-    }
+  let valid = make_payload(
+    test_user_pkh,
+    1,
+    test_ttl_ms,
+    test_security_policy_id,
+    test_network_id,
+  )
+  let proof = AttestationProof {
+    payload: bytearray.concat(valid, #"ff"),
+    signature: test_invalid_signature,
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -402,18 +392,17 @@ test attestation_fails_when_payload_too_long() {
 }
 
 test attestation_fails_when_signature_wrong_length() {
-  let proof =
-    AttestationProof {
-      payload: make_payload(
-        test_user_pkh,
-        1,
-        test_ttl_ms,
-        test_security_policy_id,
-        test_network_id,
-      ),
-      signature: #"aabb",
-      issuer_vkey: test_issuer_vkey,
-    }
+  let proof = AttestationProof {
+    payload: make_payload(
+      test_user_pkh,
+      1,
+      test_ttl_ms,
+      test_security_policy_id,
+      test_network_id,
+    ),
+    signature: #"aabb",
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -425,18 +414,17 @@ test attestation_fails_when_signature_wrong_length() {
 }
 
 test attestation_fails_when_vkey_wrong_length() {
-  let proof =
-    AttestationProof {
-      payload: make_payload(
-        test_user_pkh,
-        1,
-        test_ttl_ms,
-        test_security_policy_id,
-        test_network_id,
-      ),
-      signature: test_invalid_signature,
-      issuer_vkey: #"cccc",
-    }
+  let proof = AttestationProof {
+    payload: make_payload(
+      test_user_pkh,
+      1,
+      test_ttl_ms,
+      test_security_policy_id,
+      test_network_id,
+    ),
+    signature: test_invalid_signature,
+    issuer_vkey: #"cccc",
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -451,18 +439,17 @@ test attestation_fails_when_vkey_wrong_length() {
 
 test attestation_fails_when_user_pkh_mismatch() {
   let wrong_pkh = #"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-  let proof =
-    AttestationProof {
-      payload: make_payload(
-        wrong_pkh,
-        1,
-        test_ttl_ms,
-        test_security_policy_id,
-        test_network_id,
-      ),
-      signature: test_invalid_signature,
-      issuer_vkey: test_issuer_vkey,
-    }
+  let proof = AttestationProof {
+    payload: make_payload(
+      wrong_pkh,
+      1,
+      test_ttl_ms,
+      test_security_policy_id,
+      test_network_id,
+    ),
+    signature: test_invalid_signature,
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -475,18 +462,17 @@ test attestation_fails_when_user_pkh_mismatch() {
 
 test attestation_fails_when_tier_is_invalid() {
   // tier = 0x00 is the tier_invalid sentinel
-  let proof =
-    AttestationProof {
-      payload: make_payload(
-        test_user_pkh,
-        0,
-        test_ttl_ms,
-        test_security_policy_id,
-        test_network_id,
-      ),
-      signature: test_invalid_signature,
-      issuer_vkey: test_issuer_vkey,
-    }
+  let proof = AttestationProof {
+    payload: make_payload(
+      test_user_pkh,
+      0,
+      test_ttl_ms,
+      test_security_policy_id,
+      test_network_id,
+    ),
+    signature: test_invalid_signature,
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -499,18 +485,17 @@ test attestation_fails_when_tier_is_invalid() {
 
 test attestation_fails_when_ttl_expired() {
   // payload_ttl = tx_upper - 1 → tx_upper <= payload_ttl is False
-  let proof =
-    AttestationProof {
-      payload: make_payload(
-        test_user_pkh,
-        1,
-        test_tx_upper - 1,
-        test_security_policy_id,
-        test_network_id,
-      ),
-      signature: test_invalid_signature,
-      issuer_vkey: test_issuer_vkey,
-    }
+  let proof = AttestationProof {
+    payload: make_payload(
+      test_user_pkh,
+      1,
+      test_tx_upper - 1,
+      test_security_policy_id,
+      test_network_id,
+    ),
+    signature: test_invalid_signature,
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -523,18 +508,17 @@ test attestation_fails_when_ttl_expired() {
 
 test attestation_fails_when_upper_bound_is_infinite() {
   // PositiveInfinity matches the `_ -> False` branch in ttl_ok
-  let proof =
-    AttestationProof {
-      payload: make_payload(
-        test_user_pkh,
-        1,
-        test_ttl_ms,
-        test_security_policy_id,
-        test_network_id,
-      ),
-      signature: test_invalid_signature,
-      issuer_vkey: test_issuer_vkey,
-    }
+  let proof = AttestationProof {
+    payload: make_payload(
+      test_user_pkh,
+      1,
+      test_ttl_ms,
+      test_security_policy_id,
+      test_network_id,
+    ),
+    signature: test_invalid_signature,
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -547,18 +531,17 @@ test attestation_fails_when_upper_bound_is_infinite() {
 
 test attestation_fails_when_security_policy_mismatch() {
   let wrong_policy = #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-  let proof =
-    AttestationProof {
-      payload: make_payload(
-        test_user_pkh,
-        1,
-        test_ttl_ms,
-        wrong_policy,
-        test_network_id,
-      ),
-      signature: test_invalid_signature,
-      issuer_vkey: test_issuer_vkey,
-    }
+  let proof = AttestationProof {
+    payload: make_payload(
+      test_user_pkh,
+      1,
+      test_ttl_ms,
+      wrong_policy,
+      test_network_id,
+    ),
+    signature: test_invalid_signature,
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -571,18 +554,17 @@ test attestation_fails_when_security_policy_mismatch() {
 
 test attestation_fails_when_network_id_mismatch() {
   // Payload encodes mainnet (2); caller expects preprod (1)
-  let proof =
-    AttestationProof {
-      payload: make_payload(
-        test_user_pkh,
-        1,
-        test_ttl_ms,
-        test_security_policy_id,
-        2,
-      ),
-      signature: test_invalid_signature,
-      issuer_vkey: test_issuer_vkey,
-    }
+  let proof = AttestationProof {
+    payload: make_payload(
+      test_user_pkh,
+      1,
+      test_ttl_ms,
+      test_security_policy_id,
+      2,
+    ),
+    signature: test_invalid_signature,
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -597,18 +579,17 @@ test attestation_fails_when_network_id_mismatch() {
 
 test attestation_fails_when_issuer_not_in_tel() {
   // TEL is empty — issuer_ok = False short-circuits sig_ok computation
-  let proof =
-    AttestationProof {
-      payload: make_payload(
-        test_user_pkh,
-        1,
-        test_ttl_ms,
-        test_security_policy_id,
-        test_network_id,
-      ),
-      signature: test_invalid_signature,
-      issuer_vkey: test_issuer_vkey,
-    }
+  let proof = AttestationProof {
+    payload: make_payload(
+      test_user_pkh,
+      1,
+      test_ttl_ms,
+      test_security_policy_id,
+      test_network_id,
+    ),
+    signature: test_invalid_signature,
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -622,18 +603,17 @@ test attestation_fails_when_issuer_not_in_tel() {
 test attestation_fails_when_signature_is_invalid() {
   // lengths_ok, fields_ok, and issuer_ok all pass; only sig_ok = False
   // (test_invalid_signature is not a valid Ed25519 sig over the payload)
-  let proof =
-    AttestationProof {
-      payload: make_payload(
-        test_user_pkh,
-        1,
-        test_ttl_ms,
-        test_security_policy_id,
-        test_network_id,
-      ),
-      signature: test_invalid_signature,
-      issuer_vkey: test_issuer_vkey,
-    }
+  let proof = AttestationProof {
+    payload: make_payload(
+      test_user_pkh,
+      1,
+      test_ttl_ms,
+      test_security_policy_id,
+      test_network_id,
+    ),
+    signature: test_invalid_signature,
+    issuer_vkey: test_issuer_vkey,
+  }
   !verify_attestation_proof(
     proof,
     test_user_pkh,
@@ -648,14 +628,12 @@ test attestation_fails_when_signature_is_invalid() {
 
 test membership_fails_when_pkh_mismatch() {
   // proof.pkh != expected_user_pkh → short-circuits before TTL / MPF checks
-  let different_pkh =
-    #"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-  let proof =
-    MembershipProof {
-      pkh: test_user_pkh,
-      valid_until_ms: test_ttl_ms,
-      mpf_proof: [],
-    }
+  let different_pkh = #"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  let proof = MembershipProof {
+    pkh: test_user_pkh,
+    valid_until_ms: test_ttl_ms,
+    mpf_proof: [],
+  }
   !verify_membership_proof(
     proof,
     different_pkh,
@@ -666,12 +644,11 @@ test membership_fails_when_pkh_mismatch() {
 
 test membership_fails_when_ttl_expired() {
   // valid_until_ms = tx_upper - 1 → tx_upper <= valid_until_ms is False
-  let proof =
-    MembershipProof {
-      pkh: test_user_pkh,
-      valid_until_ms: test_tx_upper - 1,
-      mpf_proof: [],
-    }
+  let proof = MembershipProof {
+    pkh: test_user_pkh,
+    valid_until_ms: test_tx_upper - 1,
+    mpf_proof: [],
+  }
   !verify_membership_proof(
     proof,
     test_user_pkh,
@@ -682,12 +659,11 @@ test membership_fails_when_ttl_expired() {
 
 test membership_fails_when_upper_bound_is_infinite() {
   // PositiveInfinity hits the `_ -> False` branch
-  let proof =
-    MembershipProof {
-      pkh: test_user_pkh,
-      valid_until_ms: test_ttl_ms,
-      mpf_proof: [],
-    }
+  let proof = MembershipProof {
+    pkh: test_user_pkh,
+    valid_until_ms: test_ttl_ms,
+    mpf_proof: [],
+  }
   !verify_membership_proof(
     proof,
     test_user_pkh,
@@ -699,14 +675,12 @@ test membership_fails_when_upper_bound_is_infinite() {
 test membership_fails_when_mpf_proof_is_wrong() {
   // pkh and TTL checks pass; empty proof cannot satisfy a real 32-byte root.
   // mpf.from_root requires exactly 32 bytes (blake2b_256 digest size).
-  let fake_root =
-    #"0000000000000000000000000000000000000000000000000000000000000000"
-  let proof =
-    MembershipProof {
-      pkh: test_user_pkh,
-      valid_until_ms: test_ttl_ms,
-      mpf_proof: [],
-    }
+  let fake_root = #"0000000000000000000000000000000000000000000000000000000000000000"
+  let proof = MembershipProof {
+    pkh: test_user_pkh,
+    valid_until_ms: test_ttl_ms,
+    mpf_proof: [],
+  }
   !verify_membership_proof(
     proof,
     test_user_pkh,
@@ -720,14 +694,13 @@ test membership_fails_when_mpf_proof_is_wrong() {
 test kyc_proof_routes_attestation_variant() {
   // Short payload → verify_attestation_proof returns False (lengths_ok = False),
   // confirming the Attestation branch is reached.
-  let proof =
-    Attestation {
-      kyc_proof: AttestationProof {
-        payload: #"aa",
-        signature: test_invalid_signature,
-        issuer_vkey: test_issuer_vkey,
-      },
-    }
+  let proof = Attestation {
+    kyc_proof: AttestationProof {
+      payload: #"aa",
+      signature: test_invalid_signature,
+      issuer_vkey: test_issuer_vkey,
+    },
+  }
   !verify_kyc_proof(
     proof,
     test_user_pkh,
@@ -741,16 +714,14 @@ test kyc_proof_routes_attestation_variant() {
 test kyc_proof_routes_membership_variant() {
   // PKH mismatch → verify_membership_proof returns False,
   // confirming the Membership branch is reached.
-  let different_pkh =
-    #"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-  let proof =
-    Membership {
-      membership_proof: MembershipProof {
-        pkh: test_user_pkh,
-        valid_until_ms: test_ttl_ms,
-        mpf_proof: [],
-      },
-    }
+  let different_pkh = #"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  let proof = Membership {
+    membership_proof: MembershipProof {
+      pkh: test_user_pkh,
+      valid_until_ms: test_ttl_ms,
+      mpf_proof: [],
+    },
+  }
   !verify_kyc_proof(
     proof,
     different_pkh,

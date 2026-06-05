@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 use aiken/merkle_patricia_forestry.{Proof} as mpf
 
 /// A KYC proof is a short-lived Ed25519 signature from a trusted issuer

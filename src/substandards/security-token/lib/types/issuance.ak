@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 use aiken/builtin
 
 pub const issuance_cbor_hex_token_name = "IssuanceCborHex"
@@ -19,14 +18,13 @@ pub fn apply_hashed_parameter(
   let version_header = #"03"
 
   // Build the script: version + prefix + serialized_param + postfix
-  let script_bytes =
+  let script_bytes = builtin.append_bytearray(
+    version_header,
     builtin.append_bytearray(
-      version_header,
-      builtin.append_bytearray(
-        prefix,
-        builtin.append_bytearray(hashed_param, postfix),
-      ),
-    )
+      prefix,
+      builtin.append_bytearray(hashed_param, postfix),
+    ),
+  )
 
   // Hash with blake2b_224 to get the policy ID (28 bytes)
   builtin.blake2b_224(script_bytes)

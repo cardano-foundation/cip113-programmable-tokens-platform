@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 // Preview issuance_cbor_hex_policy_id, derived at standard-bootstrap time.
 // Update after re-running `cip113-sdk-ts/examples/bafin/00-deploy-standard.ts`
 // with NETWORK=preview: copy the new `issuance_cbor_hex` policy id here, then

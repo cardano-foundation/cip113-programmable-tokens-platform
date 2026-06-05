@@ -309,7 +309,7 @@ public class SecurityTokenController {
     }
 
     /** Build the full security-token registration chain (genesis → AddPowerUser →
-     *  registration) as three unsigned CBORs. The frontend signs all three in one
+     *  registration -> transfer registration) as four unsigned CBORs. The frontend signs all four in one
      *  CIP-30 {@code signTxs} call, then POSTs the signed CBORs (in order) to
      *  {@code /issue-token/submit-chain} which submits them sequentially via the
      *  backend's submission service — bypassing the wallet's submission backend so
@@ -336,7 +336,7 @@ public class SecurityTokenController {
             // Use HashMap (Map.of caps at 10 entries; we now have 12).
             // Null-value entries (e.g. the optional 4th tx) are skipped so the
             // JSON response omits them, keeping the wire shape forward-compat.
-            java.util.Map<String, Object> resp = new java.util.HashMap<>();
+            Map<String, Object> resp = new java.util.HashMap<>();
             resp.put("genesisCborHex", meta.genesisCborHex());
             resp.put("addPowerUserCborHex", meta.addPowerUserCborHex());
             resp.put("registrationCborHex", meta.registrationCborHex());

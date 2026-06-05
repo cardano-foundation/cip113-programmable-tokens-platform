@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 use aiken/collection/dict
 use aiken/collection/list
 use aiken_design_patterns/linked_list.{
@@ -45,11 +44,10 @@ validator mint(
       Init { root_output_index } -> {
         // Nonce-gated. GS doesn't exist yet at bootstrap — the operator-held
         // one-shot UTxO is the implicit gate, same pattern as power_users.
-        let nonce_validated =
-          list.any(
-            self.inputs,
-            fn(input) { input.output_reference == init_input_out_ref },
-          )
+        let nonce_validated = list.any(
+          self.inputs,
+          fn(input) { input.output_reference == init_input_out_ref },
+        )
         let root_output = utils.safe_list_at(self.outputs, root_output_index)
         and {
           dict.size(tokens(self.mint, policy_id)) == 1,
@@ -58,12 +56,11 @@ validator mint(
         }
       }
       Deinit { root_input_index, global_state_ref_input_index } -> {
-        let admin =
-          admin_from_ref_input(
-            self.reference_inputs,
-            global_state_ref_input_index,
-            global_state_policy_id,
-          )
+        let admin = admin_from_ref_input(
+          self.reference_inputs,
+          global_state_ref_input_index,
+          global_state_policy_id,
+        )
         let root_input = utils.safe_list_at(self.inputs, root_input_index)
         and {
           must_be_signed_by_credential(self, admin),
@@ -79,18 +76,23 @@ validator mint(
         appended_node_output_index,
         global_state_ref_input_index,
       } -> {
-        let admin =
-          admin_from_ref_input(
-            self.reference_inputs,
-            global_state_ref_input_index,
-            global_state_policy_id,
-          )
-        let anchor_input =
-          utils.safe_list_at(self.inputs, anchor_node_input_index)
-        let anchor_output =
-          utils.safe_list_at(self.outputs, anchor_node_output_index)
-        let new_node_output =
-          utils.safe_list_at(self.outputs, appended_node_output_index)
+        let admin = admin_from_ref_input(
+          self.reference_inputs,
+          global_state_ref_input_index,
+          global_state_policy_id,
+        )
+        let anchor_input = utils.safe_list_at(
+          self.inputs,
+          anchor_node_input_index,
+        )
+        let anchor_output = utils.safe_list_at(
+          self.outputs,
+          anchor_node_output_index,
+        )
+        let new_node_output = utils.safe_list_at(
+          self.outputs,
+          appended_node_output_index,
+        )
         and {
           must_be_signed_by_credential(self, admin),
           dict.size(tokens(self.mint, policy_id)) == 1,
@@ -128,18 +130,23 @@ validator mint(
         anchor_node_output_index,
         global_state_ref_input_index,
       } -> {
-        let admin =
-          admin_from_ref_input(
-            self.reference_inputs,
-            global_state_ref_input_index,
-            global_state_policy_id,
-          )
-        let anchor_input =
-          utils.safe_list_at(self.inputs, anchor_node_input_index)
-        let removing_input =
-          utils.safe_list_at(self.inputs, removed_node_input_index)
-        let anchor_output =
-          utils.safe_list_at(self.outputs, anchor_node_output_index)
+        let admin = admin_from_ref_input(
+          self.reference_inputs,
+          global_state_ref_input_index,
+          global_state_policy_id,
+        )
+        let anchor_input = utils.safe_list_at(
+          self.inputs,
+          anchor_node_input_index,
+        )
+        let removing_input = utils.safe_list_at(
+          self.inputs,
+          removed_node_input_index,
+        )
+        let anchor_output = utils.safe_list_at(
+          self.outputs,
+          anchor_node_output_index,
+        )
         and {
           must_be_signed_by_credential(self, admin),
           dict.size(tokens(self.mint, policy_id)) == 1,

@@ -1,4 +1,3 @@
-// Ported from easy1staking-com/fn-bafin-cardano-sc (commit 2fce4c39b0d4cf4412016ba101a3560b336927c9). See ATTRIBUTION.md.
 use cardano/address.{Address, Credential, Script}
 use cardano/assets.{from_asset, from_lovelace, merge}
 use cardano/transaction.{InlineDatum, Input, Output, OutputReference}
