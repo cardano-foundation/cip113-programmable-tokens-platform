@@ -24,7 +24,7 @@ import {
 import { getPaymentKeyHash } from '@/lib/utils/address';
 import { getExplorerTxUrl } from '@/lib/utils/format';
 import { getKycExtendedAdminPkh } from '@/lib/api/kyc-extended';
-import type { KycRegisterRequest, KycExtendedRegisterRequest, Cip170AttestationData } from '@/types/api';
+import type { KycRegisterRequest, KycExtendedRegisterRequest, SecurityTokenRegisterRequest, Cip170AttestationData } from '@/types/api';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
 import { Shield, Copy, QrCode } from 'lucide-react';
 
@@ -170,9 +170,14 @@ export function KycBuildSignSubmitStep({
       const adminAddress = addresses[0];
 
       const isKycExtended = wizardState.flowId === 'kyc-extended';
+      const isSecurityToken = wizardState.flowId === 'security-token';
 
-      // kyc-extended: issuerAdminPkh must be the backend's signing key PKH so the
+      // kyc-extended: issuerAdminPkh must be the BACKEND's signing key PKH so the
       // backend can autonomously sign UpdateMemberRootHash transactions.
+      //
+      // security-token: issuerAdminPkh must be the USER's wallet PKH because
+      // BaFin's on-chain admin gates every admin action on a signature from
+      // `admin_credential_hash`, which was set to the wallet PKH at genesis.
       let adminPubKeyHash: string;
       if (isKycExtended) {
         const adminInfo = await getKycExtendedAdminPkh();
@@ -181,8 +186,14 @@ export function KycBuildSignSubmitStep({
         adminPubKeyHash = getPaymentKeyHash(adminAddress);
       }
 
-      const regRequest: KycRegisterRequest | KycExtendedRegisterRequest = {
-        substandardId: isKycExtended ? 'kyc-extended' : 'kyc',
+      const substandardId = isKycExtended
+        ? 'kyc-extended'
+        : isSecurityToken
+          ? 'security-token'
+          : 'kyc';
+
+      const regRequest: KycRegisterRequest | KycExtendedRegisterRequest | SecurityTokenRegisterRequest = {
+        substandardId,
         feePayerAddress: adminAddress,
         assetName: stringToHex(tokenDetails.assetName),
         quantity: tokenDetails.quantity,

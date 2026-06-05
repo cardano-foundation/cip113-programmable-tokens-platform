@@ -20,3 +20,4 @@ import './flows/dummy-flow.tsx';
 import './flows/freeze-and-seize-flow.tsx';
 import './flows/kyc-flow.tsx';
 import './flows/kyc-extended-flow.tsx';
+import './flows/security-token-flow.tsx';

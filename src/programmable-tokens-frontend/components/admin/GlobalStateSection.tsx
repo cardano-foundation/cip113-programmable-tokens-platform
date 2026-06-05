@@ -17,9 +17,20 @@ import {
   Loader2,
 } from "lucide-react";
 import { AdminTokenSelector } from "./AdminTokenSelector";
-import { AdminTokenInfo } from "@/lib/api/admin";
+import {
+  AdminTokenInfo,
+  SecurityTokenCapability,
+  hasSecurityTokenCapability,
+} from "@/lib/api/admin";
 import { getSigningEntityVkey } from "@/lib/api/keri";
 import { readGlobalState, updateGlobalState } from "@/lib/api/compliance";
+import {
+  buildGlobalStateUpdateChain,
+  submitTokenChain,
+  getSecurityTokenGlobalState,
+  acknowledgeRootPublish,
+  type GsChangeSpec,
+} from "@/lib/api/security-token";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useToast } from "@/components/ui/use-toast";
 import { getExplorerTxUrl } from "@/lib/utils";
@@ -41,9 +52,16 @@ export function GlobalStateSection({
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
 
-  const manageableTokens = tokens.filter(
-    (t) => t.roles.includes("ISSUER_ADMIN") && t.substandardId === "kyc"
-  );
+  // kyc: legacy ISSUER_ADMIN role gating.
+  // security-token: BaFin's GS spend validator is admin-gated via the
+  //   admin_credential_hash field of the datum — anyone with the ADMIN
+  //   capability bit in the on-chain power-users LL counts as such.
+  const manageableTokens = tokens.filter((t) => {
+    if (t.substandardId === "security-token") {
+      return hasSecurityTokenCapability(t, SecurityTokenCapability.ADMIN);
+    }
+    return t.roles.includes("ISSUER_ADMIN") && t.substandardId === "kyc";
+  });
 
   const [selectedToken, setSelectedToken] = useState<AdminTokenInfo | null>(null);
   const [step, setStep] = useState<SectionStep>("form");
@@ -94,11 +112,18 @@ export function GlobalStateSection({
   }, [showToast]);
 
   useEffect(() => {
-    if (selectedToken) {
-      loadGlobalState(selectedToken.policyId);
-    } else {
+    if (!selectedToken) {
       setGlobalState(null);
+      return;
     }
+    // security-token has its own GS endpoint at /api/v1/security-token/.../global-state
+    // and renders SecurityTokenGlobalStatePanel below; the kyc compliance endpoint
+    // would 404 for security-token policies, so skip the load here.
+    if (selectedToken.substandardId === "security-token") {
+      setGlobalState(null);
+      return;
+    }
+    loadGlobalState(selectedToken.policyId);
   }, [selectedToken, loadGlobalState]);
 
   // Detect which fields changed
@@ -225,7 +250,7 @@ export function GlobalStateSection({
 
       setTxHash(lastHash);
       setStep("success");
-      showToast({ title: "Global State Updated", description: `${changes.length} change(s) submitted`, variant: "success" });
+      showToast({ title: "Global state updated", description: `${changes.length} change(s) submitted`, variant: "success" });
     } catch (error) {
       console.error("Global state update error:", error);
       const msg = error instanceof Error
@@ -250,9 +275,9 @@ export function GlobalStateSection({
     return (
       <div className="flex flex-col items-center py-12 px-6">
         <Settings className="h-16 w-16 text-dark-600 mb-4" />
-        <h3 className="text-lg font-semibold text-white mb-2">No KYC Token Management Access</h3>
+        <h3 className="text-lg font-semibold text-white mb-2">No Global-State Management Access</h3>
         <p className="text-sm text-dark-400 text-center">
-          You don&apos;t have issuer admin permissions for any KYC tokens.
+          You don&apos;t hold admin capability for any registered tokens.
         </p>
       </div>
     );
@@ -291,6 +316,28 @@ export function GlobalStateSection({
         <div className="h-12 w-12 border-4 border-primary-500 border-t-transparent rounded-full animate-spin mb-4" />
         <p className="text-white font-medium">Waiting for signature...</p>
         <p className="text-sm text-dark-400 mt-2">Please confirm the transaction in your wallet</p>
+      </div>
+    );
+  }
+
+  // Branch render: security-tokens use the BaFin GS validator which has a
+  // different datum shape, different actions, and admin gating via
+  // admin_credential_hash (not a power-user role). Render its own panel.
+  if (selectedToken?.substandardId === "security-token") {
+    return (
+      <div className="space-y-6">
+        <AdminTokenSelector
+          tokens={manageableTokens}
+          selectedToken={selectedToken}
+          onSelect={setSelectedToken}
+          disabled={false}
+          filterByRole="ISSUER_ADMIN"
+        />
+        <SecurityTokenGlobalStatePanel
+          policyId={selectedToken.policyId}
+          adminAddress={adminAddress}
+          signingEntityVkey={signingEntityVkey}
+        />
       </div>
     );
   }
@@ -532,5 +579,480 @@ export function GlobalStateSection({
         </div>
       )}
     </form>
+  );
+}
+
+// ── Security-token global state panel ───────────────────────────────────────
+//
+// Each BaFin GlobalStateSpendAction is one redeemer variant, and the
+// global_state_spend_validator enforces the action's effect on the continuing
+// datum. That means EACH datum field change must be a separate transaction
+// signed by the admin wallet. v1 ships UpdateMemberRootHash; PauseTransfers /
+// SetRequiresReceiverKyc / ModifySecurityInfo / RotateAdmin / trusted-entity
+// changes all follow the same pattern (one backend endpoint that builds the
+// one-action tx, the same signing flow here).
+
+function SecurityTokenGlobalStatePanel({
+  policyId,
+  adminAddress,
+  signingEntityVkey,
+}: { policyId: string; adminAddress: string; signingEntityVkey: string | null }) {
+  const { wallet } = useWallet();
+  const { toast: showToast } = useToast();
+
+  // On-chain (source of truth on load + after Refresh / save)
+  const [onchain, setOnchain] = useState<{
+    transfersPaused: boolean;
+    mintableAmount: number;
+    requiresReceiverKyc: boolean;
+    securityInfoHex: string | null;
+    memberRootHash: string | null;
+    memberRootHashLocal: string | null;
+    trustedEntityVkeys: string[];
+  } | null>(null);
+
+  // Editable mirror — initialised from on-chain, modified by user
+  const [transfersPaused, setTransfersPaused] = useState(false);
+  const [requiresReceiverKyc, setRequiresReceiverKyc] = useState(false);
+  const [securityInfo, setSecurityInfo] = useState("");
+  const [trustedEntities, setTrustedEntities] = useState<string[]>([]);
+  const [newEntityInput, setNewEntityInput] = useState("");
+  const [republishRoot, setRepublishRoot] = useState(false);
+
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [submittedHashes, setSubmittedHashes] = useState<string[]>([]);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const gs = await getSecurityTokenGlobalState(policyId);
+      const next = {
+        transfersPaused: gs.transfersPaused,
+        mintableAmount: gs.mintableAmount,
+        requiresReceiverKyc: gs.requiresReceiverKyc,
+        securityInfoHex: gs.securityInfoHex ?? null,
+        memberRootHash: gs.memberRootHash ?? null,
+        memberRootHashLocal: gs.memberRootHashLocal ?? null,
+        trustedEntityVkeys: gs.trustedEntityVkeys ?? [],
+      };
+      setOnchain(next);
+      // Reset editable mirror to chain values
+      setTransfersPaused(next.transfersPaused);
+      setRequiresReceiverKyc(next.requiresReceiverKyc);
+      setSecurityInfo(next.securityInfoHex ?? "");
+      setTrustedEntities([...next.trustedEntityVkeys]);
+      // Default the re-publish checkbox to TRUE when the on-chain root is stale,
+      // so the admin doesn't have to remember to tick it.
+      setRepublishRoot(
+        next.memberRootHashLocal !== null
+          && next.memberRootHash !== null
+          && next.memberRootHashLocal.toLowerCase() !== next.memberRootHash.toLowerCase()
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [policyId]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Detect changes
+  const trustedAdded = onchain
+    ? trustedEntities.filter((v) => !onchain.trustedEntityVkeys.includes(v))
+    : [];
+  const trustedRemoved = onchain
+    ? onchain.trustedEntityVkeys.filter((v) => !trustedEntities.includes(v))
+    : [];
+  const pauseChanged = onchain && transfersPaused !== onchain.transfersPaused;
+  const requiresChanged = onchain && requiresReceiverKyc !== onchain.requiresReceiverKyc;
+  const securityChanged = onchain && securityInfo !== (onchain.securityInfoHex ?? "");
+  const hasChanges = pauseChanged || requiresChanged || securityChanged
+    || trustedAdded.length > 0 || trustedRemoved.length > 0 || republishRoot;
+
+  const buildChangeList = (): GsChangeSpec[] => {
+    const changes: GsChangeSpec[] = [];
+    if (pauseChanged) changes.push({ action: "PauseTransfers", transfersPaused });
+    if (securityChanged) {
+      // We treat the input as raw hex of a CBOR Data value. If the user typed
+      // plain text, we wrap it as CBOR bytes (major type 2). For most BaFin
+      // setups the field is opaque, so either is fine — backend just relays.
+      changes.push({
+        action: "ModifySecurityInfo",
+        newSecurityInfoHex: isHex(securityInfo)
+          ? securityInfo
+          : textToCborBytesHex(securityInfo),
+      });
+    }
+    for (const v of trustedRemoved) {
+      changes.push({ action: "RemoveTrustedEntity", trustedVkeyHex: v });
+    }
+    for (const v of trustedAdded) {
+      // Backend takes metadataHex as Data CBOR — pass an empty Map (a0).
+      changes.push({
+        action: "AddTrustedEntity",
+        trustedVkeyHex: v,
+        trustedMetadataHex: "a0",
+      });
+    }
+    if (requiresChanged) {
+      changes.push({
+        action: "SetRequiresReceiverKyc",
+        requiresReceiverKycEnabled: requiresReceiverKyc,
+      });
+    }
+    if (republishRoot) {
+      // Backend pulls the current local MPF root when newMemberRootHashHex omitted.
+      changes.push({ action: "UpdateMemberRootHash" });
+    }
+    return changes;
+  };
+
+  const handleSave = async () => {
+    if (!wallet) { setError("Connect a wallet first"); return; }
+    const changes = buildChangeList();
+    if (changes.length === 0) return;
+    setBusy(true);
+    setError(null);
+    setSubmittedHashes([]);
+    try {
+      const { unsignedCborTxs } = await buildGlobalStateUpdateChain(
+        policyId, adminAddress, changes);
+      // Sign all N at once via CIP-103 batch signing (wallet wrapper falls
+      // back to sequential signTx if the wallet doesn't support cip103).
+      const signedCbors = await wallet.signTxs(unsignedCborTxs, true);
+      const submit = await submitTokenChain(signedCbors);
+      if (submit.error) throw new Error(submit.error);
+      setSubmittedHashes(submit.txHashes);
+      showToast({
+        title: "Global state updated",
+        description: `${submit.txHashes.length} transaction${submit.txHashes.length !== 1 ? "s" : ""} submitted`,
+        variant: "success",
+      });
+      // If we just published a new member root, notify the backend so it can
+      // update memberRootHashOnchain / lastRootUpdateTxHash / lastRootUpdateAt
+      // and mark current leaves as published. The autonomous sync job used to
+      // do this after submit+confirm; now it's user-driven so we have to ack.
+      const rootIdx = changes.findIndex((c) => c.action === "UpdateMemberRootHash");
+      if (rootIdx >= 0 && submit.txHashes[rootIdx]) {
+        try {
+          const newRoot = changes[rootIdx].newMemberRootHashHex
+            ?? onchain?.memberRootHashLocal
+            ?? "";
+          if (newRoot) {
+            await acknowledgeRootPublish(policyId, {
+              txHash: submit.txHashes[rootIdx],
+              newRootHashHex: newRoot,
+            });
+          }
+        } catch (ackErr) {
+          // Non-fatal: the chain has the new root regardless; the DB just
+          // shows stale "needs publish" until the next refresh fixes it.
+          console.warn("root-publish ack failed:", ackErr);
+        }
+      }
+      // Optimistic refresh after a short delay (chain propagation)
+      setTimeout(() => { refresh(); }, 10_000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      showToast({ title: "Save failed", description: msg, variant: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loading || !onchain) {
+    return (
+      <div className="flex items-center justify-center gap-3 py-8">
+        <Loader2 className="h-5 w-5 text-primary-400 animate-spin" />
+        <span className="text-sm text-dark-300">Loading on-chain state…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-white">On-chain state</span>
+        <button
+          type="button"
+          onClick={refresh}
+          disabled={busy}
+          className="flex items-center gap-1.5 text-xs text-dark-400 hover:text-primary-400 transition-colors"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          Refresh
+        </button>
+      </div>
+
+      {/* Pause toggle */}
+      <div>
+        <label className="block text-sm font-medium text-white mb-2">Transfer status</label>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setTransfersPaused(true)}
+            disabled={busy}
+            className={cn("flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border transition-colors",
+              transfersPaused ? "bg-red-500/10 border-red-500 text-red-400" : "bg-dark-800 border-dark-700 text-dark-400 hover:border-dark-600")}
+          >
+            <PauseCircle className="h-4 w-4" /> Paused
+          </button>
+          <button
+            type="button"
+            onClick={() => setTransfersPaused(false)}
+            disabled={busy}
+            className={cn("flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg border transition-colors",
+              !transfersPaused ? "bg-green-500/10 border-green-500 text-green-400" : "bg-dark-800 border-dark-700 text-dark-400 hover:border-dark-600")}
+          >
+            <PlayCircle className="h-4 w-4" /> Active
+          </button>
+        </div>
+        {pauseChanged && <p className="mt-1 text-xs text-amber-400">Will submit: PauseTransfers</p>}
+      </div>
+
+      {/* requires_receiver_kyc */}
+      <div>
+        <label className="block text-sm font-medium text-white mb-2">Requires receiver KYC</label>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setRequiresReceiverKyc(true)}
+            disabled={busy}
+            className={cn("flex-1 px-4 py-2 rounded-lg border text-sm transition-colors",
+              requiresReceiverKyc ? "bg-primary-500/10 border-primary-500 text-primary-300" : "bg-dark-800 border-dark-700 text-dark-400 hover:border-dark-600")}
+          >Enabled</button>
+          <button
+            type="button"
+            onClick={() => setRequiresReceiverKyc(false)}
+            disabled={busy}
+            className={cn("flex-1 px-4 py-2 rounded-lg border text-sm transition-colors",
+              !requiresReceiverKyc ? "bg-primary-500/10 border-primary-500 text-primary-300" : "bg-dark-800 border-dark-700 text-dark-400 hover:border-dark-600")}
+          >Disabled</button>
+        </div>
+        {requiresChanged && <p className="mt-1 text-xs text-amber-400">Will submit: SetRequiresReceiverKyc</p>}
+      </div>
+
+      {/* mintable_amount (read-only — there's no direct update action) */}
+      <ReadOnlyField label="mintable_amount (no direct update — decremented by MintSecurity)"
+                     value={String(onchain.mintableAmount)} />
+
+      {/* security_info */}
+      <div>
+        <label className="block text-sm font-medium text-white mb-2">Security info</label>
+        <Input
+          value={securityInfo}
+          onChange={(e) => setSecurityInfo(e.target.value)}
+          placeholder="hex (CBOR Data) or plain text"
+          disabled={busy}
+        />
+        {securityChanged && <p className="mt-1 text-xs text-amber-400">Will submit: ModifySecurityInfo</p>}
+      </div>
+
+      {/* Trusted entities (KYC issuers) — fetched from on-chain GS datum's
+          trusted_entity_vkeys field. These vkeys are the only signers whose
+          KYC attestations are accepted by transfer_logic_script.withdraw. */}
+      <div className="pt-3 border-t border-dark-700">
+        <div className="flex items-center justify-between mb-2">
+          <label className="block text-sm font-medium text-white">
+            Trusted entities (KYC proof issuers)
+          </label>
+          <span className="text-[10px] text-dark-500">
+            on-chain: {onchain.trustedEntityVkeys.length}
+          </span>
+        </div>
+        <p className="text-xs text-dark-400 mb-2">
+          Ed25519 vkeys whose KYC attestations transfer_logic_script will accept.
+          {signingEntityVkey && !onchain.trustedEntityVkeys.includes(signingEntityVkey) && (
+            <span className="text-amber-400 ml-1">
+              ⚠ Your backend&apos;s signing entity isn&apos;t in this list yet —
+              add it so KYC proofs issued here verify on chain.
+            </span>
+          )}
+        </p>
+        <div className="space-y-1">
+          {trustedEntities.length === 0 && (
+            <p className="text-xs text-dark-500 italic">
+              No trusted entities on chain yet. Add one below (or use the
+              &quot;+ Add backend signing entity&quot; quick-add).
+            </p>
+          )}
+          {trustedEntities.map((v) => {
+            const isNew = !onchain.trustedEntityVkeys.includes(v);
+            return (
+              <div key={v} className="flex items-center justify-between gap-2 p-2 bg-dark-900 rounded">
+                <p className={cn("text-xs font-mono break-all", isNew ? "text-amber-300" : "text-dark-300")}>{v}</p>
+                <button
+                  type="button"
+                  onClick={() => setTrustedEntities((cur) => cur.filter((x) => x !== v))}
+                  disabled={busy}
+                  className="text-dark-400 hover:text-red-400"
+                  title="Remove"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <div className="flex gap-2 mt-2">
+          <Input
+            value={newEntityInput}
+            onChange={(e) => setNewEntityInput(e.target.value)}
+            placeholder="vkey hex (32 bytes)"
+            disabled={busy}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              const v = newEntityInput.trim().toLowerCase();
+              if (!v) return;
+              if (!/^[0-9a-f]{64}$/.test(v)) {
+                setError("trusted vkey must be 32 bytes hex (64 chars)");
+                return;
+              }
+              if (trustedEntities.includes(v)) return;
+              setTrustedEntities((cur) => [...cur, v]);
+              setNewEntityInput("");
+            }}
+            disabled={busy}
+          >
+            <Plus className="h-4 w-4 mr-1" /> Add
+          </Button>
+        </div>
+        {/* Quick-add the backend's KERI signing-entity vkey — it's the issuer
+            of KYC proofs this backend produces, so it MUST be in the trusted
+            entity list for any KYC proof generated locally to verify on chain. */}
+        {signingEntityVkey && !trustedEntities.includes(signingEntityVkey) && (
+          <Button
+            type="button"
+            variant="outline"
+            className="text-xs h-7 px-3 mt-2"
+            onClick={() => setTrustedEntities((cur) => [...cur, signingEntityVkey])}
+            disabled={busy}
+            title={"Add this backend's KERI signing-entity vkey: " + signingEntityVkey}
+          >
+            + Add backend signing entity
+          </Button>
+        )}
+        {(trustedAdded.length > 0 || trustedRemoved.length > 0) && (
+          <p className="mt-1 text-xs text-amber-400">
+            Will submit: {trustedRemoved.length} RemoveTrustedEntity + {trustedAdded.length} AddTrustedEntity
+          </p>
+        )}
+      </div>
+
+      {/* member_root_hash — show on-chain vs local with a divergence indicator */}
+      {(() => {
+        const local = onchain.memberRootHashLocal;
+        const chain = onchain.memberRootHash;
+        const diverged =
+          local !== null && chain !== null
+            && local.toLowerCase() !== chain.toLowerCase();
+        return (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-sm font-medium text-white">Member root hash</label>
+              {diverged ? (
+                <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-0.5">
+                  <RefreshCw className="h-3 w-3" /> needs publish
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-success-300 bg-success-500/10 border border-success-500/30 rounded px-2 py-0.5">
+                  in sync
+                </span>
+              )}
+            </div>
+            <div className="space-y-2">
+              <div className="p-2 bg-dark-900 rounded border border-dark-700">
+                <p className="text-[10px] uppercase tracking-wider text-dark-500">On-chain</p>
+                <p className="text-xs font-mono text-dark-200 mt-0.5 break-all">{chain ?? "—"}</p>
+              </div>
+              <div className={cn(
+                "p-2 rounded border",
+                diverged ? "bg-amber-500/5 border-amber-500/40" : "bg-dark-900 border-dark-700"
+              )}>
+                <p className="text-[10px] uppercase tracking-wider text-dark-500">
+                  Local (computed from {trustedEntities.length === 0 ? "0" : "current"} enrolled members)
+                </p>
+                <p className={cn(
+                  "text-xs font-mono mt-0.5 break-all",
+                  diverged ? "text-amber-200" : "text-dark-200"
+                )}>{local ?? "—"}</p>
+              </div>
+            </div>
+            <label className="inline-flex items-center gap-2 mt-3 text-xs text-dark-300">
+              <input
+                type="checkbox"
+                checked={republishRoot}
+                onChange={(e) => setRepublishRoot(e.target.checked)}
+                disabled={busy || !diverged}
+              />
+              {diverged
+                ? "Publish the new local root in this batch (recommended)"
+                : "Re-publish current local root in this batch"}
+            </label>
+            {republishRoot && <p className="mt-1 text-xs text-amber-400">Will submit: UpdateMemberRootHash</p>}
+          </div>
+        );
+      })()}
+
+      {/* Save */}
+      <div className="pt-3 border-t border-dark-700 space-y-2">
+        <Button type="button" variant="primary" onClick={handleSave} disabled={busy || !hasChanges}>
+          {busy ? "Building + signing…" : hasChanges ? "Save & submit chain" : "No changes"}
+        </Button>
+        <p className="text-xs text-dark-400">
+          Each change = one mempool-chained admin tx. Your wallet will be asked to
+          sign N transactions in a single popup (CIP-103) where supported.
+        </p>
+        {submittedHashes.length > 0 && (
+          <div className="space-y-1 pt-2">
+            <p className="text-xs text-green-400">Submitted {submittedHashes.length} tx{submittedHashes.length !== 1 ? "es" : ""}:</p>
+            {submittedHashes.map((h, i) => (
+              <p key={h} className="text-xs font-mono text-green-300 break-all">#{i + 1}: {h}</p>
+            ))}
+          </div>
+        )}
+        {error && <p className="text-xs text-red-400">{error}</p>}
+      </div>
+    </div>
+  );
+}
+
+function isHex(s: string): boolean {
+  return /^[0-9a-fA-F]*$/.test(s) && s.length % 2 === 0;
+}
+
+function textToCborBytesHex(s: string): string {
+  const bytes = new TextEncoder().encode(s);
+  // CBOR major type 2 (byte string). Use 1-byte length if < 24, else 1-/2-/4-byte lengths.
+  let header: number[];
+  if (bytes.length < 24) header = [0x40 | bytes.length];
+  else if (bytes.length < 256) header = [0x58, bytes.length];
+  else if (bytes.length < 65536) header = [0x59, (bytes.length >> 8) & 0xff, bytes.length & 0xff];
+  else header = [0x5a,
+    (bytes.length >>> 24) & 0xff, (bytes.length >>> 16) & 0xff,
+    (bytes.length >>> 8) & 0xff, bytes.length & 0xff];
+  const all = new Uint8Array(header.length + bytes.length);
+  all.set(header, 0);
+  all.set(bytes, header.length);
+  return Array.from(all).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function ReadOnlyField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="p-2 bg-dark-900 rounded border border-dark-700">
+      <p className="text-[10px] uppercase tracking-wider text-dark-500">{label}</p>
+      <p className={cn("text-xs text-dark-200 mt-0.5 break-all", mono && "font-mono")}>
+        {value}
+      </p>
+    </div>
   );
 }

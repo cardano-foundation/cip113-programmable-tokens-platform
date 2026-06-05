@@ -111,7 +111,9 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
     public TransactionContext<List<String>> buildPreRegistrationTransaction(
             KycExtendedRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
-        // kyc-extended uses the combined build flow; pre-registration not needed separately.
+        // kyc-extended bundles the substandard stake-credential registration into
+        // the GS-init tx (see buildGlobalStateInitTransaction). The wizard doesn't
+        // call a separate pre-registration step for this substandard.
         return TransactionContext.ok(null, List.of());
     }
 

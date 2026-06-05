@@ -1,0 +1,28 @@
+name = "cip113/security-token"
+version = "0.0.0"
+compiler = "v1.1.21"
+plutus = "v3"
+license = "Apache-2.0"
+description = "Aiken contracts for the CIP-113 security-token substandard (ported from easy1staking-com/fn-bafin-cardano-sc)"
+
+[repository]
+user = "cardano-foundation"
+project = "cip113-programmable-tokens-platform"
+platform = "github"
+
+[[dependencies]]
+name = "aiken-lang/stdlib"
+version = "v3.1.0"
+source = "github"
+
+[[dependencies]]
+name = "anastasia-labs/aiken-design-patterns"
+version = "v1.6.0"
+source = "github"
+
+[[dependencies]]
+name = "aiken-lang/merkle-patricia-forestry"
+version = "v2.1.0"
+source = "github"
+
+[config]

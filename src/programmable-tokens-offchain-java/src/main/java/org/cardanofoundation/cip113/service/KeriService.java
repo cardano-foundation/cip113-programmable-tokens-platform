@@ -27,7 +27,7 @@ import org.cardanofoundation.cip113.model.keri.SchemaItem;
 import org.cardanofoundation.cip113.model.keri.SessionResponse;
 import org.cardanofoundation.cip113.repository.KycSessionRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
-import org.cardanofoundation.cip113.util.AddressUtil;
+import org.cardanofoundation.cip113.service.keri.TokenMembershipHook;
 import org.cardanofoundation.cip113.util.CESRStreamUtil;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.cardanofoundation.cip113.util.IpexNotificationHelper;
@@ -110,10 +110,12 @@ public class KeriService {
     private final ConcurrentHashMap<String, Thread> activePresentations = new ConcurrentHashMap<>();
 
     @Autowired(required = false)
-    private MpfTreeService mpfTreeService;
-
-    @Autowired(required = false)
     private ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
+
+    /** Per-substandard membership hooks keyed by {@link TokenMembershipHook#substandardId()}.
+     *  Populated by Spring with every {@link TokenMembershipHook} bean on the classpath, so
+     *  adding or removing a substandard's hook is a self-contained, no-edit change here. */
+    private final Map<String, TokenMembershipHook> membershipHooks;
 
     public KeriService(
             IdentifierConfig identifierConfig,
@@ -123,6 +125,7 @@ public class KeriService {
             SchemaConfig schemaConfig,
             ObjectMapper objectMapper,
             QuickTxBuilder quickTxBuilder,
+            List<TokenMembershipHook> hooks,
             @Value("${keri.identifier.name}") String identifierName,
             @Value("${keri.identifier.registry-name:kyc-registry}") String registryName,
             @Value("${keri.signing-mnemonic}") String signingMnemonic,
@@ -134,6 +137,9 @@ public class KeriService {
         this.schemaConfig = schemaConfig;
         this.objectMapper = objectMapper;
         this.quickTxBuilder = quickTxBuilder;
+        this.membershipHooks = hooks.stream()
+                .collect(java.util.stream.Collectors.toUnmodifiableMap(
+                        TokenMembershipHook::substandardId, h -> h));
         this.identifierName = identifierName;
         this.registryName = registryName;
         this.signingMnemonic = signingMnemonic;
@@ -503,36 +509,32 @@ public class KeriService {
         kyc.setKycProofValidUntil(proof.validUntilPosixMs());
         kycSessionRepository.save(kyc);
 
-        autoUpsertMpfMember(kyc, proof);
+        dispatchMembershipHook(kyc, proof);
 
         return proof;
     }
 
-    private void autoUpsertMpfMember(KycSessionEntity kyc, KycProofResponse proof) {
+    /** Look up the bound policy's substandard and forward the proof to the matching
+     *  {@link TokenMembershipHook}. Substandard-specific side effects (e.g. MPF
+     *  allowlist upsert) live entirely on the hook implementation, so {@code KeriService}
+     *  remains substandard-agnostic. */
+    private void dispatchMembershipHook(KycSessionEntity kyc, KycProofResponse proof) {
         String boundPolicyId = kyc.getBoundTokenPolicyId();
         if (boundPolicyId == null) return;
-        if (kyc.getCardanoAddress() == null) return;
-        if (mpfTreeService == null || programmableTokenRegistryRepository == null) return;
+        if (programmableTokenRegistryRepository == null) return;
 
         var regOpt = programmableTokenRegistryRepository.findByPolicyId(boundPolicyId);
-        if (regOpt.isEmpty() || !"kyc-extended".equals(regOpt.get().getSubstandardId())) return;
+        if (regOpt.isEmpty()) return;
+        String substandardId = regOpt.get().getSubstandardId();
 
-        // Identity in the kyc-extended MPF tree is the stake credential — the on-chain
-        // transfer validator extracts witnesses from prog-token outputs' stake credential.
-        byte[] pkh = AddressUtil.extractStakeCredHashFromAddress(kyc.getCardanoAddress());
-        if (pkh == null) {
-            log.warn("Cannot derive stake-cred PKH from address {} for auto-upsert (base address required)",
-                    kyc.getCardanoAddress());
-            return;
-        }
+        TokenMembershipHook hook = membershipHooks.get(substandardId);
+        if (hook == null) return; // no hook registered for this substandard — silently skip
+
         try {
-            mpfTreeService.putMember(boundPolicyId, pkh, proof.validUntilPosixMs(),
-                    kyc.getCardanoAddress(), kyc.getSessionId());
-            log.info("Auto-upserted member into kyc-extended MPF tree: policy={}, sessionId={}",
-                    boundPolicyId, kyc.getSessionId());
+            hook.onProofGenerated(kyc, proof);
         } catch (Exception e) {
-            log.warn("Failed to auto-upsert MPF member for policy {} session {}: {}",
-                    boundPolicyId, kyc.getSessionId(), e.getMessage());
+            log.warn("Membership hook for substandard '{}' threw for policy {} session {}: {}",
+                    substandardId, boundPolicyId, kyc.getSessionId(), e.getMessage());
         }
     }
 

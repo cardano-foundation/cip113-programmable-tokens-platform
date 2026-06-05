@@ -172,4 +172,47 @@ public class UtxoProvider {
         }
     }
 
+    /** Find the UTxO holding the specific NFT {@code (policyId, assetNameHex)}.
+     *
+     *  <p>Unlike {@link #findUtxosByPolicy} which only looks at the first asset
+     *  under a policy (and therefore misses linked-list node NFTs whose policy
+     *  also has a root NFT), this helper goes straight to the asset's
+     *  Blockfrost record, finds the single address holding it, and returns the
+     *  matching UTxO. Used by the admin-action handlers to resolve specific
+     *  power-user / denylist nodes by their unique asset name.
+     *
+     *  @return the UTxO holding the NFT, or {@link Optional#empty()} if the
+     *          asset isn't indexed yet or has no on-chain holder. */
+    public Optional<Utxo> findUtxoByAsset(String policyId, String assetNameHex) {
+        try {
+            String unit = policyId + assetNameHex.toLowerCase();
+            var addressesResult = bfBackendService.getAssetService().getAssetAddresses(unit, 1, 1);
+            if (!addressesResult.isSuccessful() || addressesResult.getValue() == null
+                    || addressesResult.getValue().isEmpty()) {
+                log.debug("findUtxoByAsset({}): no addresses found for asset", unit);
+                return Optional.empty();
+            }
+            String address = addressesResult.getValue().getFirst().getAddress();
+
+            var utxosResult = bfBackendService.getUtxoService().getUtxos(address, unit, 100, 1);
+            if (!utxosResult.isSuccessful() || utxosResult.getValue() == null
+                    || utxosResult.getValue().isEmpty()) {
+                log.debug("findUtxoByAsset({}): no UTxOs found at {}", unit, address);
+                return Optional.empty();
+            }
+            // Blockfrost can return more than one UTxO at the address that
+            // contains the unit. The linked-list invariant guarantees the NFT
+            // is unique (quantity == 1 in exactly one UTxO), so the first hit
+            // that actually contains the asset is the right one.
+            for (Utxo u : utxosResult.getValue()) {
+                boolean hasAsset = u.getAmount().stream()
+                        .anyMatch(a -> unit.equalsIgnoreCase(a.getUnit()));
+                if (hasAsset) return Optional.of(u);
+            }
+            return Optional.empty();
+        } catch (Exception e) {
+            log.warn("findUtxoByAsset({}, {}) failed: {}", policyId, assetNameHex, e.getMessage());
+            return Optional.empty();
+        }
+    }
 }

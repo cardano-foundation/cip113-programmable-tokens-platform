@@ -11,13 +11,19 @@ import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.entity.BlacklistInitEntity;
 import org.cardanofoundation.cip113.entity.FreezeAndSeizeTokenRegistrationEntity;
+import org.cardanofoundation.cip113.entity.KycExtendedTokenRegistrationEntity;
 import org.cardanofoundation.cip113.entity.KycTokenRegistrationEntity;
 import org.cardanofoundation.cip113.entity.ProgrammableTokenRegistryEntity;
+import org.cardanofoundation.cip113.entity.SecurityTokenPowerUserEntity;
+import org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
+import org.cardanofoundation.cip113.repository.KycExtendedTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.KycTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
+import org.cardanofoundation.cip113.repository.SecurityTokenPowerUserRepository;
+import org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository;
 import org.cardanofoundation.cip113.service.ProtocolBootstrapService;
 import org.cardanofoundation.cip113.service.UtxoProvider;
 import org.cardanofoundation.cip113.util.BalanceValueHelper;
@@ -41,6 +47,9 @@ public class AdminController {
 
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeRepo;
     private final KycTokenRegistrationRepository kycTokenRegistrationRepo;
+    private final KycExtendedTokenRegistrationRepository kycExtendedTokenRegistrationRepo;
+    private final SecurityTokenRegistrationRepository securityTokenRegistrationRepo;
+    private final SecurityTokenPowerUserRepository securityTokenPowerUserRepo;
     private final BlacklistInitRepository blacklistInitRepo;
     private final ProtocolBootstrapService protocolBootstrapService;
     private final ProgrammableTokenRegistryRepository programmableTokenRepo;
@@ -199,7 +208,100 @@ public class AdminController {
             }
         }
 
-        // 4. For dummy tokens - include ALL registered dummy tokens (anyone can mint)
+        // 4. Query kyc-extended tokens where user is issuer admin.
+        // For kyc-extended the issuer admin is normally the BACKEND signing key
+        // (so the backend can autonomously sign UpdateMemberRootHash), so this
+        // typically only matches when a dev wallet IS the backend admin.
+        List<KycExtendedTokenRegistrationEntity> kycExtIssuerTokens =
+                kycExtendedTokenRegistrationRepo.findByIssuerAdminPkh(pkh);
+        for (KycExtendedTokenRegistrationEntity token : kycExtIssuerTokens) {
+            String policyId = token.getProgrammableTokenPolicyId();
+            if (tokenMap.containsKey(policyId)) continue;
+
+            Optional<ProgrammableTokenRegistryEntity> registryEntry =
+                    programmableTokenRepo.findByPolicyId(policyId);
+            String assetName = registryEntry.map(ProgrammableTokenRegistryEntity::getAssetName).orElse("");
+            String assetNameDisplay = hexToString(assetName);
+            String substandardId = registryEntry.map(ProgrammableTokenRegistryEntity::getSubstandardId).orElse("kyc-extended");
+
+            AdminTokenDetails details = new AdminTokenDetails(
+                    null,
+                    token.getIssuerAdminPkh(),
+                    null,
+                    token.getTelPolicyId()
+            );
+            tokenMap.put(policyId, new AdminTokenInfo(
+                    policyId, assetName, assetNameDisplay,
+                    substandardId, List.of("ISSUER_ADMIN"), details));
+        }
+
+        // 5. Query security-token registrations where the connected wallet is
+        // a POWER USER (admin / minter / burner / pauser / force-transfer) for
+        // the token. This is broader than just "founding admin": it surfaces
+        // tokens where the wallet was added to the on-chain power-users
+        // linked-list later, and excludes tokens where the wallet has no
+        // capability at all — important when switching wallets so stale
+        // registrations don't bleed through.
+        //
+        // Each row carries the wallet's capabilities bitfield (mirrors the
+        // SecurityTokenPowerUserCapability enum). The frontend filters per
+        // page: mint needs MINTER|ADMIN, burn needs BURNER|ADMIN, etc.
+        List<SecurityTokenPowerUserEntity> securityTokenPus =
+                securityTokenPowerUserRepo.findByPowerUserPkh(pkh);
+        for (SecurityTokenPowerUserEntity pu : securityTokenPus) {
+            String policyId = pu.getProgrammableTokenPolicyId();
+            if (tokenMap.containsKey(policyId)) continue;
+
+            Optional<SecurityTokenRegistrationEntity> regOpt =
+                    securityTokenRegistrationRepo.findByProgrammableTokenPolicyId(policyId);
+            if (regOpt.isEmpty()) continue;
+            SecurityTokenRegistrationEntity token = regOpt.get();
+
+            Optional<ProgrammableTokenRegistryEntity> registryEntry =
+                    programmableTokenRepo.findByPolicyId(policyId);
+            // Asset name lives on SecurityTokenRegistrationEntity itself —
+            // fall back to it if the platform-wide ProgrammableTokenRegistryEntity
+            // row is missing (e.g. mid-flow recovery state).
+            String assetName = registryEntry
+                    .map(ProgrammableTokenRegistryEntity::getAssetName)
+                    .orElse(token.getSecurityAssetNameHex() != null ? token.getSecurityAssetNameHex() : "");
+            String assetNameDisplay = hexToString(assetName);
+            String substandardId = registryEntry
+                    .map(ProgrammableTokenRegistryEntity::getSubstandardId)
+                    .orElse("security-token");
+
+            // The frontend's AdminRole type only knows ISSUER_ADMIN and
+            // BLACKLIST_MANAGER; the chip renderer labels every other role
+            // as "Blacklist". So surface ONLY those two role strings here.
+            // Mint/burn/etc. tabs use the capabilities bitfield directly via
+            // hasSecurityTokenCapability() — they don't need a role string.
+            //
+            //   ISSUER_ADMIN     → set when wallet IS the on-chain admin OR
+            //                      when wallet holds the ADMIN capability
+            //                      (both imply they can perform admin-gated
+            //                      ops; SeizeSection filters by this string).
+            //   BLACKLIST_MANAGER → set when wallet holds the ADMIN capability
+            //                       (BaFin denylist mutations are admin-only
+            //                       per the on-chain mint script).
+            int caps = pu.getCapabilities();
+            boolean isOnChainAdmin = pkh.equals(token.getIssuerAdminPkh());
+            boolean hasAdminCap = (caps & 0b00001) != 0;
+            List<String> roles = new java.util.ArrayList<>();
+            if (isOnChainAdmin || hasAdminCap) roles.add("ISSUER_ADMIN");
+            if (hasAdminCap) roles.add("BLACKLIST_MANAGER");
+
+            AdminTokenDetails details = new AdminTokenDetails(
+                    token.getDenylistPolicyId(),
+                    token.getIssuerAdminPkh(),
+                    null,
+                    token.getGlobalStatePolicyId()
+            );
+            tokenMap.put(policyId, new AdminTokenInfo(
+                    policyId, assetName, assetNameDisplay,
+                    substandardId, roles, details, pu.getCapabilities()));
+        }
+
+        // 6. For dummy tokens - include ALL registered dummy tokens (anyone can mint)
         List<ProgrammableTokenRegistryEntity> dummyTokens =
                 programmableTokenRepo.findBySubstandardId("dummy");
 
@@ -357,8 +459,18 @@ public class AdminController {
             String assetNameDisplay,    // Human readable
             String substandardId,
             List<String> roles,         // ["ISSUER_ADMIN", "BLACKLIST_MANAGER"]
-            AdminTokenDetails details
+            AdminTokenDetails details,
+            /** Security-token only: bitfield of the connected wallet's BaFin
+             *  power-user capabilities for this token, mirrored from the
+             *  SecurityTokenPowerUserEntity row. Drives per-page filtering on
+             *  the frontend (mint → MINTER|ADMIN, burn → BURNER|ADMIN, etc.).
+             *  Null for non-security-token entries. */
+            Integer securityTokenCapabilities
     ) {
+        public AdminTokenInfo(String policyId, String assetName, String assetNameDisplay,
+                              String substandardId, List<String> roles, AdminTokenDetails details) {
+            this(policyId, assetName, assetNameDisplay, substandardId, roles, details, null);
+        }
     }
 
     public record AdminTokenDetails(

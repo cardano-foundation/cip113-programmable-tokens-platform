@@ -8,12 +8,19 @@ import { Card } from '@/components/ui/card';
 import { useToast } from '@/components/ui/use-toast';
 import { getSigningEntityVkey } from '@/lib/api/keri';
 import { getKycExtendedAdminPkh } from '@/lib/api/kyc-extended';
+import {
+  buildSecurityTokenChain,
+  submitTokenChain,
+  PowerUserCapability,
+} from '@/lib/api/security-token';
 import { useProtocolVersion } from '@/contexts/protocol-version-context';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import type { StepComponentProps } from '@/types/registration';
 
 interface KycConfigData {
   globalStatePolicyId: string;
+  /** security-token only: the prog-token policy id returned from the chain build. */
+  programmableTokenPolicyId?: string;
 }
 
 interface GlobalStateInitResponse {
@@ -45,6 +52,7 @@ export function KycConfigStep({
   onBack,
 }: StepComponentProps<KycConfigData>) {
   const isKycExtendedFlow = wizardState.flowId === 'kyc-extended';
+  const isSecurityTokenFlow = wizardState.flowId === 'security-token';
   const { wallet, rawApi } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
@@ -189,15 +197,164 @@ export function KycConfigStep({
       const { initGlobalState } = await import('@/lib/api/compliance');
 
       const isKycExtended = wizardState.flowId === 'kyc-extended';
+      const isSecurityToken = wizardState.flowId === 'security-token';
       const flowSubstandardId = isKycExtended ? 'kyc-extended' : 'kyc';
 
-      // kyc-extended must parameterise the global-state script with the backend's
+      // kyc-extended parameterises the global-state script with the BACKEND's
       // signing key PKH so the backend can autonomously sign UpdateMemberRootHash.
+      //
+      // security-token follows a different model: the on-chain
+      // `admin_credential_hash` is the USER's wallet PKH, because BaFin's
+      // global_state validator gates every admin action (AddPowerUser,
+      // AddTrustedEntity, RotateAdmin, …) on a signature from that key.
+      // Using the backend's PKH here would mean only the backend could ever
+      // sign admin txs — but the user signs in their wallet, so the tx would
+      // fail with `missingSignatories` pointing at the backend's PKH.
+      //
+      // (Autonomous MPF root sync for security-token is a separate problem
+      // left for a follow-up: either the user signs root-hash updates manually,
+      // or admin is later delegated to the backend via RotateAdmin.)
       let adminPkh: string | undefined;
       if (isKycExtended) {
         setStatusMessage('Fetching backend admin key…');
         const adminInfo = await getKycExtendedAdminPkh();
         adminPkh = adminInfo.adminPkh;
+      } else if (isSecurityToken) {
+        const { getPaymentKeyHash } = await import('@/lib/utils/address');
+        adminPkh = getPaymentKeyHash(adminAddress);
+      }
+
+      // Security-token: chained build + single-popup sign + batched submit.
+      //
+      // The backend assembles the full 3-tx registration chain in one call
+      // (genesis → AddPowerUser → registration), deterministically chained
+      // via mempool-visible UTxOs. The wallet signs all three in one CIP-30
+      // signTxs popup. The backend submits them sequentially via its own
+      // submission service, so the wallet's submission backend (which would
+      // typically reject mempool-chained txs) never sees the chain.
+      //
+      // No initial mint of security tokens happens here — registration sets
+      // up the prog-token policy in the CIP-113 directory + registers the
+      // substandard's stake credentials. The first actual MintSecurity is
+      // a separate admin action once everything is on chain.
+      if (isSecurityToken) {
+        const tokenDetails = wizardState.stepStates['token-details']?.data as {
+          assetName?: string;
+          quantity?: string;
+        } | undefined;
+        const allCaps =
+          PowerUserCapability.ADMIN |
+          PowerUserCapability.MINTER |
+          PowerUserCapability.BURNER |
+          PowerUserCapability.PAUSER |
+          PowerUserCapability.FORCE_TRANSFER;
+
+        // ── Phase 1: build the chain on the backend ──
+        setStatusMessage('Phase 1/3 — building the registration chain (genesis + AddPowerUser + register + transferLogic cert)…');
+        // Seed the GS datum's trusted_entity_vkeys with the wizard's chosen
+        // trusted entities (the kyc-config step lets the admin add/remove
+        // them). Almost always includes this backend's KERI signing-entity
+        // vkey — required so KYC proofs issued by this backend verify on
+        // chain immediately. Without this, the admin would have to run a
+        // separate AddTrustedEntity GS-update tx before the first transfer.
+        const initialTrustedEntityVkeys = trustedEntities.length > 0
+          ? trustedEntities
+          : (signingEntityVkey ? [signingEntityVkey] : []);
+
+        const chain = await buildSecurityTokenChain({
+          feePayerAddress: adminAddress,
+          assetName: tokenDetails?.assetName
+            ? Buffer.from(tokenDetails.assetName, 'utf8').toString('hex')
+            : '',
+          adminPubKeyHash: adminPkh!,
+          // Defaults to ON per BaFin's compliance posture: recipients must
+          // hold a fresh KYC attestation to receive tokens. The admin can
+          // toggle this off later from the admin page via the
+          // SetRequiresReceiverKyc global-state action.
+          requiresReceiverKyc: true,
+          initialMintableAmount: mintableAmount ? parseInt(mintableAmount, 10) : 0,
+          bootstrapPowerUserPkh: adminPkh,
+          bootstrapPowerUserCapabilities: allCaps,
+          bootstrapPowerUserLabel: 'Bootstrap admin',
+          initialTrustedEntityVkeys,
+          // Initial supply minted at registration (directory-mint validator requires
+          // a non-zero prog-token mint). The BaFin mintingLogic.withdraw runs in
+          // its registration-mode rubber-stamp branch — no GS spend / supply-cap
+          // enforcement at registration. Subsequent mints go through MintSecurity.
+          quantity: tokenDetails?.quantity || '1',
+        });
+
+        // ── Phase 2: single wallet popup signs all txs in the chain ──
+        // 4-tx shape when the backend included the transferLogic RegCert
+        // (it's optional but on by default). All txs go through the same
+        // CIP-103 batch so Eternl signs them as a single popup — including
+        // the script-cred RegCert that Eternl refuses via single-tx signTx.
+        const unsignedCbors = [
+          chain.genesisCborHex,
+          chain.addPowerUserCborHex,
+          chain.registrationCborHex,
+          ...(chain.registerTransferLogicCborHex ? [chain.registerTransferLogicCborHex] : []),
+        ];
+        const totalTxs = unsignedCbors.length;
+        setStatusMessage(`Phase 2/3 — please sign all ${totalTxs} transactions in a single wallet popup…`);
+        let signedCbors: string[];
+        try {
+          // CIP-30 signTxs (CIP-103). Most modern wallets (Eternl, Lace, Nami) support it.
+          signedCbors = await wallet.signTxs(unsignedCbors, true);
+        } catch (batchErr) {
+          // Fallback: sequential signTx (one popup per tx). Surface the reason
+          // so we know to keep the batch path primary.
+          console.warn('[security-token] signTxs batch failed, falling back to sequential signTx:',
+            (batchErr as Error)?.message);
+          setStatusMessage(`Phase 2/3 — wallet doesn't support batch sign, falling back to ${totalTxs} popups…`);
+          signedCbors = [];
+          for (const cbor of unsignedCbors) {
+            signedCbors.push(await wallet.signTx(cbor, true));
+          }
+        }
+
+        // ── Phase 3: backend submits the chain sequentially (mempool-chained) ──
+        setStatusMessage(`Phase 3/3 — submitting ${totalTxs} chained transactions to the network…`);
+        const submitResp = await submitTokenChain(signedCbors);
+        const submitted = submitResp.txHashes ?? [];
+        if (submitted.length < totalTxs || submitResp.error) {
+          showToast({
+            title: 'Chain submission incomplete',
+            description: submitResp.error
+              ? `Submitted ${submitted.length}/${totalTxs} — ${submitResp.error}`
+              : `Only ${submitted.length}/${totalTxs} transactions accepted by the network.`,
+            variant: 'error',
+          });
+        } else {
+          showToast({
+            title: 'Security token registered',
+            description: `All ${submitted.length} transactions submitted: ${submitted.map(h => h.slice(0, 8)).join(', ')}…`,
+            variant: 'default',
+          });
+        }
+
+        // Persist on BOTH .data and .result paths so downstream steps (e.g. the
+        // success step) can read globalStatePolicyId via onDataChange.
+        onDataChange({
+          globalStatePolicyId: chain.globalStatePolicyId,
+          programmableTokenPolicyId: chain.programmableTokenPolicyId,
+        });
+        onComplete({
+          stepId: 'kyc-config',
+          data: {
+            globalStatePolicyId: chain.globalStatePolicyId,
+            programmableTokenPolicyId: chain.programmableTokenPolicyId,
+            denylistPolicyId: chain.denylistPolicyId,
+            powerUsersPolicyId: chain.powerUsersPolicyId,
+            mintableAmount,
+            securityInfo,
+            trustedEntities,
+            chainTxHashes: submitted,
+          },
+          txHash: chain.registrationTxHash,
+          completedAt: Date.now(),
+        });
+        return;
       }
 
       const response = await initGlobalState(
@@ -215,7 +372,7 @@ export function KycConfigStep({
 
       if (!response.isSuccessful || !response.unsignedCborTx) {
         showToast({
-          title: 'Global State Init Failed',
+          title: 'Global state initialization failed',
           description: response.error || 'Failed to build Global State initialization transaction',
           variant: 'error',
         });
@@ -230,8 +387,8 @@ export function KycConfigStep({
       const globalStatePolicyId = response.metadata?.globalStatePolicyId || '';
 
       showToast({
-        title: 'Global State Submitted',
-        description: `Tx: ${txHash.slice(0, 16)}... — waiting for on-chain confirmation`,
+        title: 'Global state submitted',
+        description: `Tx: ${txHash.slice(0, 16)}… — waiting for on-chain confirmation`,
         variant: 'success',
       });
 
@@ -249,7 +406,7 @@ export function KycConfigStep({
       });
 
       showToast({
-        title: 'Global State Confirmed',
+        title: 'Global state confirmed',
         description: 'On-chain state confirmed and visible. Proceeding to token registration.',
         variant: 'success',
       });
@@ -269,7 +426,7 @@ export function KycConfigStep({
           : error.message;
       }
       showToast({
-        title: 'Global State Setup Failed',
+        title: 'Global state setup failed',
         description: errorMessage,
         variant: 'error',
       });
@@ -288,6 +445,41 @@ export function KycConfigStep({
           All fields can be updated later via the Admin Panel.
         </p>
       </div>
+
+      {isSecurityTokenFlow && (
+        <Card className="p-4 space-y-3 border border-primary-700/40 bg-primary-900/10">
+          <h4 className="text-sm font-medium text-white">What happens when you click &ldquo;Initialize&rdquo;</h4>
+          <p className="text-sm text-dark-300">
+            Setting up a BaFin-style security token chains <span className="text-white">four transactions</span>.
+            The backend builds them all up-front, your wallet signs them as a single batch (CIP-103), and the
+            backend submits them sequentially without waiting for confirmations.
+          </p>
+          <ol className="text-sm text-dark-300 space-y-2 list-decimal list-inside">
+            <li>
+              <span className="text-white">Genesis</span> — mints three NFTs and registers the minting-logic stake credential:
+              <ul className="ml-5 mt-1 list-disc list-inside text-xs text-dark-400 space-y-0.5">
+                <li><span className="font-mono text-primary-400">GlobalState NFT</span> — carries the configuration datum below</li>
+                <li><span className="font-mono text-primary-400">Denylist root NFT</span> — sentinel for the blocked-recipients list (starts empty)</li>
+                <li><span className="font-mono text-primary-400">Power-users root NFT</span> — sentinel for the role-holders list (starts empty)</li>
+              </ul>
+            </li>
+            <li>
+              <span className="text-white">AddPowerUser</span> — inserts your wallet into the power-users list with
+              all 5 capabilities (admin, mint, burn, pause, force-transfer).
+            </li>
+            <li>
+              <span className="text-white">Registration</span> — inserts the policy into the CIP-113 directory and mints the initial token supply.
+            </li>
+            <li>
+              <span className="text-white">TransferLogic cert</span> — registers the transfer-logic stake credential (Conway RegCert) so the first transfer can issue a withdraw-0.
+            </li>
+          </ol>
+          <p className="text-xs text-dark-400">
+            Each tx feeds the next via mempool chaining — no on-chain confirmation pauses. If your wallet
+            doesn&apos;t support CIP-103 batch signing, the flow falls back to one popup per transaction.
+          </p>
+        </Card>
+      )}
 
       <Card className="p-4 space-y-3">
         <h4 className="text-sm font-medium text-white">What the Global State contains</h4>
@@ -308,11 +500,31 @@ export function KycConfigStep({
             <span className="text-primary-400 font-mono text-xs mt-0.5">security_info</span>
             <span>Arbitrary compliance/regulation metadata stored on-chain</span>
           </li>
-          {isKycExtendedFlow && (
+          {(isKycExtendedFlow || isSecurityTokenFlow) && (
             <li className="flex items-start gap-2">
               <span className="text-primary-400 font-mono text-xs mt-0.5">member_root_hash</span>
               <span>Blake2b-256 root of the Merkle Patricia Forestry allowlist. Updated automatically by the backend whenever a user completes KYC. Transfers to recipients not in the tree are rejected on-chain.</span>
             </li>
+          )}
+          {isSecurityTokenFlow && (
+            <>
+              <li className="flex items-start gap-2">
+                <span className="text-primary-400 font-mono text-xs mt-0.5">admin_credential_hash</span>
+                <span>The pub-key hash of the BaFin admin (you). Gates rotate-admin and direct denylist updates.</span>
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary-400 font-mono text-xs mt-0.5">power_user_linked_list_policy_id</span>
+                <span>Policy of the linked list whose nodes are the role-holders (admin/mint/burn/pause/force).</span>
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary-400 font-mono text-xs mt-0.5">denylist_linked_list_policy_id</span>
+                <span>Policy of the linked list of blocked recipient pkhs. Transfers to anyone on the list are rejected on-chain.</span>
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-primary-400 font-mono text-xs mt-0.5">requires_receiver_kyc</span>
+                <span>If on, recipients must hold a fresh KYC attestation to receive tokens. Toggle later from the admin page.</span>
+              </li>
+            </>
           )}
         </ul>
       </Card>
@@ -461,7 +673,7 @@ export function KycConfigStep({
           isLoading={isProcessing}
           disabled={isProcessing}
         >
-          Initialize Global State & Continue
+          {isSecurityTokenFlow ? 'Register Security Token' : 'Initialize Global State & Continue'}
         </Button>
       </div>
     </div>

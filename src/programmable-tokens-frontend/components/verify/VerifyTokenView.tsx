@@ -3,10 +3,18 @@
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { CheckCircle, AlertCircle, Loader2, Shield } from "lucide-react";
-import type { KycExtendedTokenSummary } from "@/lib/api/kyc-extended";
+
+/** Common shape used by the verify view across substandards. Both
+ *  {@code KycExtendedTokenSummary} and {@code SecurityTokenSummary} satisfy
+ *  this shape. */
+export interface VerifyTokenDisplay {
+  policyId: string;
+  displayName: string;
+  description?: string | null;
+}
 
 interface Props {
-  token: KycExtendedTokenSummary;
+  token: VerifyTokenDisplay;
   status: "not-verified" | "verified" | "expired" | "publish-pending";
   validUntilMs?: number;
   showRenew?: boolean;
@@ -60,9 +68,9 @@ export function VerifyTokenView({
           <div>
             <h3 className="text-lg font-semibold text-white">Verification submitted</h3>
             <p className="text-sm text-dark-300">
-              Your KYC is complete and you&apos;ve been added to the local allowlist for {token.displayName}.
-              Publishing the new allowlist on-chain takes a minute or two — once it&apos;s confirmed,
-              other holders can send this token to you. This page will refresh automatically.
+              Your KYC is complete and you&apos;ve been added to the off-chain allowlist for {token.displayName}.
+              An admin still needs to publish the updated allowlist root on-chain before other holders can
+              send this token to you. This page polls and will update once that publish lands.
             </p>
           </div>
         </div>

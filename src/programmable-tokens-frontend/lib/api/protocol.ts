@@ -31,7 +31,7 @@ export async function getProtocolBootstrap(protocolTxHash?: string): Promise<Pro
 /**
  * Get substandard blueprint (validators for a specific substandard)
  *
- * @param substandardId - The substandard identifier (e.g., "dummy", "bafin")
+ * @param substandardId - The substandard identifier (e.g., "dummy", "kyc", "kyc-extended", "security-token")
  * @returns Substandard blueprint with validators
  */
 export async function getSubstandardBlueprint(substandardId: string): Promise<SubstandardBlueprint> {

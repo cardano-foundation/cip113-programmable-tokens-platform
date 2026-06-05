@@ -37,6 +37,8 @@ function getFlowEnvVar(flowId: string): string | undefined {
       return process.env.NEXT_PUBLIC_FLOW_KYC_ENABLED;
     case 'kyc-extended':
       return process.env.NEXT_PUBLIC_FLOW_KYC_EXTENDED_ENABLED;
+    case 'security-token':
+      return process.env.NEXT_PUBLIC_FLOW_SECURITY_TOKEN_ENABLED;
     default:
       return undefined;
   }

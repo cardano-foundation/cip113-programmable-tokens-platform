@@ -7,5 +7,13 @@ public record TokenContextResponse(
         String blacklistNodePolicyId,
         String issuerAdminPkh,
         String blacklistInitTxHash,
-        Integer blacklistInitOutputIndex
+        Integer blacklistInitOutputIndex,
+        /** Security-token only: whether the on-chain validator requires the recipient
+         *  to be in the allowlist. Null for substandards that don't carry this flag. */
+        Boolean requiresReceiverKyc,
+        /** Security-token only: whether on-chain transfers are currently paused
+         *  (set via the GlobalState {@code PauseTransfers} admin action). The FE
+         *  uses this to disable the Send button + surface a notice. Null for
+         *  substandards that don't carry this flag. */
+        Boolean transfersPaused
 ) {}

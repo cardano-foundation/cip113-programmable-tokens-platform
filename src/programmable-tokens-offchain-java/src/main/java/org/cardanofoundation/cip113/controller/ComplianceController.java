@@ -70,6 +70,7 @@ public class ComplianceController {
     private final GlobalStateInitRepository globalStateInitRepository;
 
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
+    private final org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository securityTokenRegistrationRepository;
 
     // ========== Blacklist Endpoints ==========
 
@@ -163,6 +164,8 @@ public class ComplianceController {
                             .build();
                 }
 
+                case "security-token" -> buildSecurityTokenContext(request.tokenPolicyId());
+
                 default -> null;
             };
 
@@ -230,6 +233,8 @@ public class ComplianceController {
                                     .build())
                             .build();
                 }
+
+                case "security-token" -> buildSecurityTokenContext(request.tokenPolicyId());
 
                 default -> null;
             };
@@ -655,6 +660,32 @@ public class ComplianceController {
                         .transactionId(initEntity.getTxHash())
                         .index(initEntity.getOutputIndex())
                         .build())
+                .memberRootHashOnchain(reg.getMemberRootHashOnchain())
+                .memberRootHashLocal(reg.getMemberRootHashLocal())
+                .build();
+    }
+
+    /**
+     * Build a security-token context (issuer + GS/DL/PU policies + bootstrap
+     * UTxO + receiver-KYC flag + root-hash state) from the persisted
+     * registration row. Mirrors the security-token arm in
+     * {@code TokenOperationsService.transferToken / mintToken / burnToken}.
+     */
+    private SubstandardContext buildSecurityTokenContext(String policyId) {
+        var reg = securityTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId)
+                .orElseThrow(() -> new RuntimeException(
+                        "could not find security-token registration data for policy: " + policyId));
+        return org.cardanofoundation.cip113.service.substandard.context.SecurityTokenContext.builder()
+                .issuerAdminPkh(reg.getIssuerAdminPkh())
+                .globalStatePolicyId(reg.getGlobalStatePolicyId())
+                .denylistPolicyId(reg.getDenylistPolicyId())
+                .powerUsersPolicyId(reg.getPowerUsersPolicyId())
+                .securityAssetNameHex(reg.getSecurityAssetNameHex())
+                .globalStateInitTxInput(TransactionInput.builder()
+                        .transactionId(reg.getBootstrapTxHash())
+                        .index(reg.getBootstrapOutputIndex())
+                        .build())
+                .requiresReceiverKyc(reg.isRequiresReceiverKyc())
                 .memberRootHashOnchain(reg.getMemberRootHashOnchain())
                 .memberRootHashLocal(reg.getMemberRootHashLocal())
                 .build();

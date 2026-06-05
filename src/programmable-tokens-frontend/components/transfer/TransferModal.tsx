@@ -24,7 +24,9 @@ import { getExplorerTxUrl } from "@/lib/utils";
 import { KycVerificationFlow } from "./KycVerificationFlow";
 import { getKycProof, clearKycProof, type KycProofCookie } from "@/lib/utils/kyc-cookie";
 import { useMpfMembershipStatus } from "@/hooks/useMpfMembershipStatus";
+import { useSecurityTokenMembershipStatus } from "@/hooks/useSecurityTokenMembershipStatus";
 import { getMpfInclusionProof, requestMpfInclusion } from "@/lib/api/kyc-extended";
+import { getSecurityTokenInclusionProof, requestSecurityTokenInclusion } from "@/lib/api/security-token";
 import { extractStakeCredHashFromAddress } from "@/lib/utils/address";
 import { getKeriSessionIdForWallet } from "@/lib/utils/keri-session";
 
@@ -72,6 +74,15 @@ export function TransferModal({
   // KYC state
   const [isKycToken, setIsKycToken] = useState(false);
   const [isKycExtendedToken, setIsKycExtendedToken] = useState(false);
+  const [isSecurityTokenToken, setIsSecurityTokenToken] = useState(false);
+  /** Security-token only: per-token toggle from the global-state datum. Defaults to true
+   *  (the safer regulatory-compliance posture) until the token context resolves. */
+  const [securityTokenRequiresReceiverKyc, setSecurityTokenRequiresReceiverKyc] = useState(true);
+  /** Security-token only: live `transfers_paused` flag from the global-state datum.
+   *  When true, the on-chain transfer_logic validator rejects every transfer — we
+   *  surface a banner and disable the Send button so the user doesn't burn fees
+   *  on a tx the network will refuse. */
+  const [securityTokenTransfersPaused, setSecurityTokenTransfersPaused] = useState(false);
   const [kycProof, setKycProofState] = useState<KycProofCookie | null>(null);
 
   const [recipientCheckStatus, setRecipientCheckStatus] = useState<RecipientCheckStatus>({ kind: "idle" });
@@ -89,17 +100,34 @@ export function TransferModal({
     isKycExtendedToken ? policyId : null,
     isKycExtendedToken ? senderAddress : null,
   );
+  // Same shape for security-token, on its own API surface.
+  const securityTokenSenderMembership = useSecurityTokenMembershipStatus(
+    isSecurityTokenToken ? policyId : null,
+    isSecurityTokenToken ? senderAddress : null,
+  );
 
-  const senderMpfReady =
-    senderMembership.status.kind === "verified" && senderMembership.status.onChainSynced;
-  const senderReady = isKycExtendedToken
-    ? senderMpfReady || !!kycProof
-    : isKycToken
-      ? !!kycProof
-      : true;
+  const senderMpfReady = isSecurityTokenToken
+    ? securityTokenSenderMembership.status.kind === "verified"
+        && securityTokenSenderMembership.status.onChainSynced
+    : senderMembership.status.kind === "verified"
+        && senderMembership.status.onChainSynced;
+  // For security-token, the on-chain transfer_logic_script requires the sender
+  // to be in the MPF tree — a fresh kycProof cookie alone won't satisfy the
+  // validator until the new root is published. So gate STRICTLY on on-chain
+  // membership for security-token. For kyc-extended, the cookie is an accepted
+  // fallback (the validator filters senders out of receiver_witnesses).
+  const senderReady = isSecurityTokenToken
+    ? senderMpfReady
+    : isKycExtendedToken
+      ? senderMpfReady || !!kycProof
+      : isKycToken
+        ? !!kycProof
+        : true;
 
+  /** When `requiresReceiverKyc` is false on a security-token, we don't gate Send on the
+   *  recipient probe — the validator skips the check anyway. */
   const recipientReady =
-    !isKycExtendedToken ||
+    !(isKycExtendedToken || (isSecurityTokenToken && securityTokenRequiresReceiverKyc)) ||
     recipientCheckStatus.kind === "verified" ||
     recipientCheckStatus.kind === "self";
 
@@ -115,6 +143,9 @@ export function TransferModal({
       setRecipientCheckStatus({ kind: "idle" });
       setIsKycToken(false);
       setIsKycExtendedToken(false);
+      setIsSecurityTokenToken(false);
+      setSecurityTokenRequiresReceiverKyc(true);
+      setSecurityTokenTransfersPaused(false);
 
       getTokenContext(policyId)
         .then((ctx) => {
@@ -127,15 +158,29 @@ export function TransferModal({
             setIsKycExtendedToken(true);
             const cachedProof = getKycProof(policyId, senderAddress);
             if (cachedProof) setKycProofState(cachedProof);
+          } else if (ctx.substandardId === "security-token") {
+            setIsKycToken(true);
+            setIsSecurityTokenToken(true);
+            setSecurityTokenRequiresReceiverKyc(ctx.requiresReceiverKyc ?? true);
+            setSecurityTokenTransfersPaused(ctx.transfersPaused ?? false);
+            const cachedProof = getKycProof(policyId, senderAddress);
+            if (cachedProof) setKycProofState(cachedProof);
           }
         })
         .catch(() => {});
     }
   }, [isOpen, policyId]);
 
-  // Recipient MPF membership probe (kyc-extended only).
+  // Recipient MPF membership probe. We probe for kyc-extended and ALWAYS for
+  // security-token so the admin can see the receiver's enrollment status even
+  // when {@code requires_receiver_kyc} is false. Whether the probe gates the
+  // Send button is decided separately in {@link recipientReady} below.
   useEffect(() => {
-    if (!isKycExtendedToken) return;
+    const needsProbe = isKycExtendedToken || isSecurityTokenToken;
+    if (!needsProbe) {
+      setRecipientCheckStatus({ kind: "idle" });
+      return;
+    }
 
     const addr = recipientAddress.trim();
     if (!addr || !addr.startsWith("addr")) {
@@ -161,7 +206,11 @@ export function TransferModal({
     setRecipientCheckStatus({ kind: "checking" });
     const token = ++recipientProbingToken.current;
 
-    getMpfInclusionProof(policyId, recipientPkh)
+    const probeFn = isSecurityTokenToken
+      ? () => getSecurityTokenInclusionProof(policyId, recipientPkh)
+      : () => getMpfInclusionProof(policyId, recipientPkh);
+
+    probeFn()
       .then((proof) => {
         if (recipientProbingToken.current !== token) return;
         setRecipientCheckStatus({
@@ -179,7 +228,7 @@ export function TransferModal({
         }
         setRecipientCheckStatus({ kind: "error", message: "Could not check recipient status" });
       });
-  }, [recipientAddress, isKycExtendedToken, policyId, senderAddress]);
+  }, [recipientAddress, isKycExtendedToken, isSecurityTokenToken, securityTokenRequiresReceiverKyc, policyId, senderAddress]);
 
   const handleSetMax = () => {
     setQuantity(asset.amount.toString());
@@ -215,6 +264,19 @@ export function TransferModal({
 
     if (!validateForm()) return;
 
+    // Belt-and-braces guard: the Send button is disabled when transfers are
+    // paused, but an Enter-key submit or dev-tools poke could still reach
+    // here. Surface a clear toast rather than building a tx the on-chain
+    // validator will reject.
+    if (isSecurityTokenToken && securityTokenTransfersPaused) {
+      showToast({
+        title: "Transfers paused",
+        description: "The token admin has paused transfers via the global-state PauseTransfers action. Wait for the admin to re-enable transfers and try again.",
+        variant: "warning",
+      });
+      return;
+    }
+
     try {
       setIsBuilding(true);
 
@@ -244,9 +306,11 @@ export function TransferModal({
           recipientAddress: recipientAddress.trim(),
         };
 
-        if (isKycExtendedToken) {
+        if (isKycExtendedToken || isSecurityTokenToken) {
           // Sender proof: membership (preferred) or attestation cookie
-          const ms = senderMembership.status;
+          const ms = isSecurityTokenToken
+              ? securityTokenSenderMembership.status
+              : senderMembership.status;
           if (ms.kind === "verified" && ms.onChainSynced) {
             request.senderMpfProofCborHex = ms.proofCborHex;
             request.senderMpfValidUntilMs = ms.validUntilMs;
@@ -257,12 +321,17 @@ export function TransferModal({
             throw new Error("Please complete KYC verification before sending");
           }
 
-          // Receiver proof (omitted for self-send)
-          if (recipientCheckStatus.kind === "verified") {
-            request.mpfProofCborHex = recipientCheckStatus.proofCborHex;
-            request.mpfValidUntilMs = recipientCheckStatus.validUntilMs;
-          } else if (recipientCheckStatus.kind !== "self") {
-            throw new Error("Recipient must complete KYC before receiving this token");
+          // Receiver proof: required for kyc-extended (always) and for security-token
+          // when `requires_receiver_kyc` is true. Self-sends skip the proof either way.
+          const receiverRequired =
+              isKycExtendedToken || (isSecurityTokenToken && securityTokenRequiresReceiverKyc);
+          if (receiverRequired) {
+            if (recipientCheckStatus.kind === "verified") {
+              request.mpfProofCborHex = recipientCheckStatus.proofCborHex;
+              request.mpfValidUntilMs = recipientCheckStatus.validUntilMs;
+            } else if (recipientCheckStatus.kind !== "self") {
+              throw new Error("Recipient must complete KYC before receiving this token");
+            }
           }
         } else if (kycProof) {
           request.kycPayload = kycProof.payloadHex;
@@ -283,8 +352,8 @@ export function TransferModal({
       setStep("success");
 
       showToast({
-        title: "Transfer Successful",
-        description: `Transferred ${quantity} ${asset.assetName} tokens`,
+        title: "Transfer submitted",
+        description: `Tx ${submittedTxHash.slice(0, 12)}… — sending ${quantity} ${asset.assetName} tokens to the network. Wait for confirmation.`,
         variant: "success",
       });
     } catch (error) {
@@ -293,7 +362,45 @@ export function TransferModal({
       if (error instanceof Error) {
         errorMessage = error.message.includes("User declined") ? "Transaction was cancelled" : error.message;
       }
-      showToast({ title: "Transfer Failed", description: errorMessage, variant: "error" });
+      // Auto-trigger the one-shot transfer-logic stake-credential registration
+      // when the backend reports it's missing. Conway requires a script's stake
+      // credential to be registered on-chain before any withdraw-0 against it.
+      // We isolate it in its own tx so Eternl can sign it without choking on
+      // mixed-script signing.
+      const needsCertRegistration =
+        isSecurityTokenToken
+        && errorMessage.includes("transferLogic stake credential not yet registered");
+      if (needsCertRegistration) {
+        try {
+          showToast({
+            title: "One-time setup required",
+            description: "Registering the transfer-logic stake credential on-chain. Your wallet will prompt to sign.",
+            variant: "info",
+          });
+          const { buildRegisterTransferLogicTx } = await import(
+            "@/lib/api/security-token"
+          );
+          const { unsignedCborTx: regCbor } = await buildRegisterTransferLogicTx(
+            policyId, senderAddress,
+          );
+          const signedReg = await wallet.signTx(regCbor);
+          const regTxHash = await wallet.submitTx(signedReg);
+          showToast({
+            title: "Stake credential registered",
+            description: `Tx ${regTxHash.slice(0, 12)}… — wait for confirmation, then retry the transfer.`,
+            variant: "success",
+          });
+        } catch (regErr) {
+          console.error("transferLogic cert registration failed:", regErr);
+          showToast({
+            title: "Stake-credential registration failed",
+            description: regErr instanceof Error ? regErr.message : "registration failed",
+            variant: "error",
+          });
+        }
+      } else {
+        showToast({ title: "Transfer failed", description: errorMessage, variant: "error" });
+      }
       setStep("form");
     } finally {
       setIsBuilding(false);
@@ -348,7 +455,29 @@ export function TransferModal({
             />
           )}
 
-          {step === "kyc-verify" && isKycToken && !isKycExtendedToken && (
+          {step === "kyc-sender" && isSecurityTokenToken && (
+            <KycVerificationFlow
+              policyId={policyId}
+              senderAddress={senderAddress}
+              onBack={() => setStep("form")}
+              onComplete={async (proof) => {
+                setKycProofState(proof);
+                try {
+                  await requestSecurityTokenInclusion(policyId, {
+                    boundAddress: senderAddress,
+                    kycSessionId: getKeriSessionIdForWallet(senderAddress),
+                    validUntilMs: proof.validUntilMs,
+                  });
+                  securityTokenSenderMembership.refresh();
+                } catch (err) {
+                  console.error("Failed to register sender in security-token allowlist:", err);
+                }
+                setStep("form");
+              }}
+            />
+          )}
+
+          {step === "kyc-verify" && isKycToken && !isKycExtendedToken && !isSecurityTokenToken && (
             <KycVerificationFlow
               policyId={policyId}
               senderAddress={senderAddress}
@@ -362,14 +491,34 @@ export function TransferModal({
 
           {step === "form" && (
             <form onSubmit={handleSubmit} className="space-y-5">
+              {/* Pause notice — fires when the security-token's GS datum has
+                  transfers_paused=true. The on-chain transfer_logic validator
+                  rejects every transfer in this state, so we surface a banner
+                  AND disable the Send button below to spare the user the fees
+                  on a tx the network would refuse anyway. */}
+              {isSecurityTokenToken && securityTokenTransfersPaused && (
+                <div className="flex items-start gap-3 px-4 py-3 bg-warning-900/20 border border-warning-700/40 rounded-lg">
+                  <AlertCircle className="h-5 w-5 text-warning-400 mt-0.5 shrink-0" />
+                  <div className="text-sm">
+                    <p className="font-medium text-warning-200">Transfers are currently paused</p>
+                    <p className="text-warning-300/80 text-xs mt-0.5">
+                      The token admin has paused transfers via the global-state
+                      <span className="font-mono"> PauseTransfers</span> action.
+                      You can&apos;t send this token until the admin re-enables transfers
+                      from the Global State admin tab.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* KYC verification badge. For kyc-extended, allowlist membership shows as
                   secondary info — sender membership is not required to send (validator
                   filters senders out of receiver_witnesses). */}
               {isKycToken && (
-                <div className="flex items-center justify-between px-4 py-3 bg-dark-900 rounded-lg border border-dark-700">
-                  <div className="flex items-center gap-2">
-                    <Shield className="h-4 w-4 text-primary-400" />
-                    <div>
+                <div className="flex items-start justify-between gap-3 px-4 py-3 bg-dark-900 rounded-lg border border-dark-700">
+                  <div className="flex items-start gap-2 flex-1 min-w-0">
+                    <Shield className="h-4 w-4 text-primary-400 mt-0.5 shrink-0" />
+                    <div className="min-w-0 flex-1">
                       <span className="text-xs text-dark-300">KYC Verification</span>
                       {/* Secondary allowlist status for kyc-extended */}
                       {isKycExtendedToken && senderMembership.status.kind === "verified" && senderMembership.status.onChainSynced && (
@@ -378,9 +527,63 @@ export function TransferModal({
                       {isKycExtendedToken && senderMembership.status.kind === "verified" && !senderMembership.status.onChainSynced && (
                         <p className="text-[10px] text-warning-400 leading-tight mt-0.5">Allowlist sync pending…</p>
                       )}
+                      {/* security-token: surface sender's on-chain membership status.
+                          Sender MUST be in the on-chain tree to send (BaFin transfer_logic
+                          verifies a membership proof for every input's stake credential). */}
+                      {isSecurityTokenToken && (() => {
+                        const s = securityTokenSenderMembership.status;
+                        if (s.kind === "loading") return (
+                          <p className="text-[10px] text-dark-400 leading-tight mt-0.5">Checking allowlist…</p>
+                        );
+                        if (s.kind === "verified" && s.onChainSynced) return (
+                          <p className="text-[10px] text-success-400 leading-tight mt-0.5 break-words">In allowlist (on-chain) — ready to send</p>
+                        );
+                        if (s.kind === "verified" && !s.onChainSynced) return (
+                          <p className="text-[10px] text-warning-400 leading-tight mt-0.5 break-words">Allowlist sync pending — admin must publish a new MPF root</p>
+                        );
+                        if (s.kind === "publish-pending") return (
+                          <p className="text-[10px] text-warning-400 leading-tight mt-0.5 break-words">In off-chain allowlist — admin must publish root on chain</p>
+                        );
+                        if (s.kind === "expired") return (
+                          <p className="text-[10px] text-warning-400 leading-tight mt-0.5 break-words">KYC expired — re-verify</p>
+                        );
+                        if (s.kind === "not-verified") return (
+                          <p className="text-[10px] text-dark-400 leading-tight mt-0.5 break-words">Not in allowlist — verify KYC to enroll</p>
+                        );
+                        if (s.kind === "error") return (
+                          <p className="text-[10px] text-red-400 leading-tight mt-0.5 break-words">Could not check allowlist status</p>
+                        );
+                        return null;
+                      })()}
                     </div>
                   </div>
-                  {kycProof ? (
+                  {/* For security-token, Verified badge follows on-chain membership
+                      (not the cookie). For other substandards, falls back to kycProof. */}
+                  <div className="shrink-0">
+                  {isSecurityTokenToken ? (
+                    securityTokenSenderMembership.status.kind === "verified" && securityTokenSenderMembership.status.onChainSynced ? (
+                      <Badge variant="success" size="sm">Verified</Badge>
+                    ) : securityTokenSenderMembership.status.kind === "loading" ? (
+                      <Loader2 className="h-4 w-4 text-dark-400 animate-spin" />
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-7 text-xs px-3 whitespace-nowrap"
+                        onClick={() => setStep("kyc-sender")}
+                        disabled={securityTokenSenderMembership.status.kind === "publish-pending"}
+                        title={securityTokenSenderMembership.status.kind === "publish-pending"
+                          ? "Already enrolled off-chain. Ask the admin to publish the new MPF root via the Global State tab."
+                          : undefined}
+                      >
+                        {securityTokenSenderMembership.status.kind === "publish-pending"
+                          ? "Awaiting publish"
+                          : securityTokenSenderMembership.status.kind === "expired"
+                          ? "Re-verify"
+                          : "Verify KYC"}
+                      </Button>
+                    )
+                  ) : kycProof ? (
                     <div className="flex items-center gap-2">
                       <Badge variant="success" size="sm">Verified</Badge>
                       <button
@@ -415,6 +618,7 @@ export function TransferModal({
                       Verify KYC
                     </Button>
                   )}
+                  </div>
                 </div>
               )}
 
@@ -516,15 +720,17 @@ export function TransferModal({
                   variant="primary"
                   className="flex-1"
                   isLoading={isBuilding}
-                  disabled={isBuilding || !senderReady || !recipientReady}
+                  disabled={isBuilding || !senderReady || !recipientReady || securityTokenTransfersPaused}
                 >
                   {isBuilding
                     ? "Building..."
-                    : !senderReady
-                      ? "KYC Required"
-                      : !recipientReady
-                        ? "Recipient Unverified"
-                        : "Transfer"}
+                    : securityTokenTransfersPaused
+                      ? "Transfers paused"
+                      : !senderReady
+                        ? "KYC Required"
+                        : !recipientReady
+                          ? "Recipient Unverified"
+                          : "Transfer"}
                 </Button>
               </div>
             </form>
