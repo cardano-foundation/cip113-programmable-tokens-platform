@@ -606,208 +606,84 @@ public class SecurityTokenSubstandardHandler
             MintTokenRequest request,
             ProtocolBootstrapParams protocolParams) {
         try {
-            // ── 1. Resolve registration row ────────────────────────────────
-            Optional<SecurityTokenRegistrationEntity> regOpt =
-                    registrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId());
-            if (regOpt.isEmpty()) {
-                return TransactionContext.typedError(
-                        "security-token registration not found for policy " + request.tokenPolicyId());
-            }
-            SecurityTokenRegistrationEntity reg = regOpt.get();
+            // ── 1. Resolve registration row + validate quantity ────────────
+            SecurityTokenRegistrationEntity reg = registrationRepository
+                    .findByProgrammableTokenPolicyId(request.tokenPolicyId())
+                    .orElseThrow(() -> new BuildPreconditionException(
+                            "security-token registration not found for policy " + request.tokenPolicyId()));
 
-            // ── 2. Validate quantity ───────────────────────────────────────
             BigInteger mintQuantity;
             try {
                 mintQuantity = new BigInteger(request.quantity());
             } catch (NumberFormatException nfe) {
-                return TransactionContext.typedError("quantity must be a positive integer");
+                throw new BuildPreconditionException("quantity must be a positive integer");
             }
             if (mintQuantity.signum() <= 0) {
-                return TransactionContext.typedError(
+                throw new BuildPreconditionException(
                         "quantity must be > 0 (use buildBurnTransaction for negative mints)");
             }
 
-            // ── 3. Build all the parameterised scripts we'll need ──────────
-            String registryPolicyId = protocolParams.directoryMintParams().scriptHash();
-            PlutusScript mintingLogicScript = scriptBuilder.buildMintingLogicScript(
-                    reg.getSecurityAssetNameHex(), reg.getGlobalStatePolicyId(),
-                    registryPolicyId, reg.getPowerUsersPolicyId());
-            PlutusScript issuanceContract = protocolScriptBuilderService
-                    .getParameterizedIssuanceMintScript(protocolParams, mintingLogicScript);
-            PlutusScript gsSpendScript = scriptBuilder.buildGlobalStateSpendScript(
-                    reg.getSecurityAssetNameHex(),
-                    issuanceContract.getPolicyId(), reg.getGlobalStatePolicyId());
-            Address gsSpendAddress = AddressProvider.getEntAddress(
-                    gsSpendScript, network.getCardanoNetwork());
-            Address mintingLogicRewardAddress = AddressProvider.getRewardAddress(
-                    mintingLogicScript, network.getCardanoNetwork());
+            // ── 2. Resolve scripts + on-chain inputs via shared helpers ────
+            MintLikeScripts s = buildMintLikeScripts(reg, protocolParams);
+            Utxo gsUtxo = findGsUtxo(reg);
+            Utxo puNode = findPuNode(reg, HexUtil.decodeHexString(reg.getIssuerAdminPkh()), "admin");
+            Utxo directoryEntry = findDirectoryEntry(request.tokenPolicyId(), protocolParams);
+            List<Utxo> protoIssue = findProtocolAndIssuanceUtxos(protocolParams);
+            Utxo protocolParamsUtxo = protoIssue.get(0);
+            Utxo issuanceUtxo = protoIssue.get(1);
+            Utxo funding = findFunding(request.feePayerAddress(), 5_000_000L);
 
-            // ── 4. Resolve all UTxOs the tx needs ──────────────────────────
-            // GS UTxO (input — will be spent + recreated with decremented amount).
-            // Look up by EXACT (policy, asset_name): once the token is in the
-            // CIP-113 directory, multiple assets exist under this policy id and
-            // policy-only lookup can return the wrong one, which manifests as
-            // RequiredRedeemersMismatch at eval time.
-            Utxo gsUtxo = utxoProvider.findUtxoByAsset(
-                    reg.getGlobalStatePolicyId(),
-                    SecurityTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX
-            ).orElse(null);
-            if (gsUtxo == null) {
-                return TransactionContext.typedError(
-                        "GS NFT not found on chain — has the registration tx confirmed?");
-            }
-            if (gsUtxo.getInlineDatum() == null || gsUtxo.getInlineDatum().isBlank()) {
-                return TransactionContext.typedError("GS UTxO is missing its inline datum");
-            }
-
-            // Admin power-user node (ref input — mintingLogic.withdraw checks
-            // can_mint on this PU's data and the admin's signature on the tx).
-            // The node NFT has asset name = "Node" ++ adminPkh — we look it up
-            // by exact (policy, assetName) because the PU policy also mints a
-            // root NFT with empty asset name, which the broader findUtxosByPolicy
-            // would surface instead (and miss our node).
-            byte[] adminKeyHash = HexUtil.decodeHexString(reg.getIssuerAdminPkh());
-            byte[] adminNodeAssetName = concat(LL_NODE_KEY_PREFIX, adminKeyHash);
-            String adminNodeAssetNameHex = HexUtil.encodeHexString(adminNodeAssetName);
-            Utxo puNode = utxoProvider.findUtxoByAsset(
-                    reg.getPowerUsersPolicyId(), adminNodeAssetNameHex).orElse(null);
-            if (puNode == null) {
-                return TransactionContext.typedError(
-                        "admin power-user node not found on chain — AddPowerUser tx may not have confirmed yet "
-                        + "(asset: " + reg.getPowerUsersPolicyId() + "/" + adminNodeAssetNameHex + ")");
-            }
-
-            // Directory entry for our prog-token policy (ref input — issuance
-            // contract resolves the registered substandard here, and BaFin's
-            // mintingLogic.withdraw runs derive_issuance_policy_id_from_registry_node
-            // against this entry)
-            PlutusScript directorySpendContract = protocolScriptBuilderService
-                    .getParameterizedDirectorySpendScript(protocolParams);
-            Address directorySpendAddress = AddressProvider.getEntAddress(
-                    directorySpendContract, network.getCardanoNetwork());
-            List<Utxo> registryEntries = utxoProvider.findUtxos(directorySpendAddress.getAddress());
-            Utxo directoryEntry = registryEntries.stream()
-                    .filter(u -> registryNodeParser.parse(u.getInlineDatum())
-                            .map(node -> request.tokenPolicyId().equals(node.key()))
-                            .orElse(false))
-                    .findAny().orElse(null);
-            if (directoryEntry == null) {
-                return TransactionContext.typedError(
-                        "directory entry for policy " + request.tokenPolicyId() + " not found");
-            }
-
-            // CIP-113 protocol params + issuance params ref inputs
-            String bootstrapTxHash = protocolParams.txHash();
-            Optional<Utxo> protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
-            Optional<Utxo> issuanceUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 2);
-            if (protocolParamsUtxoOpt.isEmpty() || issuanceUtxoOpt.isEmpty()) {
-                return TransactionContext.typedError("could not resolve protocol or issuance params UTxOs");
-            }
-            Utxo protocolParamsUtxo = protocolParamsUtxoOpt.get();
-            Utxo issuanceUtxo = issuanceUtxoOpt.get();
-
-            // Funding UTxO (fees + collateral) — must be ADA-only and confirmed
-            List<Utxo> fundingUtxos = accountService.findAdaOnlyUtxo(
-                    request.feePayerAddress(), 5_000_000L);
-            if (fundingUtxos.isEmpty()) {
-                return TransactionContext.typedError("no funding UTxO at fee-payer address");
-            }
-            Utxo funding = fundingUtxos.getFirst();
-
-            // ── 5. Parse current GS datum + compute new mintable_amount ────
-            PlutusData currentGsDatum = PlutusData.deserialize(
-                    HexUtil.decodeHexString(gsUtxo.getInlineDatum()));
-            if (!(currentGsDatum instanceof ConstrPlutusData currentConstr)) {
-                return TransactionContext.typedError("GS datum is not a Constr");
-            }
-            List<PlutusData> gsFields = currentConstr.getData().getPlutusDataList();
-            if (gsFields.size() < 9) {
-                return TransactionContext.typedError(
-                        "GS datum has " + gsFields.size() + " fields, expected 9");
-            }
-            long currentMintable;
-            if (gsFields.get(1) instanceof BigIntPlutusData bi) {
-                currentMintable = bi.getValue().longValueExact();
-            } else {
-                return TransactionContext.typedError(
-                        "GS datum field 1 (mintable_amount) is not an Int");
-            }
+            // ── 3. Parse GS datum + apply mintable_amount delta ────────────
+            List<PlutusData> gsFields = parseGsFields(gsUtxo);
+            long currentMintable = ((BigIntPlutusData) gsFields.get(1)).getValue().longValueExact();
+            PlutusData newGsDatum = applyMintableDelta(gsFields, -mintQuantity.longValueExact());
             long newMintable = currentMintable - mintQuantity.longValueExact();
-            if (newMintable < 0) {
-                return TransactionContext.typedError(
-                        "mint quantity (" + mintQuantity + ") exceeds remaining mintable_amount ("
-                        + currentMintable + ")");
-            }
 
-            // Rebuild the GS datum with only mintable_amount changed, all other
-            // fields (transfers_paused, admin_credential_hash, the two LL
-            // policy ids, security_info, trusted_entity_vkeys, member_root_hash,
-            // requires_receiver_kyc) preserved verbatim.
-            PlutusData newGsDatum = ConstrPlutusData.of(0,
-                    gsFields.get(0),                                              // transfers_paused
-                    BigIntPlutusData.of(BigInteger.valueOf(newMintable)),         // mintable_amount (decremented)
-                    gsFields.get(2),                                              // admin_credential_hash
-                    gsFields.get(3),                                              // power_user_linked_list_policy_id
-                    gsFields.get(4),                                              // denylist_linked_list_policy_id
-                    gsFields.get(5),                                              // security_info
-                    gsFields.get(6),                                              // trusted_entity_vkeys
-                    gsFields.get(7),                                              // member_root_hash
-                    gsFields.get(8));                                             // requires_receiver_kyc
-
-            // ── 6. Compute redeemer indices ────────────────────────────────
-            // Cardano lex-sorts both inputs and reference_inputs by (txHash,
-            // outIdx) at evaluation time. Our off-chain redeemer indices MUST
-            // match what the on-chain script sees.
+            // ── 4. Compute redeemer indices ────────────────────────────────
+            // Cardano lex-sorts inputs and reference_inputs by (txHash, outIdx)
+            // at eval time; off-chain indices in our redeemers MUST match.
             int gsInputIdx = lexIndex(List.of(gsUtxo, funding), gsUtxo);
             List<Utxo> refInputsSortable = List.of(directoryEntry, puNode,
                     protocolParamsUtxo, issuanceUtxo);
             int directoryRefIdx = lexIndex(refInputsSortable, directoryEntry);
             int puNodeRefIdx = lexIndex(refInputsSortable, puNode);
-
-            // Redeemers are sorted by tag (Spend → Mint → Cert → Reward), and
-            // within each tag by their index. Our tx has 1 Spend (GS), 1 Mint
-            // (issuance), 1 Reward (mintingLogic). So issuance Mint sits at
-            // global redeemer index 1 (after the single Spend).
+            // Tx has 1 Spend (GS), 1 Mint (issuance), 1 Reward (mintingLogic).
+            // Redeemers sorted by tag (Spend → Mint → Cert → Reward), so the
+            // issuance Mint sits at global redeemer index 1.
             int issuancePri = 1;
 
-            // ── 7. Build redeemers ─────────────────────────────────────────
-            // Issuance contract — "mint against existing directory entry" variant.
-            // Mirrors kyc-extended.buildMintTransaction:
-            //   Constr 0 [Constr 1 [substandardHash], Constr 0 [directoryRefIdx]]
+            // ── 5. Build redeemers ─────────────────────────────────────────
+            // Issuance — "mint against existing directory entry" variant.
+            // Constr 0 [Constr 1 [substandardHash], Constr 0 [directoryRefIdx]]
             // The inner Constr 0 (vs Constr 1) tells the issuance contract to
-            // FIND the directory entry as a ref input at the given index (vs
-            // CREATE it at an output index — that's the registration flow).
+            // FIND the directory entry as a ref input (vs CREATE it at an
+            // output index, which is the registration flow).
             PlutusData issuanceRedeemer = ConstrPlutusData.of(0,
-                    ConstrPlutusData.of(1, BytesPlutusData.of(mintingLogicScript.getScriptHash())),
+                    ConstrPlutusData.of(1, BytesPlutusData.of(s.mintingLogic().getScriptHash())),
                     ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx))));
-
-            // mintingLogic.withdraw — STRICT path (registration mode not
-            // triggered because no directory NFT is being minted in this tx).
-            // Redeemer is MintingLogicScriptWithdrawRedeemer { gs_input_index,
-            // power_user_node_ref_input_index, minted_amount }.
+            // mintingLogic.withdraw STRICT path. MintingLogicScriptWithdrawRedeemer
+            // { gs_input_index, power_user_node_ref_input_index, minted_amount }.
             PlutusData withdrawRedeemer = ConstrPlutusData.of(0,
                     BigIntPlutusData.of(BigInteger.valueOf(gsInputIdx)),
                     BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)),
                     BigIntPlutusData.of(mintQuantity));
-
-            // GS spend — MintSecurity action. config_ref_input_index is unused
-            // by the MintSecurity branch; gs_output_index = 1 (after the prog
-            // token output at 0); issuance_policy_redeemer_index = position of
-            // the issuance Mint redeemer in the canonical ordering.
+            // GS spend MintSecurity action. config_ref_input_index unused here;
+            // gs_output_index = 1 (after the prog-token output at 0);
+            // issuance_policy_redeemer_index = position of issuance Mint redeemer.
             int gsOutputIdx = 1;
             PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
                     BigIntPlutusData.of(BigInteger.ZERO),
                     BigIntPlutusData.of(BigInteger.valueOf(gsOutputIdx)),
                     ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(issuancePri))));
 
-            // ── 8. Prog-token output + GS output values ────────────────────
+            // ── 6. Outputs ─────────────────────────────────────────────────
             Asset programmableToken = Asset.builder()
                     .name("0x" + request.assetName())
                     .value(mintQuantity).build();
             Value programmableTokenValue = Value.builder()
                     .coin(Amount.ada(1).getQuantity())
                     .multiAssets(List.of(MultiAsset.builder()
-                            .policyId(issuanceContract.getPolicyId())
+                            .policyId(s.issuanceContract().getPolicyId())
                             .assets(List.of(programmableToken)).build()))
                     .build();
 
@@ -822,81 +698,44 @@ public class SecurityTokenSubstandardHandler
                             new IllegalArgumentException("recipient must be a base address (need stake credential)")),
                     network.getCardanoNetwork());
 
-            // GS output value — preserved verbatim from input (the GS spend
-            // validator's `value_preserved` invariant).
-            BigInteger gsLovelace = gsUtxo.getAmount().stream()
-                    .filter(a -> "lovelace".equals(a.getUnit()))
-                    .map(Amount::getQuantity)
-                    .findFirst().orElseThrow(() -> new IllegalStateException("GS UTxO has no lovelace"));
-            Amount gsNftAmount = gsUtxo.getAmount().stream()
-                    .filter(a -> !"lovelace".equals(a.getUnit()))
-                    .findFirst().orElseThrow(() -> new IllegalStateException("GS UTxO has no NFT"));
-            Value gsValue = Value.builder()
-                    .coin(gsLovelace)
-                    .multiAssets(List.of(MultiAsset.builder()
-                            .policyId(reg.getGlobalStatePolicyId())
-                            .assets(List.of(Asset.builder()
-                                    .name("0x" + AssetType.fromUnit(gsNftAmount.getUnit()).assetName())
-                                    .value(BigInteger.ONE).build()))
-                            .build()))
-                    .build();
+            Value gsValue = buildPreservedGsValue(gsUtxo, reg.getGlobalStatePolicyId());
 
-            // ── 9. Compose the tx ──────────────────────────────────────────
+            // ── 7. Compose tx ──────────────────────────────────────────────
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
                     .collectFrom(gsUtxo, gsSpendRedeemer)
-                    .withdraw(mintingLogicRewardAddress.getAddress(), BigInteger.ZERO, withdrawRedeemer)
-                    .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
+                    .withdraw(s.mintingLogicRewardAddress().getAddress(), BigInteger.ZERO, withdrawRedeemer)
+                    .mintAsset(s.issuanceContract(), programmableToken, issuanceRedeemer)
                     .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue),
                             ConstrPlutusData.of(0))                                                 // output 0
-                    .payToContract(gsSpendAddress.getAddress(), ValueUtil.toAmountList(gsValue),
+                    .payToContract(s.gsSpendAddress().getAddress(), ValueUtil.toAmountList(gsValue),
                             newGsDatum)                                                              // output 1
                     .readFrom(
-                            TransactionInput.builder()
-                                    .transactionId(directoryEntry.getTxHash())
-                                    .index(directoryEntry.getOutputIndex()).build(),
-                            TransactionInput.builder()
-                                    .transactionId(puNode.getTxHash())
-                                    .index(puNode.getOutputIndex()).build(),
-                            TransactionInput.builder()
-                                    .transactionId(protocolParamsUtxo.getTxHash())
-                                    .index(protocolParamsUtxo.getOutputIndex()).build(),
-                            TransactionInput.builder()
-                                    .transactionId(issuanceUtxo.getTxHash())
-                                    .index(issuanceUtxo.getOutputIndex()).build())
-                    .attachSpendingValidator(gsSpendScript)
-                    .attachRewardValidator(mintingLogicScript)
+                            txInputOf(directoryEntry),
+                            txInputOf(puNode),
+                            txInputOf(protocolParamsUtxo),
+                            txInputOf(issuanceUtxo))
+                    .attachSpendingValidator(s.gsSpend())
+                    .attachRewardValidator(s.mintingLogic())
                     .withChangeAddress(request.feePayerAddress());
 
-            // ── 10. Build with admin required-signer, pinned collateral, and
-            //       preBalanceTx hook to keep redeemer output indices stable ─
-            String adminPkhHex = reg.getIssuerAdminPkh();
             String feePayerAddress = request.feePayerAddress();
             Transaction transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(HexUtil.decodeHexString(adminPkhHex))
+                    .withRequiredSigners(HexUtil.decodeHexString(reg.getIssuerAdminPkh()))
                     .feePayer(feePayerAddress)
                     .mergeOutputs(false)
                     .withCollateralInputs(TransactionInput.builder()
                             .transactionId(funding.getTxHash())
                             .index(funding.getOutputIndex()).build())
-                    .preBalanceTx((bctx, txn) -> {
-                        // Move the fee-payer change to the END so the prog-token
-                        // output stays at index 0 and the new GS at index 1
-                        // (matching the redeemers we built above).
-                        List<com.bloxbean.cardano.client.transaction.spec.TransactionOutput> outs =
-                                txn.getBody().getOutputs();
-                        if (!outs.isEmpty() && outs.getFirst().getAddress().equals(feePayerAddress)) {
-                            com.bloxbean.cardano.client.transaction.spec.TransactionOutput first =
-                                    outs.removeFirst();
-                            outs.addLast(first);
-                        }
-                    })
+                    .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
                     .ignoreScriptCostEvaluationError(false)
                     .build();
 
             log.info("security-token mint: policy={} qty={} (mintable_amount {} → {})",
                     request.tokenPolicyId(), mintQuantity, currentMintable, newMintable);
             return TransactionContext.ok(transaction.serializeToHex());
+        } catch (BuildPreconditionException bpe) {
+            return TransactionContext.typedError(bpe.getMessage());
         } catch (Exception e) {
             log.error("security-token mint failed for policy={}", request.tokenPolicyId(), e);
             return TransactionContext.typedError("mint failed: " + e.getMessage());
@@ -2465,181 +2304,100 @@ public class SecurityTokenSubstandardHandler
             BurnTokenRequest request,
             ProtocolBootstrapParams protocolParams) {
         try {
-            // ── 1. Resolve registration row ────────────────────────────────
-            Optional<SecurityTokenRegistrationEntity> regOpt =
-                    registrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId());
-            if (regOpt.isEmpty()) {
-                return TransactionContext.typedError(
-                        "security-token registration not found for policy " + request.tokenPolicyId());
-            }
-            SecurityTokenRegistrationEntity reg = regOpt.get();
+            // ── 1. Resolve registration row + validate burn quantity ───────
+            SecurityTokenRegistrationEntity reg = registrationRepository
+                    .findByProgrammableTokenPolicyId(request.tokenPolicyId())
+                    .orElseThrow(() -> new BuildPreconditionException(
+                            "security-token registration not found for policy " + request.tokenPolicyId()));
 
-            // ── 2. Parse + validate burn quantity ──────────────────────────
             BigInteger burnQuantity;
             try {
                 burnQuantity = new BigInteger(request.quantity());
             } catch (NumberFormatException nfe) {
-                return TransactionContext.typedError("quantity must be a positive integer");
+                throw new BuildPreconditionException("quantity must be a positive integer");
             }
             if (burnQuantity.signum() <= 0) {
-                return TransactionContext.typedError("burn quantity must be > 0");
+                throw new BuildPreconditionException("burn quantity must be > 0");
             }
             BigInteger mintFieldQuantity = burnQuantity.negate();
 
-            // ── 3. Build scripts ───────────────────────────────────────────
-            String registryPolicyId = protocolParams.directoryMintParams().scriptHash();
-            PlutusScript mintingLogicScript = scriptBuilder.buildMintingLogicScript(
-                    reg.getSecurityAssetNameHex(), reg.getGlobalStatePolicyId(),
-                    registryPolicyId, reg.getPowerUsersPolicyId());
-            PlutusScript transferLogicScript = scriptBuilder.buildTransferLogicScript(
-                    reg.getSecurityAssetNameHex(), reg.getGlobalStatePolicyId(),
-                    registryPolicyId);
-            PlutusScript issuanceContract = protocolScriptBuilderService
-                    .getParameterizedIssuanceMintScript(protocolParams, mintingLogicScript);
-            PlutusScript gsSpendScript = scriptBuilder.buildGlobalStateSpendScript(
-                    reg.getSecurityAssetNameHex(),
-                    issuanceContract.getPolicyId(), reg.getGlobalStatePolicyId());
-            Address gsSpendAddress = AddressProvider.getEntAddress(
-                    gsSpendScript, network.getCardanoNetwork());
-            Address mintingLogicRewardAddress = AddressProvider.getRewardAddress(
-                    mintingLogicScript, network.getCardanoNetwork());
-            Address transferLogicRewardAddress = AddressProvider.getRewardAddress(
-                    transferLogicScript, network.getCardanoNetwork());
-
-            // ── 4. Resolve UTxOs ───────────────────────────────────────────
-            // Token UTxO being burned (caller-supplied)
-            Optional<Utxo> tokenUtxoOpt = utxoProvider.findUtxo(
-                    request.utxoTxHash(), request.utxoOutputIndex());
-            if (tokenUtxoOpt.isEmpty()) {
-                return TransactionContext.typedError(
-                        "token UTxO not found: " + request.utxoTxHash() + ":" + request.utxoOutputIndex());
-            }
-            Utxo tokenUtxo = tokenUtxoOpt.get();
-
-            // GS UTxO — look up by EXACT (policy, asset_name); see comment on
-            // the mint flow for why policy-only lookup is unreliable once the
-            // CIP-113 directory has entries under this policy id.
-            Utxo gsUtxo = utxoProvider.findUtxoByAsset(
-                    reg.getGlobalStatePolicyId(),
-                    SecurityTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX
-            ).orElse(null);
-            if (gsUtxo == null) {
-                return TransactionContext.typedError("GS NFT not found on chain");
-            }
-            if (gsUtxo.getInlineDatum() == null || gsUtxo.getInlineDatum().isBlank()) {
-                return TransactionContext.typedError("GS UTxO is missing its inline datum");
-            }
-
-            // Burner PU node. The BURNER is the connected wallet that signed the
-            // request — not necessarily the original registrant admin. We derive
-            // the burner's PKH from request.feePayerAddress() and look up their
-            // power-user node. minting_logic.withdraw then enforces that this
-            // PKH is a tx signer AND holds BURNER capability in the LL node.
+            // ── 2. Resolve burner credentials from the request fee-payer ───
+            // The BURNER is the connected wallet — not necessarily the original
+            // registrant admin. minting_logic.withdraw enforces that this
+            // payment PKH is a tx signer AND holds the BURNER capability in the
+            // power-users linked-list node. prog-logic-global's
+            // collect_input_assets also requires the burner's STAKE credential
+            // in extra_signatories (it uses has_or_fail, which crashes with
+            // EmptyList rather than failing cleanly when missing).
             Address feePayer = new Address(request.feePayerAddress());
             byte[] burnerKeyHash = feePayer.getPaymentCredentialHash()
                     .orElseThrow(() -> new IllegalArgumentException(
                             "feePayerAddress has no payment credential: " + request.feePayerAddress()));
-            String burnerPkhHex = HexUtil.encodeHexString(burnerKeyHash);
-            // Also need the burner's STAKE credential hash: the prog-token UTxO
-            // we're spending is at prog-base + burner-stake, and the CIP-113
-            // prog-logic-global validator's collect_input_assets requires the
-            // input's stake VerificationKey to be in extra_signatories (via
-            // has_or_fail — which crashes with EmptyList rather than failing
-            // cleanly when missing).
-            byte[] burnerStakeHash = feePayer.getDelegationCredentialHash().orElse(null);
-            if (burnerStakeHash == null) {
-                return TransactionContext.typedError(
-                        "feePayerAddress must be a base address with a stake credential: "
-                        + request.feePayerAddress());
-            }
-            byte[] burnerNodeAssetName = concat(LL_NODE_KEY_PREFIX, burnerKeyHash);
-            String burnerNodeAssetNameHex = HexUtil.encodeHexString(burnerNodeAssetName);
-            Utxo puNode = utxoProvider.findUtxoByAsset(
-                    reg.getPowerUsersPolicyId(), burnerNodeAssetNameHex).orElse(null);
-            if (puNode == null) {
-                return TransactionContext.typedError(
-                        "burner power-user node not found on chain — connected wallet "
-                        + burnerPkhHex + " is not a registered power user (asset: "
-                        + reg.getPowerUsersPolicyId() + "/" + burnerNodeAssetNameHex + ")");
-            }
+            byte[] burnerStakeHash = feePayer.getDelegationCredentialHash()
+                    .orElseThrow(() -> new BuildPreconditionException(
+                            "feePayerAddress must be a base address with a stake credential: "
+                            + request.feePayerAddress()));
 
-            // Directory entry
-            PlutusScript directorySpendContract = protocolScriptBuilderService
-                    .getParameterizedDirectorySpendScript(protocolParams);
-            Address directorySpendAddress = AddressProvider.getEntAddress(
-                    directorySpendContract, network.getCardanoNetwork());
-            List<Utxo> registryEntries = utxoProvider.findUtxos(directorySpendAddress.getAddress());
-            Utxo directoryEntry = registryEntries.stream()
-                    .filter(u -> registryNodeParser.parse(u.getInlineDatum())
-                            .map(node -> request.tokenPolicyId().equals(node.key()))
-                            .orElse(false))
-                    .findAny().orElse(null);
-            if (directoryEntry == null) {
-                return TransactionContext.typedError(
-                        "directory entry for policy " + request.tokenPolicyId() + " not found");
-            }
+            // ── 3. Resolve scripts + on-chain inputs via shared helpers ────
+            MintLikeScripts s = buildMintLikeScripts(reg, protocolParams);
+            Utxo gsUtxo = findGsUtxo(reg);
+            Utxo puNode = findPuNode(reg, burnerKeyHash, "burner");
+            Utxo directoryEntry = findDirectoryEntry(request.tokenPolicyId(), protocolParams);
+            List<Utxo> protoIssue = findProtocolAndIssuanceUtxos(protocolParams);
+            Utxo protocolParamsUtxo = protoIssue.get(0);
+            Utxo issuanceUtxo = protoIssue.get(1);
+            Utxo funding = findFunding(request.feePayerAddress(), 5_000_000L);
 
-            // Protocol params + issuance params
-            String bootstrapTxHash = protocolParams.txHash();
-            Optional<Utxo> protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
-            Optional<Utxo> issuanceUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 2);
-            if (protocolParamsUtxoOpt.isEmpty() || issuanceUtxoOpt.isEmpty()) {
-                return TransactionContext.typedError("could not resolve protocol or issuance params UTxOs");
-            }
-            Utxo protocolParamsUtxo = protocolParamsUtxoOpt.get();
-            Utxo issuanceUtxo = issuanceUtxoOpt.get();
+            // Token UTxO being burned (caller-supplied). Distinct from the GS
+            // and PU lookups — its location depends on which wallet holds the
+            // tokens. The validator gates on the burner's stake cred so the
+            // UTxO's address is implicitly the burner's.
+            Utxo tokenUtxo = utxoProvider.findUtxo(
+                    request.utxoTxHash(), request.utxoOutputIndex()
+            ).orElseThrow(() -> new BuildPreconditionException(
+                    "token UTxO not found: " + request.utxoTxHash() + ":" + request.utxoOutputIndex()));
 
-            // Funding UTxO
-            List<Utxo> fundingUtxos = accountService.findAdaOnlyUtxo(
-                    request.feePayerAddress(), 5_000_000L);
-            if (fundingUtxos.isEmpty()) {
-                return TransactionContext.typedError("no funding UTxO at fee-payer address");
+            // Honour request.quantity; the continuation output keeps any
+            // leftover balance of the burned policy (partial burn). The CIP-113
+            // prog-logic-global ThirdPartyAct branch we use below performs a
+            // value-preservation check (input − mint == output) which holds
+            // for both full-UTxO and partial burns. FreezeAndSeize ALWAYS
+            // burns the entire UTxO because of its own substandard validator
+            // (dict.delete on the policy); BaFin's minting_logic has no such
+            // constraint.
+            String burnedAssetUnit = request.tokenPolicyId() + request.assetName();
+            BigInteger utxoTokenBalance = tokenUtxo.getAmount().stream()
+                    .filter(a -> burnedAssetUnit.equals(a.getUnit().replace("0x", "")))
+                    .map(Amount::getQuantity)
+                    .findFirst()
+                    .orElse(BigInteger.ZERO);
+            if (utxoTokenBalance.signum() <= 0) {
+                throw new BuildPreconditionException(
+                        "token UTxO does not contain any of " + burnedAssetUnit);
             }
-            Utxo funding = fundingUtxos.getFirst();
+            if (burnQuantity.compareTo(utxoTokenBalance) > 0) {
+                throw new BuildPreconditionException(
+                        "burn quantity " + burnQuantity + " exceeds the token UTxO's balance of "
+                        + utxoTokenBalance + " — pick a UTxO with enough of the token, or split the burn");
+            }
+            BigInteger remainingTokenInUtxo = utxoTokenBalance.subtract(burnQuantity);
 
-            // ── 5. Parse current GS datum + compute new mintable_amount ────
-            PlutusData currentGsDatum = PlutusData.deserialize(
-                    HexUtil.decodeHexString(gsUtxo.getInlineDatum()));
-            if (!(currentGsDatum instanceof ConstrPlutusData currentConstr)) {
-                return TransactionContext.typedError("GS datum is not a Constr");
-            }
-            List<PlutusData> gsFields = currentConstr.getData().getPlutusDataList();
-            if (gsFields.size() < 9) {
-                return TransactionContext.typedError(
-                        "GS datum has " + gsFields.size() + " fields, expected 9");
-            }
-            long currentMintable;
-            if (gsFields.get(1) instanceof BigIntPlutusData bi) {
-                currentMintable = bi.getValue().longValueExact();
-            } else {
-                return TransactionContext.typedError(
-                        "GS datum field 1 (mintable_amount) is not an Int");
-            }
-            // Burn increments mintable_amount: remaining_amount = old - minted_amount
-            //                                                   = old - (-burnQty)
-            //                                                   = old + burnQty
+            // ── 4. Parse GS datum + apply mintable_amount delta ────────────
+            // Burn INCREMENTS mintable_amount (the cap returns):
+            //   remaining = old - minted_amount = old - (-burnQty) = old + burnQty
+            List<PlutusData> gsFields = parseGsFields(gsUtxo);
+            long currentMintable = ((BigIntPlutusData) gsFields.get(1)).getValue().longValueExact();
+            PlutusData newGsDatum = applyMintableDelta(gsFields, burnQuantity.longValueExact());
             long newMintable = currentMintable + burnQuantity.longValueExact();
 
-            PlutusData newGsDatum = ConstrPlutusData.of(0,
-                    gsFields.get(0),                                              // transfers_paused
-                    BigIntPlutusData.of(BigInteger.valueOf(newMintable)),         // mintable_amount (incremented)
-                    gsFields.get(2),                                              // admin_credential_hash
-                    gsFields.get(3),                                              // power_user_linked_list_policy_id
-                    gsFields.get(4),                                              // denylist_linked_list_policy_id
-                    gsFields.get(5),                                              // security_info
-                    gsFields.get(6),                                              // trusted_entity_vkeys
-                    gsFields.get(7),                                              // member_root_hash
-                    gsFields.get(8));                                             // requires_receiver_kyc
-
-            // ── 6. Redeemer indices ────────────────────────────────────────
+            // ── 5. Redeemer indices ────────────────────────────────────────
             // Inputs sorted lex by (txHash, outIdx): tokenUtxo, gsUtxo, funding.
             int gsInputIdx = lexIndex(List.of(gsUtxo, tokenUtxo, funding), gsUtxo);
             // Reference inputs MUST include the full set the tx actually has —
-            // the on-chain validator reads ref inputs by index against the
-            // lex-sorted FULL list, so omitting progBaseRef + progGlobalRef
-            // here makes our directoryRefIdx + puNodeRefIdx point at the wrong
-            // entries at eval time (causing EvaluationFailure in both the
-            // issuance contract and mintingLogic.withdraw).
+            // the validator reads ref inputs by index against the lex-sorted
+            // FULL list. Omitting progBaseRef + progGlobalRef from this
+            // computation would make our directoryRefIdx + puNodeRefIdx point
+            // at the wrong entries at eval time.
             TransactionInput progBaseRefInput = TransactionInput.builder()
                     .transactionId(protocolParams.programmableBaseRefInput().txHash())
                     .index(protocolParams.programmableBaseRefInput().outputIndex())
@@ -2648,8 +2406,6 @@ public class SecurityTokenSubstandardHandler
                     .transactionId(protocolParams.programmableGlobalRefInput().txHash())
                     .index(protocolParams.programmableGlobalRefInput().outputIndex())
                     .build();
-            // Lex-sort by (txHash, outIdx) using Bloxbean's
-            // TransactionInputComparator (matches Conway ledger ordering).
             List<TransactionInput> refInputsSorted = java.util.stream.Stream.of(
                     txInputOf(directoryEntry), txInputOf(puNode),
                     txInputOf(protocolParamsUtxo), txInputOf(issuanceUtxo),
@@ -2657,195 +2413,149 @@ public class SecurityTokenSubstandardHandler
             ).sorted(new TransactionInputComparator()).toList();
             int directoryRefIdx = refInputsSorted.indexOf(txInputOf(directoryEntry));
             int puNodeRefIdx = refInputsSorted.indexOf(txInputOf(puNode));
-            // Diagnostic: dump the resolved indices + the lex order so we can
-            // verify against the actual on-chain ref-input order at eval time.
-            log.info("security-token burn indices: gsInputIdx={} directoryRefIdx={} puNodeRefIdx={}",
-                    gsInputIdx, directoryRefIdx, puNodeRefIdx);
-            for (int i = 0; i < refInputsSorted.size(); i++) {
-                TransactionInput ti = refInputsSorted.get(i);
-                log.info("  refInputs[{}] = {}:{}", i, ti.getTransactionId(), ti.getIndex());
-            }
-            // Inspect what's actually at directoryEntry and puNode — addresses,
-            // first asset, datum prefix. Verifies our lookups didn't pick the
-            // wrong UTxO (which would cause the validator to parse the wrong
-            // datum and fail with EmptyList during structural pattern matching).
-            log.info("  directoryEntry (chain): {}:{} address={} datum(full)={}",
-                    directoryEntry.getTxHash(), directoryEntry.getOutputIndex(),
-                    directoryEntry.getAddress(),
-                    directoryEntry.getInlineDatum());
-            log.info("  directoryEntry.amount = {}", directoryEntry.getAmount());
-            // Also dump the protocol params UTxO datum so we can see what
-            // registry_node_cs prog-logic-global expects (this is what peek_first
-            // on the directoryEntry value must match for the get_registry_node
-            // expect to pass).
-            try {
-                Utxo ppUtxoForLog = utxoProvider.findUtxo(bootstrapTxHash, 0).orElse(null);
-                if (ppUtxoForLog != null) {
-                    log.info("  protocolParamsUtxo.amount = {}", ppUtxoForLog.getAmount());
-                    log.info("  protocolParamsUtxo.datum = {}", ppUtxoForLog.getInlineDatum());
-                }
-            } catch (Exception ignore) { /* logging best-effort */ }
-            log.info("  puNode (chain): {}:{} address={} datum(full)={}",
-                    puNode.getTxHash(), puNode.getOutputIndex(),
-                    puNode.getAddress(),
-                    puNode.getInlineDatum());
-            // Also try to parse the directory datum so we can verify the
-            // substandard hashes match what we computed.
-            try {
-                Optional<RegistryNode> nodeOpt = registryNodeParser.parse(directoryEntry.getInlineDatum());
-                nodeOpt.ifPresent(n -> log.info(
-                        "  parsed RegistryNode: key={} next={} transferLogic={} thirdParty(=mintingLogic?)={} gsPolicy={}",
-                        n.key(), n.next(), n.transferLogicScript(),
-                        n.thirdPartyTransferLogicScript(), n.globalStatePolicyId()));
-            } catch (Exception parseEx) {
-                log.warn("  failed to parse directoryEntry datum as RegistryNode: {}", parseEx.getMessage());
-            }
-            // Also dump the script-hashes we're computing, so we can verify
-            // they match what's recorded in the directoryEntry's RegistryNode.
-            log.info("  transferLogic.scriptHash={}", HexUtil.encodeHexString(transferLogicScript.getScriptHash()));
-            log.info("  mintingLogic.scriptHash={}", HexUtil.encodeHexString(mintingLogicScript.getScriptHash()));
-            log.info("  programmableLogicGlobal.scriptHash={}",
-                    protocolParams.programmableLogicGlobalPrams().scriptHash());
-
-            // Tx has: 2 Spends (gs + token), 1 Mint (issuance), 3 Rewards
-            // (mintingLogic + transferLogic + programmableLogicGlobal). The
-            // transferLogic withdraw is required by prog-logic-global for any
-            // prog-token spend; for burns we rely on the mint/burn rubber-stamp
-            // branch we added in transfer_logic_script.ak so the redeemer
-            // contents don't matter. Redeemer ordering (Spend → Mint → Cert →
-            // Reward); Mint sits at global index 2.
+            // Tx has 2 Spends (gs + token), 1 Mint (issuance), 2 Rewards
+            // (mintingLogic + programmableLogicGlobal). Redeemers sorted by tag
+            // (Spend → Mint → Cert → Reward), so the issuance Mint sits at
+            // global index 2.
             int issuancePri = 2;
 
-            // ── 7. Build redeemers ─────────────────────────────────────────
+            // ── 6. Build redeemers ─────────────────────────────────────────
             PlutusData issuanceRedeemer = ConstrPlutusData.of(0,
-                    ConstrPlutusData.of(1, BytesPlutusData.of(mintingLogicScript.getScriptHash())),
+                    ConstrPlutusData.of(1, BytesPlutusData.of(s.mintingLogic().getScriptHash())),
                     ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx))));
-
             // mintingLogic.withdraw STRICT path with negative minted_amount —
             // the validator's else-branch requires can_burn.
             PlutusData withdrawRedeemer = ConstrPlutusData.of(0,
                     BigIntPlutusData.of(BigInteger.valueOf(gsInputIdx)),
                     BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)),
                     BigIntPlutusData.of(mintFieldQuantity));
-
-            int gsOutputIdx = 0;  // new GS at output 0 (change moved to end)
+            // Output ordering — continuation FIRST (matches FES; prog-logic-global
+            // ThirdPartyAct reads outputs from outputs_start_idx onward to verify
+            // the burned policy has been removed):
+            //   output 0: continuation of tokenUtxo (same address + datum,
+            //             burned policy stripped from value)
+            //   output 1: new GS UTxO (mintable_amount incremented)
+            //   output N: change to fee-payer (moved to end by preBalanceTx)
+            int continuationOutputIdx = 0;
+            int gsOutputIdx = 1;
             PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
                     BigIntPlutusData.of(BigInteger.ZERO),
                     BigIntPlutusData.of(BigInteger.valueOf(gsOutputIdx)),
                     ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(issuancePri))));
-
-            // Token UTxO spend redeemer — passthrough (Constr 0). The
-            // prog-logic-base validator that runs against this input delegates
-            // authorisation to prog-logic-global's withdraw-0 below.
+            // Token UTxO spend redeemer — passthrough. The prog-logic-base
+            // validator running against this input delegates authorisation to
+            // prog-logic-global's withdraw-0 below.
             PlutusData tokenSpendRedeemer = ConstrPlutusData.of(0);
-
-            // prog-logic-global validator: invoked via withdraw-0 to authorise
-            // the prog-token spend. The script itself is supplied via reference
-            // input (programmableGlobalRefInput) — we only need the reward
-            // address here to attach the withdraw-0 to the tx. Its redeemer
-            // points at the registry entry by reference-input index (Constr 0
-            // wraps the variant; the inner single-element list mirrors
-            // kyc-extended's pattern). prog-logic-base (spending validator for
-            // the token UTxO) is similarly supplied via programmableBaseRefInput.
+            // prog-logic-global — invoked via withdraw-0 to authorise the
+            // prog-token spend. Burns use the ThirdPartyAct branch (Constr 1)
+            // rather than TransferAct (Constr 0): the latter requires per-token
+            // proofs and a matching continuation-as-transfer shape that doesn't
+            // exist for a burn. ThirdPartyAct just needs the registry-entry
+            // index + the outputs_start_idx telling the validator where the
+            // continuation outputs begin (so it can verify the burned policy
+            // has been removed from them). See FreezeAndSeizeHandler.buildBurn
+            // for the same pattern.
             PlutusScript programmableLogicGlobal = protocolScriptBuilderService
                     .getParameterizedProgrammableLogicGlobalScript(protocolParams);
             Address programmableLogicGlobalRewardAddress = AddressProvider.getRewardAddress(
                     programmableLogicGlobal, network.getCardanoNetwork());
-            PlutusData programmableGlobalRedeemer = ConstrPlutusData.of(0,
-                    ListPlutusData.of(ConstrPlutusData.of(0,
-                            BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx)))));
+            PlutusData programmableGlobalRedeemer = ConstrPlutusData.of(1,
+                    BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx)),
+                    BigIntPlutusData.of(BigInteger.valueOf(continuationOutputIdx)));
 
-            // ── 8. GS output value (preserved verbatim from input) ─────────
-            BigInteger gsLovelace = gsUtxo.getAmount().stream()
-                    .filter(a -> "lovelace".equals(a.getUnit()))
-                    .map(Amount::getQuantity)
-                    .findFirst().orElseThrow(() -> new IllegalStateException("GS UTxO has no lovelace"));
-            Amount gsNftAmount = gsUtxo.getAmount().stream()
-                    .filter(a -> !"lovelace".equals(a.getUnit()))
-                    .findFirst().orElseThrow(() -> new IllegalStateException("GS UTxO has no NFT"));
-            Value gsValue = Value.builder()
-                    .coin(gsLovelace)
-                    .multiAssets(List.of(MultiAsset.builder()
-                            .policyId(reg.getGlobalStatePolicyId())
-                            .assets(List.of(Asset.builder()
-                                    .name("0x" + AssetType.fromUnit(gsNftAmount.getUnit()).assetName())
-                                    .value(BigInteger.ONE).build()))
-                            .build()))
-                    .build();
-
-            // ── 9. The burned asset (negative quantity in mint field) ──────
+            // ── 7. Outputs ─────────────────────────────────────────────────
+            Value gsValue = buildPreservedGsValue(gsUtxo, reg.getGlobalStatePolicyId());
             Asset burnAsset = Asset.builder()
                     .name("0x" + request.assetName())
                     .value(mintFieldQuantity).build();
 
-            // ── 10. Compose tx ─────────────────────────────────────────────
+            // Continuation value — preserve the token UTxO's lovelace + every
+            // other multi-asset; for the burned policy, keep
+            // `remainingTokenInUtxo` of the burned asset (zero = full burn →
+            // policy entry omitted entirely so we don't emit a zero-quantity
+            // asset, which the ledger rejects).
+            Value tokenUtxoValue = tokenUtxo.toValue();
+            List<MultiAsset> continuationMultiAssets = new java.util.ArrayList<>();
+            if (tokenUtxoValue.getMultiAssets() != null) {
+                for (MultiAsset ma : tokenUtxoValue.getMultiAssets()) {
+                    if (!ma.getPolicyId().equals(request.tokenPolicyId())) {
+                        continuationMultiAssets.add(ma);
+                        continue;
+                    }
+                    if (remainingTokenInUtxo.signum() == 0) continue;
+                    // Keep all OTHER asset names under the same policy verbatim
+                    // (if any), and the burned asset at the reduced quantity.
+                    List<Asset> kept = new java.util.ArrayList<>();
+                    for (Asset a : ma.getAssets()) {
+                        String aHexName = a.getName().startsWith("0x")
+                                ? a.getName().substring(2) : a.getName();
+                        if (aHexName.equalsIgnoreCase(request.assetName())) {
+                            kept.add(Asset.builder()
+                                    .name("0x" + request.assetName())
+                                    .value(remainingTokenInUtxo).build());
+                        } else {
+                            kept.add(a);
+                        }
+                    }
+                    continuationMultiAssets.add(MultiAsset.builder()
+                            .policyId(ma.getPolicyId())
+                            .assets(kept).build());
+                }
+            }
+            Value continuationValue = Value.builder()
+                    .coin(tokenUtxoValue.getCoin())
+                    .multiAssets(continuationMultiAssets)
+                    .build();
+
+            // ── 8. Compose tx ──────────────────────────────────────────────
             // Script witnesses:
-            //   spending → gsSpendScript        (attached — BaFin, parameterised)
-            //   spending → programmableLogicBase (REFERENCED via programmableBaseRefInput
-            //                                     — protocol script, published at bootstrap)
-            //   minting  → issuanceContract     (attached — wrapped per-token)
-            //   reward   → mintingLogic         (attached — BaFin, parameterised, can_burn)
-            //   reward   → transferLogic        (attached — BaFin, parameterised, mint/burn
-            //                                    rubber-stamp branch)
-            //   reward   → programmableLogicGlobal (REFERENCED via programmableGlobalRefInput
-            //                                       — protocol script, published at bootstrap)
+            //   spending → gsSpend                (attached — BaFin, parameterised)
+            //   spending → programmableLogicBase  (REFERENCED via progBaseRefInput)
+            //   minting  → issuanceContract       (attached — wrapped per-token)
+            //   reward   → mintingLogic           (attached — BaFin, parameterised, can_burn)
+            //   reward   → programmableLogicGlobal (REFERENCED via progGlobalRefInput)
             //
-            // The protocol scripts must be referenced (not attached) — attaching
-            // both inline pushes the tx well over the 16 KB size limit.
+            // The protocol scripts MUST be referenced (not attached) — attaching
+            // both inline pushes the tx over the 16 KB ledger size limit.
             //
-            // progBaseRefInput + progGlobalRefInput declared above in step 6
-            // (we need them for ref-input lex-sorting before computing indices).
-
-            // (No transferLogic-stake-cred-registered precondition: burn no
-            // longer uses transferLogic.withdraw — see comment block on the
-            // Tx builder below for why prog-logic-global's check is satisfied
-            // by mintingLogic instead.)
-
-            // The transferLogic withdraw + script are intentionally OMITTED here.
+            // transferLogic is intentionally NOT in the witness set even though
             // prog-logic-global validates a prog-token spend via
             //   expect has_withdrawal(transfer_logic_script)
             // where transfer_logic_script is read from registry node field 3.
-            // In our registry datum, field 3 stores mintingLogic's hash (the
-            // BaFin substandard reuses CIP-113's "third_party_transfer_logic"
-            // slot for mintingLogic — see RegistryNode.toPlutusData). Since
-            // mintingLogic IS in our withdrawals, the protocol's check passes
-            // without needing a separate transferLogic withdrawal. Removing it
-            // also drops the ~5952-byte transferLogic script from the witness
-            // set, keeping the burn tx under the 16 KB ledger limit.
+            // In our registry datum, field 3 stores mintingLogic's hash (BaFin
+            // reuses CIP-113's "third_party_transfer_logic" slot for
+            // mintingLogic — see RegistryNode.toPlutusData). Since mintingLogic
+            // IS in our withdrawals, the protocol's check passes without
+            // needing a separate transferLogic withdrawal, and we save ~5952
+            // bytes of script witness, keeping the tx under 16 KB.
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
                     .collectFrom(tokenUtxo, tokenSpendRedeemer)
                     .collectFrom(gsUtxo, gsSpendRedeemer)
-                    .withdraw(mintingLogicRewardAddress.getAddress(), BigInteger.ZERO, withdrawRedeemer)
+                    .withdraw(s.mintingLogicRewardAddress().getAddress(), BigInteger.ZERO, withdrawRedeemer)
                     .withdraw(programmableLogicGlobalRewardAddress.getAddress(), BigInteger.ZERO,
                             programmableGlobalRedeemer)
-                    .mintAsset(issuanceContract, burnAsset, issuanceRedeemer)
-                    .payToContract(gsSpendAddress.getAddress(), ValueUtil.toAmountList(gsValue),
-                            newGsDatum)                                                              // output 0
+                    .mintAsset(s.issuanceContract(), burnAsset, issuanceRedeemer)
+                    .payToContract(tokenUtxo.getAddress(), ValueUtil.toAmountList(continuationValue),
+                            ConstrPlutusData.of(0))                                                  // output 0 (continuation)
+                    .payToContract(s.gsSpendAddress().getAddress(), ValueUtil.toAmountList(gsValue),
+                            newGsDatum)                                                              // output 1 (new GS)
                     .readFrom(
-                            TransactionInput.builder()
-                                    .transactionId(directoryEntry.getTxHash())
-                                    .index(directoryEntry.getOutputIndex()).build(),
-                            TransactionInput.builder()
-                                    .transactionId(puNode.getTxHash())
-                                    .index(puNode.getOutputIndex()).build(),
-                            TransactionInput.builder()
-                                    .transactionId(protocolParamsUtxo.getTxHash())
-                                    .index(protocolParamsUtxo.getOutputIndex()).build(),
-                            TransactionInput.builder()
-                                    .transactionId(issuanceUtxo.getTxHash())
-                                    .index(issuanceUtxo.getOutputIndex()).build(),
+                            txInputOf(directoryEntry),
+                            txInputOf(puNode),
+                            txInputOf(protocolParamsUtxo),
+                            txInputOf(issuanceUtxo),
                             progBaseRefInput,
                             progGlobalRefInput)
-                    .attachSpendingValidator(gsSpendScript)
-                    .attachRewardValidator(mintingLogicScript)
+                    .attachSpendingValidator(s.gsSpend())
+                    .attachRewardValidator(s.mintingLogic())
                     .withChangeAddress(request.feePayerAddress());
 
-            // ── 11. Build with burner signature + pinned collateral ────────
+            // ── 9. Build with burner signature + pinned collateral ─────────
             // Required signers:
-            //   - burnerKeyHash (PAYMENT) — needed by mintingLogic.withdraw's
+            //   burnerKeyHash (PAYMENT) — needed by mintingLogic.withdraw's
             //     can_burn check (matches the PU node's credential_hash field).
-            //   - burnerStakeHash (STAKE) — needed by prog-logic-global's
+            //   burnerStakeHash (STAKE) — needed by prog-logic-global's
             //     collect_input_assets check on the prog-token UTxO's stake
             //     credential. Wallets sign for BOTH payment and stake when
             //     signing as themselves, so this just declares the requirement.
@@ -2857,17 +2567,7 @@ public class SecurityTokenSubstandardHandler
                     .withCollateralInputs(TransactionInput.builder()
                             .transactionId(funding.getTxHash())
                             .index(funding.getOutputIndex()).build())
-                    .preBalanceTx((bctx, txn) -> {
-                        // Move the fee-payer change output to the END so the
-                        // new GS at output 0 keeps its position.
-                        List<com.bloxbean.cardano.client.transaction.spec.TransactionOutput> outs =
-                                txn.getBody().getOutputs();
-                        if (!outs.isEmpty() && outs.getFirst().getAddress().equals(feePayerAddress)) {
-                            com.bloxbean.cardano.client.transaction.spec.TransactionOutput first =
-                                    outs.removeFirst();
-                            outs.addLast(first);
-                        }
-                    })
+                    .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
                     .postBalanceTx((bctx, txn) -> {
                         // Same fee-too-small pattern we saw in transfer:
                         // Bloxbean's fee calc comes up short by a few KB
@@ -2917,6 +2617,8 @@ public class SecurityTokenSubstandardHandler
             log.info("security-token burn: policy={} qty={} (mintable_amount {} → {})",
                     request.tokenPolicyId(), burnQuantity, currentMintable, newMintable);
             return TransactionContext.ok(transaction.serializeToHex());
+        } catch (BuildPreconditionException bpe) {
+            return TransactionContext.typedError(bpe.getMessage());
         } catch (Exception e) {
             log.error("security-token burn failed for policy={}", request.tokenPolicyId(), e);
             return TransactionContext.typedError("burn failed: " + e.getMessage());
@@ -3867,6 +3569,209 @@ public class SecurityTokenSubstandardHandler
             }
         }
         return out;
+    }
+
+    // ── Shared helpers for mint / burn tx construction ─────────────────────
+    //
+    // Mint and burn build the same kind of MintSecurity GS-spend tx with the
+    // same set of parameterised scripts and ref inputs — only the sign of the
+    // minted amount, the GS datum's mintable_amount delta, and the input/output
+    // shape differ. These helpers collapse the otherwise-duplicated setup so
+    // the two entry points stay focused on their genuine differences.
+
+    /** Bundle of parameterised scripts + addresses every MintSecurity-style tx needs. */
+    private record MintLikeScripts(
+            PlutusScript mintingLogic,
+            PlutusScript issuanceContract,
+            PlutusScript gsSpend,
+            Address gsSpendAddress,
+            Address mintingLogicRewardAddress) {}
+
+    /** Thrown by build-helpers when a precondition isn't met. The outer
+     *  build* method's catch surfaces the message verbatim via
+     *  {@link TransactionContext#typedError(String)} so callers see the same
+     *  user-facing error as the original inline checks. */
+    private static final class BuildPreconditionException extends RuntimeException {
+        BuildPreconditionException(String message) { super(message); }
+    }
+
+    private MintLikeScripts buildMintLikeScripts(
+            SecurityTokenRegistrationEntity reg, ProtocolBootstrapParams protocolParams)
+            throws com.bloxbean.cardano.client.exception.CborSerializationException {
+        String registryPolicyId = protocolParams.directoryMintParams().scriptHash();
+        PlutusScript mintingLogicScript = scriptBuilder.buildMintingLogicScript(
+                reg.getSecurityAssetNameHex(), reg.getGlobalStatePolicyId(),
+                registryPolicyId, reg.getPowerUsersPolicyId());
+        PlutusScript issuanceContract = protocolScriptBuilderService
+                .getParameterizedIssuanceMintScript(protocolParams, mintingLogicScript);
+        PlutusScript gsSpendScript = scriptBuilder.buildGlobalStateSpendScript(
+                reg.getSecurityAssetNameHex(),
+                issuanceContract.getPolicyId(), reg.getGlobalStatePolicyId());
+        Address gsSpendAddress = AddressProvider.getEntAddress(
+                gsSpendScript, network.getCardanoNetwork());
+        Address mintingLogicRewardAddress = AddressProvider.getRewardAddress(
+                mintingLogicScript, network.getCardanoNetwork());
+        return new MintLikeScripts(
+                mintingLogicScript, issuanceContract, gsSpendScript,
+                gsSpendAddress, mintingLogicRewardAddress);
+    }
+
+    /** Look up the GS UTxO by exact (policy, asset_name) and validate it has
+     *  an inline datum. Policy-only lookup is unreliable once the CIP-113
+     *  directory has entries under the same policy id. */
+    private Utxo findGsUtxo(SecurityTokenRegistrationEntity reg) {
+        Utxo gsUtxo = utxoProvider.findUtxoByAsset(
+                reg.getGlobalStatePolicyId(),
+                SecurityTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX
+        ).orElseThrow(() -> new BuildPreconditionException(
+                "GS NFT not found on chain — has the registration tx confirmed?"));
+        if (gsUtxo.getInlineDatum() == null || gsUtxo.getInlineDatum().isBlank()) {
+            throw new BuildPreconditionException("GS UTxO is missing its inline datum");
+        }
+        return gsUtxo;
+    }
+
+    /** Deserialize + validate the 9-field BaFin GlobalStateDatum, returning its
+     *  fields. Throws {@link BuildPreconditionException} with a user-visible
+     *  message when the datum shape is wrong. */
+    private static List<PlutusData> parseGsFields(Utxo gsUtxo) {
+        try {
+            PlutusData datum = PlutusData.deserialize(
+                    HexUtil.decodeHexString(gsUtxo.getInlineDatum()));
+            if (!(datum instanceof ConstrPlutusData constr)) {
+                throw new BuildPreconditionException("GS datum is not a Constr");
+            }
+            List<PlutusData> fields = constr.getData().getPlutusDataList();
+            if (fields.size() < 9) {
+                throw new BuildPreconditionException(
+                        "GS datum has " + fields.size() + " fields, expected 9");
+            }
+            return fields;
+        } catch (BuildPreconditionException bpe) {
+            throw bpe;
+        } catch (Exception e) {
+            throw new BuildPreconditionException("could not parse GS datum: " + e.getMessage());
+        }
+    }
+
+    /** Look up a power-user's linked-list node by signer PKH. The node NFT has
+     *  asset name {@code "Node" ++ signerPkh}; we look up by exact
+     *  (policy, assetName) because the PU policy also mints a root NFT with
+     *  empty asset name. {@code role} appears in the error message
+     *  ("admin" / "burner") when the node isn't found. */
+    private Utxo findPuNode(SecurityTokenRegistrationEntity reg, byte[] signerPkh, String role) {
+        byte[] nodeAssetName = concat(LL_NODE_KEY_PREFIX, signerPkh);
+        String nodeAssetNameHex = HexUtil.encodeHexString(nodeAssetName);
+        return utxoProvider.findUtxoByAsset(
+                reg.getPowerUsersPolicyId(), nodeAssetNameHex
+        ).orElseThrow(() -> new BuildPreconditionException(
+                role + " power-user node not found on chain — "
+                + HexUtil.encodeHexString(signerPkh) + " may not be a registered power user "
+                + "(asset: " + reg.getPowerUsersPolicyId() + "/" + nodeAssetNameHex + ")"));
+    }
+
+    /** Look up the CIP-113 directory entry for the given prog-token policy by
+     *  walking the directory-spend address and filtering on parsed
+     *  {@code RegistryNode.key()}. */
+    private Utxo findDirectoryEntry(String tokenPolicyId, ProtocolBootstrapParams protocolParams) {
+        PlutusScript directorySpendContract = protocolScriptBuilderService
+                .getParameterizedDirectorySpendScript(protocolParams);
+        Address directorySpendAddress = AddressProvider.getEntAddress(
+                directorySpendContract, network.getCardanoNetwork());
+        List<Utxo> registryEntries = utxoProvider.findUtxos(directorySpendAddress.getAddress());
+        return registryEntries.stream()
+                .filter(u -> registryNodeParser.parse(u.getInlineDatum())
+                        .map(node -> tokenPolicyId.equals(node.key()))
+                        .orElse(false))
+                .findAny()
+                .orElseThrow(() -> new BuildPreconditionException(
+                        "directory entry for policy " + tokenPolicyId + " not found"));
+    }
+
+    /** Resolve the CIP-113 protocol-params and issuance-params UTxOs from the
+     *  bootstrap tx. Returns them in stable order: [protocolParams, issuance]. */
+    private List<Utxo> findProtocolAndIssuanceUtxos(ProtocolBootstrapParams protocolParams) {
+        String bootstrapTxHash = protocolParams.txHash();
+        Utxo protocolParamsUtxo = utxoProvider.findUtxo(bootstrapTxHash, 0)
+                .orElseThrow(() -> new BuildPreconditionException(
+                        "could not resolve protocol params UTxO at " + bootstrapTxHash + ":0"));
+        Utxo issuanceUtxo = utxoProvider.findUtxo(bootstrapTxHash, 2)
+                .orElseThrow(() -> new BuildPreconditionException(
+                        "could not resolve issuance params UTxO at " + bootstrapTxHash + ":2"));
+        return List.of(protocolParamsUtxo, issuanceUtxo);
+    }
+
+    /** Pick a single ADA-only funding UTxO at the fee-payer address. */
+    private Utxo findFunding(String feePayerAddress, long minLovelace) {
+        List<Utxo> fundingUtxos = accountService.findAdaOnlyUtxo(feePayerAddress, minLovelace);
+        if (fundingUtxos.isEmpty()) {
+            throw new BuildPreconditionException("no funding UTxO at fee-payer address");
+        }
+        return fundingUtxos.getFirst();
+    }
+
+    /** Mutate only the {@code mintable_amount} field of the parsed GS fields
+     *  by the given (signed) delta — positive for burn, negative for mint —
+     *  and return the new 9-field Constr datum. All other fields are preserved
+     *  verbatim. Throws if the delta would drive mintable_amount negative. */
+    private static PlutusData applyMintableDelta(List<PlutusData> gsFields, long delta) {
+        if (!(gsFields.get(1) instanceof BigIntPlutusData bi)) {
+            throw new BuildPreconditionException("GS datum field 1 (mintable_amount) is not an Int");
+        }
+        long current = bi.getValue().longValueExact();
+        long updated = current + delta;
+        if (updated < 0) {
+            throw new BuildPreconditionException(
+                    "mint quantity exceeds remaining mintable_amount (" + current + ")");
+        }
+        return ConstrPlutusData.of(0,
+                gsFields.get(0),                                              // transfers_paused
+                BigIntPlutusData.of(BigInteger.valueOf(updated)),             // mintable_amount
+                gsFields.get(2),                                              // admin_credential_hash
+                gsFields.get(3),                                              // power_user_linked_list_policy_id
+                gsFields.get(4),                                              // denylist_linked_list_policy_id
+                gsFields.get(5),                                              // security_info
+                gsFields.get(6),                                              // trusted_entity_vkeys
+                gsFields.get(7),                                              // member_root_hash
+                gsFields.get(8));                                             // requires_receiver_kyc
+    }
+
+    /** Reproduce the GS UTxO's Value verbatim from its (lovelace + single NFT)
+     *  amounts. The GS spend validator's {@code value_preserved} invariant
+     *  requires the recreated output to match the input value exactly. */
+    private static Value buildPreservedGsValue(Utxo gsUtxo, String gsPolicyId) {
+        BigInteger gsLovelace = gsUtxo.getAmount().stream()
+                .filter(a -> "lovelace".equals(a.getUnit()))
+                .map(Amount::getQuantity)
+                .findFirst().orElseThrow(() -> new IllegalStateException("GS UTxO has no lovelace"));
+        Amount gsNftAmount = gsUtxo.getAmount().stream()
+                .filter(a -> !"lovelace".equals(a.getUnit()))
+                .findFirst().orElseThrow(() -> new IllegalStateException("GS UTxO has no NFT"));
+        return Value.builder()
+                .coin(gsLovelace)
+                .multiAssets(List.of(MultiAsset.builder()
+                        .policyId(gsPolicyId)
+                        .assets(List.of(Asset.builder()
+                                .name("0x" + AssetType.fromUnit(gsNftAmount.getUnit()).assetName())
+                                .value(BigInteger.ONE).build()))
+                        .build()))
+                .build();
+    }
+
+    /** preBalanceTx hook that moves a leading fee-payer change output to the
+     *  END of the outputs list. Used so that explicitly-positioned outputs
+     *  (the new GS UTxO, recipient prog-token, etc.) keep the indices their
+     *  redeemers point at when Bloxbean's balancer prepends a change output. */
+    private static com.bloxbean.cardano.client.function.TxBuilder
+            moveLeadingChangeOutputToEnd(String feePayerAddress) {
+        return (bctx, txn) -> {
+            List<com.bloxbean.cardano.client.transaction.spec.TransactionOutput> outs =
+                    txn.getBody().getOutputs();
+            if (!outs.isEmpty() && outs.getFirst().getAddress().equals(feePayerAddress)) {
+                com.bloxbean.cardano.client.transaction.spec.TransactionOutput first = outs.removeFirst();
+                outs.addLast(first);
+            }
+        };
     }
 
     /** Read view of the on-chain global state datum surfaced to off-chain callers. */
