@@ -1,0 +1,69 @@
+{
+    "protocolParams": {
+        "txInput": {
+            "txHash": "b1d2119fef99f97f349bcd7376a1faf3a93fefda1051a7dbfa2dfa0ff0172cc8",
+            "outputIndex": 0
+        },
+        "scriptHash": "fc9b310f55a9b40c3f54bed971a9af3d4b01bd0329a23bee0b0235a0",
+        "alwaysFailScriptHash": "c253110c9995d5bad192bad38fb6f4fb7b02e7aa5fc123254572adb3"
+    },
+    "coordinationParams": {
+        "nonce": "9c1f0c1e3a5d47b28e6f0a91d4c7b3e50f28a6d19b4c7e035a8d2f61c093b47e",
+        "scriptHash": "c253110c9995d5bad192bad38fb6f4fb7b02e7aa5fc123254572adb3",
+        "address": "addr_test1wrp9xygvnx2atwk3j2ad8rak7nahkqh84f0uzge9g4e2mvc74ttw5"
+    },
+    "programmableLogicGlobalPrams": {
+        "protocolParamsScriptHash": "fc9b310f55a9b40c3f54bed971a9af3d4b01bd0329a23bee0b0235a0",
+        "scriptHash": "d4583518cd04af93e7a6e6d1bf4c58ee436b56ae8374aeda54731b53"
+    },
+    "programmableLogicBaseParams": {
+        "protocolParamsPolicyId": "fc9b310f55a9b40c3f54bed971a9af3d4b01bd0329a23bee0b0235a0",
+        "scriptHash": "aeadb92788b5df7246b7a50ec175ecd1c6eb2ca4b8b8b57e5fb3fbe4"
+    },
+    "unfrackingParams": {
+        "protocolParamsPolicyId": "fc9b310f55a9b40c3f54bed971a9af3d4b01bd0329a23bee0b0235a0",
+        "scriptHash": "2a139424f418897c3cde72866b0bb57ada4fe9f2cd34a190dcfbafea",
+        "rewardAddress": "stake_test17q4p89py7svgjlpumeegv6ctk4ad5nlf7txnfgvsmna6l6skazpwh"
+    },
+    "upgradeMultisigParams": {
+        "signers": [
+            "32e7e00eae28502a2aa271cf4202b1b01b94ca8efe642e380c93d5e2"
+        ],
+        "threshold": 1,
+        "scriptHash": "4861aca31fe0581ff2a16d180f26ac2b4feeb71ca5fd2a86b7927bb5",
+        "rewardAddress": "stake_test17pyxrt9rrls9s8lj59k3srex4s45lm4hrjjl625xk7f8hdgr7mzav"
+    },
+    "issuanceParams": {
+        "txInput": {
+            "txHash": "b1d2119fef99f97f349bcd7376a1faf3a93fefda1051a7dbfa2dfa0ff0172cc8",
+            "outputIndex": 1
+        },
+        "scriptHash": "0d0e48b761af0138962222e91cf1656436ea25999a1fbca989f4eecd",
+        "alwaysFailScriptHash": "5ff3439ab5b059889fbaf360195275d8471de9ad939e1bb6c3a7b74c"
+    },
+    "directoryMintParams": {
+        "txInput": {
+            "txHash": "b1d2119fef99f97f349bcd7376a1faf3a93fefda1051a7dbfa2dfa0ff0172cc8",
+            "outputIndex": 0
+        },
+        "issuanceScriptHash": "0d0e48b761af0138962222e91cf1656436ea25999a1fbca989f4eecd",
+        "scriptHash": "3852e8027878cc5390a30eb607fe894bfc8902ed1ec6af1c6e9b1d91"
+    },
+    "directorySpendParams": {
+        "protocolParamsPolicyId": "fc9b310f55a9b40c3f54bed971a9af3d4b01bd0329a23bee0b0235a0",
+        "scriptHash": "c8864f5268eb2c2f8fae4d5651ab299d82e49cf8896c7fb889e335ee"
+    },
+    "programmableBaseRefInput": {
+        "txHash": "2209835bd7e0914c9e58b62dc867f3ad4c04d80fa046fa9f174f07304678d75c",
+        "outputIndex": 3
+    },
+    "programmableGlobalRefInput": {
+        "txHash": "2209835bd7e0914c9e58b62dc867f3ad4c04d80fa046fa9f174f07304678d75c",
+        "outputIndex": 4
+    },
+    "unfrackingRefInput": {
+        "txHash": "2209835bd7e0914c9e58b62dc867f3ad4c04d80fa046fa9f174f07304678d75c",
+        "outputIndex": 5
+    },
+    "txHash": "2209835bd7e0914c9e58b62dc867f3ad4c04d80fa046fa9f174f07304678d75c"
+}

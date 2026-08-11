@@ -96,11 +96,7 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
     @Test
     public void deploy() throws Exception {
 
-        var dryRun = true;
-        // Task 5 will add a branch on dryRun to call completeAndWait() instead of just
-        // buildAndSign(). That branch doesn't exist yet, so guard against silently flipping this
-        // flag and no-op'ing the deployment before the submit path is wired up.
-        Assertions.assertTrue(dryRun, "submit path not implemented yet — see Task 5");
+        var dryRun = false;
 
         var utxosOpt = bfBackendService.getUtxoService().getUtxos(adminAccount.baseAddress(), 100, 1);
         Assertions.assertTrue(utxosOpt.isSuccessful(), "utxo query failed: " + utxosOpt.getResponse());
@@ -365,9 +361,10 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 .payToAddress(adminAccount.baseAddress(), Amount.ada(50))
                 .withChangeAddress(adminAccount.baseAddress());
 
-        // dryRun stays true here: buildAndSign() executes AikenTransactionEvaluator locally
-        // (registry_mint, protocol_params_mint, issuance_cbor_hex_mint all run against Task 2's
-        // datums) but never submits. Task 5 branches on dryRun to call completeAndWait() instead.
+        // buildAndSign() executes AikenTransactionEvaluator locally (registry_mint,
+        // protocol_params_mint, issuance_cbor_hex_mint all run against the datums above)
+        // regardless of dryRun; submission itself is gated separately below so the built
+        // Transaction object is always available for the ref-index/size checks that follow.
         var transaction = quickTxBuilder.compose(tx)
                 .withSigner(SignerProviders.signerFrom(adminAccount))
                 .withTxEvaluator(new AikenTransactionEvaluator(bfBackendService))
@@ -395,6 +392,18 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         // not this dry run is ever submitted, since the ref inputs below point at outputs of
         // *this* transaction and must resolve to its real hash, not a placeholder.
         var txHash = TransactionUtil.getTxHash(transaction);
+
+        if (!dryRun) {
+            var result = bfBackendService.getTransactionService().submitTransaction(transaction.serialize());
+            if (result.isSuccessful()) {
+                log.info("submitted: {}", result.getValue());
+                Assertions.assertEquals(txHash, result.getValue(),
+                        "locally computed tx hash must match the submitted tx hash");
+            } else {
+                log.warn("error: {}", result.getResponse());
+                Assertions.fail("submission failed: " + result.getResponse());
+            }
+        }
 
         var protocolParams = new ProtocolParams(
                 new TxInput(utxo1.getTxHash(), utxo1.getOutputIndex()),
