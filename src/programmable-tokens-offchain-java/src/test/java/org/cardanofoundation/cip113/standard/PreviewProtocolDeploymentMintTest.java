@@ -16,7 +16,6 @@ import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.PlutusData;
 import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
-import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.quicktx.Tx;
 import com.bloxbean.cardano.client.transaction.spec.Asset;
 import com.bloxbean.cardano.client.transaction.spec.MultiAsset;
@@ -471,24 +470,5 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         }
         throw new IllegalStateException("no output carries reference script " + wanted);
     }
-
-    @Test
-    public void registerAddress() throws Exception {
-        var utxosOpt = bfBackendService.getUtxoService().getUtxos(adminAccount.baseAddress(), 100, 1);
-
-        var allWalletUtxos = utxosOpt.getValue();
-
-        var stakeRegistrationTx = new Tx()
-                .from(adminAccount.baseAddress())
-                .collectFrom(List.of(allWalletUtxos.get(2)))
-                .registerStakeAddress("stake_test17qma20wkn4dwuweaudjqelpra78m2x5qyqd3psmwfa7lj4g5qmpkq")
-                .withChangeAddress(adminAccount.baseAddress());
-
-        new QuickTxBuilder(bfBackendService).compose(stakeRegistrationTx)
-                .feePayer(adminAccount.baseAddress())
-                .withSigner(SignerProviders.signerFrom(adminAccount))
-                .completeAndWait();
-    }
-
 
 }

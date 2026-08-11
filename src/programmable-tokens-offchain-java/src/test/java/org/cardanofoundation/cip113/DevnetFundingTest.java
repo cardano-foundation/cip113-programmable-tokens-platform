@@ -31,7 +31,8 @@ public class DevnetFundingTest extends AbstractPreviewTest {
         log.info("funding {} from {}", adminAccount.baseAddress(), genesis.baseAddress());
 
         // Three fat UTxOs: the deployment pins two of them as one-shot inputs and needs
-        // ~160 ADA across the pair; the third covers the wallet-split fallback path.
+        // >=175 ADA across the pair (its >=2-UTxO / >=175-ADA precondition); the third
+        // is just headroom, not required by any specific code path.
         var tx = new Tx()
                 .from(genesis.baseAddress())
                 .payToAddress(adminAccount.baseAddress(), Amount.ada(1000))
