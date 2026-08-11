@@ -14,6 +14,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -58,6 +59,7 @@ public class ProtocolBootstrapService {
 
             // Store all bootstraps in map
             for (ProtocolBootstrapParams params : bootstrapsList) {
+                requireV040Complete(params);
                 bootstrapsByTxHash.put(params.txHash(), params);
                 log.info("Loaded protocol bootstrap for txHash: {}", params.txHash());
             }
@@ -87,6 +89,48 @@ public class ProtocolBootstrapService {
         } catch (IOException e) {
             log.error("could not load bootstrap or protocol blueprint", e);
             throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Fails fast, at load time, when a bootstrap entry is missing a component that v0.4.0
+     * requires. Older bootstrap files (protocol-bootstraps-preview.json,
+     * protocol-bootstraps-preprod.json) predate the v0.4.0 contract port and describe
+     * deployments that no longer match the current contracts; Jackson happily fills their
+     * absent fields with {@code null} and would otherwise hand out a record that NPEs the
+     * first time something reads one of those limbs (e.g. inside
+     * {@link ProtocolScriptBuilderService}). Refusing to load it here, with the exact missing
+     * section named, turns that latent NPE into a loud, actionable startup failure instead.
+     */
+    private static void requireV040Complete(ProtocolBootstrapParams params) {
+        var missing = new ArrayList<String>();
+
+        if (params.coordinationParams() == null) {
+            missing.add("coordinationParams");
+        }
+        if (params.unfrackingParams() == null) {
+            missing.add("unfrackingParams");
+        }
+        if (params.upgradeMultisigParams() == null) {
+            missing.add("upgradeMultisigParams");
+        }
+        if (params.unfrackingRefInput() == null) {
+            missing.add("unfrackingRefInput");
+        }
+        // programmableLogicBaseParams itself is present in legacy files too, but under the
+        // pre-rename key programmableLogicGlobalScriptHash; protocolParamsPolicyId is the
+        // v0.4.0 key and is silently null for those entries (see ProgrammableLogicBaseParams).
+        if (params.programmableLogicBaseParams() == null
+                || params.programmableLogicBaseParams().protocolParamsPolicyId() == null) {
+            missing.add("programmableLogicBaseParams.protocolParamsPolicyId");
+        }
+
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException(
+                    "Protocol bootstrap entry txHash=" + params.txHash()
+                            + " is missing v0.4.0 component(s): " + String.join(", ", missing)
+                            + ". This bootstrap file predates the v0.4.0 contract port; "
+                            + "regenerate it from a real v0.4.0 deployment before using it.");
         }
     }
 
