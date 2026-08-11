@@ -161,6 +161,9 @@ public class ProtocolScriptBuilderService {
             var parameters = ListPlutusData.of(BytesPlutusData.of(HexUtil.decodeHexString(protocolParamsPolicyId)));
 
             var contractOpt = protocolBootstrapService.getProtocolContract("programmable_logic_base.programmable_logic_base.spend");
+            if (contractOpt.isEmpty()) {
+                throw new IllegalStateException("Programmable logic base contract not found");
+            }
 
             return PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
                     AikenScriptUtil.applyParamToScript(parameters, contractOpt.get()),

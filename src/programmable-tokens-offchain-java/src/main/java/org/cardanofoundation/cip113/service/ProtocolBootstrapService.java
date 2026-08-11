@@ -105,6 +105,8 @@ public class ProtocolBootstrapService {
     private static void requireV040Complete(ProtocolBootstrapParams params) {
         var missing = new ArrayList<String>();
 
+        // Components new in v0.4.0 — absent entirely (rather than merely renamed) in legacy
+        // bootstrap files, so Jackson leaves them null.
         if (params.coordinationParams() == null) {
             missing.add("coordinationParams");
         }
@@ -123,6 +125,34 @@ public class ProtocolBootstrapService {
         if (params.programmableLogicBaseParams() == null
                 || params.programmableLogicBaseParams().protocolParamsPolicyId() == null) {
             missing.add("programmableLogicBaseParams.protocolParamsPolicyId");
+        }
+
+        // Components that predate v0.4.0 and are present in every known bootstrap file today,
+        // but are still required by ProtocolScriptBuilderService/callers — checked so a
+        // hand-edited or truncated bootstrap file fails here too, not with an NPE downstream.
+        if (params.protocolParams() == null) {
+            missing.add("protocolParams");
+        }
+        if (params.programmableLogicGlobalPrams() == null) {
+            missing.add("programmableLogicGlobalPrams");
+        }
+        if (params.issuanceParams() == null) {
+            missing.add("issuanceParams");
+        }
+        if (params.directoryMintParams() == null) {
+            missing.add("directoryMintParams");
+        }
+        if (params.directorySpendParams() == null) {
+            missing.add("directorySpendParams");
+        }
+        if (params.programmableBaseRefInput() == null) {
+            missing.add("programmableBaseRefInput");
+        }
+        if (params.programmableGlobalRefInput() == null) {
+            missing.add("programmableGlobalRefInput");
+        }
+        if (params.txHash() == null) {
+            missing.add("txHash");
         }
 
         if (!missing.isEmpty()) {

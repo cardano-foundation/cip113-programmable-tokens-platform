@@ -1,5 +1,6 @@
 package org.cardanofoundation.cip113.service;
 
+import com.bloxbean.cardano.client.util.HexUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
@@ -7,7 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * WP-2 safety net (no chain, no network): re-derives every protocol script hash from
@@ -15,14 +16,19 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  * {@link ProtocolScriptBuilderService} and asserts each result equals the hash recorded in that
  * file.
  *
- * <p>That JSON is the handoff record of a deployment a real Cardano node accepted
- * ({@code PreviewProtocolDeploymentMintTest.deploy()}, tx
- * {@code 96343b91bda3ec81de743f45a5acc4f30b7e9f37ed0a54534ce0499f35ec015d} on the local Yaci
- * devnet, confirmed on-chain — see {@code docs/PLATFORM-V0.4.0-PORT-PLAN.md} and the commit
- * history around it). Agreement between what this test derives and what is recorded there is
- * real evidence that the parameter shape and order {@link ProtocolScriptBuilderService} applies
- * matches {@code plutus.json}'s {@code validators[].parameters}, not a tautology against a value
- * this test invented itself.
+ * <p>That JSON is the handoff record of tx
+ * {@code 96343b91bda3ec81de743f45a5acc4f30b7e9f37ed0a54534ce0499f35ec015d}, produced by
+ * {@code PreviewProtocolDeploymentMintTest.deploy()} against the local Yaci devnet and supplied
+ * as ground truth for this port (a later, independent re-run of the same deployment tracked in
+ * {@code docs/PLATFORM-V0.4.0-PORT-PLAN.md}/{@code docs/deployments/devnet-v0.4.0.json}, which
+ * describe an earlier tx and different hashes — the two are not the same deployment, so do not
+ * cross-check hashes between them). Agreement between what this test derives and what is
+ * recorded here is evidence that the parameter shape and order
+ * {@link ProtocolScriptBuilderService} applies matches {@code plutus.json}'s
+ * {@code validators[].parameters}, not a tautology against a value this test invented itself —
+ * though for {@code programmable_logic_base} specifically, note that a bootstrap tx being
+ * accepted on-chain does not itself validate PLB's parameterization: PLB is only ever published
+ * as a reference script at bootstrap time, never evaluated by that transaction.
  */
 class ProtocolScriptBuilderServiceHashDerivationTest {
 
@@ -87,26 +93,38 @@ class ProtocolScriptBuilderServiceHashDerivationTest {
     }
 
     /**
-     * issuance_mint is deliberately NOT asserted against a recorded hash above. Its 4th
-     * parameter (now {@code plg_stake_cred}, the fix under test for param count) is fine — PLG's
-     * hash is in the bootstrap record — but its 3rd parameter, {@code minting_logic_cred}, is the
-     * *substandard's* issuer script, which is not part of the protocol bootstrap and differs per
-     * token. So unlike the other six builders above, there is no fixed "protocol" hash for
-     * issuance_mint anywhere in the bootstrap record to check against: the deployment instead
-     * records a split prefix/postfix CBOR template built around a dummy placeholder credential
-     * (see {@code PreviewProtocolDeploymentMintTest.deploy()}, step 10), not an applied policy
-     * id. Weakening the assertion to match that template is out of scope here — this is a smoke
-     * test only, applying all 4 parameters (including a real, non-dummy credential in the
-     * substandard slot) and checking the result is a well-formed policy id, so a param-count or
-     * param-order regression in the fixed builder still fails loudly.
+     * issuance_mint is deliberately NOT asserted against a recorded hash the way the other six
+     * builders are. Its 3rd parameter, {@code minting_logic_cred}, is the *substandard's* issuer
+     * script — not part of the protocol bootstrap, and different per token — so unlike the other
+     * builders there is no fixed "protocol" policy id for issuance_mint anywhere in the bootstrap
+     * record to compare against: the deployment instead records a split prefix/postfix CBOR
+     * template built around a dummy placeholder credential (see
+     * {@code PreviewProtocolDeploymentMintTest.deploy()}, step 10), not an applied policy id.
+     *
+     * <p>{@code AikenScriptUtil.applyParamToScript} performs no arity check, so merely asserting
+     * the output is *some* well-formed 28-byte hash would pass just as well with 3 parameters
+     * applied as with the fixed 4 — it would not have caught the {@code plg_stake_cred} bug this
+     * builder was fixed for. Instead this test follows {@code deploy()}'s own technique
+     * (step 10, splitting the serialized template on the dummy marker): serialize the applied
+     * script body, split it on the *substandard* script's hash (the 3rd parameter, which is
+     * unambiguous and known here), and assert the PLG credential bytes (the 4th parameter) landed
+     * in the postfix, i.e. were applied *after* the substandard credential. Dropping or misplacing
+     * {@code plg_stake_cred} makes this fail.
      */
     @Test
-    void issuanceMintAppliesFourParametersWithoutError() throws Exception {
+    void issuanceMintAppliesFourParametersInOrder() throws Exception {
         var substandardIssueScript = protocolScriptBuilderService.getParameterizedAlwaysFailScript("deadbeef");
 
         var script = protocolScriptBuilderService.getParameterizedIssuanceMintScript(params, substandardIssueScript);
 
-        assertNotNull(script.getPolicyId());
-        assertEquals(56, script.getPolicyId().length(), "policy id must be a 28-byte hash (56 hex chars)");
+        var serializedBody = HexUtil.encodeHexString(script.serializeScriptBody());
+        var substandardHashHex = HexUtil.encodeHexString(substandardIssueScript.getScriptHash());
+        var parts = serializedBody.split(substandardHashHex);
+
+        assertEquals(2, parts.length,
+                "substandard credential must appear exactly once in the applied issuance_mint body");
+        assertTrue(parts[1].contains(params.programmableLogicGlobalPrams().scriptHash()),
+                "plg_stake_cred (PLG's hash) must be applied after minting_logic_cred — "
+                        + "its bytes should appear in the postfix following the substandard credential");
     }
 }
