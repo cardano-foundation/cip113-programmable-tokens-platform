@@ -137,10 +137,9 @@ public class IssueTokenTest extends AbstractPreviewTest {
         log.info("issuanceContract: {}", issuanceContract.getPolicyId());
 
         // Registry node output is at index 2: [0] PLB token, [1] covering node, [2] new registry node
-        var issuanceRedeemer = ConstrPlutusData.of(0,
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
-                ConstrPlutusData.of(1, BigIntPlutusData.of(2)) // OutputIndex { index: 2 }
-        );
+        // issuance_mint's redeemer IS types.MintingRegistryProof in v0.4.0 (no
+        // SmartTokenMintingAction wrapper): OutputIndex { index } = Constr 1 [Int].
+        var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2));
 
         // Directory MINT parameterization
         log.info("protocolBootstrapParams.directoryMintParams(): {}", protocolBootstrapParams.directoryMintParams());
@@ -165,9 +164,11 @@ public class IssueTokenTest extends AbstractPreviewTest {
 
 
         // Directory MINT - NFT, address, datum and value
+        // types.RegistryInsert { key, minting_logic_script: Credential } — v0.4.0: the 2nd
+        // field is a Credential, not a bare hash.
         var directoryMintRedeemer = ConstrPlutusData.of(1,
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
-                BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash()))
         );
 
         var directoryMintNft = Asset.builder()
@@ -371,10 +372,9 @@ public class IssueTokenTest extends AbstractPreviewTest {
         log.info("issuanceContract: {}", issuanceContract.getPolicyId());
 
         // Registry node output is at index 2: [0] PLB token, [1] covering node, [2] new registry node
-        var issuanceRedeemer = ConstrPlutusData.of(0,
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
-                ConstrPlutusData.of(1, BigIntPlutusData.of(2)) // OutputIndex { index: 2 }
-        );
+        // issuance_mint's redeemer IS types.MintingRegistryProof in v0.4.0 (no
+        // SmartTokenMintingAction wrapper): OutputIndex { index } = Constr 1 [Int].
+        var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2));
 
         // Directory MINT parameterization
         log.info("protocolBootstrapParams.directoryMintParams(): {}", protocolBootstrapParams.directoryMintParams());
@@ -573,10 +573,9 @@ public class IssueTokenTest extends AbstractPreviewTest {
         log.info("issuanceContract: {}", issuanceContract.getPolicyId());
 
         // Registry node output is at index 2: [0] PLB token, [1] covering node, [2] new registry node
-        var issuanceRedeemer = ConstrPlutusData.of(0,
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
-                ConstrPlutusData.of(1, BigIntPlutusData.of(2)) // OutputIndex { index: 2 }
-        );
+        // issuance_mint's redeemer IS types.MintingRegistryProof in v0.4.0 (no
+        // SmartTokenMintingAction wrapper): OutputIndex { index } = Constr 1 [Int].
+        var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2));
 
         // Directory MINT parameterization
         log.info("protocolBootstrapParams.directoryMintParams(): {}", protocolBootstrapParams.directoryMintParams());
@@ -601,9 +600,11 @@ public class IssueTokenTest extends AbstractPreviewTest {
 
 
         // Directory MINT - NFT, address, datum and value
+        // types.RegistryInsert { key, minting_logic_script: Credential } — v0.4.0: the 2nd
+        // field is a Credential, not a bare hash.
         var directoryMintRedeemer = ConstrPlutusData.of(1,
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
-                BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash()))
         );
 
         var directoryMintNft = Asset.builder()

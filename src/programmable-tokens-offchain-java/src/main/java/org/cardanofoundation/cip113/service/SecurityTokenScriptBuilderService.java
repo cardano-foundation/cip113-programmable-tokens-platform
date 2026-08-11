@@ -130,9 +130,35 @@ public class SecurityTokenScriptBuilderService {
         return applyParameters(contract, params, "transfer_logic");
     }
 
-    // Third-party transfer (admin seizure) is deferred from v1 — its builder is
-    // intentionally absent. The ported validator code is still on disk under
-    // src/substandards/security-token/validators/ so a future PR can wire it up.
+    // ── Third-party transfer logic (power-user seizure / forced transfer) ────
+
+    /**
+     * The substandard's dedicated third-party transfer validator — the credential that
+     * goes into {@code RegistryNode.third_party_transfer_logic_script} (index 4).
+     * {@code programmable_logic_global.validate_3rd_party} requires a withdraw-0 against
+     * exactly this credential before it will honour a {@code ThirdPartyAct}, and the
+     * validator in turn gates on a power-user node, so seizure is delegated to the
+     * compliance role rather than to the raw admin key.
+     *
+     * <p>Parameter order mirrors {@code third_party_transfer_logic_script.ak}:
+     * {@code (security_asset_name, power_users_linked_list_policy_id, global_state_policy_id,
+     * registry_policy_id)} — note {@code power_users} comes <em>before</em>
+     * {@code global_state} here, unlike in {@code minting_logic_script}.
+     */
+    public PlutusScript buildThirdPartyTransferLogicScript(String securityAssetNameHex,
+                                                           String powerUsersLinkedListPolicyId,
+                                                           String globalStatePolicyId,
+                                                           String registryPolicyId) {
+        SubstandardValidator contract =
+                getContract("third_party_transfer_logic_script.third_party_transfer_logic_validator.withdraw");
+        ListPlutusData params = ListPlutusData.of(
+                BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
+                BytesPlutusData.of(HexUtil.decodeHexString(powerUsersLinkedListPolicyId)),
+                BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
+                BytesPlutusData.of(HexUtil.decodeHexString(registryPolicyId))
+        );
+        return applyParameters(contract, params, "third_party_transfer_logic");
+    }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 

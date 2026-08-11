@@ -218,9 +218,11 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
             var directoryMintContract = protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolParams);
             var directoryMintPolicyId = directoryMintContract.getPolicyId();
 
+            // types.RegistryInsert { key: ByteArray, minting_logic_script: Credential }.
+            // v0.4.0: the 2nd field is a Credential, not a bare hash — Script(hash) is Constr 1 [bytes].
             var directoryMintRedeemer = ConstrPlutusData.of(1,
                     BytesPlutusData.of(issuanceContract.getScriptHash()),
-                    BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                    ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash()))
             );
 
             var directoryMintNft = Asset.builder()
@@ -248,15 +250,27 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
                     .next(HexUtil.encodeHexString(issuanceContract.getScriptHash()))
                     .build();
 
-            // WP-5 TODO: thirdPartyTransferLogicScript and unfrackingLogicScript are left
-            // at the "forbidden" default (empty_vkey) — no admin/seize authority is wired
-            // for kyc-extended yet (see docs/PLATFORM-V0.4.0-PORT-PLAN.md, WP-3).
+            // third_party_transfer_logic_script (index 4): the `kyc-extended` substandard declares
+            // NO third-party/force-transfer validator.
+            // src/substandards/kyc-extended/validators/kyc_extended_transfer.ak has exactly two
+            // validators — `issue` (issuer-admin gate on *issuance*) and `transfer` (KYC
+            // attestation / MPF-allowlist gated). Reusing the issuer-admin credential here would
+            // silently grant the issuer power to take tokens from any holder, which nothing in the
+            // substandard expresses; that is a product decision, not a port. The slot cannot be
+            // empty either (linked_list.is_28_byte_credential rejects a zero-length credential on
+            // a non-origin node), so it is pinned to the protocol's always_fail script:
+            // programmable_logic_global.validate_3rd_party requires a *withdrawal* against this
+            // credential and always_fail's `else` handler fails unconditionally, so seizure is
+            // structurally impossible. The field stays mutable via the registry-node update path
+            // (linked_list.is_field_updated_registry_node) if a real authority is chosen later.
+            // unfrackingLogicScript (index 5): empty_vkey = unfracking FORBIDDEN — least
+            // permission by default, and no kyc-extended validator declares an unfracking hook.
             var directoryMintDatum = new RegistryNode(
                     HexUtil.encodeHexString(issuanceContract.getScriptHash()),
                     existingRegistryNodeDatum.next(),
                     Credential.fromScript(substandardIssueContract.getScriptHash()),
                     Credential.fromScript(substandardTransferContract.getScriptHash()),
-                    RegistryNode.EMPTY_VKEY,
+                    Credential.fromScript(protocolParams.issuanceParams().alwaysFailScriptHash()),
                     RegistryNode.EMPTY_VKEY,
                     globalStatePolicyId);
 
@@ -280,10 +294,11 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
                     ))
                     .build();
 
-            var issuanceRedeemer = ConstrPlutusData.of(0,
-                    ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
-                    ConstrPlutusData.of(1, BigIntPlutusData.of(2))
-            );
+            // issuance_mint's redeemer IS types.MintingRegistryProof in v0.4.0 — the old
+            // SmartTokenMintingAction { minting_logic_cred, minting_registry_proof } wrapper is
+            // gone (the credential is now the validator's compile-time parameter).
+            // Registry node output is at index 2: [0] PLB, [1] updated covering node, [2] new node.
+            var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2)); // OutputIndex { index: 2 }
 
             var programmableToken = Asset.builder()
                     .name("0x" + request.getAssetName())
@@ -437,10 +452,8 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
                     .toList();
             var registryRefInputIndex = sortedReferenceInputs.indexOf(registryRefInput);
 
-            var issuanceRedeemer = ConstrPlutusData.of(0,
-                    ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
-                    ConstrPlutusData.of(0, BigIntPlutusData.of(registryRefInputIndex))
-            );
+            // types.MintingRegistryProof directly (no SmartTokenMintingAction wrapper in v0.4.0).
+            var issuanceRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(registryRefInputIndex)); // RefInput { index }
 
             var programmableToken = Asset.builder()
                     .name("0x" + request.assetName())

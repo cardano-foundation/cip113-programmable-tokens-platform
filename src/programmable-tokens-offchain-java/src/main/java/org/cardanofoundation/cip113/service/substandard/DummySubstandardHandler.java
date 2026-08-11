@@ -270,9 +270,12 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 var existingRegistryNodeDatum = existingRegistryNodeDatumOpt.get();
 
                 // Directory MINT - NFT, address, datum and value
+                // types.RegistryInsert { key: ByteArray, minting_logic_script: Credential }.
+                // v0.4.0: the 2nd field is a Credential, not a bare hash — Script(hash) is
+                // Constr 1 [bytes].
                 var directoryMintRedeemer = ConstrPlutusData.of(1,
                         BytesPlutusData.of(issuanceContract.getScriptHash()),
-                        BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                        ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash()))
                 );
 
                 var directoryMintNft = Asset.builder()
@@ -301,13 +304,26 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                         .build();
                 log.info("directorySpendDatum: {}", directorySpendDatum);
 
-                // WP-5 TODO: unfrackingLogicScript left at the "forbidden" default
-                // (empty_vkey) — no substandard config wires a real unfracking hook yet.
+                // third_party_transfer_logic_script (index 4): the `dummy` substandard has NO
+                // third-party/force-transfer validator — src/substandards/dummy/validators/transfer.ak
+                // declares only `issue` and `transfer`, and the blueprint exposes only those two.
+                // The slot cannot be left empty (linked_list.is_28_byte_credential rejects a
+                // zero-length credential on a non-origin node), so it is pinned to the protocol's
+                // always_fail script: programmable_logic_global.validate_3rd_party requires a
+                // withdrawal against this credential, and always_fail's `else` handler fails
+                // unconditionally, making seizure structurally impossible rather than
+                // delegated to an authority the substandard never declared.
+                // The lookup below is kept so a future dummy third_party validator is picked up
+                // automatically.
+                // unfrackingLogicScript (index 5): empty_vkey = unfracking FORBIDDEN. No dummy
+                // validator declares an unfracking hook, so least permission is the deliberate value.
                 var directoryMintDatum = new RegistryNode(HexUtil.encodeHexString(issuanceContract.getScriptHash()),
                         existingRegistryNodeDatum.next(),
                         Credential.fromScript(substandardIssueContract.getScriptHash()),
                         Credential.fromScript(substandardTransferContract.getScriptHash()),
-                        thirdPartyScriptHash.isEmpty() ? RegistryNode.EMPTY_VKEY : Credential.fromScript(thirdPartyScriptHash),
+                        Credential.fromScript(thirdPartyScriptHash.isEmpty()
+                                ? protocolBootstrapParams.issuanceParams().alwaysFailScriptHash()
+                                : thirdPartyScriptHash),
                         RegistryNode.EMPTY_VKEY,
                         "");
                 log.info("directoryMintDatum: {}", directoryMintDatum);
@@ -335,12 +351,12 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 log.info("directorySpendValue: {}", directorySpendValue);
 
 
+                // issuance_mint's redeemer IS types.MintingRegistryProof in v0.4.0 — the old
+                // SmartTokenMintingAction { minting_logic_cred, minting_registry_proof } wrapper
+                // is gone (the credential is now the validator's compile-time parameter).
                 // Registry node output is at index 2 in outputs:
                 // [0] PLB output (programmable token), [1] updated covering node, [2] new registry node
-                var issuanceRedeemer = ConstrPlutusData.of(0,
-                        ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
-                        ConstrPlutusData.of(1, BigIntPlutusData.of(2)) // OutputIndex { index: 2 }
-                );
+                var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2)); // OutputIndex { index: 2 }
 
                 // Programmable Token Mint
                 var programmableToken = Asset.builder()
@@ -456,8 +472,15 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             }
             var feePayerUtxos = feePayerUtxosOpt.get().stream().map(UtxoUtil::toUtxo).toList();
 
-            // Handler knows its own contract names internally
-            var substandardIssuanceContractOpt = substandardService.getSubstandardValidator(SUBSTANDARD_ID, "issue.issue.withdraw");
+            // Handler knows its own contract names internally. The dummy blueprint declares
+            // `issue` and `transfer` inside validators/transfer.ak, so the path is
+            // "transfer.issue.withdraw" — same name the registration path above uses.
+            // ("issue.issue.withdraw" does not exist and made every dummy mint fail with a
+            // bare NoSuchElementException from Optional.get().)
+            var substandardIssuanceContractOpt = substandardService.getSubstandardValidator(SUBSTANDARD_ID, "transfer.issue.withdraw");
+            if (substandardIssuanceContractOpt.isEmpty()) {
+                return TransactionContext.error("substandard issuance contract not found for " + SUBSTANDARD_ID);
+            }
 
             var substandardIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(substandardIssuanceContractOpt.get().scriptBytes(), PlutusVersion.v3);
             log.info("substandardIssueContract: {}", substandardIssueContract.getPolicyId());
@@ -495,10 +518,8 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                     .toList();
             var registryRefInputIndex = sortedReferenceInputs.indexOf(registryRefInput);
 
-            var issuanceRedeemer = ConstrPlutusData.of(0,
-                    ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
-                    ConstrPlutusData.of(0, BigIntPlutusData.of(registryRefInputIndex)) // RefInput { index }
-            );
+            // types.MintingRegistryProof directly (no SmartTokenMintingAction wrapper in v0.4.0).
+            var issuanceRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(registryRefInputIndex)); // RefInput { index }
 
             // Programmable Token Mint
             var programmableToken = Asset.builder()

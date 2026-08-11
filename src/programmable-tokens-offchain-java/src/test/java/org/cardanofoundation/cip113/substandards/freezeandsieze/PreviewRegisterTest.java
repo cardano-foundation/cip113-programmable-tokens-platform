@@ -13,6 +13,7 @@ import com.bloxbean.cardano.client.common.model.Networks;
 import com.bloxbean.cardano.client.function.helper.SignerProviders;
 import com.bloxbean.cardano.client.plutus.blueprint.PlutusBlueprintUtil;
 import com.bloxbean.cardano.client.plutus.blueprint.model.PlutusVersion;
+import com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
@@ -182,9 +183,11 @@ public class PreviewRegisterTest extends AbstractPreviewTest implements PreviewF
         var directoryMintContract = protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolBootstrapParams);
         var directoryMintPolicyId = directoryMintContract.getPolicyId();
 
+        // types.RegistryInsert { key: ByteArray, minting_logic_script: Credential }.
+        // v0.4.0: the 2nd field is a Credential, not a bare hash — Script(hash) is Constr 1 [bytes].
         var directoryMintRedeemer = ConstrPlutusData.of(1,
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
-                BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash()))
         );
 
         var directoryMintNft = Asset.builder()
@@ -216,7 +219,8 @@ public class PreviewRegisterTest extends AbstractPreviewTest implements PreviewF
         // substandardIssueContract is the freeze-and-seize admin script ("Issuer to be
         // used for minting/burning/sieze" above), so it is both minting_logic_script AND
         // the seize authority at third_party_transfer_logic_script.
-        // WP-5 TODO: unfrackingLogicScript left at the "forbidden" default (empty_vkey).
+        // unfrackingLogicScript (index 5): empty_vkey = unfracking FORBIDDEN — least permission
+        // by default; freeze-and-seize declares no unfracking hook validator.
         var directoryMintDatum = new RegistryNode(HexUtil.encodeHexString(issuanceContract.getScriptHash()),
                 existingRegistryNodeDatum.next(),
                 Credential.fromScript(substandardIssueContract.getScriptHash()),
@@ -249,7 +253,9 @@ public class PreviewRegisterTest extends AbstractPreviewTest implements PreviewF
         log.info("directorySpendValue: {}", directorySpendValue);
 
 
-        var issuanceRedeemer = ConstrPlutusData.of(0, ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())));
+        // issuance_mint's redeemer IS types.MintingRegistryProof in v0.4.0 — the old
+        // SmartTokenMintingAction wrapper is gone. Registry node output is at index 2.
+        var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2)); // OutputIndex { index: 2 }
 
         // Programmable Token Mint
         var programmableToken = Asset.builder()

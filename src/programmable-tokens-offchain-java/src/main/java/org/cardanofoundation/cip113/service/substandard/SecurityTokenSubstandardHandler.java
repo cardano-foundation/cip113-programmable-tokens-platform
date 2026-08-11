@@ -198,6 +198,10 @@ public class SecurityTokenSubstandardHandler
                     securityAssetNameHex, gsPolicy, registryPolicyId, puPolicy);
             PlutusScript transferLogicScript = scriptBuilder.buildTransferLogicScript(
                     securityAssetNameHex, gsPolicy, registryPolicyId);
+            // security-token is the one substandard with a dedicated third-party/force-transfer
+            // validator (third_party_transfer_logic_script.ak), so index 4 gets a genuine value.
+            PlutusScript thirdPartyTransferLogicScript = scriptBuilder.buildThirdPartyTransferLogicScript(
+                    securityAssetNameHex, puPolicy, gsPolicy, registryPolicyId);
             PlutusScript issuanceContract = protocolScriptBuilderService.getParameterizedIssuanceMintScript(
                     protocolParams, mintingLogicScript);
             String progTokenPolicyId = issuanceContract.getPolicyId();
@@ -284,18 +288,20 @@ public class SecurityTokenSubstandardHandler
 
             // 4. Redeemers.
             //
-            // Issuance redeemer (CIP-113 MintAndCreate variant): tell the issuance
-            // contract this is a fresh registration, with the new directory entry
-            // at output index 2 (preserved-slot=output 1, new-slot=output 2 per
-            // kyc-extended convention).
-            ConstrPlutusData issuanceRedeemer = ConstrPlutusData.of(0,
-                    ConstrPlutusData.of(1, BytesPlutusData.of(mintingLogicScript.getScriptHash())),
-                    ConstrPlutusData.of(1, BigIntPlutusData.of(2))
-            );
-            // Directory mint Insert redeemer (carries issuance + substandard hashes).
+            // Issuance redeemer: in v0.4.0 issuance_mint's redeemer IS
+            // types.MintingRegistryProof — the old SmartTokenMintingAction
+            // { minting_logic_cred, minting_registry_proof } wrapper is gone (the credential
+            // is the validator's compile-time parameter now). OutputIndex { index } =
+            // Constr 1 [Int]: this is a fresh registration, with the new directory entry at
+            // output index 2 (preserved-slot=output 1, new-slot=output 2 per kyc-extended
+            // convention).
+            ConstrPlutusData issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2));
+            // types.RegistryInsert { key: ByteArray, minting_logic_script: Credential }.
+            // v0.4.0: the 2nd field is a Credential, not a bare hash — Script(hash) is
+            // Constr 1 [bytes].
             ConstrPlutusData directoryMintRedeemer = ConstrPlutusData.of(1,
                     BytesPlutusData.of(issuanceContract.getScriptHash()),
-                    BytesPlutusData.of(mintingLogicScript.getScriptHash())
+                    ConstrPlutusData.of(1, BytesPlutusData.of(mintingLogicScript.getScriptHash()))
             );
 
             // 5. New + updated directory datums (preserved slot links to new key,
@@ -303,16 +309,19 @@ public class SecurityTokenSubstandardHandler
             RegistryNode directorySpendDatum = existingNode.toBuilder()
                     .next(HexUtil.encodeHexString(issuanceContract.getScriptHash()))
                     .build();
-            // WP-5 TODO: thirdPartyTransferLogicScript (seize authority) and
-            // unfrackingLogicScript are left at the "forbidden" default (empty_vkey) —
-            // who may seize a security token is an unresolved product decision (see
-            // docs/PLATFORM-V0.4.0-PORT-PLAN.md, WP-3).
+            // third_party_transfer_logic_script (index 4): the substandard's own
+            // third_party_transfer_logic_validator. This is the only substandard in the repo
+            // that ships a dedicated force-transfer/seizure validator, so the seize authority
+            // is not invented here — it is the one the on-chain code already defines, gated on
+            // a power-user node rather than on the raw admin key.
+            // unfrackingLogicScript (index 5): empty_vkey = unfracking FORBIDDEN — least
+            // permission by default; security-token declares no unfracking hook validator.
             RegistryNode directoryMintDatum = new RegistryNode(
                     HexUtil.encodeHexString(issuanceContract.getScriptHash()),
                     existingNode.next(),
                     Credential.fromScript(mintingLogicScript.getScriptHash()),
                     Credential.fromScript(transferLogicScript.getScriptHash()),
-                    RegistryNode.EMPTY_VKEY,
+                    Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()),
                     RegistryNode.EMPTY_VKEY,
                     gsPolicy);
 
@@ -659,14 +668,12 @@ public class SecurityTokenSubstandardHandler
             int issuancePri = 1;
 
             // ── 5. Build redeemers ─────────────────────────────────────────
-            // Issuance — "mint against existing directory entry" variant.
-            // Constr 0 [Constr 1 [substandardHash], Constr 0 [directoryRefIdx]]
-            // The inner Constr 0 (vs Constr 1) tells the issuance contract to
-            // FIND the directory entry as a ref input (vs CREATE it at an
-            // output index, which is the registration flow).
-            PlutusData issuanceRedeemer = ConstrPlutusData.of(0,
-                    ConstrPlutusData.of(1, BytesPlutusData.of(s.mintingLogic().getScriptHash())),
-                    ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx))));
+            // Issuance — "mint against existing directory entry" variant. In v0.4.0 the
+            // redeemer IS types.MintingRegistryProof: Constr 0 [directoryRefIdx] =
+            // RefInput { index }, telling the issuance contract to FIND the directory entry
+            // as a ref input (vs Constr 1 = OutputIndex, which is the registration flow).
+            PlutusData issuanceRedeemer =
+                    ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx)));
             // mintingLogic.withdraw STRICT path. MintingLogicScriptWithdrawRedeemer
             // { gs_input_index, power_user_node_ref_input_index, minted_amount }.
             PlutusData withdrawRedeemer = ConstrPlutusData.of(0,
@@ -2426,9 +2433,10 @@ public class SecurityTokenSubstandardHandler
             int issuancePri = 2;
 
             // ── 6. Build redeemers ─────────────────────────────────────────
-            PlutusData issuanceRedeemer = ConstrPlutusData.of(0,
-                    ConstrPlutusData.of(1, BytesPlutusData.of(s.mintingLogic().getScriptHash())),
-                    ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx))));
+            // types.MintingRegistryProof directly (no SmartTokenMintingAction wrapper in v0.4.0):
+            // RefInput { index } = Constr 0 [Int].
+            PlutusData issuanceRedeemer =
+                    ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx)));
             // mintingLogic.withdraw STRICT path with negative minted_amount —
             // the validator's else-branch requires can_burn.
             PlutusData withdrawRedeemer = ConstrPlutusData.of(0,
