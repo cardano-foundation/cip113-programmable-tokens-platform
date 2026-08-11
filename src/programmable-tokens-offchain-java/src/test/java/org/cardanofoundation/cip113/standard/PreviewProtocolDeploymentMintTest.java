@@ -43,6 +43,14 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
 
     private static final String NONCE_COORDINATION = "9c1f0c1e3a5d47b28e6f0a91d4c7b3e50f28a6d19b4c7e035a8d2f61c093b47e";
 
+    /** registry_node.empty_vkey = VerificationKey(#"") — Credential index 0. */
+    private static ConstrPlutusData emptyVkey() {
+        return ConstrPlutusData.of(0, BytesPlutusData.of(""));
+    }
+
+    /** registry_node.sentinel_next_key — 30 bytes of 0xff, deliberately NOT 28. */
+    private static final String SENTINEL_NEXT_KEY = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
     private String ALWAYS_FAIL_CONTRACT;
     private String COORDINATION_SPEND_CONTRACT;
     private String PROTOCOL_PARAMS_CONTRACT;
@@ -182,6 +190,97 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 BytesPlutusData.of(issuanceCborHexContract.getScriptHash()),
                 scriptCred(registrySpendContract));
         log.info("registryMint policy: {}", registryMintContract.getPolicyId());
+
+        // ProgrammableLogicGlobalParams (validators/programmable_logic/params.ak:12-37).
+        // Field order is load-bearing: PLB reads field 3 and unfracking reads fields 0-1
+        // by index via builtins, without deserialising the record.
+        var coordinationDatum = ConstrPlutusData.of(0,
+                // 0: registry_node_cs — the registry NFT policy
+                BytesPlutusData.of(registryMintContract.getScriptHash()),
+                // 1: prog_logic_cred — payment credential of EVERY programmable token UTxO (frozen)
+                scriptCred(programmableLogicBaseContract),
+                // 2: unfracking_cred — read only by PLG's UnfrackingAct arm
+                scriptCred(unfrackingContract),
+                // 3: prog_logic_global_cred — read by PLB on every spend; this is what makes PLG swappable
+                scriptCred(programmableLogicGlobalContract),
+                // 4: upgrade_logic_cred — trampoline-2 authority, read only by coordination_spend
+                scriptCred(upgradeMultisigContract));
+
+        var protocolParamNft = Asset.builder()
+                .name(HexUtil.encodeHexString("ProtocolParams".getBytes(), true))
+                .value(BigInteger.ONE)
+                .build();
+
+        Value protocolParamsValue = Value.builder()
+                .coin(Amount.ada(5).getQuantity())
+                .multiAssets(List.of(MultiAsset.builder()
+                        .policyId(protocolParamsContract.getPolicyId())
+                        .assets(List.of(protocolParamNft))
+                        .build()))
+                .build();
+
+        // RegistryNode (lib/registry_node.ak:51-...). registry_mint's RegistryInit compares
+        // the parsed node against `origin_node` by whole-record equality, so every field must
+        // be present and canonical. v0.4.0 added `unfracking_logic_script` at index 5.
+        var originNodeDatum = ConstrPlutusData.of(0,
+                BytesPlutusData.of(""),                                              // 0: key = origin_node_key
+                BytesPlutusData.of(HexUtil.decodeHexString(SENTINEL_NEXT_KEY)),       // 1: next = sentinel
+                emptyVkey(),                                                          // 2: minting_logic_script
+                emptyVkey(),                                                          // 3: transfer_logic_script
+                emptyVkey(),                                                          // 4: third_party_transfer_logic_script
+                emptyVkey(),                                                          // 5: unfracking_logic_script (NEW)
+                BytesPlutusData.of(""));                                              // 6: global_state_cs
+
+        var registryNft = Asset.builder()
+                .name("0x")                                       // origin_node_tn = #""
+                .value(BigInteger.ONE)
+                .build();
+
+        Value registryValue = Value.builder()
+                .coin(Amount.ada(5).getQuantity())
+                .multiAssets(List.of(MultiAsset.builder()
+                        .policyId(registryMintContract.getPolicyId())
+                        .assets(List.of(registryNft))
+                        .build()))
+                .build();
+
+        // issuance_mint gained a 4th param (plg_stake_cred) AFTER minting_logic_cred, so the
+        // dummy marker is no longer last: the postfix is now non-empty and carries the PLG
+        // credential bytes. The split still works because the marker is unique.
+        var dummyPolicyId = "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeef";
+        var issuanceDummyContract = applyParams(ISSUANCE_CONTRACT,
+                scriptCred(programmableLogicBaseContract),                 // programmable_logic_base
+                BytesPlutusData.of(registryMintContract.getScriptHash()),  // registry_node_cs
+                ConstrPlutusData.of(1, BytesPlutusData.of(HexUtil.decodeHexString(dummyPolicyId))), // minting_logic_cred
+                scriptCred(programmableLogicGlobalContract));              // plg_stake_cred (NEW)
+
+        var encodedIssuanceDummyContract = HexUtil.encodeHexString(issuanceDummyContract.serializeScriptBody());
+        var contractParts = encodedIssuanceDummyContract.split(dummyPolicyId);
+        // Guard: registry_mint derives every token's policy id as
+        // blake2b_224(prefix || minting_logic_hash || postfix) (lib/utils.ak,
+        // is_programmable_token_id_valid). A marker that appears 0 or 2+ times silently
+        // produces a template that can never validate any registration.
+        Assertions.assertEquals(2, contractParts.length,
+                "dummy policy marker must appear exactly once in the issuance template");
+        Assertions.assertFalse(contractParts[1].isEmpty(),
+                "postfix must be non-empty: plg_stake_cred is applied after minting_logic_cred");
+
+        var issuanceCborHexDatum = ConstrPlutusData.of(0,
+                BytesPlutusData.of(HexUtil.decodeHexString(contractParts[0])),   // prefix_cbor_hex
+                BytesPlutusData.of(HexUtil.decodeHexString(contractParts[1])));  // postfix_cbor_hex
+
+        var issuanceCborHexNft = Asset.builder()
+                .name(HexUtil.encodeHexString("IssuanceCborHex".getBytes(), true))
+                .value(BigInteger.ONE)
+                .build();
+
+        Value issuanceCborHexValue = Value.builder()
+                .coin(Amount.ada(5).getQuantity())
+                .multiAssets(List.of(MultiAsset.builder()
+                        .policyId(issuanceCborHexContract.getPolicyId())
+                        .assets(List.of(issuanceCborHexNft))
+                        .build()))
+                .build();
 
         if (true) return;
     }
