@@ -49,6 +49,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigInteger;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Stream;
 
@@ -202,8 +203,13 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             var substandardIssuanceContractOpt = substandardService.getSubstandardValidator(SUBSTANDARD_ID, "transfer.issue.withdraw");
             var substandardTransferContractOpt = substandardService.getSubstandardValidator(SUBSTANDARD_ID, "transfer.transfer.withdraw");
 
+            // filter(Objects::nonNull) after the map, not just orElse(""): the validator
+            // may be PRESENT with a null scriptHash (blueprint entry without a compiled
+            // hash), which orElse alone would pass straight through to
+            // Credential.fromScript(null) below.
             var thirdPartyScriptHash = substandardService.getSubstandardValidator(SUBSTANDARD_ID, "third_party.third_party.withdraw")
                     .map(SubstandardValidator::scriptHash)
+                    .filter(Objects::nonNull)
                     .orElse("");
 
             if (substandardIssuanceContractOpt.isEmpty() || substandardTransferContractOpt.isEmpty()) {

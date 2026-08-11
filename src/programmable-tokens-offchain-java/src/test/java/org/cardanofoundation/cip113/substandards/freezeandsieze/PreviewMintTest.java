@@ -12,18 +12,20 @@ import com.bloxbean.cardano.client.common.model.Networks;
 import com.bloxbean.cardano.client.function.helper.SignerProviders;
 import com.bloxbean.cardano.client.plutus.blueprint.PlutusBlueprintUtil;
 import com.bloxbean.cardano.client.plutus.blueprint.model.PlutusVersion;
-import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
 import com.bloxbean.cardano.client.quicktx.ScriptTx;
 import com.bloxbean.cardano.client.transaction.spec.Asset;
 import com.bloxbean.cardano.client.transaction.spec.MultiAsset;
+import com.bloxbean.cardano.client.transaction.spec.TransactionInput;
 import com.bloxbean.cardano.client.transaction.spec.Value;
 import com.bloxbean.cardano.client.util.HexUtil;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.AbstractPreviewTest;
 import org.cardanofoundation.cip113.config.AppConfig;
+import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
 import org.cardanofoundation.cip113.service.*;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -45,6 +47,8 @@ public class PreviewMintTest extends AbstractPreviewTest {
     private final UtxoProvider utxoProvider = new UtxoProvider(bfBackendService, null);
 
     private final AccountService accountService = new AccountService(utxoProvider);
+
+    private final RegistryNodeParser registryNodeParser = new RegistryNodeParser(OBJECT_MAPPER);
 
     private final ProtocolBootstrapService protocolBootstrapService = new ProtocolBootstrapService(OBJECT_MAPPER, new AppConfig.Network("preview"));
 
@@ -103,8 +107,30 @@ public class PreviewMintTest extends AbstractPreviewTest {
 
         var issuanceContract = protocolScriptBuilderService.getParameterizedIssuanceMintScript(protocolBootstrapParams, substandardIssueContract);
         log.info("issuanceContract: {}", issuanceContract.getPolicyId());
+        var progTokenPolicyId = issuanceContract.getPolicyId();
 
-        var issuanceRedeemer = ConstrPlutusData.of(0, ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())));
+        // v0.4.0: issuance_mint's redeemer IS types.MintingRegistryProof — the old
+        // SmartTokenMintingAction { minting_logic_cred, proof } wrapper is gone (the
+        // credential is a compile-time parameter now). This tx mints against an
+        // already-registered directory node, so the proof is
+        // RefInput { index } = Constr 0 [Int], and the tx MUST actually carry that
+        // reference input: issuance_mint resolves it with
+        // `list.at(self.reference_inputs, index)`. Sole reference input ⇒ index 0.
+        var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+        var registryAddress = AddressProvider.getEntAddress(directorySpendContract, network);
+        var progTokenRegistry = utxoProvider.findUtxos(registryAddress.getAddress()).stream()
+                .filter(utxo -> registryNodeParser.parse(utxo.getInlineDatum())
+                        .map(node -> node.key().equals(progTokenPolicyId))
+                        .orElse(false))
+                .findAny()
+                .orElseThrow(() -> new AssertionError(
+                        "no registry node for " + progTokenPolicyId + " — register the token first"));
+        var registryRefInput = TransactionInput.builder()
+                .transactionId(progTokenRegistry.getTxHash())
+                .index(progTokenRegistry.getOutputIndex())
+                .build();
+
+        var issuanceRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(0));
 
         // Programmable Token Mint
         var programmableToken = Asset.builder()
@@ -134,6 +160,7 @@ public class PreviewMintTest extends AbstractPreviewTest {
                 .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, ConstrPlutusData.of(0))
                 .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
                 .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue), ConstrPlutusData.of(0))
+                .readFrom(registryRefInput)
                 .attachRewardValidator(substandardIssueContract)
                 .withChangeAddress(adminAccount.baseAddress());
 

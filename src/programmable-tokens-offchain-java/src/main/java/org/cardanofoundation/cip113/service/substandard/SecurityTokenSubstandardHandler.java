@@ -215,10 +215,6 @@ public class SecurityTokenSubstandardHandler
                     securityAssetNameHex, gsPolicy, registryPolicyId, puPolicy);
             PlutusScript transferLogicScript = scriptBuilder.buildTransferLogicScript(
                     securityAssetNameHex, gsPolicy, registryPolicyId);
-            // security-token is the one substandard with a dedicated third-party/force-transfer
-            // validator (third_party_transfer_logic_script.ak), so index 4 gets a genuine value.
-            PlutusScript thirdPartyTransferLogicScript = scriptBuilder.buildThirdPartyTransferLogicScript(
-                    securityAssetNameHex, puPolicy, gsPolicy, registryPolicyId);
             PlutusScript issuanceContract = protocolScriptBuilderService.getParameterizedIssuanceMintScript(
                     protocolParams, mintingLogicScript);
             String progTokenPolicyId = issuanceContract.getPolicyId();
@@ -326,11 +322,35 @@ public class SecurityTokenSubstandardHandler
             RegistryNode directorySpendDatum = existingNode.toBuilder()
                     .next(HexUtil.encodeHexString(issuanceContract.getScriptHash()))
                     .build();
-            // third_party_transfer_logic_script (index 4): the substandard's own
-            // third_party_transfer_logic_validator. This is the only substandard in the repo
-            // that ships a dedicated force-transfer/seizure validator, so the seize authority
-            // is not invented here — it is the one the on-chain code already defines, gated on
-            // a power-user node rather than on the raw admin key.
+            // third_party_transfer_logic_script (index 4) = mintingLogic, NOT the
+            // substandard's own third_party_transfer_logic_validator.
+            //
+            // Index 4 is the credential CIP-113's ThirdPartyAct branch demands a
+            // withdrawal from (lib/registry_node.ak with_key_and_3rd_party_logic →
+            // validators/programmable_logic/third_party.ak `has_key_or_fail`), and
+            // buildBurnTransaction takes that branch. The vendored BaFin
+            // third_party_transfer_logic_validator CANNOT be used there:
+            //
+            //   substandards/security-token/validators/third_party_transfer_logic_script.ak:44
+            //   passes `constants.transfer_logic_script_registry_node_index` (= 3) to
+            //   utils.derive_issuance_policy_id_from_registry_node, which then asserts
+            //   `registry_fields[3] == <the withdrawing script's own hash>`. Field 3 must
+            //   hold transferLogic (CIP-113's validate_transfer reads it), so the
+            //   third-party validator can only ever self-locate in a registry node whose
+            //   field 3 IS the third-party script — mutually exclusive with working
+            //   transfers. `third_party_transfer_logic_script_registry_node_index` (= 4)
+            //   is declared in lib/constants.ak but never referenced: an upstream bug at
+            //   the pinned commit (UPSTREAM_PIN.json → FluidTokens/fn-bafin-cardano-sc
+            //   7ae4ce3). The vendored tree is verbatim-pinned, so we cannot fix it here.
+            //
+            // mintingLogic is the one vendored withdraw validator that self-locates
+            // correctly (index 2 = itself) and is already withdrawn by the burn tx. It
+            // gates on a power-user linked-list node, so the ThirdPartyAct branch stays
+            // authority-gated rather than open — but on `can_burn`, not
+            // `can_force_transfer`, and WITHOUT the destination KYC/denylist checks the
+            // BaFin third-party validator would apply. Same slot choice as
+            // FreezeAndSeizeHandler. Revisit when upstream fixes the constant.
+            //
             // unfrackingLogicScript (index 5): empty_vkey = unfracking FORBIDDEN — least
             // permission by default; security-token declares no unfracking hook validator.
             RegistryNode directoryMintDatum = new RegistryNode(
@@ -338,7 +358,7 @@ public class SecurityTokenSubstandardHandler
                     existingNode.next(),
                     Credential.fromScript(mintingLogicScript.getScriptHash()),
                     Credential.fromScript(transferLogicScript.getScriptHash()),
-                    Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()),
+                    Credential.fromScript(mintingLogicScript.getScriptHash()),
                     RegistryNode.EMPTY_VKEY,
                     gsPolicy);
 
@@ -2635,16 +2655,21 @@ public class SecurityTokenSubstandardHandler
             // The protocol scripts MUST be referenced (not attached) — attaching
             // both inline pushes the tx over the 16 KB ledger size limit.
             //
-            // transferLogic is intentionally NOT in the witness set even though
-            // prog-logic-global validates a prog-token spend via
-            //   expect has_withdrawal(transfer_logic_script)
-            // where transfer_logic_script is read from registry node field 3.
-            // In our registry datum, field 3 stores mintingLogic's hash (BaFin
-            // reuses CIP-113's "third_party_transfer_logic" slot for
-            // mintingLogic — see RegistryNode.toPlutusData). Since mintingLogic
-            // IS in our withdrawals, the protocol's check passes without
-            // needing a separate transferLogic withdrawal, and we save ~5952
-            // bytes of script witness, keeping the tx under 16 KB.
+            // transferLogic is intentionally NOT in the witness set. Registry
+            // node field 3 (transfer_logic_script) is only consulted by
+            // prog-logic-global's TransferAct branch; this tx takes the
+            // ThirdPartyAct branch, which instead requires a withdrawal keyed
+            // on registry node field 4 (third_party_transfer_logic_script) —
+            //   lib/registry_node.ak :: with_key_and_3rd_party_logic
+            //   validators/programmable_logic/third_party.ak ::
+            //     expect pairs.has_key_or_fail(self.withdrawals, third_party_logic)
+            // buildRegistrationTransaction writes mintingLogic into field 4
+            // (see the comment there for why the BaFin
+            // third_party_transfer_logic_validator cannot go in that slot at
+            // the pinned upstream commit), and mintingLogic IS in our
+            // withdrawals below — so the ThirdPartyAct check is satisfied by
+            // the withdrawal the burn needs anyway. That also saves ~5952
+            // bytes of transferLogic script witness, keeping the tx under 16 KB.
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
                     .collectFrom(tokenUtxo, tokenSpendRedeemer)

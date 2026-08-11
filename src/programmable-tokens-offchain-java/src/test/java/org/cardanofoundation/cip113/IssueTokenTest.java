@@ -23,6 +23,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.model.DirectorySetNode;
 import org.cardanofoundation.cip113.model.blueprint.Plutus;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
+import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -124,6 +125,10 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var substandardTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(SUBSTANDARD_TRANSFER_CONTRACT, PlutusVersion.v3);
 
         // Issuance Parameterization
+        // v0.4.0 issuance_mint takes FOUR parameters — programmable_logic_base (Credential),
+        // registry_node_cs (PolicyId), minting_logic_cred (Credential), plg_stake_cred
+        // (Credential). Applying only the first three yields a different (wrong) policy id.
+        // Mirrors ProtocolScriptBuilderService.getParameterizedIssuanceMintScript.
         var issuanceParameters = ListPlutusData.of(
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicBaseScriptHash))
@@ -131,6 +136,10 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().scriptHash())),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                ),
+                ConstrPlutusData.of(1,
+                        BytesPlutusData.of(HexUtil.decodeHexString(
+                                protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash()))
                 )
         );
         var issuanceContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(issuanceParameters, ISSUANCE_MINT), PlutusVersion.v3);
@@ -182,18 +191,35 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 .value(BigInteger.ONE)
                 .build();
 
+        // v0.4.0 RegistryNode is SEVEN fields (lib/registry_node.ak):
+        //   0 key  1 next  2 minting_logic  3 transfer_logic
+        //   4 third_party_transfer_logic  5 unfracking_logic  6 global_state_cs
+        // Credentials are tagged: VerificationKey = Constr 0 [bytes], Script = Constr 1 [bytes].
+        //
+        // Covering (origin) node re-emitted with `next` pointing at the inserted key. All
+        // four credential slots stay empty_vkey = VerificationKey(#"") — registry_mint's
+        // is_updated_directory_node compares the whole record, so every other field must
+        // round-trip byte-for-byte AND tag-for-tag.
         var directorySpendDatum = ConstrPlutusData.of(0,
                 BytesPlutusData.of(""),
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
                 ConstrPlutusData.of(0, BytesPlutusData.of("")),
                 ConstrPlutusData.of(0, BytesPlutusData.of("")),
+                ConstrPlutusData.of(0, BytesPlutusData.of("")),
+                ConstrPlutusData.of(0, BytesPlutusData.of("")),
                 BytesPlutusData.of(""));
 
+        // Inserted node. is_inserted_directory_node requires 28-byte credentials in slots
+        // 2, 3 AND 4 (empty is only legal on the origin node), slot 2 to equal the
+        // RegistryInsert redeemer's minting_logic_script, and slot 5 to be either
+        // empty_vkey (unfracking forbidden — what we use) or a 28-byte credential.
         var directoryMintDatum = ConstrPlutusData.of(0,
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
                 BytesPlutusData.of(HexUtil.decodeHexString("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")),
+                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
                 ConstrPlutusData.of(1, BytesPlutusData.of(substandardTransferContract.getScriptHash())),
                 ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
+                ConstrPlutusData.of(0, BytesPlutusData.of("")),
                 BytesPlutusData.of(""));
 
         Value directoryMintValue = Value.builder()
@@ -359,6 +385,10 @@ public class IssueTokenTest extends AbstractPreviewTest {
 
 
         // Issuance Parameterization
+        // v0.4.0 issuance_mint takes FOUR parameters — programmable_logic_base (Credential),
+        // registry_node_cs (PolicyId), minting_logic_cred (Credential), plg_stake_cred
+        // (Credential). Applying only the first three yields a different (wrong) policy id.
+        // Mirrors ProtocolScriptBuilderService.getParameterizedIssuanceMintScript.
         var issuanceParameters = ListPlutusData.of(
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicBaseScriptHash))
@@ -366,15 +396,14 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().scriptHash())),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                ),
+                ConstrPlutusData.of(1,
+                        BytesPlutusData.of(HexUtil.decodeHexString(
+                                protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash()))
                 )
         );
         var issuanceContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(issuanceParameters, ISSUANCE_MINT), PlutusVersion.v3);
         log.info("issuanceContract: {}", issuanceContract.getPolicyId());
-
-        // Registry node output is at index 2: [0] PLB token, [1] covering node, [2] new registry node
-        // issuance_mint's redeemer IS types.MintingRegistryProof in v0.4.0 (no
-        // SmartTokenMintingAction wrapper): OutputIndex { index } = Constr 1 [Int].
-        var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2));
 
         // Directory MINT parameterization
         log.info("protocolBootstrapParams.directoryMintParams(): {}", protocolBootstrapParams.directoryMintParams());
@@ -396,6 +425,32 @@ public class IssueTokenTest extends AbstractPreviewTest {
         log.info("directorySpendContract, script hash: {}", HexUtil.encodeHexString(directorySpendContract.getScriptHash()));
         var directorySpendContractAddress = AddressProvider.getEntAddress(Credential.fromScript(directorySpendContract.getScriptHash()), network);
         log.info("directorySpendContractAddress: {}", directorySpendContractAddress.getAddress());
+
+        // This tx mints against an ALREADY-REGISTERED policy — it emits no directory
+        // outputs at all, so OutputIndex { index } (Constr 1) has nothing to point at.
+        // The right proof is RefInput { index } = Constr 0 [Int], resolved on-chain via
+        // `list.at(self.reference_inputs, index)`, so the registry node has to be a real
+        // reference input on the tx. Modelled on dummy/PreviewRegisterTest.mint().
+        var registryUtxosOpt = bfBackendService.getUtxoService()
+                .getUtxos(directorySpendContractAddress.getAddress(), 100, 1);
+        if (!registryUtxosOpt.isSuccessful()) {
+            Assertions.fail("could not fetch registry utxos");
+        }
+        var registryNodeParser = new RegistryNodeParser(OBJECT_MAPPER);
+        final var progTokenPolicyId = issuanceContract.getPolicyId();
+        var progTokenRegistry = registryUtxosOpt.getValue().stream()
+                .filter(utxo -> registryNodeParser.parse(utxo.getInlineDatum())
+                        .map(node -> node.key().equals(progTokenPolicyId))
+                        .orElse(false))
+                .findAny()
+                .orElseThrow(() -> new AssertionError("no registry node for "
+                        + progTokenPolicyId + " — run test()/registerToken() first"));
+        var registryRefInput = TransactionInput.builder()
+                .transactionId(progTokenRegistry.getTxHash())
+                .index(progTokenRegistry.getOutputIndex())
+                .build();
+        // Sole reference input ⇒ index 0.
+        var issuanceRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(0));
 
 
         // Programmable Token Mint
@@ -421,9 +476,9 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var tx = new ScriptTx()
                 .collectFrom(walletUtxos)
                 .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(100))
-                // Redeemer is DirectoryInit (constr(0))
                 .mintAsset(issuanceContract, pintToken, issuanceRedeemer)
                 .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(pintTokenValue), ConstrPlutusData.of(0))
+                .readFrom(registryRefInput)
                 .attachRewardValidator(substandardIssueContract)
                 .withChangeAddress(adminAccount.baseAddress());
 
@@ -560,6 +615,10 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var substandardTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(SUBSTANDARD_TRANSFER_CONTRACT, PlutusVersion.v3);
 
         // Issuance Parameterization
+        // v0.4.0 issuance_mint takes FOUR parameters — programmable_logic_base (Credential),
+        // registry_node_cs (PolicyId), minting_logic_cred (Credential), plg_stake_cred
+        // (Credential). Applying only the first three yields a different (wrong) policy id.
+        // Mirrors ProtocolScriptBuilderService.getParameterizedIssuanceMintScript.
         var issuanceParameters = ListPlutusData.of(
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicBaseScriptHash))
@@ -567,6 +626,10 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().scriptHash())),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                ),
+                ConstrPlutusData.of(1,
+                        BytesPlutusData.of(HexUtil.decodeHexString(
+                                protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash()))
                 )
         );
         var issuanceContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(issuanceParameters, ISSUANCE_MINT), PlutusVersion.v3);
@@ -618,18 +681,35 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 .value(BigInteger.ONE)
                 .build();
 
+        // v0.4.0 RegistryNode is SEVEN fields (lib/registry_node.ak):
+        //   0 key  1 next  2 minting_logic  3 transfer_logic
+        //   4 third_party_transfer_logic  5 unfracking_logic  6 global_state_cs
+        // Credentials are tagged: VerificationKey = Constr 0 [bytes], Script = Constr 1 [bytes].
+        //
+        // Covering (origin) node re-emitted with `next` pointing at the inserted key. All
+        // four credential slots stay empty_vkey = VerificationKey(#"") — registry_mint's
+        // is_updated_directory_node compares the whole record, so every other field must
+        // round-trip byte-for-byte AND tag-for-tag.
         var directorySpendDatum = ConstrPlutusData.of(0,
                 BytesPlutusData.of(""),
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
                 ConstrPlutusData.of(0, BytesPlutusData.of("")),
                 ConstrPlutusData.of(0, BytesPlutusData.of("")),
+                ConstrPlutusData.of(0, BytesPlutusData.of("")),
+                ConstrPlutusData.of(0, BytesPlutusData.of("")),
                 BytesPlutusData.of(""));
 
+        // Inserted node. is_inserted_directory_node requires 28-byte credentials in slots
+        // 2, 3 AND 4 (empty is only legal on the origin node), slot 2 to equal the
+        // RegistryInsert redeemer's minting_logic_script, and slot 5 to be either
+        // empty_vkey (unfracking forbidden — what we use) or a 28-byte credential.
         var directoryMintDatum = ConstrPlutusData.of(0,
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
                 BytesPlutusData.of(HexUtil.decodeHexString("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")),
+                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
                 ConstrPlutusData.of(1, BytesPlutusData.of(substandardTransferContract.getScriptHash())),
                 ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
+                ConstrPlutusData.of(0, BytesPlutusData.of("")),
                 BytesPlutusData.of(""));
 
         Value directoryMintValue = Value.builder()
