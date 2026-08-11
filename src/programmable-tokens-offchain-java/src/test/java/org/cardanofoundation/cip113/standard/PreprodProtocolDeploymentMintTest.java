@@ -27,6 +27,7 @@ import org.cardanofoundation.cip113.model.blueprint.Plutus;
 import org.cardanofoundation.cip113.model.bootstrap.*;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
@@ -72,6 +73,12 @@ public class PreprodProtocolDeploymentMintTest extends AbstractPreprodTest {
         ISSUANCE_CONTRACT = getCompiledCodeFor("issuance_mint.issuance_mint.mint", validators);
     }
 
+    @Disabled("pre-v0.4.0 and unmigrated: no coordination_spend/unfracking/upgrade_multisig "
+            + "wiring exists in this file, so the ProtocolBootstrapParams it builds has null "
+            + "coordinationParams/unfrackingParams/upgradeMultisigParams/unfrackingRefInput; "
+            + "dryRun=false here means running it submits a real preprod transaction and logs "
+            + "that incomplete BootstrapParams JSON as if it were a valid deployment handoff. "
+            + "Re-enable only once this file is ported to v0.4.0 (see PreviewProtocolDeploymentMintTest).")
     @Test
     public void deploy() throws Exception {
 
