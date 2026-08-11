@@ -49,13 +49,11 @@ import static org.junit.jupiter.api.Assertions.fail;
  * divergent tree — is {@code src/substandards/security-token/verify-upstream-pin.sh},
  * which re-downloads the pinned tarball and diffs it.
  *
- * <p><b>Caveat:</b> the vendored directory sits outside this Gradle project, so it
- * is not one of the {@code test} task's declared inputs. Editing a vendored file
- * alone therefore leaves the task {@code UP-TO-DATE} and the guard does not
- * re-run. A clean checkout, CI, or any Java source change re-runs it; to check on
- * demand use {@code ./gradlew cleanTest test --tests '*SecurityTokenUpstreamPinTest*'}.
- * Declaring the directory as a task input in {@code build.gradle} would close
- * that gap.
+ * <p>The vendored directory sits outside this Gradle project, so it is not an
+ * implicit input of the {@code test} task; {@code build.gradle} therefore declares
+ * it explicitly ({@code inputs.dir(…/substandards/security-token)}). Without that
+ * declaration, editing a vendored file left {@code test} {@code UP-TO-DATE} and
+ * this guard silently never ran.
  *
  * <p>Note also that running {@code aiken build} in the vendored directory
  * rewrites {@code plutus.json} — the locally installed compiler (v1.1.23) is not
@@ -72,7 +70,10 @@ class SecurityTokenUpstreamPinTest {
     private static final Set<String> NON_UPSTREAM_FILES =
             Set.of("UPSTREAM_PIN.json", "verify-upstream-pin.sh");
 
-    /** Local aiken working directory; upstream does not ship it and it is gitignored. */
+    /** Local aiken working directory; upstream does not ship it and it is gitignored.
+     *  Pruned at ANY depth, matching {@code verify-upstream-pin.sh}'s
+     *  {@code dirs[:] = [d for d in dirs if d != "build"]} — the two must agree or
+     *  the manifest the script writes cannot be the manifest this test verifies. */
     private static final String BUILD_DIR = "build";
 
     @Test
@@ -156,12 +157,20 @@ class SecurityTokenUpstreamPinTest {
         try (Stream<Path> walk = Files.walk(root)) {
             for (Path p : walk.filter(Files::isRegularFile).toList()) {
                 String rel = root.relativize(p).toString().replace('\\', '/');
-                if (rel.equals(BUILD_DIR) || rel.startsWith(BUILD_DIR + "/")) continue;
+                if (isUnderBuildDir(rel)) continue;
                 if (NON_UPSTREAM_FILES.contains(rel)) continue;
                 out.put(rel, sha256(p));
             }
         }
         return out;
+    }
+
+    /** True when any path segment of {@code rel} is the aiken {@code build} directory. */
+    private static boolean isUnderBuildDir(String rel) {
+        for (String segment : rel.split("/")) {
+            if (BUILD_DIR.equals(segment)) return true;
+        }
+        return false;
     }
 
     private static String sha256(Path p) throws IOException {

@@ -104,7 +104,15 @@ import java.util.Optional;
  *        registration-mode short-circuit in {@code minting_logic_script.ak} and
  *        its mint/burn short-circuit in {@code transfer_logic_script.ak}. The
  *        registration flow therefore cannot validate as currently shaped — see
- *        the note in {@code buildRegistrationTransaction}.</li>
+ *        {@link #REGISTRATION_BLOCKED_AT_UPSTREAM_PIN} and the note in
+ *        {@code buildRegistrationTransaction}. Both
+ *        {@code buildRegistrationTransaction} and
+ *        {@code buildFullRegistrationChain} reject the request up front rather
+ *        than building a transaction that can only fail in the evaluator.</li>
+ *    <li>The sender-side KYC check in {@code transfer_logic_script.ak} is gated
+ *        on {@code gs_datum.requires_receiver_kyc} (it was unconditional in the
+ *        fork), so a token with {@code requires_receiver_kyc = False} needs no
+ *        sender Membership proof — see {@code buildTransferTransaction}.</li>
  *  </ul> */
 @Component
 @Scope("prototype")
@@ -119,6 +127,43 @@ public class SecurityTokenSubstandardHandler
 
     /** Hex of an empty (32-byte) MPF root: 32 zero bytes. */
     static final String EMPTY_ROOT_HEX = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /** Why registration is refused at the pinned upstream revision.
+     *
+     *  <p>{@code validators/minting_logic_script.ak} resolves the CIP-113 registry
+     *  node for the token being minted via
+     *  {@code derive_issuance_policy_id_from_registry_node}, which does a
+     *  {@code list.expect_find} over {@code self.reference_inputs} for a node
+     *  carrying the registry NFT, and then requires that node's minting-logic
+     *  script hash to equal this very script's hash. The registry node is
+     *  <em>created</em> by the registration transaction itself, so it cannot also
+     *  be one of that transaction's reference inputs, and no pre-existing node
+     *  matches — the withdraw can never succeed.
+     *
+     *  <p>The vendored fork this pin replaced hid the problem behind an
+     *  undeclared registration-mode short-circuit ({@code is_registration_tx →
+     *  True}) that upstream does not have. Resolving it is an upstream/platform
+     *  decision (either a registration-mode branch upstream, or a registration
+     *  transaction that does not withdraw from the substandard minting logic —
+     *  possible only when nothing is minted, which CIP-113's directory mint
+     *  forbids), not something the off-chain builder can work around.
+     *
+     *  <p>Failing here, before any transaction is composed and before any row is
+     *  written, keeps the error legible and stops the genesis step from leaving
+     *  orphaned {@code SecurityTokenRegistrationEntity} /
+     *  {@code SecurityTokenPowerUserEntity} rows behind on every attempt. */
+    static final String REGISTRATION_BLOCKED_AT_UPSTREAM_PIN =
+            "security-token registration is not supported at the pinned contract revision "
+            + "(FluidTokens/fn-bafin-cardano-sc @ 7ae4ce3). validators/minting_logic_script.ak "
+            + "resolves this token's CIP-113 registry node with list.expect_find over the "
+            + "transaction's REFERENCE inputs (derive_issuance_policy_id_from_registry_node) "
+            + "and then requires that node's minting-logic hash to equal its own. Registration "
+            + "creates that registry node in the same transaction, so it cannot be a reference "
+            + "input of that transaction and no other node matches — the withdraw always fails. "
+            + "This is an upstream contract defect, not an off-chain bug; it needs a "
+            + "registration-mode branch upstream (or a different registration shape) before the "
+            + "flow can work. Request rejected before any transaction build or database write. "
+            + "See docs WP-6 report.";
 
     private final SecurityTokenScriptBuilderService scriptBuilder;
     private final ProtocolScriptBuilderService protocolScriptBuilderService;
@@ -157,9 +202,17 @@ public class SecurityTokenSubstandardHandler
         return TransactionContext.ok(null, List.of());
     }
 
-    /** Registration tx. Mints the security-token policy under prog-logic-base, registers
-     *  in the CIP-113 directory with the parameterised {@code transfer_logic_script.withdraw}
-     *  hash, persists the {@link SecurityTokenRegistrationEntity} row.
+    /** Registration tx. <b>Always fails with
+     *  {@link #REGISTRATION_BLOCKED_AT_UPSTREAM_PIN} at the currently pinned
+     *  contract revision</b> — the transaction cannot validate on chain, so it is
+     *  rejected before anything is built or persisted.
+     *
+     *  <p>What it does once the upstream blocker is lifted: mints the
+     *  security-token policy under prog-logic-base, registers it in the CIP-113
+     *  directory with the parameterised {@code transfer_logic_script.withdraw}
+     *  hash, and persists the {@link SecurityTokenRegistrationEntity} row. That
+     *  implementation is preserved verbatim in
+     *  {@code buildRegistrationTransactionUnchecked}.
      *
      *  <p>Pre-condition: the genesis tx ({@link #buildGlobalStateInitTransaction}) must
      *  have run first so the three NFT policy ids on the request are valid.
@@ -188,6 +241,20 @@ public class SecurityTokenSubstandardHandler
      *  the SAME value the genesis tx used so we can compute the decremented
      *  amount correctly without re-reading the chain. */
     public TransactionContext<RegistrationResult> buildRegistrationTransaction(
+            SecurityTokenRegisterRequest request,
+            ProtocolBootstrapParams protocolParams,
+            Utxo chainedGsUtxoOverride) {
+        // BLOCKED at the pinned upstream revision. Fail here — before any script
+        // is built, any UTxO is read, or any row is persisted — so the caller
+        // gets the real reason instead of an opaque UPLC evaluation error from
+        // deep inside quickTxBuilder, and so no partial state is left behind.
+        // See REGISTRATION_BLOCKED_AT_UPSTREAM_PIN for the full explanation and
+        // the note further down in this method for the transaction-shape detail.
+        return TransactionContext.typedError(REGISTRATION_BLOCKED_AT_UPSTREAM_PIN);
+    }
+
+    @SuppressWarnings("unused") // unreachable until the upstream blocker above is resolved
+    private TransactionContext<RegistrationResult> buildRegistrationTransactionUnchecked(
             SecurityTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams,
             Utxo chainedGsUtxoOverride) {
@@ -403,6 +470,12 @@ public class SecurityTokenSubstandardHandler
             // logic (possible only when quantity == 0, since CIP-113's issuance_mint
             // requires that withdraw whenever prog-tokens are minted), or upstream
             // needs a registration-mode branch. See docs WP-6 report.
+            //
+            // Because of that, this method body is not reachable: the public
+            // buildRegistrationTransaction entry point returns
+            // REGISTRATION_BLOCKED_AT_UPSTREAM_PIN before calling it. The code is
+            // kept intact so the flow can be re-enabled (by deleting that guard)
+            // the moment upstream grows a registration-mode branch.
             BigInteger mintQuantity;
             try {
                 mintQuantity = new BigInteger(request.getQuantity());
@@ -801,8 +874,10 @@ public class SecurityTokenSubstandardHandler
      *  Each source action carries a {@code KycProof} (Attestation OR Membership, see
      *  {@code lib/types/kyc_proof.ak}: 66-byte payload, 64-byte signature, 32-byte vkey)
      *  plus the index of a denylist-covering linked-list ref-input proving the sender
-     *  is not denylisted. Destination actions are identical but only required when the
-     *  token's {@code requires_receiver_kyc} flag is true. */
+     *  is not denylisted. Destination actions are identical. The KYC proof itself is
+     *  only verified — on the sender side as well as the destination side — when the
+     *  live GS datum's {@code requires_receiver_kyc} flag is true; the denylist-absence
+     *  check is unconditional on both sides. */
     @Override
     public TransactionContext<Void> buildTransferTransaction(
             TransferTokenRequest request,
@@ -839,22 +914,13 @@ public class SecurityTokenSubstandardHandler
             }
             boolean isSelfSend = java.util.Arrays.equals(senderStakeHash, recipientStakeHash);
 
-            // Sender Membership proof is always required (the validator's
-            // sender-side check is unconditional). Attestation-style sender
-            // proofs would need the KERI service to produce BaFin 66-byte
-            // payloads — a separate workstream — so v1 only supports the
-            // Membership shape, same as the kyc-extended sender fast-path.
-            if (request.senderMpfProofCborHex() == null || request.senderMpfProofCborHex().isBlank()
-                    || request.senderMpfValidUntilMs() == null) {
-                return TransactionContext.typedError(
-                        "security-token sender Membership proof required: senderMpfProofCborHex + senderMpfValidUntilMs");
-            }
-            // Receiver-proof requirement is decided by the LIVE GS datum's
-            // requires_receiver_kyc field, not by SecurityTokenRegistrationEntity
-            // (the DB cache is set at registration time and isn't refreshed when
-            // the admin runs SetRequiresReceiverKyc on-chain). Validation of
-            // mpfProofCborHex presence is deferred until after the GS UTxO is
-            // fetched and its datum parsed (further below).
+            // BOTH the sender and the receiver proof requirements are decided by
+            // the LIVE GS datum's requires_receiver_kyc field, not by
+            // SecurityTokenRegistrationEntity (the DB cache is set at registration
+            // time and isn't refreshed when the admin runs SetRequiresReceiverKyc
+            // on-chain). Presence checks for senderMpfProofCborHex/mpfProofCborHex
+            // are therefore deferred until after the GS UTxO is fetched and its
+            // datum parsed (further below).
 
             // ── 3. Build scripts ───────────────────────────────────────────
             // Transfer doesn't touch the issuance contract (no mint/burn), so
@@ -972,6 +1038,33 @@ public class SecurityTokenSubstandardHandler
                         + "(token currently has requires_receiver_kyc=true on chain)");
             }
 
+            // Sender proof requirement — same flag, same gate. Upstream's
+            // per-sender loop is `let kyc_ok = if gs_datum.requires_receiver_kyc
+            // { verify_kyc_proof(action.source_proof, …) } else { True }`
+            // (validators/transfer_logic_script.ak, step 5), mirroring the
+            // per-destination loop in step 6. The fork this pin replaced checked
+            // the sender unconditionally, which is why this used to be a
+            // hard requirement.
+            //
+            // Demanding it unconditionally is not just redundant, it is wrong: a
+            // token bootstrapped with requiresReceiverKyc=false (a supported wizard
+            // option) has an empty member_root_hash and no enrolled members, so no
+            // sender can produce a Membership proof at all — every transfer would be
+            // rejected off-chain even though the chain accepts the placeholder
+            // Membership shape we already emit on the destination side.
+            //
+            // Only the Membership shape is supported in v1; Attestation-style sender
+            // proofs would need the KERI service to produce BaFin 66-byte payloads,
+            // which is a separate workstream.
+            boolean needSenderProof = liveRequiresReceiverKyc;
+            if (needSenderProof
+                    && (request.senderMpfProofCborHex() == null || request.senderMpfProofCborHex().isBlank()
+                        || request.senderMpfValidUntilMs() == null)) {
+                return TransactionContext.typedError(
+                        "security-token sender Membership proof required: senderMpfProofCborHex "
+                        + "+ senderMpfValidUntilMs (token currently has requires_receiver_kyc=true on chain)");
+            }
+
             // Denylist root node (ref input) — for an empty denylist (v1 happy
             // path), the root node covers all possible sender + recipient pkhs.
             // For populated denylists we'd need to find the specific covering
@@ -1032,12 +1125,12 @@ public class SecurityTokenSubstandardHandler
             int denylistRefIdx = refInputsSorted.indexOf(tiDenylistRoot);
 
             // ── 6. Build redeemers ─────────────────────────────────────────
-            // Sender proof: Constr 1 = Membership { pkh, valid_until_ms, mpf_proof }
-            PlutusData senderMembershipProof = ConstrPlutusData.of(1,
-                    ConstrPlutusData.of(0,
-                            BytesPlutusData.of(senderStakeHash),
-                            BigIntPlutusData.of(BigInteger.valueOf(request.senderMpfValidUntilMs())),
-                            decodeMpfProof(request.senderMpfProofCborHex())));
+            // Sender proof: Constr 1 = Membership { pkh, valid_until_ms, mpf_proof }.
+            // When requires_receiver_kyc is false the validator never inspects it,
+            // so emit the same placeholder shape the destination side uses.
+            PlutusData senderMembershipProof = buildMembershipProof(
+                    senderStakeHash, needSenderProof,
+                    request.senderMpfProofCborHex(), request.senderMpfValidUntilMs());
 
             // One source action per UNIQUE sender stake credential among token
             // inputs. v1: all token inputs are from the same wallet => 1 action.
@@ -1143,10 +1236,18 @@ public class SecurityTokenSubstandardHandler
                     .attachRewardValidator(transferLogicScript)
                     .withChangeAddress(senderAddress.getAddress());
 
-            // TTL bounded by the membership-proof validity windows
+            // TTL bounded by whichever membership-proof validity windows actually
+            // apply. When requires_receiver_kyc is false neither proof is verified
+            // and neither may even exist (empty member_root_hash, no enrolled
+            // members), so the plain 15-minute window stands — reading
+            // senderMpfValidUntilMs unconditionally here would NPE on exactly the
+            // transfers the relaxed precondition above now allows through.
             long now = System.currentTimeMillis();
-            long ttlMs = Math.min(now + 15 * 60 * 1000L, request.senderMpfValidUntilMs());
-            if (needRecipientProof) {
+            long ttlMs = now + 15 * 60 * 1000L;
+            if (needSenderProof && request.senderMpfValidUntilMs() != null) {
+                ttlMs = Math.min(ttlMs, request.senderMpfValidUntilMs());
+            }
+            if (needRecipientProof && request.mpfValidUntilMs() != null) {
                 ttlMs = Math.min(ttlMs, request.mpfValidUntilMs());
             }
             java.time.LocalDateTime ttlTime = java.time.LocalDateTime.ofInstant(
@@ -1251,23 +1352,39 @@ public class SecurityTokenSubstandardHandler
                                                      Long mpfValidUntilMs,
                                                      int denylistCoveringRefIdx)
             throws com.bloxbean.cardano.client.exception.CborDeserializationException {
-        PlutusData membership;
-        if (includeKycProof && mpfProofCborHex != null && mpfValidUntilMs != null) {
-            membership = ConstrPlutusData.of(1,
+        return ConstrPlutusData.of(0,
+                buildMembershipProof(destStakeHash, includeKycProof, mpfProofCborHex, mpfValidUntilMs),
+                BigIntPlutusData.of(BigInteger.valueOf(denylistCoveringRefIdx)));
+    }
+
+    /** Build a {@code KycProof.Membership} — {@code Constr 1 (Constr 0 [pkh,
+     *  valid_until_ms, mpf_proof])} per {@code lib/types/kyc_proof.ak}.
+     *
+     *  <p>When {@code includeKycProof} is false (or the caller supplied no proof)
+     *  a placeholder with {@code valid_until_ms = 0} and an empty proof list is
+     *  emitted. Upstream's transfer validator short-circuits
+     *  {@code verify_kyc_proof} on BOTH the sender and the destination loop when
+     *  {@code gs_datum.requires_receiver_kyc} is false, so the contents are never
+     *  inspected — but the Membership <em>shape</em> still has to be there for the
+     *  redeemer to deserialise. */
+    private static PlutusData buildMembershipProof(byte[] stakeHash,
+                                                   boolean includeKycProof,
+                                                   String mpfProofCborHex,
+                                                   Long mpfValidUntilMs)
+            throws com.bloxbean.cardano.client.exception.CborDeserializationException {
+        if (includeKycProof && mpfProofCborHex != null && !mpfProofCborHex.isBlank()
+                && mpfValidUntilMs != null) {
+            return ConstrPlutusData.of(1,
                     ConstrPlutusData.of(0,
-                            BytesPlutusData.of(destStakeHash),
+                            BytesPlutusData.of(stakeHash),
                             BigIntPlutusData.of(BigInteger.valueOf(mpfValidUntilMs)),
                             decodeMpfProof(mpfProofCborHex)));
-        } else {
-            membership = ConstrPlutusData.of(1,
-                    ConstrPlutusData.of(0,
-                            BytesPlutusData.of(destStakeHash),
-                            BigIntPlutusData.of(BigInteger.ZERO),
-                            ListPlutusData.of()));
         }
-        return ConstrPlutusData.of(0,
-                membership,
-                BigIntPlutusData.of(BigInteger.valueOf(denylistCoveringRefIdx)));
+        return ConstrPlutusData.of(1,
+                ConstrPlutusData.of(0,
+                        BytesPlutusData.of(stakeHash),
+                        BigIntPlutusData.of(BigInteger.ZERO),
+                        ListPlutusData.of()));
     }
 
     /** Global-state genesis. One tx that mints all three NFTs (GlobalState, denylist
@@ -1597,13 +1714,34 @@ public class SecurityTokenSubstandardHandler
      *  (see {@code lib/types/kyc_proof.ak}: {@code 0x00} preview, {@code 0x01}
      *  preprod, {@code 0x02} mainnet, {@code 0x03} yaci/devnet). Upstream used
      *  to take this from a compile-time {@code env} module; at @7ae4ce3 it is
-     *  read from the GS datum instead, so the off-chain side owns it. */
+     *  read from the GS datum instead, so the off-chain side owns it.
+     *
+     *  <p>Unrecognised values throw rather than defaulting. {@code network_id} is
+     *  written once at genesis, is immutable afterwards (no
+     *  {@code GlobalStateSpendAction} touches it), and is compared byte-for-byte
+     *  against every KYC attestation — so a typo'd or unset {@code network}
+     *  property silently baking in {@code 0x02} would permanently invalidate every
+     *  attestation for that token. Failing the genesis build is strictly better.
+     *
+     *  <p>NOTE: the accepted spellings here are deliberately a superset of
+     *  {@code AppConfig.Network#getCardanoNetwork()}, which handles
+     *  {@code preprod}/{@code preview}/{@code devnet} and falls through to mainnet
+     *  for everything else — {@code yaci} maps to the devnet id byte here but
+     *  would produce mainnet-shaped ADDRESSES there. Configure the devnet as
+     *  {@code network=devnet}. */
     private int kycNetworkId() {
-        return switch (network.getNetwork()) {
+        String n = network.getNetwork();
+        return switch (n == null ? "" : n) {
             case "preview" -> 0x0;
             case "preprod" -> 0x1;
+            case "mainnet" -> 0x2;
             case "devnet", "yaci" -> 0x3;
-            default -> 0x2;   // mainnet
+            default -> throw new IllegalStateException(
+                    "unrecognised network '" + n + "': cannot derive the KYC network_id byte. "
+                    + "It is baked into the global-state datum at genesis, is immutable "
+                    + "afterwards, and is checked byte-for-byte against every KYC attestation, "
+                    + "so guessing here would permanently break the token. "
+                    + "Set `network` to one of: preview, preprod, mainnet, devnet, yaci.");
         };
     }
 
@@ -2160,8 +2298,29 @@ public class SecurityTokenSubstandardHandler
             String registerTransferLogicTxHash) {}
 
     /** Build the full security-token registration chain in one call.
-      */
+     *
+     *  <p><b>Always fails with {@link #REGISTRATION_BLOCKED_AT_UPSTREAM_PIN} at the
+     *  currently pinned contract revision.</b> The chain's third transaction is the
+     *  registration tx, which cannot validate on chain; its first transaction
+     *  (genesis) writes database rows as a side effect, so the whole chain is
+     *  rejected before phase 1 rather than leaving orphaned registration and
+     *  power-user rows behind on every attempt. The full implementation is
+     *  preserved in {@code buildFullRegistrationChainUnchecked}.
+     */
     public TransactionContext<ChainBuildResult> buildFullRegistrationChain(
+            SecurityTokenRegisterRequest request,
+            ProtocolBootstrapParams protocolParams) {
+        // Phase 3 of this chain is the registration tx, which cannot validate at
+        // the pinned upstream revision. Reject here, BEFORE phase 1 runs:
+        // buildGlobalStateInitTransaction persists a SecurityTokenRegistrationEntity
+        // (and a bootstrap SecurityTokenPowerUserEntity) as a side effect, so
+        // letting the chain start would leave an orphan registration row behind on
+        // every attempt for a chain that can never be submitted.
+        return TransactionContext.typedError(REGISTRATION_BLOCKED_AT_UPSTREAM_PIN);
+    }
+
+    @SuppressWarnings("unused") // unreachable until the upstream blocker above is resolved
+    private TransactionContext<ChainBuildResult> buildFullRegistrationChainUnchecked(
             SecurityTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
         try {
@@ -2302,7 +2461,7 @@ public class SecurityTokenSubstandardHandler
             // wrote into the GS datum (same request object), so the registration
             // tx's decrement computation is correct.
             TransactionContext<RegistrationResult> regResult =
-                    buildRegistrationTransaction(request, protocolParams, chainedGsUtxo);
+                    buildRegistrationTransactionUnchecked(request, protocolParams, chainedGsUtxo);
             if (!regResult.isSuccessful()) {
                 hybridUtxoSupplier.clear();
                 return TransactionContext.typedError("chain[registration]: " + regResult.error());
@@ -3288,9 +3447,26 @@ public class SecurityTokenSubstandardHandler
                             ? pauseTransfersRefInputs
                             : List.of();
 
+                    // RotateAdmin is DUAL-SIGNED on chain: global_state.ak requires
+                    // must_be_signed_by_credential for BOTH the outgoing admin (from
+                    // the INPUT datum's admin_credential_hash) and the incoming one.
+                    // Passing only the fee payer's credential means
+                    // new_admin_credential_hash never reaches extra_signatories and
+                    // the branch can never validate. Declare both here so the built
+                    // transaction states its real signing requirement; the frontend
+                    // must collect the second signature (see report).
+                    List<byte[]> requiredSigners = new java.util.ArrayList<>();
+                    requiredSigners.add(signerKeyHash);
+                    if ("RotateAdmin".equals(change.action())) {
+                        addSignerIfAbsent(requiredSigners,
+                                gsAdminCredentialHash(currentDatum));
+                        addSignerIfAbsent(requiredSigners,
+                                HexUtil.decodeHexString(change.newAdminCredentialHashHex()));
+                    }
+
                     TransactionContext<Void> stepCtx = buildSingleGsUpdateTx(
                             reg, gsSpendScript, gsSpendAddress, gsUtxo, ad.actionRedeemer,
-                            ad.newDatum, funding, feePayerAddress, signerKeyHash, refInputs);
+                            ad.newDatum, funding, feePayerAddress, requiredSigners, refInputs);
                     if (!stepCtx.isSuccessful()) {
                         return TransactionContext.typedError(
                                 "change[" + i + "] (" + change.action() + "): " + stepCtx.error());
@@ -3331,6 +3507,32 @@ public class SecurityTokenSubstandardHandler
         PlutusData actionRedeemer;
         PlutusData newDatum;
         String error;
+    }
+
+    /** {@code admin_credential_hash} — GS datum field 2. Read from the datum the tx
+     *  is actually spending rather than from the cached DB row, because RotateAdmin
+     *  can have moved it since registration. */
+    private static byte[] gsAdminCredentialHash(PlutusData gsDatum) {
+        if (!(gsDatum instanceof ConstrPlutusData constr)) {
+            throw new IllegalStateException("GS datum is not a Constr");
+        }
+        List<PlutusData> fields = constr.getData().getPlutusDataList();
+        if (fields.size() != GS_DATUM_FIELD_COUNT
+                || !(fields.get(2) instanceof BytesPlutusData admin)) {
+            throw new IllegalStateException(
+                    "GS datum does not carry a 28-byte admin_credential_hash at field 2");
+        }
+        return admin.getValue();
+    }
+
+    /** Append {@code keyHash} unless an equal hash is already present — duplicate
+     *  entries in {@code required_signers} are a ledger-level error. */
+    private static void addSignerIfAbsent(List<byte[]> signers, byte[] keyHash) {
+        if (keyHash == null) return;
+        for (byte[] existing : signers) {
+            if (java.util.Arrays.equals(existing, keyHash)) return;
+        }
+        signers.add(keyHash);
     }
 
     /** Compute (action redeemer, new datum) for one change. The new datum mutates
@@ -3496,7 +3698,12 @@ public class SecurityTokenSubstandardHandler
      *  admin's power-user node (the validator does
      *  {@code safe_list_at(self.reference_inputs, power_user_node_ref_input_index)}
      *  and fails with EmptyList without it). Pass an empty list for actions
-     *  that are admin-signature-only. */
+     *  that are admin-signature-only.
+     *
+     *  <p>{@code requiredSignerKeyHashes} is every credential the action's on-chain
+     *  branch demands in {@code extra_signatories}. It is usually just the admin,
+     *  but {@code RotateAdmin} needs BOTH the outgoing and the incoming admin
+     *  ({@code global_state.ak}: two {@code must_be_signed_by_credential} calls). */
     private TransactionContext<Void> buildSingleGsUpdateTx(
             SecurityTokenRegistrationEntity reg,
             PlutusScript gsSpendScript,
@@ -3506,7 +3713,7 @@ public class SecurityTokenSubstandardHandler
             PlutusData newGsDatum,
             Utxo funding,
             String feePayerAddress,
-            byte[] signerKeyHash,
+            List<byte[]> requiredSignerKeyHashes,
             List<Utxo> refInputs) {
         try {
             PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
@@ -3550,7 +3757,7 @@ public class SecurityTokenSubstandardHandler
             }
 
             Transaction transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(signerKeyHash)
+                    .withRequiredSigners(requiredSignerKeyHashes.toArray(byte[][]::new))
                     .feePayer(feePayerAddress)
                     .mergeOutputs(false)
                     .withCollateralInputs(TransactionInput.builder()
