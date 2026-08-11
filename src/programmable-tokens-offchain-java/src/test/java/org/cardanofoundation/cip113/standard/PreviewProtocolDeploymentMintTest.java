@@ -22,6 +22,7 @@ import com.bloxbean.cardano.client.transaction.spec.Asset;
 import com.bloxbean.cardano.client.transaction.spec.MultiAsset;
 import com.bloxbean.cardano.client.transaction.spec.TransactionOutput;
 import com.bloxbean.cardano.client.transaction.spec.Value;
+import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import com.bloxbean.cardano.client.util.HexUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -389,6 +390,59 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 "transaction exceeds devnet max-tx-size (16384 bytes): " + serializedTx.length + " bytes");
         log.info("dryRun={}, fee={} lovelace, txSize={} bytes", dryRun, transaction.getBody().getFee(), serializedTx.length);
         log.info("serialized tx: {}", HexUtil.encodeHexString(serializedTx));
+
+        // Computed locally from the built+signed tx body — deterministic and valid whether or
+        // not this dry run is ever submitted, since the ref inputs below point at outputs of
+        // *this* transaction and must resolve to its real hash, not a placeholder.
+        var txHash = TransactionUtil.getTxHash(transaction);
+
+        var protocolParams = new ProtocolParams(
+                new TxInput(utxo1.getTxHash(), utxo1.getOutputIndex()),
+                protocolParamsContract.getPolicyId(),
+                HexUtil.encodeHexString(coordinationSpendScript.getScriptHash()));
+        var coordinationParams = new CoordinationParams(
+                NONCE_COORDINATION,
+                HexUtil.encodeHexString(coordinationSpendScript.getScriptHash()),
+                coordinationAddress.getAddress());
+        var programmableLogicGlobalParams = new ProgrammableLogicGlobalParams(
+                protocolParamsContract.getPolicyId(), programmableLogicGlobalContract.getPolicyId());
+        var programmableLogicBaseParams = new ProgrammableLogicBaseParams(
+                protocolParamsContract.getPolicyId(), programmableLogicBaseContract.getPolicyId());
+        var unfrackingParams = new UnfrackingParams(
+                protocolParamsContract.getPolicyId(),
+                HexUtil.encodeHexString(unfrackingContract.getScriptHash()),
+                unfrackingRewardAddress.getAddress());
+        var upgradeMultisigParams = new UpgradeMultisigParams(
+                List.of(HexUtil.encodeHexString(adminVkh)),
+                1,
+                HexUtil.encodeHexString(upgradeMultisigContract.getScriptHash()),
+                upgradeMultisigRewardAddress.getAddress());
+        var issuanceParams = new IssuanceParams(
+                new TxInput(utxo2.getTxHash(), utxo2.getOutputIndex()),
+                issuanceCborHexContract.getPolicyId(),
+                HexUtil.encodeHexString(issuanceAlwaysFailScript.getScriptHash()));
+        var directoryParams = new DirectoryMintParams(
+                new TxInput(utxo1.getTxHash(), utxo1.getOutputIndex()),
+                issuanceCborHexContract.getPolicyId(),
+                registryMintContract.getPolicyId());
+        var directorySpendParams = new DirectorySpendParams(
+                protocolParamsContract.getPolicyId(), registrySpendContract.getPolicyId());
+
+        var protocolBootstrapParams = new ProtocolBootstrapParams(protocolParams,
+                coordinationParams,
+                programmableLogicGlobalParams,
+                programmableLogicBaseParams,
+                unfrackingParams,
+                upgradeMultisigParams,
+                issuanceParams,
+                directoryParams,
+                directorySpendParams,
+                new TxInput(txHash, plbRefIdx),
+                new TxInput(txHash, plgRefIdx),
+                new TxInput(txHash, unfrackingRefIdx),
+                txHash);
+
+        log.info("BootstrapParams: {}", OBJECT_MAPPER.writeValueAsString(protocolBootstrapParams));
     }
 
     private static int findRefScriptOutputIndex(
