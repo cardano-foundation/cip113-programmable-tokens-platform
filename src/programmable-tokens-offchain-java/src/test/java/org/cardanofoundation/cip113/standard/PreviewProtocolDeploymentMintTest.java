@@ -7,6 +7,7 @@ import com.bloxbean.cardano.client.address.Credential;
 import com.bloxbean.cardano.client.api.MinAdaCalculator;
 import com.bloxbean.cardano.client.api.model.Amount;
 import com.bloxbean.cardano.client.api.util.ValueUtil;
+import com.bloxbean.cardano.client.crypto.Blake2bUtil;
 import com.bloxbean.cardano.client.function.helper.SignerProviders;
 import com.bloxbean.cardano.client.plutus.blueprint.PlutusBlueprintUtil;
 import com.bloxbean.cardano.client.plutus.blueprint.model.PlutusVersion;
@@ -42,8 +43,6 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private static final String NONCE_ISSUANCE_ALWAYS_FAIL = "fa5b084bbdc0336c1e3c086617d99cf6ecff1a190116784a0dd54aeca948e8fe";
-
-    private static final String NONCE_COORDINATION = "9c1f0c1e3a5d47b28e6f0a91d4c7b3e50f28a6d19b4c7e035a8d2f61c093b47e";
 
     /** registry_node.empty_vkey = VerificationKey(#"") — Credential index 0. */
     private static ConstrPlutusData emptyVkey() {
@@ -138,14 +137,20 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         var issuanceAlwaysFailAddress = AddressProvider.getEntAddress(issuanceAlwaysFailScript, network);
 
         // ---- 1. coordination_spend: the (now spendable) home of the protocol-params NFT.
-        // Nonce-parameterised on purpose — depending on the params policy would be circular.
+        // Nonce-parameterised on purpose — depending on the params policy would be circular
+        // (protocol_params_mint is itself parameterised by THIS validator's address).
+        // Derived from the bootstrap UTxO rather than a constant, so each deployment gets its
+        // own coordination address; a fixed nonce parks every deployment's coordination UTxO at
+        // one address, which is confusing to debug after a redeploy. The value is carried in
+        // the handoff JSON so the address can be re-derived later.
+        var coordinationNonce = Blake2bUtil.blake2bHash256(
+                HexUtil.decodeHexString(utxo1.getTxHash() + String.format("%02x", utxo1.getOutputIndex())));
         var coordinationSpendScript = applyParams(COORDINATION_SPEND_CONTRACT,
-                BytesPlutusData.of(HexUtil.decodeHexString(NONCE_COORDINATION)));
+                BytesPlutusData.of(coordinationNonce));
         var coordinationAddress = AddressProvider.getEntAddress(coordinationSpendScript, network);
         log.info("coordinationAddress: {}", coordinationAddress.getAddress());
 
         // ---- 2. protocol_params_mint(utxo1, coordination_hash)
-        // The 2nd param is *named* always_fail_hash but must be the coordination hash:
         // protocol_params_mint.ak requires the NFT output at address.from_script(that hash).
         var protocolParamsContract = applyParams(PROTOCOL_PARAMS_CONTRACT,
                 utxo1OutputReference,
@@ -347,10 +352,6 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 .payToContract(registrySpendAddress.getAddress(), ValueUtil.toAmountList(registryValue), originNodeDatum)
                 // issuance template, permanently locked under always_fail
                 .payToContract(issuanceAlwaysFailAddress.getAddress(), ValueUtil.toAmountList(issuanceCborHexValue), issuanceCborHexDatum)
-                // all three withdraw-0 validators need a registered reward account
-                .registerStakeAddress(programmableLogicGlobalRewardAddress.getAddress())
-                .registerStakeAddress(unfrackingRewardAddress.getAddress())
-                .registerStakeAddress(upgradeMultisigRewardAddress.getAddress())
                 // reference scripts (amounts cover min-UTxO for the script sizes)
                 .payToAddress(refInputAccount.baseAddress(), Amount.ada(5), programmableLogicBaseContract)
                 .payToAddress(refInputAccount.baseAddress(), Amount.ada(20), programmableLogicGlobalContract)
@@ -359,6 +360,22 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 .payToAddress(adminAccount.baseAddress(), Amount.ada(50))
                 .payToAddress(adminAccount.baseAddress(), Amount.ada(50))
                 .withChangeAddress(adminAccount.baseAddress());
+
+        // All three withdraw-0 validators need a registered reward account, but only PLG and
+        // unfracking get a deployment-unique hash (both are parameterized by the params policy,
+        // which derives from utxo1). upgrade_multisig is parameterized by (signers, threshold)
+        // only, so redeploying with the same signer set collides with the existing registration
+        // and the node rejects the whole tx with StakeKeyRegisteredDELEG. Register only what is
+        // not already on-chain.
+        for (var rewardAddress : List.of(programmableLogicGlobalRewardAddress,
+                unfrackingRewardAddress,
+                upgradeMultisigRewardAddress)) {
+            if (isStakeAddressRegistered(rewardAddress.getAddress())) {
+                log.info("reward account already registered, skipping: {}", rewardAddress.getAddress());
+            } else {
+                tx.registerStakeAddress(rewardAddress.getAddress());
+            }
+        }
 
         // buildAndSign() executes AikenTransactionEvaluator locally (registry_mint,
         // protocol_params_mint, issuance_cbor_hex_mint all run against the datums above)
@@ -409,7 +426,7 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 protocolParamsContract.getPolicyId(),
                 HexUtil.encodeHexString(coordinationSpendScript.getScriptHash()));
         var coordinationParams = new CoordinationParams(
-                NONCE_COORDINATION,
+                HexUtil.encodeHexString(coordinationNonce),
                 HexUtil.encodeHexString(coordinationSpendScript.getScriptHash()),
                 coordinationAddress.getAddress());
         var programmableLogicGlobalParams = new ProgrammableLogicGlobalParams(
@@ -451,6 +468,43 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 txHash);
 
         log.info("BootstrapParams: {}", OBJECT_MAPPER.writeValueAsString(protocolBootstrapParams));
+
+        // Also write the handoff to disk: gradle swallows log.info by default, and this record
+        // is the deployment's only durable output — it is what a protocol-bootstraps-<network>.json
+        // is regenerated from. Written as a single-element array to match the shape
+        // ProtocolBootstrapService expects when loading from resources.
+        var handoffPath = java.nio.file.Path.of(
+                System.getProperty("bootstrapOut", "build/bootstrap-params.json"));
+        java.nio.file.Files.createDirectories(handoffPath.getParent());
+        OBJECT_MAPPER.writerWithDefaultPrettyPrinter()
+                .writeValue(handoffPath.toFile(), List.of(protocolBootstrapParams));
+        log.info("BootstrapParams written to {}", handoffPath.toAbsolutePath());
+    }
+
+    /**
+     * True when {@code rewardAddress} already has a registration certificate on chain.
+     *
+     * <p>Only yaci-store exposes the certificate list (at {@code /stake/registrations});
+     * Blockfrost has no equivalent, and its {@code /accounts/{addr}} response does not
+     * distinguish a registered account from an unknown one. So anything other than a
+     * clean 200 is treated as "unknown", and the caller registers as usual — which is the
+     * correct behaviour for a first deployment on preview.
+     */
+    private static boolean isStakeAddressRegistered(String rewardAddress) {
+        var backend = System.getenv("CARDANO_BACKEND_URL");
+        if (backend == null || backend.isBlank()) {
+            return false;
+        }
+        var url = backend.endsWith("/") ? backend + "stake/registrations" : backend + "/stake/registrations";
+        try (var client = java.net.http.HttpClient.newHttpClient()) {
+            var response = client.send(
+                    java.net.http.HttpRequest.newBuilder(java.net.URI.create(url)).GET().build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofString());
+            return response.statusCode() == 200 && response.body().contains("\"" + rewardAddress + "\"");
+        } catch (Exception e) {
+            log.warn("could not check stake registration for {}: {}", rewardAddress, e.getMessage());
+            return false;
+        }
     }
 
     private static int findRefScriptOutputIndex(
