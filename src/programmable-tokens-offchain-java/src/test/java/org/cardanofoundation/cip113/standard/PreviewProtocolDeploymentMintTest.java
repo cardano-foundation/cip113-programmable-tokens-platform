@@ -96,6 +96,10 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
     public void deploy() throws Exception {
 
         var dryRun = true;
+        // Task 5 will add a branch on dryRun to call completeAndWait() instead of just
+        // buildAndSign(). That branch doesn't exist yet, so guard against silently flipping this
+        // flag and no-op'ing the deployment before the submit path is wired up.
+        Assertions.assertTrue(dryRun, "submit path not implemented yet — see Task 5");
 
         var utxosOpt = bfBackendService.getUtxoService().getUtxos(adminAccount.baseAddress(), 100, 1);
         Assertions.assertTrue(utxosOpt.isSuccessful(), "utxo query failed: " + utxosOpt.getResponse());
@@ -108,8 +112,14 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 .filter(a -> "lovelace".equals(a.getUnit()))
                 .map(Amount::getQuantity)
                 .reduce(BigInteger.ZERO, BigInteger::add);
-        Assertions.assertTrue(collectedLovelace.compareTo(Amount.ada(160).getQuantity()) >= 0,
-                "need >=160 ADA across the two bootstrap UTxOs (run DevnetFundingTest); got " + collectedLovelace);
+        // Explicit output total is ~158 ADA (5 coordination + 5 registry + ~11 issuanceCborHex,
+        // dynamically sized below from the ledger-exact min-utxo + a small buffer + 5 PLB ref +
+        // 20 PLG ref + 12 unfracking ref + 50 + 50 re-fragmentation), plus 6 ADA across three
+        // stake-registration deposits, plus ~1 ADA fee ≈ 165 ADA. Assert well above that: the
+        // issuanceCborHex figure is computed later from the actual template size, so this
+        // hardcoded precondition needs headroom against it drifting upward.
+        Assertions.assertTrue(collectedLovelace.compareTo(Amount.ada(175).getQuantity()) >= 0,
+                "need >=175 ADA across the two bootstrap UTxOs (run DevnetFundingTest); got " + collectedLovelace);
 
         var utxo1 = walletUtxos.getFirst();
         var utxo2 = walletUtxos.getLast();
@@ -299,8 +309,14 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         var minIssuanceCborHexAda = new MinAdaCalculator(protocolParamsResult.getValue())
                 .calculateMinAda(candidateIssuanceCborHexOutput);
 
-        // Comfortable margin over the ledger-exact minimum: 50% headroom, rounded up to a whole ADA.
-        var issuanceCborHexCoin = minIssuanceCborHexAda.multiply(BigInteger.valueOf(3)).divide(BigInteger.valueOf(2));
+        // Small fixed buffer over the ledger-exact minimum, then round up to a whole ADA. The
+        // calculation above is already exact (real protocol params, real address/asset-shape/
+        // datum), so it doesn't need a large proportional margin the way a guessed figure would —
+        // it only needs to absorb the few-byte CBOR-width slack between DUMMY_COIN_VAL and this
+        // output's real coin (finding: min-UTxO is a creation-time check that a permanently
+        // locked always_fail UTxO can never need to satisfy again, so any headroom beyond that is
+        // pure waste, not safety margin).
+        var issuanceCborHexCoin = minIssuanceCborHexAda.add(BigInteger.valueOf(1_000_000));
         issuanceCborHexCoin = issuanceCborHexCoin
                 .add(BigInteger.valueOf(999_999))
                 .divide(BigInteger.valueOf(1_000_000))
@@ -365,8 +381,14 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         var unfrackingRefIdx = findRefScriptOutputIndex(transaction, unfrackingContract);
         log.info("ref script indices — plb: {}, plg: {}, unfracking: {}", plbRefIdx, plgRefIdx, unfrackingRefIdx);
 
-        log.info("dryRun={}, fee={} lovelace", dryRun, transaction.getBody().getFee());
-        log.info("serialized tx: {}", transaction.serializeToHex());
+        // This devnet's max-tx-size is 16384 bytes; assert it explicitly rather than relying on
+        // buildAndSign() having silently accepted it — a failure here should read as "the tx grew
+        // too large" and not surface later as an opaque submit-time error.
+        var serializedTx = transaction.serialize();
+        Assertions.assertTrue(serializedTx.length < 16384,
+                "transaction exceeds devnet max-tx-size (16384 bytes): " + serializedTx.length + " bytes");
+        log.info("dryRun={}, fee={} lovelace, txSize={} bytes", dryRun, transaction.getBody().getFee(), serializedTx.length);
+        log.info("serialized tx: {}", HexUtil.encodeHexString(serializedTx));
     }
 
     private static int findRefScriptOutputIndex(
