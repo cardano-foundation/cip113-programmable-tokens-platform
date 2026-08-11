@@ -4,6 +4,7 @@ import com.bloxbean.cardano.aiken.AikenScriptUtil;
 import com.bloxbean.cardano.aiken.AikenTransactionEvaluator;
 import com.bloxbean.cardano.client.address.AddressProvider;
 import com.bloxbean.cardano.client.address.Credential;
+import com.bloxbean.cardano.client.api.MinAdaCalculator;
 import com.bloxbean.cardano.client.api.model.Amount;
 import com.bloxbean.cardano.client.api.util.ValueUtil;
 import com.bloxbean.cardano.client.function.helper.SignerProviders;
@@ -19,6 +20,7 @@ import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.quicktx.Tx;
 import com.bloxbean.cardano.client.transaction.spec.Asset;
 import com.bloxbean.cardano.client.transaction.spec.MultiAsset;
+import com.bloxbean.cardano.client.transaction.spec.TransactionOutput;
 import com.bloxbean.cardano.client.transaction.spec.Value;
 import com.bloxbean.cardano.client.util.HexUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -96,28 +98,18 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         var dryRun = true;
 
         var utxosOpt = bfBackendService.getUtxoService().getUtxos(adminAccount.baseAddress(), 100, 1);
-        if (!utxosOpt.isSuccessful() || utxosOpt.getValue().size() < 3) {
-            log.warn("not enough utxos, splitting wallet");
+        Assertions.assertTrue(utxosOpt.isSuccessful(), "utxo query failed: " + utxosOpt.getResponse());
+        Assertions.assertTrue(utxosOpt.getValue().size() >= 2,
+                "need >=2 utxos at the admin address — run DevnetFundingTest first");
 
-            var splitTx = new Tx()
-                    .from(adminAccount.baseAddress())
-                    .payToAddress(adminAccount.baseAddress(), Amount.ada(5))
-                    .payToAddress(adminAccount.baseAddress(), Amount.ada(5))
-                    .payToAddress(adminAccount.baseAddress(), Amount.ada(5))
-                    .withChangeAddress(adminAccount.baseAddress());
-
-            var response = quickTxBuilder.compose(splitTx)
-                    .withSigner(SignerProviders.signerFrom(adminAccount))
-                    .mergeOutputs(false)
-                    .completeAndWait();
-
-            log.info("Completed: {}", response);
-
-            Thread.sleep(30000L);
-
-            utxosOpt = bfBackendService.getUtxoService().getUtxos(adminAccount.baseAddress(), 100, 1);
-        }
         var walletUtxos = utxosOpt.getValue().stream().limit(2).toList();
+        var collectedLovelace = walletUtxos.stream()
+                .flatMap(u -> u.getAmount().stream())
+                .filter(a -> "lovelace".equals(a.getUnit()))
+                .map(Amount::getQuantity)
+                .reduce(BigInteger.ZERO, BigInteger::add);
+        Assertions.assertTrue(collectedLovelace.compareTo(Amount.ada(160).getQuantity()) >= 0,
+                "need >=160 ADA across the two bootstrap UTxOs (run DevnetFundingTest); got " + collectedLovelace);
 
         var utxo1 = walletUtxos.getFirst();
         var utxo2 = walletUtxos.getLast();
@@ -274,15 +266,125 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 .value(BigInteger.ONE)
                 .build();
 
+        // Size the IssuanceCborHex output precisely instead of reusing the flat 5 ADA used for
+        // the other two datum outputs above: this inline datum embeds the ~1.7 KB serialized
+        // issuance_mint script body split across the prefix/postfix byte fields, and min-UTxO is
+        // (160 + serializedOutputSizeInBytes) * coinsPerUtxoByte lovelace — the inline datum
+        // counts toward that size, so 5 ADA is very likely insufficient here.
+        int issuanceTemplateBytes = (contractParts[0].length() + contractParts[1].length()) / 2;
+        log.info("issuance template embedded in datum: {} bytes total (prefix {} + postfix {})",
+                issuanceTemplateBytes, contractParts[0].length() / 2, contractParts[1].length() / 2);
+
+        var protocolParamsResult = bfBackendService.getEpochService().getProtocolParameters();
+        Assertions.assertTrue(protocolParamsResult.isSuccessful(),
+                "protocol params query failed: " + protocolParamsResult.getResponse());
+
+        // MinAdaCalculator implements the exact ledger formula (Babbage-changes.pdf p.9):
+        // minAda = coinsPerUtxoByte * (serSize(txOut) + 160). Build a candidate output with the
+        // real address/asset-shape/datum so serSize is exact; the coin figure used only for this
+        // sizing pass doesn't matter as long as it CBOR-encodes at the same width as the real
+        // one — both are well under 2^32 so both take the 4-byte uint form — which is exactly
+        // what MinAdaCalculator.DUMMY_COIN_VAL is for.
+        var candidateIssuanceCborHexOutput = TransactionOutput.builder()
+                .address(issuanceAlwaysFailAddress.getAddress())
+                .value(Value.builder()
+                        .coin(MinAdaCalculator.DUMMY_COIN_VAL)
+                        .multiAssets(List.of(MultiAsset.builder()
+                                .policyId(issuanceCborHexContract.getPolicyId())
+                                .assets(List.of(issuanceCborHexNft))
+                                .build()))
+                        .build())
+                .inlineDatum(issuanceCborHexDatum)
+                .build();
+        var minIssuanceCborHexAda = new MinAdaCalculator(protocolParamsResult.getValue())
+                .calculateMinAda(candidateIssuanceCborHexOutput);
+
+        // Comfortable margin over the ledger-exact minimum: 50% headroom, rounded up to a whole ADA.
+        var issuanceCborHexCoin = minIssuanceCborHexAda.multiply(BigInteger.valueOf(3)).divide(BigInteger.valueOf(2));
+        issuanceCborHexCoin = issuanceCborHexCoin
+                .add(BigInteger.valueOf(999_999))
+                .divide(BigInteger.valueOf(1_000_000))
+                .multiply(BigInteger.valueOf(1_000_000));
+        log.info("issuanceCborHex output: ledger-exact min-utxo = {} lovelace, using {} lovelace ({} ADA) after margin",
+                minIssuanceCborHexAda, issuanceCborHexCoin, issuanceCborHexCoin.divide(BigInteger.valueOf(1_000_000)));
+
         Value issuanceCborHexValue = Value.builder()
-                .coin(Amount.ada(5).getQuantity())
+                .coin(issuanceCborHexCoin)
                 .multiAssets(List.of(MultiAsset.builder()
                         .policyId(issuanceCborHexContract.getPolicyId())
                         .assets(List.of(issuanceCborHexNft))
                         .build()))
                 .build();
 
-        if (true) return;
+        // ---- Assemble the bootstrap transaction: mint the three protocol NFTs, place them at
+        // the addresses their validators demand, register the three withdraw-0 reward accounts,
+        // and publish the three reference scripts needed by follow-up tests.
+        var tx = new Tx()
+                // both one-shot UTxOs must be consumed: utxo1 by protocol_params_mint AND
+                // registry_mint, utxo2 by issuance_cbor_hex_mint
+                .collectFrom(walletUtxos)
+                // RegistryInit
+                .mintAsset(registryMintContract, registryNft, ConstrPlutusData.of(0))
+                // redeemer unused
+                .mintAsset(protocolParamsContract, protocolParamNft, ConstrPlutusData.of(1))
+                // redeemer unused
+                .mintAsset(issuanceCborHexContract, issuanceCborHexNft, ConstrPlutusData.of(2))
+                // coordination UTxO: enterprise address, ADA + NFT only, inline datum, NO ref script
+                .payToContract(coordinationAddress.getAddress(), ValueUtil.toAmountList(protocolParamsValue), coordinationDatum)
+                // origin registry node, locked under registry_spend
+                .payToContract(registrySpendAddress.getAddress(), ValueUtil.toAmountList(registryValue), originNodeDatum)
+                // issuance template, permanently locked under always_fail
+                .payToContract(issuanceAlwaysFailAddress.getAddress(), ValueUtil.toAmountList(issuanceCborHexValue), issuanceCborHexDatum)
+                // all three withdraw-0 validators need a registered reward account
+                .registerStakeAddress(programmableLogicGlobalRewardAddress.getAddress())
+                .registerStakeAddress(unfrackingRewardAddress.getAddress())
+                .registerStakeAddress(upgradeMultisigRewardAddress.getAddress())
+                // reference scripts (amounts cover min-UTxO for the script sizes)
+                .payToAddress(refInputAccount.baseAddress(), Amount.ada(5), programmableLogicBaseContract)
+                .payToAddress(refInputAccount.baseAddress(), Amount.ada(20), programmableLogicGlobalContract)
+                .payToAddress(refInputAccount.baseAddress(), Amount.ada(12), unfrackingContract)
+                // re-fragment the admin wallet for follow-up tests
+                .payToAddress(adminAccount.baseAddress(), Amount.ada(50))
+                .payToAddress(adminAccount.baseAddress(), Amount.ada(50))
+                .withChangeAddress(adminAccount.baseAddress());
+
+        // dryRun stays true here: buildAndSign() executes AikenTransactionEvaluator locally
+        // (registry_mint, protocol_params_mint, issuance_cbor_hex_mint all run against Task 2's
+        // datums) but never submits. Task 5 branches on dryRun to call completeAndWait() instead.
+        var transaction = quickTxBuilder.compose(tx)
+                .withSigner(SignerProviders.signerFrom(adminAccount))
+                .withTxEvaluator(new AikenTransactionEvaluator(bfBackendService))
+                .feePayer(adminAccount.baseAddress())
+                .mergeOutputs(false)
+                .buildAndSign();
+
+        // Resolve reference-script output indices dynamically — hardcoding them (e.g. 3 and 4)
+        // breaks as soon as an output is added or reordered upstream.
+        var plbRefIdx = findRefScriptOutputIndex(transaction, programmableLogicBaseContract);
+        var plgRefIdx = findRefScriptOutputIndex(transaction, programmableLogicGlobalContract);
+        var unfrackingRefIdx = findRefScriptOutputIndex(transaction, unfrackingContract);
+        log.info("ref script indices — plb: {}, plg: {}, unfracking: {}", plbRefIdx, plgRefIdx, unfrackingRefIdx);
+
+        log.info("dryRun={}, fee={} lovelace", dryRun, transaction.getBody().getFee());
+        log.info("serialized tx: {}", transaction.serializeToHex());
+    }
+
+    private static int findRefScriptOutputIndex(
+            com.bloxbean.cardano.client.transaction.spec.Transaction tx,
+            PlutusScript script) throws Exception {
+        var wanted = HexUtil.encodeHexString(script.getScriptHash());
+        var outputs = tx.getBody().getOutputs();
+        for (int i = 0; i < outputs.size(); i++) {
+            var ref = outputs.get(i).getScriptRef();
+            if (ref == null) {
+                continue;
+            }
+            var deserialized = com.bloxbean.cardano.client.api.util.ReferenceScriptUtil.deserializeScriptRef(ref);
+            if (wanted.equals(HexUtil.encodeHexString(deserialized.getScriptHash()))) {
+                return i;
+            }
+        }
+        throw new IllegalStateException("no output carries reference script " + wanted);
     }
 
     @Test
