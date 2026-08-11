@@ -280,10 +280,16 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .build();
             log.info("directorySpendDatum: {}", directorySpendDatum);
 
+            // substandardIssueContract is the freeze-and-seize admin script — "Issuer to
+            // be used for minting/burning/sieze" (see its construction above) — so it is
+            // both minting_logic_script AND the seize authority at third_party_transfer_logic_script.
+            // WP-5 TODO: unfrackingLogicScript left at the "forbidden" default (empty_vkey).
             var directoryMintDatum = new RegistryNode(HexUtil.encodeHexString(issuanceContract.getScriptHash()),
                     existingRegistryNodeDatum.next(),
-                    HexUtil.encodeHexString(substandardTransferContract.getScriptHash()),
-                    HexUtil.encodeHexString(substandardIssueContract.getScriptHash()),
+                    Credential.fromScript(substandardIssueContract.getScriptHash()),
+                    Credential.fromScript(substandardTransferContract.getScriptHash()),
+                    Credential.fromScript(substandardIssueContract.getScriptHash()),
+                    RegistryNode.EMPTY_VKEY,
                     "");
             log.info("directoryMintDatum: {}", directoryMintDatum);
 

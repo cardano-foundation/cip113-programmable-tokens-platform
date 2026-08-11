@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.entity.ProtocolParamsEntity;
 import org.cardanofoundation.cip113.entity.RegistryNodeEntity;
+import org.cardanofoundation.cip113.model.onchain.PlutusCredentialCodec;
 import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
@@ -90,8 +91,10 @@ public class RegistryEventListener {
                                         RegistryNodeEntity entity = RegistryNodeEntity.builder()
                                                 .key(registryNode.key())
                                                 .next(registryNode.next())
-                                                .transferLogicScript(registryNode.transferLogicScript())
-                                                .thirdPartyTransferLogicScript(registryNode.thirdPartyTransferLogicScript())
+                                                .mintingLogicScript(PlutusCredentialCodec.hex(registryNode.mintingLogicScript()))
+                                                .transferLogicScript(PlutusCredentialCodec.hex(registryNode.transferLogicScript()))
+                                                .thirdPartyTransferLogicScript(PlutusCredentialCodec.hex(registryNode.thirdPartyTransferLogicScript()))
+                                                .unfrackingLogicScript(PlutusCredentialCodec.hex(registryNode.unfrackingLogicScript()))
                                                 .globalStatePolicyId(registryNode.globalStatePolicyId())
                                                 .protocolParams(protocolParams)
                                                 .txHash(txHash)

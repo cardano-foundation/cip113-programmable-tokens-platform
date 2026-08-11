@@ -303,11 +303,17 @@ public class SecurityTokenSubstandardHandler
             RegistryNode directorySpendDatum = existingNode.toBuilder()
                     .next(HexUtil.encodeHexString(issuanceContract.getScriptHash()))
                     .build();
+            // WP-5 TODO: thirdPartyTransferLogicScript (seize authority) and
+            // unfrackingLogicScript are left at the "forbidden" default (empty_vkey) —
+            // who may seize a security token is an unresolved product decision (see
+            // docs/PLATFORM-V0.4.0-PORT-PLAN.md, WP-3).
             RegistryNode directoryMintDatum = new RegistryNode(
                     HexUtil.encodeHexString(issuanceContract.getScriptHash()),
                     existingNode.next(),
-                    HexUtil.encodeHexString(transferLogicScript.getScriptHash()),
-                    HexUtil.encodeHexString(mintingLogicScript.getScriptHash()),
+                    Credential.fromScript(mintingLogicScript.getScriptHash()),
+                    Credential.fromScript(transferLogicScript.getScriptHash()),
+                    RegistryNode.EMPTY_VKEY,
+                    RegistryNode.EMPTY_VKEY,
                     gsPolicy);
 
             Asset directorySpendNft = Asset.builder()

@@ -30,6 +30,7 @@ import org.cardanofoundation.cip113.entity.ProgrammableTokenRegistryEntity;
 import org.cardanofoundation.cip113.model.*;
 import org.cardanofoundation.cip113.model.TransactionContext.RegistrationResult;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
+import org.cardanofoundation.cip113.model.onchain.PlutusCredentialCodec;
 import org.cardanofoundation.cip113.model.onchain.RegistryNode;
 import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
 import org.cardanofoundation.cip113.repository.CustomStakeRegistrationRepository;
@@ -247,11 +248,16 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
                     .next(HexUtil.encodeHexString(issuanceContract.getScriptHash()))
                     .build();
 
+            // WP-5 TODO: thirdPartyTransferLogicScript and unfrackingLogicScript are left
+            // at the "forbidden" default (empty_vkey) — no admin/seize authority is wired
+            // for kyc-extended yet (see docs/PLATFORM-V0.4.0-PORT-PLAN.md, WP-3).
             var directoryMintDatum = new RegistryNode(
                     HexUtil.encodeHexString(issuanceContract.getScriptHash()),
                     existingRegistryNodeDatum.next(),
-                    HexUtil.encodeHexString(substandardTransferContract.getScriptHash()),
-                    HexUtil.encodeHexString(substandardIssueContract.getScriptHash()),
+                    Credential.fromScript(substandardIssueContract.getScriptHash()),
+                    Credential.fromScript(substandardTransferContract.getScriptHash()),
+                    RegistryNode.EMPTY_VKEY,
+                    RegistryNode.EMPTY_VKEY,
                     globalStatePolicyId);
 
             Value directoryMintValue = Value.builder()
@@ -607,7 +613,7 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
                 for (Utxo entry : registryEntriesForCheck) {
                     var nodeOpt = registryNodeParser.parse(entry.getInlineDatum());
                     if (nodeOpt.isPresent() && policyId.equalsIgnoreCase(nodeOpt.get().key())) {
-                        registeredTransferHash = nodeOpt.get().transferLogicScript();
+                        registeredTransferHash = PlutusCredentialCodec.hex(nodeOpt.get().transferLogicScript());
                         break;
                     }
                 }

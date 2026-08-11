@@ -301,10 +301,14 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                         .build();
                 log.info("directorySpendDatum: {}", directorySpendDatum);
 
+                // WP-5 TODO: unfrackingLogicScript left at the "forbidden" default
+                // (empty_vkey) — no substandard config wires a real unfracking hook yet.
                 var directoryMintDatum = new RegistryNode(HexUtil.encodeHexString(issuanceContract.getScriptHash()),
                         existingRegistryNodeDatum.next(),
-                        HexUtil.encodeHexString(substandardTransferContract.getScriptHash()),
-                        thirdPartyScriptHash,
+                        Credential.fromScript(substandardIssueContract.getScriptHash()),
+                        Credential.fromScript(substandardTransferContract.getScriptHash()),
+                        thirdPartyScriptHash.isEmpty() ? RegistryNode.EMPTY_VKEY : Credential.fromScript(thirdPartyScriptHash),
+                        RegistryNode.EMPTY_VKEY,
                         "");
                 log.info("directoryMintDatum: {}", directoryMintDatum);
 

@@ -195,10 +195,14 @@ public class PreviewRegisterTest extends AbstractPreviewTest {
                 .build();
         log.info("directorySpendDatum: {}", directorySpendDatum);
 
+        // WP-5 TODO: thirdPartyTransferLogicScript and unfrackingLogicScript are left
+        // at the "forbidden" default (empty_vkey).
         var directoryMintDatum = new RegistryNode(HexUtil.encodeHexString(issuanceContract.getScriptHash()),
                 existingRegistryNodeDatum.next(),
-                HexUtil.encodeHexString(substandardTransferContract.getScriptHash()),
-                HexUtil.encodeHexString(substandardIssueContract.getScriptHash()),
+                Credential.fromScript(substandardIssueContract.getScriptHash()),
+                Credential.fromScript(substandardTransferContract.getScriptHash()),
+                RegistryNode.EMPTY_VKEY,
+                RegistryNode.EMPTY_VKEY,
                 "");
         log.info("directoryMintDatum: {}", directoryMintDatum);
 
