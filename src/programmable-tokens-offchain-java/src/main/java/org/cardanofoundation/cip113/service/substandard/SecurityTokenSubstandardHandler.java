@@ -79,16 +79,33 @@ import java.util.Optional;
 
 /** Handler for the "security-token" substandard.
  *
- *  <p>The on-chain validators are ported verbatim from
- *  {@code easy1staking-com/fn-bafin-cardano-sc} and live under
- *  {@code src/substandards/security-token/}. This handler is deliberately
- *  isolated from {@code KycExtendedSubstandardHandler} and {@code MpfTreeService}
- *  so the older KYC substandards can be removed without breaking it.
+ *  <p>The on-chain validators live under {@code src/substandards/security-token/}
+ *  and are a <em>verbatim, pinned</em> copy of
+ *  {@code FluidTokens/fn-bafin-cardano-sc} @ {@code 7ae4ce3} — see
+ *  {@code UPSTREAM_PIN.json} there and {@code SecurityTokenUpstreamPinTest}. That
+ *  directory previously held a hand-maintained fork; nothing in it may be edited.
+ *  This handler is deliberately isolated from {@code KycExtendedSubstandardHandler}
+ *  and {@code MpfTreeService} so the older KYC substandards can be removed
+ *  without breaking it.
  *
- *  <p>Status: registration / mint / transfer / global-state action methods are
- *  scaffolded and return a typed error until the per-method implementation lands.
- *  Wiring through the factory + DTO + JSON discriminator is in place so the
- *  dispatcher and frontend can observe the substandard end-to-end. */
+ *  <p><b>Behavioural deltas introduced by adopting upstream verbatim</b> (the
+ *  replaced fork was an older snapshot that also carried two undeclared local
+ *  patches):
+ *  <ul>
+ *    <li>{@code GlobalStateDatum} is 11 fields, not 9: {@code requires_sender_kyc}
+ *        was inserted at index 8 and {@code network_id} appended at 10. Every
+ *        {@code GlobalStateSpendAction} constructor index from 6 up shifted by one.</li>
+ *    <li>Denylist add/remove is gated by a power user holding {@code is_admin}
+ *        plus their signature (not the GS admin credential), and both redeemers
+ *        carry a {@code power_user_node_ref_input_index}.</li>
+ *    <li>{@code network_id} is read from the GS datum rather than a compile-time
+ *        {@code env} module, so the off-chain side now owns that value.</li>
+ *    <li>REMOVED by upstream, and relied on by this handler: the fork's
+ *        registration-mode short-circuit in {@code minting_logic_script.ak} and
+ *        its mint/burn short-circuit in {@code transfer_logic_script.ak}. The
+ *        registration flow therefore cannot validate as currently shaped — see
+ *        the note in {@code buildRegistrationTransaction}.</li>
+ *  </ul> */
 @Component
 @Scope("prototype")
 @RequiredArgsConstructor
@@ -348,11 +365,24 @@ public class SecurityTokenSubstandardHandler
             // 6. Recipient = the user's wallet (where the first minted security tokens go).
             //    Wrapped under the prog-logic-base stake credential per CIP-113.
             //
-            // quantity == 0 is supported: registration becomes "directory insert +
-            // stake cred registration only", with the mintingLogicScript.withdraw
-            // taking its rubber-stamp branch (mint=0 short-circuit added to the
-            // Aiken validator). The first actual mint of security tokens is then
-            // a separate MintSecurity tx run from the admin page.
+            // quantity == 0 makes registration "directory insert + stake cred
+            // registration only"; the first actual mint is then a separate
+            // MintSecurity tx run from the admin page.
+            //
+            // BLOCKED (upstream pin fn-bafin-cardano-sc @7ae4ce3): both shapes
+            // currently fail on chain. The vendored fork this replaced carried an
+            // UNDECLARED registration-mode short-circuit in minting_logic_script.ak
+            // ("is_registration_tx → True") which upstream does not have. Upstream
+            // always runs derive_issuance_policy_id_from_registry_node, which
+            // `list.expect_find`s a registry NFT among the REFERENCE inputs and then
+            // requires its logic-script field to equal this very script's hash. At
+            // registration time the directory node is being created in this same tx,
+            // so it cannot be a reference input and no other node would match.
+            // Resolving this is a platform decision, not a datum port: either the
+            // registration tx must stop withdrawing from the substandard's minting
+            // logic (possible only when quantity == 0, since CIP-113's issuance_mint
+            // requires that withdraw whenever prog-tokens are minted), or upstream
+            // needs a registration-mode branch. See docs WP-6 report.
             BigInteger mintQuantity;
             try {
                 mintQuantity = new BigInteger(request.getQuantity());
@@ -392,11 +422,9 @@ public class SecurityTokenSubstandardHandler
             // to register them again here.
             //
             // The withdraw redeemer is the BaFin MintingLogicScriptWithdrawRedeemer
-            // { gs_input_index, pu_node_ref_input_index, minted_amount }. When
-            // willMint=false we pass {0, 0, 0} and the validator's rubber-stamp
-            // branch (mint=0 short-circuit) lets the registration succeed without
-            // needing GS/PU on chain. When willMint=true we'd need the strict
-            // path's inputs — that's the separate MintSecurity tx, not this one.
+            // { gs_input_index, pu_node_ref_input_index, minted_amount }. The {0,0,0}
+            // form below relied on the removed rubber-stamp branch (see above); with
+            // the upstream contracts it reaches the strict path and fails.
             ConstrPlutusData withdrawRedeemer = ConstrPlutusData.of(0,
                     BigIntPlutusData.of(BigInteger.ZERO),
                     BigIntPlutusData.of(BigInteger.ZERO),
@@ -442,11 +470,8 @@ public class SecurityTokenSubstandardHandler
                     .withChangeAddress(request.getFeePayerAddress());
 
             // 7b. CHAIN MODE: also spend GS with MintSecurity to enforce the
-            // supply cap on the initial mint. Without this, mintable_amount
-            // wouldn't be decremented for the registration-time mint (the
-            // rubber-stamp branch of mintingLogic.withdraw bypasses the cap).
-            // GS spend's MintSecurity branch enforces the cap independently of
-            // the substandard's withdraw, so the rubber-stamp branch stays safe.
+            // supply cap on the initial mint. GS spend's MintSecurity branch
+            // enforces the cap independently of the substandard's withdraw.
             //
             // Output added: [3] new GS UTxO with decremented mintable_amount.
             // The preBalanceTx hook still moves the leading change output to
@@ -479,20 +504,16 @@ public class SecurityTokenSubstandardHandler
                             "GS datum is not a Constr (chainedGsUtxoOverride)");
                 }
                 List<PlutusData> currentRegFields = currentConstrReg.getData().getPlutusDataList();
-                if (currentRegFields.size() < 9) {
-                    return TransactionContext.typedError(
-                            "GS datum is malformed (< 9 fields)");
+                if (currentRegFields.size() != GS_DATUM_FIELD_COUNT) {
+                    return TransactionContext.typedError("GS datum has " + currentRegFields.size()
+                            + " fields, expected " + GS_DATUM_FIELD_COUNT
+                            + " (pre-@7ae4ce3 global state — must be re-bootstrapped)");
                 }
-                PlutusData newGsDatum = ConstrPlutusData.of(0,
-                        currentRegFields.get(0),                                              // transfers_paused
-                        BigIntPlutusData.of(BigInteger.valueOf(newMintable)),                 // mintable_amount (decremented)
-                        currentRegFields.get(2),                                              // admin_credential_hash
-                        currentRegFields.get(3),                                              // power_user_linked_list_policy_id
-                        currentRegFields.get(4),                                              // denylist_linked_list_policy_id
-                        currentRegFields.get(5),                                              // security_info
-                        currentRegFields.get(6),                                              // trusted_entity_vkeys (preserved!)
-                        currentRegFields.get(7),                                              // member_root_hash (preserved!)
-                        currentRegFields.get(8));                                             // requires_receiver_kyc
+                // Only mintable_amount changes; every other field — including
+                // trusted_entity_vkeys and member_root_hash — is carried through
+                // verbatim, which is what MintSecurity's equals_data check requires.
+                PlutusData newGsDatum = replaceGsField(currentRegFields, 1,
+                        BigIntPlutusData.of(BigInteger.valueOf(newMintable)));
 
                 // Compute the position of the issuance Mint redeemer in the
                 // canonical redeemer ordering (Spend → Mint → Cert → Reward,
@@ -908,13 +929,16 @@ public class SecurityTokenSubstandardHandler
                     return TransactionContext.typedError("GS datum is not a Constr");
                 }
                 List<PlutusData> gsFields = gsConstr.getData().getPlutusDataList();
-                if (gsFields.size() < 9) {
-                    return TransactionContext.typedError(
-                            "GS datum has " + gsFields.size() + " fields, expected 9");
+                if (gsFields.size() != GS_DATUM_FIELD_COUNT) {
+                    return TransactionContext.typedError("GS datum has " + gsFields.size()
+                            + " fields, expected " + GS_DATUM_FIELD_COUNT
+                            + " (pre-@7ae4ce3 global state — must be re-bootstrapped)");
                 }
-                // Field 8 is `requires_receiver_kyc: Bool`, encoded as Constr 0
-                // (False) or Constr 1 (True).
-                liveRequiresReceiverKyc = boolFromConstr(gsFields.get(8));
+                // `requires_receiver_kyc: Bool` (Constr 0 = False, Constr 1 = True)
+                // sits at index 9 in the upstream datum — index 8 is
+                // requires_sender_kyc, so reading 8 here would silently gate on
+                // the wrong flag.
+                liveRequiresReceiverKyc = boolFromConstr(gsFields.get(GS_IDX_REQUIRES_RECEIVER_KYC));
             } catch (Exception e) {
                 return TransactionContext.typedError(
                         "could not parse GS datum to read requires_receiver_kyc: " + e.getMessage());
@@ -1307,7 +1331,9 @@ public class SecurityTokenSubstandardHandler
             PlutusData gsDatum = buildInitialGlobalStateDatum(
                     adminPkh, powerUsersPolicyId, denylistPolicyId,
                     request.getInitialMintableAmount() != null ? request.getInitialMintableAmount() : 0L,
+                    request.isRequiresSenderKyc(),
                     request.isRequiresReceiverKyc(),
+                    kycNetworkId(),
                     request.getInitialTrustedEntityVkeys());
             PlutusData linkedListRootDatum = buildLinkedListRootDatum();
 
@@ -1476,19 +1502,27 @@ public class SecurityTokenSubstandardHandler
     /** Minimum lovelace placed on a script-locked UTxO that carries an NFT. */
     private static final long SCRIPT_UTXO_LOVELACE = 2_000_000L;
 
-    /** Encode the initial 9-field {@code GlobalStateDatum} per the BaFin shape.
-     *  Field order MUST match {@code lib/types/global_state.ak} exactly.
+    /** Encode the initial {@value #GS_DATUM_FIELD_COUNT}-field {@code GlobalStateDatum}
+     *  per the upstream BaFin shape. Field order MUST match
+     *  {@code lib/types/global_state.ak} exactly.
      *
      *  <p>NB: {@code trusted_entity_vkeys} is an Aiken {@code Pairs<...>} which
      *  encodes as a CBOR Map (not a List). Empty Map ≠ empty List at the byte
      *  level. The mint validator's {@code sanitise_initial_datum} calls
-     *  {@code is_sorted_no_dup_vkeys} which iterates this value as Pairs. */
+     *  {@code is_sorted_no_dup_vkeys} which iterates this value as Pairs.
+     *
+     *  <p>{@code network_id} is set once here and is IMMUTABLE — every
+     *  {@code GlobalStateSpendAction} carries it forward unchanged, and it is
+     *  bound into every KYC proof payload (byte 65) to prevent cross-network
+     *  replay. */
     private static PlutusData buildInitialGlobalStateDatum(
             String adminPkh,
             String powerUsersPolicyId,
             String denylistPolicyId,
             long mintableAmount,
+            boolean requiresSenderKyc,
             boolean requiresReceiverKyc,
+            int networkId,
             List<String> initialTrustedEntityVkeys) {
         // Build trusted_entity_vkeys as a sorted MapPlutusData with each
         // 32-byte vkey → unit metadata (Constr 0 []). Sorting by vkey bytes
@@ -1521,8 +1555,36 @@ public class SecurityTokenSubstandardHandler
                 ConstrPlutusData.of(0),                                           // security_info = Unit (Data placeholder)
                 trustedMap,                                                       // trusted_entity_vkeys
                 BytesPlutusData.of(new byte[0]),                                  // member_root_hash = empty (matches upstream E2ETest)
-                ConstrPlutusData.of(requiresReceiverKyc ? 1 : 0)                  // requires_receiver_kyc
+                ConstrPlutusData.of(requiresSenderKyc ? 1 : 0),                   // requires_sender_kyc
+                ConstrPlutusData.of(requiresReceiverKyc ? 1 : 0),                 // requires_receiver_kyc
+                BigIntPlutusData.of(BigInteger.valueOf(networkId))                // network_id
         );
+    }
+
+    /** Number of fields in the upstream {@code GlobalStateDatum}
+     *  ({@code lib/types/global_state.ak}). Bumped from 9 to 11 when the
+     *  vendored fork was replaced with FluidTokens/fn-bafin-cardano-sc
+     *  @7ae4ce3: {@code requires_sender_kyc} was inserted at index 8 (pushing
+     *  {@code requires_receiver_kyc} from 8 to 9) and {@code network_id} added
+     *  at index 10. */
+    private static final int GS_DATUM_FIELD_COUNT = 11;
+
+    private static final int GS_IDX_REQUIRES_SENDER_KYC = 8;
+    private static final int GS_IDX_REQUIRES_RECEIVER_KYC = 9;
+    private static final int GS_IDX_NETWORK_ID = 10;
+
+    /** Network-id byte baked into the GS datum and into every KYC proof payload
+     *  (see {@code lib/types/kyc_proof.ak}: {@code 0x00} preview, {@code 0x01}
+     *  preprod, {@code 0x02} mainnet, {@code 0x03} yaci/devnet). Upstream used
+     *  to take this from a compile-time {@code env} module; at @7ae4ce3 it is
+     *  read from the GS datum instead, so the off-chain side owns it. */
+    private int kycNetworkId() {
+        return switch (network.getNetwork()) {
+            case "preview" -> 0x0;
+            case "preprod" -> 0x1;
+            case "devnet", "yaci" -> 0x3;
+            default -> 0x2;   // mainnet
+        };
     }
 
     /** Encode an empty linked-list root: {@code Element { data: Root { data: Unit }, link: None }}.
@@ -1921,7 +1983,8 @@ public class SecurityTokenSubstandardHandler
             }
 
             // GS UTxO as ref input — the denylist mint validator reads
-            // admin_credential_hash from it to gate the mutation.
+            // power_user_linked_list_policy_id from it to authenticate the
+            // power-user node below.
             Utxo gsUtxo = utxoProvider.findUtxoByAsset(
                     reg.getGlobalStatePolicyId(),
                     SecurityTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX
@@ -1929,6 +1992,33 @@ public class SecurityTokenSubstandardHandler
             if (gsUtxo == null) {
                 return TransactionContext.typedError("global-state NFT not found on chain");
             }
+
+            // Power-user node as a SECOND ref input. Upstream @7ae4ce3 moved the
+            // sanction gate off the GS admin credential and onto a power user
+            // holding `is_admin` (see validators/denylist.ak: power_user_from_refs
+            // → `power_user_data.is_admin && must_be_signed_by_credential(...)`).
+            // The signer is therefore whoever is operating the wallet, not the
+            // registration's admin — so the compliance role can be delegated
+            // without handing over the master admin key.
+            byte[] signerPkh = new Address(feePayerAddress).getPaymentCredentialHash()
+                    .orElse(null);
+            if (signerPkh == null) {
+                return TransactionContext.typedError(
+                        "feePayerAddress has no payment credential: " + feePayerAddress);
+            }
+            String signerPkhHex = HexUtil.encodeHexString(signerPkh);
+            // Fail here rather than on-chain: the validator's `is_admin` check
+            // surfaces as an opaque script failure otherwise.
+            boolean signerIsAdmin = powerUserRepository
+                    .findByProgrammableTokenPolicyIdAndPowerUserPkh(policyId, signerPkhHex)
+                    .map(pu -> SecurityTokenPowerUserCapability.ADMIN.granted(pu.getCapabilities()))
+                    .orElse(false);
+            if (!signerIsAdmin) {
+                return TransactionContext.typedError(
+                        "denylist mutations require a power user holding the ADMIN capability; "
+                        + signerPkhHex + " is not one for policy " + policyId);
+            }
+            Utxo powerUserNode = findPuNode(reg, signerPkh, "denylist-admin");
 
             // Funding UTxO at fee payer (admin's wallet).
             List<Utxo> fundingUtxos = accountService.findAdaOnlyUtxo(feePayerAddress, 5_000_000L);
@@ -1943,16 +2033,24 @@ public class SecurityTokenSubstandardHandler
             int anchorInIdx = lexIndex(List.of(anchorNode, funding), anchorNode);
             int anchorOutIdx = 0;   // updated root → output 0
             int newNodeOutIdx = 1;  // new node      → output 1
-            int gsRefIdx = 0;       // GS is the only reference input
+            // Reference inputs appear in the script context sorted by
+            // (txHash, outputIndex), NOT in the order they were added — so both
+            // indices must be derived from the sorted pair, not hardcoded.
+            List<Utxo> denylistRefInputs = List.of(gsUtxo, powerUserNode);
+            int gsRefIdx = lexIndex(denylistRefInputs, gsUtxo);
+            int puNodeRefIdx = lexIndex(denylistRefInputs, powerUserNode);
 
             // Mint redeemer: AddToDenylist = variant 2 of MintRedeemer (same
             // index as AddPowerUser — see types/denylist.ak vs types/power_users.ak).
+            // Upstream @7ae4ce3 appended power_user_node_ref_input_index as the
+            // 6th field of both AddToDenylist and RemoveFromDenylist.
             ConstrPlutusData addToDenylistRedeemer = ConstrPlutusData.of(2,
                     BytesPlutusData.of(targetStakeHash),
                     BigIntPlutusData.of(BigInteger.valueOf(anchorInIdx)),
                     BigIntPlutusData.of(BigInteger.valueOf(anchorOutIdx)),
                     BigIntPlutusData.of(BigInteger.valueOf(newNodeOutIdx)),
-                    BigIntPlutusData.of(BigInteger.valueOf(gsRefIdx)));
+                    BigIntPlutusData.of(BigInteger.valueOf(gsRefIdx)),
+                    BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)));
 
             // Spend redeemer on the root: StateTransition (Constr 0).
             ConstrPlutusData rootSpendRedeemer = ConstrPlutusData.of(0);
@@ -1977,11 +2075,11 @@ public class SecurityTokenSubstandardHandler
             Value rootOutputValue = oneNftValue(reg.getDenylistPolicyId(),
                     Asset.builder().name("0x").value(BigInteger.ONE).build());
 
-            // Required signer = the on-chain admin from the GS datum. The
-            // wallet doing the add is whoever's connected, but the validator
-            // checks against the GS datum's admin_credential_hash.
-            byte[] adminPkh = HexUtil.decodeHexString(reg.getIssuerAdminPkh());
-
+            // Required signer = the power user whose node is referenced above.
+            // The validator checks `must_be_signed_by_credential(self,
+            // power_user_credential_hash)`, where the credential comes from the
+            // referenced node's key — NOT from the GS datum's admin_credential_hash
+            // (that gate moved in upstream @7ae4ce3).
             Tx tx = new Tx()
                     .collectFrom(anchorNode, rootSpendRedeemer)
                     .collectFrom(List.of(funding))
@@ -1991,12 +2089,15 @@ public class SecurityTokenSubstandardHandler
                     .mintAsset(denylistMintScript, List.of(newNodeNft), addToDenylistRedeemer,
                             denylistSpendAddress.getAddress(), newNodeDatum)
                     .readFrom(TransactionInput.builder()
-                            .transactionId(gsUtxo.getTxHash())
-                            .index(gsUtxo.getOutputIndex()).build())
+                                    .transactionId(gsUtxo.getTxHash())
+                                    .index(gsUtxo.getOutputIndex()).build(),
+                            TransactionInput.builder()
+                                    .transactionId(powerUserNode.getTxHash())
+                                    .index(powerUserNode.getOutputIndex()).build())
                     .withChangeAddress(feePayerAddress);
 
             Transaction transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(adminPkh)
+                    .withRequiredSigners(signerPkh)
                     .feePayer(feePayerAddress)
                     .mergeOutputs(false)
                     .withCollateralInputs(TransactionInput.builder()
@@ -2004,8 +2105,8 @@ public class SecurityTokenSubstandardHandler
                             .index(funding.getOutputIndex()).build())
                     .build();
 
-            log.info("security-token AddToDenylist built: policy={} target_stake={}",
-                    policyId, HexUtil.encodeHexString(targetStakeHash));
+            log.info("security-token AddToDenylist built: policy={} target_stake={} power_user={}",
+                    policyId, HexUtil.encodeHexString(targetStakeHash), signerPkhHex);
             return TransactionContext.ok(transaction.serializeToHex());
         } catch (Exception e) {
             log.error("security-token denylist {} failed for policy={} target={}",
@@ -2163,12 +2264,14 @@ public class SecurityTokenSubstandardHandler
             // to mint in the same tx (consistency between the directory
             // entry's recorded substandard hash and the actual mint).
             //
-            // The BaFin minting_logic_script.withdraw detects "registration
-            // mode" via the directory NFT being minted and rubber-stamps the
-            // withdraw — so no GS/PU on-chain refs are needed. But the supply
-            // cap must still be enforced: we ALSO spend GS with MintSecurity
+            // The supply cap is enforced by ALSO spending GS with MintSecurity
             // in this tx (via the 3-arg overload), which decrements
-            // mintable_amount independently.
+            // mintable_amount independently of the substandard's withdraw.
+            //
+            // BLOCKED at the upstream pin: minting_logic_script.withdraw no
+            // longer has the registration-mode short-circuit the vendored fork
+            // had, so this tx cannot validate as shaped. See the detailed note
+            // in buildRegistrationTransaction.
             request.setChainingTransactionCborHex(addPuCbor);
             if (request.getQuantity() == null || request.getQuantity().isBlank()
                     || "0".equals(request.getQuantity())) {
@@ -2951,19 +3054,15 @@ public class SecurityTokenSubstandardHandler
                 return TransactionContext.typedError("GS datum is not a Constr");
             }
             List<PlutusData> gsFields = currentConstr.getData().getPlutusDataList();
-            if (gsFields.size() < 9) {
-                return TransactionContext.typedError("GS datum is malformed (< 9 fields)");
+            if (gsFields.size() != GS_DATUM_FIELD_COUNT) {
+                return TransactionContext.typedError("GS datum has " + gsFields.size()
+                        + " fields, expected " + GS_DATUM_FIELD_COUNT
+                        + " (pre-@7ae4ce3 global state — must be re-bootstrapped)");
             }
-            PlutusData newGsDatum = ConstrPlutusData.of(0,
-                    gsFields.get(0),                                              // transfers_paused
-                    gsFields.get(1),                                              // mintable_amount
-                    gsFields.get(2),                                              // admin_credential_hash
-                    gsFields.get(3),                                              // power_user_linked_list_policy_id
-                    gsFields.get(4),                                              // denylist_linked_list_policy_id
-                    gsFields.get(5),                                              // security_info
-                    gsFields.get(6),                                              // trusted_entity_vkeys
-                    BytesPlutusData.of(newRootHash),                              // member_root_hash ← NEW
-                    gsFields.get(8));                                             // requires_receiver_kyc
+            // Replace only field 7 (member_root_hash); everything else — including
+            // requires_sender_kyc / requires_receiver_kyc / network_id — is carried
+            // through verbatim, which is what the validator's equals_data check requires.
+            PlutusData newGsDatum = replaceGsField(gsFields, 7, BytesPlutusData.of(newRootHash));
 
             // Funding UTxO from admin's wallet (backend AdminSigningKeyProvider).
             List<Utxo> fundingUtxos = accountService.findAdaOnlyUtxo(adminAddress, 5_000_000L);
@@ -2973,11 +3072,12 @@ public class SecurityTokenSubstandardHandler
             Utxo funding = fundingUtxos.getFirst();
 
             // GS spend redeemer: Constr 0 (config_ref_idx=0, gs_output_idx=0,
-            // action = Constr 7 UpdateMemberRootHash(new_root_hash))
+            // action = Constr 8 UpdateMemberRootHash(new_root_hash)). Index 8,
+            // not 7: SetRequiresSenderKyc was inserted at 6 in upstream @7ae4ce3.
             PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
                     BigIntPlutusData.of(BigInteger.ZERO),                          // config_ref_input_index
                     BigIntPlutusData.of(BigInteger.ZERO),                          // global_state_output_index
-                    ConstrPlutusData.of(7, BytesPlutusData.of(newRootHash)));     // UpdateMemberRootHash
+                    ConstrPlutusData.of(8, BytesPlutusData.of(newRootHash)));     // UpdateMemberRootHash
 
             // Preserve GS UTxO value verbatim (lovelace + the GS NFT).
             BigInteger gsLovelace = gsUtxo.getAmount().stream()
@@ -3055,7 +3155,8 @@ public class SecurityTokenSubstandardHandler
     public record GsChangeSpec(
             String action,                          // "PauseTransfers" | "ModifySecurityInfo" | "AddTrustedEntity" |
                                                     // "RemoveTrustedEntity" | "UpdateTrustedEntity" |
-                                                    // "SetRequiresReceiverKyc" | "UpdateMemberRootHash" | "RotateAdmin"
+                                                    // "SetRequiresSenderKyc" | "SetRequiresReceiverKyc" |
+                                                    // "UpdateMemberRootHash" | "RotateAdmin"
             Boolean transfersPaused,                // PauseTransfers
             String newSecurityInfoHex,              // ModifySecurityInfo (CBOR-encoded Data)
             String trustedVkeyHex,                  // AddTrustedEntity / RemoveTrustedEntity (32-byte hex)
@@ -3063,6 +3164,7 @@ public class SecurityTokenSubstandardHandler
             String trustedOldVkeyHex,               // UpdateTrustedEntity
             String trustedNewVkeyHex,               // UpdateTrustedEntity
             String trustedNewMetadataHex,           // UpdateTrustedEntity (CBOR-encoded Data)
+            Boolean requiresSenderKycEnabled,       // SetRequiresSenderKyc
             Boolean requiresReceiverKycEnabled,     // SetRequiresReceiverKyc
             String newMemberRootHashHex,            // UpdateMemberRootHash — if null, backend uses current local
             String newAdminCredentialHashHex        // RotateAdmin (28-byte hex)
@@ -3219,11 +3321,19 @@ public class SecurityTokenSubstandardHandler
             return out;
         }
         List<PlutusData> f = currentConstr.getData().getPlutusDataList();
-        if (f.size() < 9) {
-            out.error = "current GS datum is malformed (< 9 fields)";
+        if (f.size() != GS_DATUM_FIELD_COUNT) {
+            out.error = "current GS datum has " + f.size() + " fields, expected "
+                    + GS_DATUM_FIELD_COUNT + " (pre-@7ae4ce3 global state — must be re-bootstrapped)";
             return out;
         }
 
+        // GlobalStateSpendAction constructor indices, from the pinned upstream
+        // blueprint (types/global_state/GlobalStateSpendAction). SetRequiresSenderKyc
+        // was INSERTED at 6 when the fork was replaced with upstream @7ae4ce3, so
+        // SetRequiresReceiverKyc / UpdateMemberRootHash / RotateAdmin each shifted
+        // up by one. Emitting the old index does not fail to build — it selects a
+        // different action, which is exactly the silent-corruption mode this port
+        // is guarding against.
         switch (change.action()) {
             case "PauseTransfers" -> {
                 // PauseTransfersAction { transfers_paused, power_user_node_ref_input_index }.
@@ -3236,9 +3346,7 @@ public class SecurityTokenSubstandardHandler
                 out.actionRedeemer = ConstrPlutusData.of(1,
                         boolToConstr(change.transfersPaused()),
                         BigIntPlutusData.of(BigInteger.ZERO));
-                out.newDatum = ConstrPlutusData.of(0,
-                        boolToConstr(change.transfersPaused()), f.get(1), f.get(2),
-                        f.get(3), f.get(4), f.get(5), f.get(6), f.get(7), f.get(8));
+                out.newDatum = replaceGsField(f, 0, boolToConstr(change.transfersPaused()));
             }
             case "ModifySecurityInfo" -> {
                 if (change.newSecurityInfoHex() == null) {
@@ -3247,9 +3355,7 @@ public class SecurityTokenSubstandardHandler
                 PlutusData newSecInfo = PlutusData.deserialize(
                         HexUtil.decodeHexString(change.newSecurityInfoHex()));
                 out.actionRedeemer = ConstrPlutusData.of(2, newSecInfo);
-                out.newDatum = ConstrPlutusData.of(0,
-                        f.get(0), f.get(1), f.get(2), f.get(3), f.get(4),
-                        newSecInfo, f.get(6), f.get(7), f.get(8));
+                out.newDatum = replaceGsField(f, 5, newSecInfo);
             }
             case "AddTrustedEntity" -> {
                 if (change.trustedVkeyHex() == null || change.trustedMetadataHex() == null) {
@@ -3269,9 +3375,7 @@ public class SecurityTokenSubstandardHandler
                 sorted.put(change.trustedVkeyHex().toLowerCase(), meta);
                 sorted.forEach((kHex, v) -> newMap.put(
                         BytesPlutusData.of(HexUtil.decodeHexString(kHex)), v));
-                out.newDatum = ConstrPlutusData.of(0,
-                        f.get(0), f.get(1), f.get(2), f.get(3), f.get(4),
-                        f.get(5), newMap, f.get(7), f.get(8));
+                out.newDatum = replaceGsField(f, 6, newMap);
             }
             case "RemoveTrustedEntity" -> {
                 if (change.trustedVkeyHex() == null) {
@@ -3287,9 +3391,7 @@ public class SecurityTokenSubstandardHandler
                         newMap.put(k, v);
                     }
                 });
-                out.newDatum = ConstrPlutusData.of(0,
-                        f.get(0), f.get(1), f.get(2), f.get(3), f.get(4),
-                        f.get(5), newMap, f.get(7), f.get(8));
+                out.newDatum = replaceGsField(f, 6, newMap);
             }
             case "UpdateTrustedEntity" -> {
                 if (change.trustedOldVkeyHex() == null || change.trustedNewVkeyHex() == null
@@ -3311,19 +3413,29 @@ public class SecurityTokenSubstandardHandler
                 MapPlutusData newMap = MapPlutusData.builder().build();
                 sorted.forEach((kHex, v) -> newMap.put(
                         BytesPlutusData.of(HexUtil.decodeHexString(kHex)), v));
-                out.newDatum = ConstrPlutusData.of(0,
-                        f.get(0), f.get(1), f.get(2), f.get(3), f.get(4),
-                        f.get(5), newMap, f.get(7), f.get(8));
+                out.newDatum = replaceGsField(f, 6, newMap);
+            }
+            case "SetRequiresSenderKyc" -> {
+                // NOTE: no validator at the pinned upstream revision reads
+                // requires_sender_kyc — transfer_logic_script gates the SENDER
+                // check on requires_receiver_kyc. This action still writes the
+                // field (the GS spend validator enforces it), it just has no
+                // enforcement effect yet.
+                if (change.requiresSenderKycEnabled() == null) {
+                    out.error = "SetRequiresSenderKyc requires requiresSenderKycEnabled"; return out;
+                }
+                out.actionRedeemer = ConstrPlutusData.of(6,
+                        boolToConstr(change.requiresSenderKycEnabled()));
+                out.newDatum = replaceGsField(f, GS_IDX_REQUIRES_SENDER_KYC,
+                        boolToConstr(change.requiresSenderKycEnabled()));
             }
             case "SetRequiresReceiverKyc" -> {
                 if (change.requiresReceiverKycEnabled() == null) {
                     out.error = "SetRequiresReceiverKyc requires requiresReceiverKycEnabled"; return out;
                 }
-                out.actionRedeemer = ConstrPlutusData.of(6,
+                out.actionRedeemer = ConstrPlutusData.of(7,
                         boolToConstr(change.requiresReceiverKycEnabled()));
-                out.newDatum = ConstrPlutusData.of(0,
-                        f.get(0), f.get(1), f.get(2), f.get(3), f.get(4),
-                        f.get(5), f.get(6), f.get(7),
+                out.newDatum = replaceGsField(f, GS_IDX_REQUIRES_RECEIVER_KYC,
                         boolToConstr(change.requiresReceiverKycEnabled()));
             }
             case "UpdateMemberRootHash" -> {
@@ -3331,10 +3443,8 @@ public class SecurityTokenSubstandardHandler
                 byte[] root = change.newMemberRootHashHex() != null
                         ? HexUtil.decodeHexString(change.newMemberRootHashHex())
                         : allowlistService.currentRoot(policyId);
-                out.actionRedeemer = ConstrPlutusData.of(7, BytesPlutusData.of(root));
-                out.newDatum = ConstrPlutusData.of(0,
-                        f.get(0), f.get(1), f.get(2), f.get(3), f.get(4),
-                        f.get(5), f.get(6), BytesPlutusData.of(root), f.get(8));
+                out.actionRedeemer = ConstrPlutusData.of(8, BytesPlutusData.of(root));
+                out.newDatum = replaceGsField(f, 7, BytesPlutusData.of(root));
             }
             case "RotateAdmin" -> {
                 if (change.newAdminCredentialHashHex() == null) {
@@ -3342,10 +3452,8 @@ public class SecurityTokenSubstandardHandler
                 }
                 PlutusData newAdmin = BytesPlutusData.of(
                         HexUtil.decodeHexString(change.newAdminCredentialHashHex()));
-                out.actionRedeemer = ConstrPlutusData.of(8, newAdmin);
-                out.newDatum = ConstrPlutusData.of(0,
-                        f.get(0), f.get(1), newAdmin, f.get(3), f.get(4),
-                        f.get(5), f.get(6), f.get(7), f.get(8));
+                out.actionRedeemer = ConstrPlutusData.of(9, newAdmin);
+                out.newDatum = replaceGsField(f, 2, newAdmin);
             }
             default -> {
                 out.error = "unknown action: " + change.action();
@@ -3481,7 +3589,8 @@ public class SecurityTokenSubstandardHandler
      *  <p>Looks up the global-state policy id on the SecurityTokenRegistrationEntity
      *  for {@code policyId}, finds the UTxO holding the GS NFT via Blockfrost (no
      *  script-address derivation needed — the NFT is unique), and deserialises the
-     *  9-field BaFin {@code GlobalStateDatum} from the inline datum.
+     *  {@value #GS_DATUM_FIELD_COUNT}-field BaFin {@code GlobalStateDatum} from the
+     *  inline datum.
      *
      *  <p>Used by the autonomous publisher's equality gate and by the admin UI's
      *  read-current-state view. */
@@ -3505,7 +3614,13 @@ public class SecurityTokenSubstandardHandler
             PlutusData data = PlutusData.deserialize(HexUtil.decodeHexString(datumHex));
             if (!(data instanceof ConstrPlutusData constr)) return Optional.empty();
             List<PlutusData> fields = constr.getData().getPlutusDataList();
-            if (fields.size() < 9) return Optional.empty();
+            if (fields.size() != GS_DATUM_FIELD_COUNT) {
+                log.warn("readGlobalState({}): GS datum has {} fields, expected {} — "
+                        + "this global state predates the upstream contract pin (fn-bafin-cardano-sc "
+                        + "@7ae4ce3) and its flag fields are at different indices; refusing to read it",
+                        policyId, fields.size(), GS_DATUM_FIELD_COUNT);
+                return Optional.empty();
+            }
 
             // BaFin GlobalStateDatum field order — see
             // src/substandards/security-token/lib/types/global_state.ak.
@@ -3517,7 +3632,9 @@ public class SecurityTokenSubstandardHandler
             String securityInfoHex = serializeHex(fields.get(5));
             List<String> trustedEntityVkeys = trustedEntitiesFrom(fields.get(6));
             String memberRootHash = bytesHexFrom(fields.get(7));
-            boolean requiresReceiverKyc = boolFromConstr(fields.get(8));
+            boolean requiresSenderKyc = boolFromConstr(fields.get(GS_IDX_REQUIRES_SENDER_KYC));
+            boolean requiresReceiverKyc = boolFromConstr(fields.get(GS_IDX_REQUIRES_RECEIVER_KYC));
+            long networkId = intFrom(fields.get(GS_IDX_NETWORK_ID));
 
             return Optional.of(new GlobalStateData(
                     policyId,
@@ -3527,7 +3644,9 @@ public class SecurityTokenSubstandardHandler
                     securityInfoHex,
                     memberRootHash,
                     requiresReceiverKyc,
-                    adminCredentialHash));
+                    adminCredentialHash,
+                    requiresSenderKyc,
+                    networkId));
         } catch (Exception e) {
             log.debug("readGlobalState({}) failed: {}", policyId, e.getMessage());
             return Optional.empty();
@@ -3645,9 +3764,15 @@ public class SecurityTokenSubstandardHandler
         return gsUtxo;
     }
 
-    /** Deserialize + validate the 9-field BaFin GlobalStateDatum, returning its
-     *  fields. Throws {@link BuildPreconditionException} with a user-visible
-     *  message when the datum shape is wrong. */
+    /** Deserialize + validate the {@value #GS_DATUM_FIELD_COUNT}-field BaFin
+     *  GlobalStateDatum, returning its fields. Throws
+     *  {@link BuildPreconditionException} with a user-visible message when the
+     *  datum shape is wrong.
+     *
+     *  <p>The count is checked for EQUALITY, not a lower bound: a 9-field datum
+     *  is a pre-@7ae4ce3 global state whose field 8 is {@code requires_receiver_kyc}
+     *  rather than {@code requires_sender_kyc}. Accepting it would read and
+     *  rewrite the wrong flag silently. Such a deployment must be re-bootstrapped. */
     private static List<PlutusData> parseGsFields(Utxo gsUtxo) {
         try {
             PlutusData datum = PlutusData.deserialize(
@@ -3656,9 +3781,11 @@ public class SecurityTokenSubstandardHandler
                 throw new BuildPreconditionException("GS datum is not a Constr");
             }
             List<PlutusData> fields = constr.getData().getPlutusDataList();
-            if (fields.size() < 9) {
+            if (fields.size() != GS_DATUM_FIELD_COUNT) {
                 throw new BuildPreconditionException(
-                        "GS datum has " + fields.size() + " fields, expected 9");
+                        "GS datum has " + fields.size() + " fields, expected " + GS_DATUM_FIELD_COUNT
+                        + " — this global state predates the upstream contract pin "
+                        + "(fn-bafin-cardano-sc @7ae4ce3) and must be re-bootstrapped");
             }
             return fields;
         } catch (BuildPreconditionException bpe) {
@@ -3726,8 +3853,9 @@ public class SecurityTokenSubstandardHandler
 
     /** Mutate only the {@code mintable_amount} field of the parsed GS fields
      *  by the given (signed) delta — positive for burn, negative for mint —
-     *  and return the new 9-field Constr datum. All other fields are preserved
-     *  verbatim. Throws if the delta would drive mintable_amount negative. */
+     *  and return the new {@value #GS_DATUM_FIELD_COUNT}-field Constr datum.
+     *  All other fields are preserved verbatim. Throws if the delta would drive
+     *  mintable_amount negative. */
     private static PlutusData applyMintableDelta(List<PlutusData> gsFields, long delta) {
         if (!(gsFields.get(1) instanceof BigIntPlutusData bi)) {
             throw new BuildPreconditionException("GS datum field 1 (mintable_amount) is not an Int");
@@ -3738,16 +3866,25 @@ public class SecurityTokenSubstandardHandler
             throw new BuildPreconditionException(
                     "mint quantity exceeds remaining mintable_amount (" + current + ")");
         }
-        return ConstrPlutusData.of(0,
-                gsFields.get(0),                                              // transfers_paused
-                BigIntPlutusData.of(BigInteger.valueOf(updated)),             // mintable_amount
-                gsFields.get(2),                                              // admin_credential_hash
-                gsFields.get(3),                                              // power_user_linked_list_policy_id
-                gsFields.get(4),                                              // denylist_linked_list_policy_id
-                gsFields.get(5),                                              // security_info
-                gsFields.get(6),                                              // trusted_entity_vkeys
-                gsFields.get(7),                                              // member_root_hash
-                gsFields.get(8));                                             // requires_receiver_kyc
+        return replaceGsField(gsFields, 1, BigIntPlutusData.of(BigInteger.valueOf(updated)));
+    }
+
+    /** Rebuild the {@code GlobalStateDatum} Constr from an existing field list
+     *  with exactly one field replaced — the Java mirror of upstream's
+     *  {@code utils.replace_data_field}, which every {@code GlobalStateSpendAction}
+     *  branch now uses to derive its expected output datum. Going through one
+     *  helper (instead of re-listing all fields per action) is what keeps the
+     *  off-chain side correct when the datum grows again: upstream compares the
+     *  whole output datum with {@code builtin.equals_data}, so a dropped or
+     *  reordered field silently invalidates the transaction. */
+    private static PlutusData replaceGsField(List<PlutusData> gsFields, int index, PlutusData value) {
+        if (gsFields.size() != GS_DATUM_FIELD_COUNT) {
+            throw new BuildPreconditionException(
+                    "GS datum has " + gsFields.size() + " fields, expected " + GS_DATUM_FIELD_COUNT);
+        }
+        List<PlutusData> out = new ArrayList<>(gsFields);
+        out.set(index, value);
+        return ConstrPlutusData.of(0, out.toArray(new PlutusData[0]));
     }
 
     /** Reproduce the GS UTxO's Value verbatim from its (lovelace + single NFT)
@@ -3788,7 +3925,10 @@ public class SecurityTokenSubstandardHandler
         };
     }
 
-    /** Read view of the on-chain global state datum surfaced to off-chain callers. */
+    /** Read view of the on-chain global state datum surfaced to off-chain callers.
+     *
+     *  <p>{@code requiresSenderKyc} and {@code networkId} were appended (rather
+     *  than inserted in datum order) so existing positional callers keep working. */
     public record GlobalStateData(
             String policyId,
             boolean transfersPaused,
@@ -3797,6 +3937,8 @@ public class SecurityTokenSubstandardHandler
             String securityInfoHex,
             String memberRootHash,
             boolean requiresReceiverKyc,
-            String adminCredentialHash
+            String adminCredentialHash,
+            boolean requiresSenderKyc,
+            long networkId
     ) {}
 }

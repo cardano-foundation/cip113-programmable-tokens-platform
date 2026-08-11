@@ -1,0 +1,51 @@
+{
+  "_comment": [
+    "Machine-checkable pin for the vendored FluidTokens/fn-bafin-cardano-sc tree.",
+    "The tree below is a VERBATIM copy of the upstream repository at `commit`.",
+    "Do not hand-edit any file in this directory. If upstream must be updated,",
+    "re-vendor from the new SHA and regenerate this manifest with",
+    "`./verify-upstream-pin.sh --regenerate`.",
+    "SecurityTokenUpstreamPinTest (offline) enforces every hash below plus the",
+    "byte-equality of the backend's resource copy of plutus.json; ",
+    "verify-upstream-pin.sh (online) re-downloads the pinned tarball and diffs."
+  ],
+  "repository": "https://github.com/FluidTokens/fn-bafin-cardano-sc",
+  "commit": "7ae4ce3db39afeccc47d36740b3c145ef990659e",
+  "commit_date": "2026-08-03T08:39:10Z",
+  "vendored_at": "2026-08-11",
+  "aiken_compiler_of_committed_blueprint": "v1.1.21+42babe5",
+  "blueprint_reproduced": true,
+  "backend_resource_copy": "src/programmable-tokens-offchain-java/src/main/resources/substandards/security-token/plutus.json",
+  "excluded_from_vendoring": {
+    "README.md": "Upstream's README is intentionally NOT vendored: this repository does not carry markdown files under src/substandards/. It is documentation only and affects no compiled artifact. It is excluded from the diff in verify-upstream-pin.sh and absent from `files` below, so re-adding it makes SecurityTokenUpstreamPinTest fail with UNEXPECTED README.md. Every other upstream file is vendored verbatim with no exclusions."
+  },
+  "files": {
+    ".github/workflows/tests.yml": "74d2e1388244afce5a3af9dd356d89055ad7fd5d906d080dc6c36a68bc71164e",
+    ".gitignore": "d202d0a933360832b99bba2eb90b4470f45d775521bdf81bce2f3755550e5a66",
+    "aiken.lock": "36c6dfe4c05fe9fc2d17299b6f89863d12379aae4f18cf24fa40388e2e69d6ab",
+    "aiken.toml": "1b090e8a4409a1bb2d2e92ce75edc7a46c99e8eb77ceef65c9279bf78f18a2f2",
+    "documents/pentesting/M4 - Pentesting report 23-06-2026.pdf": "34b818c4c929ca60e890238d1da72c3265ba6149df60784f901af27a34fbfd4e",
+    "documents/pentesting/M4 - Pentesting report 26-06-2026.pdf": "be28442773ce521d63d05965c1cb11bae47b3fbd6ae717bebcfc9bee864f8c8c",
+    "lib/constants.ak": "026568d6739c7ebe6df119fdb9d6105fd44b900592be6253dfd75af600bec905",
+    "lib/denylist/absence.ak": "5c786f047e575739a1dd80cff6b0540f04dec96dfb7c5c714057af121ee7b704",
+    "lib/kyc/verify.ak": "44e4607c76ac1aaf4b3536369d40e6a9831da163b9d665b6512685baf636bf23",
+    "lib/tests.ak": "0f19bb74af085d4bd8f8ee61de38e72c9cb0126c4ac7e35ade5767b6c71050ab",
+    "lib/types/denylist.ak": "f36bc6dcf9484125b837a6930d0c3db168d6654f41cbe1312e7921303b1a6cf5",
+    "lib/types/global_state.ak": "58b8a114a5cc61d2b3cdb6d5817164517a6c910115fedb54c2a015736b98cd94",
+    "lib/types/issuance.ak": "1e8628e579b11f7373be5b29da058287de7c032e6a07436f881aff31255ab671",
+    "lib/types/kyc_proof.ak": "d857d58b7fb71c58171229e1d99d64fd6313417b1f7a75b5e99b04fe1fd1f5e5",
+    "lib/types/minting_logic_script.ak": "2e8115b6637183fe6fbc1234ad357e5d1a29002b79f635f6248e6073f07a54eb",
+    "lib/types/power_users.ak": "8278b9760864716e4f1b4c02ac64175e45b45ac2acc91c457ebd41fd08c0710d",
+    "lib/types/security/bafin.ak": "cda1b48a8801233110ed83d5a802c08c7c5d0a1079f21b54ae7db16d3caef101",
+    "lib/types/third_party_transfer_logic_script.ak": "952f9d094ddb5b74128594dee8f006966dda9b2dbf02fb30e1c1929159ed1df2",
+    "lib/types/transfer_logic_script.ak": "8112836092c8d11e51517b8effed809d31fef651c0dc11de354e5bac8392c832",
+    "lib/utils.ak": "5082ba72db8d94415ef4d55f17c40e9403c1abbfa0c979e8e124e3e07a99989a",
+    "plutus.json": "7182f9b03a3be19ca226d6781959649bb97466e083f1456f0462fab1150b25e0",
+    "validators/denylist.ak": "85637d2c63dbeed1fd233fa2227a604f81ae3a480decdfd09c0f0c479e5fb31a",
+    "validators/global_state.ak": "bae1717d897c90ec311c5a592a9a9547a246e13df1ae317bdc864f76b4dea074",
+    "validators/minting_logic_script.ak": "e9d793c8e9dd50d88f77df3bee6524b9dbef7a42cad723d28579d6b552b71d16",
+    "validators/power_users.ak": "e4c6d1fa793e71f80865cd22c4098e162a27ce1e5f3f7bc0ce65b573f2a6c3cd",
+    "validators/third_party_transfer_logic_script.ak": "baec203721c531050720f10dd71400b4c23d2b2866ce0d0c23486ab9c4dcc7de",
+    "validators/transfer_logic_script.ak": "feec8462b11afabfede1b9f477737008c1e08cb44c02e7a1fa64aba902f6c1d5"
+  }
+}

@@ -19,91 +19,69 @@ validator minting_logic_validator(
     credential: Credential,
     self: Transaction,
   ) {
-    // DIVERGES FROM UPSTREAM (registration-mode rubber-stamp):
-    //
-    // The CIP-113 platform invokes substandard.withdraw at REGISTRATION time
-    // (= the tx that inserts the prog-token policy into the directory linked
-    // list). At that point the directory entry being created doesn't yet exist
-    // as a reference input, so `derive_issuance_policy_id_from_registry_node`
-    // below would crash with EmptyList. We detect registration mode by the
-    // presence of a fresh directory NFT mint under `registry_policy_id` and
-    // short-circuit to True. The CIP-113 directory mint validator that fires
-    // in the same tx enforces the admin signature, the (issuance, substandard)
-    // hash pairing, and the linked-list structural invariants — so this
-    // rubber-stamp doesn't weaken the supply cap. All real (non-registration)
-    // mints still run the full strict path below, including GS spend, PU
-    // ref-input, and the registry-derived issuance policy check.
-    let is_registration_tx = utils.quantity_of_policy_id(
-      self.mint,
+    let issuance_policy_id = utils.derive_issuance_policy_id_from_registry_node(
+      self.reference_inputs,
       registry_policy_id,
-    ) > 0
-    if is_registration_tx {
-      True
-    } else {
-      let issuance_policy_id = utils.derive_issuance_policy_id_from_registry_node(
-        self.reference_inputs,
-        registry_policy_id,
-        credential,
-        constants.minting_logic_script_registry_node_index,
-      )
+      credential,
+      constants.minting_logic_script_registry_node_index,
+    )
 
-      let minted_amount = quantity_of(
-        self.mint,
-        issuance_policy_id,
-        security_asset_name,
-      )
+    let minted_amount = quantity_of(
+      self.mint,
+      issuance_policy_id,
+      security_asset_name,
+    )
 
-      // GS is always spent during a mint under the Track 4 design (GS minted at
-      // initCompliance; register spends-and-updates it via the MintSecurity
-      // branch, which enforces the supply cap). This validator only needs to
-      // assert the GS NFT is actually on the referenced input — NFT presence on
-      // an input implies the GS spend validator is running; by the non-Mint-
-      // branches-reject-mint invariant in global_state.ak, only the MintSecurity
-      // branch permits a security-token mint — and it decrements `mintable_amount`.
-      let gs_input = utils.safe_list_at(
-        self.inputs,
-        redeemer.global_state_input_index,
-      )
-      expect
-        quantity_of(
-          gs_input.output.value,
-          global_state_policy_id,
-          constants.global_state_asset_name,
-        ) == 1
+    // GS is always spent during a mint under the Track 4 design (GS minted at
+    // initCompliance; register spends-and-updates it via the MintSecurity
+    // branch, which enforces the supply cap). This validator only needs to
+    // assert the GS NFT is actually on the referenced input — NFT presence on
+    // an input implies the GS spend validator is running; by the non-Mint-
+    // branches-reject-mint invariant in global_state.ak, only the MintSecurity
+    // branch permits a security-token mint — and it decrements `mintable_amount`.
+    let gs_input = utils.safe_list_at(
+      self.inputs,
+      redeemer.global_state_input_index,
+    )
+    expect
+      quantity_of(
+        gs_input.output.value,
+        global_state_policy_id,
+        constants.global_state_asset_name,
+      ) == 1
 
-      let power_user_ref_input = utils.safe_list_at(
-        self.reference_inputs,
-        redeemer.power_user_node_ref_input_index,
-      )
+    let power_user_ref_input = utils.safe_list_at(
+      self.reference_inputs,
+      redeemer.power_user_node_ref_input_index,
+    )
 
-      let (power_user_node_key, power_user_data) = get_element_info(
-        power_user_ref_input.output,
-        fn(_lovelace, node_key, data, _link) {
-          expect Some(key) = node_key
-          expect power_user_data: PowerUser = data
-          (key, power_user_data)
-        },
-      )
-        |> run_element_with(
-            power_users_linked_list_policy_id,
-            constants.linked_list_root_key,
-            constants.linked_list_node_key_prefix,
-            constants.linked_list_node_key_prefix_length,
-          )
+    let (power_user_node_key, power_user_data) = get_element_info(
+      power_user_ref_input.output,
+      fn(_lovelace, node_key, data, _link) {
+        expect Some(key) = node_key
+        expect power_user_data: PowerUser = data
+        (key, power_user_data)
+      },
+    )
+      |> run_element_with(
+          power_users_linked_list_policy_id,
+          constants.linked_list_root_key,
+          constants.linked_list_node_key_prefix,
+          constants.linked_list_node_key_prefix_length,
+        )
 
-      and {
-        //Redeemer contains the amount just for easy reference for eventual other contracts
-        (minted_amount == redeemer.minted_amount)?,
-        //A power user must have signed the transaction
-        must_be_signed_by_credential(self, power_user_node_key)?,
-        //If minted_amount > 0, power user must be minter
-        //If minted_amount < 0, power user must be burner
-        if minted_amount > 0 {
-          power_user_data.can_mint
-        } else {
-          power_user_data.can_burn
-        }?,
-      }
+    and {
+      //Redeemer contains the amount just for easy reference for eventual other contracts
+      (minted_amount == redeemer.minted_amount)?,
+      //A power user must have signed the transaction
+      must_be_signed_by_credential(self, power_user_node_key)?,
+      //If minted_amount > 0, power user must be minter
+      //If minted_amount < 0, power user must be burner
+      if minted_amount > 0 {
+        power_user_data.can_mint
+      } else {
+        power_user_data.can_burn
+      }?,
     }
   }
 

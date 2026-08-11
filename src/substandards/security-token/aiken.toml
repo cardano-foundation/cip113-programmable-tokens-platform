@@ -1,13 +1,13 @@
-name = "cip113/security-token"
+name = "ft/bafin"
 version = "0.0.0"
-compiler = "v1.1.21"
+compiler = "v1.1.22"
 plutus = "v3"
 license = "Apache-2.0"
-description = "Aiken contracts for the CIP-113 security-token substandard (ported from easy1staking-com/fn-bafin-cardano-sc)"
+description = "Aiken contracts for project 'ft/bafin'"
 
 [repository]
-user = "cardano-foundation"
-project = "cip113-programmable-tokens-platform"
+user = "ft"
+project = "bafin"
 platform = "github"
 
 [[dependencies]]

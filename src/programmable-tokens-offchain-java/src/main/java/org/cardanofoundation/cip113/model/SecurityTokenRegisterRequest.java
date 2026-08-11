@@ -32,8 +32,24 @@ public class SecurityTokenRegisterRequest extends RegisterTokenRequest {
 
     /** Whether transfers to a recipient that has not completed KYC are blocked at
      *  registration time. Can be toggled later via the global-state spend action
-     *  {@code SetRequiresReceiverKyc}. */
+     *  {@code SetRequiresReceiverKyc}.
+     *
+     *  <p>NOTE (upstream fn-bafin-cardano-sc @7ae4ce3): this single flag gates
+     *  BOTH the sender-side and the receiver-side KYC check —
+     *  {@code transfer_logic_script.ak} reads {@code requires_receiver_kyc} in
+     *  the per-sender loop as well. See {@link #requiresSenderKyc}. */
     private boolean requiresReceiverKyc;
+
+    /** Whether senders must present a valid KYC proof. Written into the
+     *  {@code GlobalStateDatum} at genesis and toggleable via the
+     *  {@code SetRequiresSenderKyc} spend action.
+     *
+     *  <p>WARNING: at the pinned upstream revision (7ae4ce3) no validator reads
+     *  this field — {@code transfer_logic_script.ak:109} gates the *sender* KYC
+     *  check on {@code requires_receiver_kyc}. Setting this has no on-chain
+     *  effect today; it is carried so the datum shape matches upstream exactly.
+     *  Reported upstream; revisit when the pin moves. */
+    private boolean requiresSenderKyc;
 
     /** Initial mintable cap for the security-token policy. Decremented on every
      *  {@code MintSecurity} spend action; once it hits zero, no more tokens can

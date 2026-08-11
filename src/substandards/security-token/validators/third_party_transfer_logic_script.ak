@@ -6,7 +6,6 @@ use cardano/certificate.{Certificate, RegisterCredential}
 use cardano/transaction.{InlineDatum, Transaction}
 use constants
 use denylist/absence.{verify_denylist_absence}
-use env
 use kyc/verify.{verify_kyc_proof}
 use types/global_state.{GlobalStateDatum}
 use types/power_users.{PowerUser}
@@ -18,7 +17,7 @@ use utils.{must_be_signed_by_credential}
 /// Third-party (force) transfer logic for emergency regulatory flows.
 ///
 /// Per-destination check (for each unique destination stake credential):
-///   1. A valid KYC proof for the destination (attested by a TEL entity).
+///   1. If GS.requires_receiver_kyc, a valid KYC proof for the destination (attested by a TEL entity) or the pkh is in the merkle tree root.
 ///   2. The destination is NOT in the denylist.
 ///
 /// NO source checks — force transfer is an admin override: the source may be
@@ -84,14 +83,18 @@ validator third_party_transfer_logic_validator(
       fn(index, dest_pkh, acc) {
         expect acc
         let action = utils.safe_list_at(redeemer.destination_actions, index)
-        let kyc_ok = verify_kyc_proof(
-          action.destination_proof,
-          dest_pkh,
-          gs_datum,
-          issuance_policy_id,
-          env.network_id,
-          self,
-        )
+        let kyc_ok = if gs_datum.requires_receiver_kyc {
+          verify_kyc_proof(
+            action.destination_proof,
+            dest_pkh,
+            gs_datum,
+            issuance_policy_id,
+            gs_datum.network_id,
+            self,
+          )
+        } else {
+          True
+        }
         let denylist_ok = verify_denylist_absence(
           dest_pkh,
           action.destination_denylist_covering_ref_input_index,
