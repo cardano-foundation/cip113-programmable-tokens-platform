@@ -135,21 +135,19 @@ public class SecurityTokenScriptBuilderService {
     /**
      * The substandard's dedicated third-party transfer validator.
      *
-     * <p><b>NOT currently wired into {@code RegistryNode.third_party_transfer_logic_script}
-     * (index 4) — it cannot validate there at the pinned upstream commit.</b>
-     * {@code third_party_transfer_logic_script.ak:44} passes
-     * {@code constants.transfer_logic_script_registry_node_index} (= 3) to
-     * {@code utils.derive_issuance_policy_id_from_registry_node}, which asserts that
-     * registry-node field 3 equals the withdrawing script's own hash. Field 3 must hold
-     * {@code transfer_logic_script} for CIP-113's {@code validate_transfer}, so this
-     * validator can never self-locate in a node that also supports regular transfers.
-     * {@code constants.third_party_transfer_logic_script_registry_node_index} (= 4) is
-     * declared upstream but never referenced — an upstream bug at
-     * FluidTokens/fn-bafin-cardano-sc {@code 7ae4ce3}. The vendored tree is
-     * verbatim-pinned (see {@code UPSTREAM_PIN.json}), so the workaround lives in
-     * {@code SecurityTokenSubstandardHandler.buildRegistrationTransaction}, which puts
-     * {@code mintingLogic} in slot 4 instead. Re-point slot 4 at this script once
-     * upstream passes the right constant.
+     * <p>Wired into {@code RegistryNode.third_party_transfer_logic_script} (index 4) by
+     * {@code SecurityTokenSubstandardHandler.buildRegistrationTransaction}.
+     *
+     * <p>It could not go there at the previous pin: {@code third_party_transfer_logic_script.ak:44}
+     * passed {@code constants.transfer_logic_script_registry_node_index} (= 3) to
+     * {@code utils.derive_issuance_policy_id_from_registry_node}, which asserts that the
+     * indexed registry-node field equals the withdrawing script's own hash. Field 3 must
+     * hold {@code transfer_logic_script} for CIP-113's {@code validate_transfer}, so this
+     * validator could only ever self-locate in a node that could not support regular
+     * transfers — mutually exclusive, and the feature was dead in every deployment
+     * (docs/UPSTREAM-BAFIN-DEFECTS.md, defect A). At {@code easy1staking-com/fn-bafin-cardano-sc}
+     * {@code e69c66a} line 65 passes {@code third_party_transfer_logic_script_registry_node_index}
+     * (= 4), so it self-locates correctly and occupies its own slot.
      *
      * <p>Parameter order mirrors {@code third_party_transfer_logic_script.ak}:
      * {@code (security_asset_name, power_users_linked_list_policy_id, global_state_policy_id,
