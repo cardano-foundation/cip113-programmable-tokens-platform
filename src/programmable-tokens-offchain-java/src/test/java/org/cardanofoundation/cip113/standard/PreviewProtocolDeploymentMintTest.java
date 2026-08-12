@@ -469,16 +469,39 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
 
         log.info("BootstrapParams: {}", OBJECT_MAPPER.writeValueAsString(protocolBootstrapParams));
 
-        // Also write the handoff to disk: gradle swallows log.info by default, and this record
-        // is the deployment's only durable output — it is what a protocol-bootstraps-<network>.json
-        // is regenerated from. Written as a single-element array to match the shape
-        // ProtocolBootstrapService expects when loading from resources.
+        // Write the handoff to disk. Gradle swallows log.info by default, and this record is the
+        // deployment's only durable output — a protocol-bootstraps-<network>.json IS this file.
+        //
+        // Point BOOTSTRAP_OUT straight at the resource to have a deployment register itself:
+        //   BOOTSTRAP_OUT=src/main/resources/protocol-bootstraps-devnet.json ./gradlew test --tests '*deploy'
+        //
+        // ProtocolBootstrapService reads an ARRAY keyed by txHash and picks the active entry via
+        // programmable.token.default.txHash, so deployments accumulate rather than replace: an
+        // existing file is merged into, keeping older deployments addressable.
+        writeBootstrapHandoff(protocolBootstrapParams);
+    }
+
+    private static void writeBootstrapHandoff(ProtocolBootstrapParams params) throws Exception {
         var handoffPath = java.nio.file.Path.of(
-                System.getProperty("bootstrapOut", "build/bootstrap-params.json"));
-        java.nio.file.Files.createDirectories(handoffPath.getParent());
-        OBJECT_MAPPER.writerWithDefaultPrettyPrinter()
-                .writeValue(handoffPath.toFile(), List.of(protocolBootstrapParams));
-        log.info("BootstrapParams written to {}", handoffPath.toAbsolutePath());
+                System.getenv().getOrDefault("BOOTSTRAP_OUT", "build/bootstrap-params.json"));
+        if (handoffPath.getParent() != null) {
+            java.nio.file.Files.createDirectories(handoffPath.getParent());
+        }
+
+        var deployments = new java.util.ArrayList<ProtocolBootstrapParams>();
+        if (java.nio.file.Files.exists(handoffPath) && java.nio.file.Files.size(handoffPath) > 0) {
+            deployments.addAll(OBJECT_MAPPER.readValue(handoffPath.toFile(),
+                    new com.fasterxml.jackson.core.type.TypeReference<List<ProtocolBootstrapParams>>() {}));
+            // Re-running against the same bootstrap UTxOs reproduces the same txHash; replace
+            // rather than duplicate, since ProtocolBootstrapService keys the map on it.
+            deployments.removeIf(existing -> params.txHash().equals(existing.txHash()));
+        }
+        deployments.add(params);
+
+        OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValue(handoffPath.toFile(), deployments);
+        log.info("BootstrapParams written to {} ({} deployment(s) in file)",
+                handoffPath.toAbsolutePath(), deployments.size());
+        log.info("Set programmable.token.default.txHash={} to make this deployment active", params.txHash());
     }
 
     /**
