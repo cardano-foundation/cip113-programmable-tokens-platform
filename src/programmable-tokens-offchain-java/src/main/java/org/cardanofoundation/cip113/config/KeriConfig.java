@@ -13,10 +13,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.model.keri.IdentifierConfig;
 import org.cardanofoundation.signify.app.aiding.CreateIdentifierArgs;
-import org.cardanofoundation.signify.app.aiding.EventResult;
 import org.cardanofoundation.signify.app.clienting.SignifyClient;
 import org.cardanofoundation.signify.app.coring.Coring;
-import org.cardanofoundation.signify.app.coring.Operation;
 import org.cardanofoundation.signify.generated.keria.model.HabState;
 import org.cardanofoundation.signify.generated.keria.model.Tier;
 import org.springframework.beans.factory.annotation.Value;
@@ -49,8 +47,8 @@ public class KeriConfig {
 
         if (schemaConfig.getSchemas() != null) {
             for (SchemaConfig.SchemaEntry entry : schemaConfig.getSchemas().values()) {
-                Object resolve = client.oobis().resolve(schemaConfig.getBaseUrl() + entry.getSaid(), null);
-                client.operations().wait(Operation.fromObject(resolve));
+                var resolve = client.oobis().resolve(schemaConfig.getBaseUrl() + entry.getSaid(), null);
+                client.operations().wait(resolve);
             }
         }
 
@@ -79,7 +77,6 @@ public class KeriConfig {
                 .build();
     }
 
-    @SuppressWarnings("unchecked")
     public static String createAid(SignifyClient client, String name) throws Exception {
         Object id = null;
         String eid = "";
@@ -98,11 +95,15 @@ public class KeriConfig {
             id = optionalIdentifier.get().getPrefix();
         } else {
             // log.info("Creating identifier {} with toad {} and witnesses {}", name, availableWitnesses.toad(), witnessIds);
-            EventResult result = client.identifiers().create(name, kArgs);
-            Object op = result.op();
-            op = client.operations().wait(Operation.fromObject(op));
-            LinkedHashMap<String, Object> resp = (LinkedHashMap<String, Object>) (Operation.fromObject(op).getResponse());
-            id = resp.get("i");
+            var result = client.identifiers().create(name, kArgs);
+            client.operations().wait(result.op());
+            // signify 0.1.2-d92f263 dropped app.coring.Operation (and with it the untyped
+            // getResponse() map this used to read "i" out of). The prefix is read back from
+            // the hab instead, which is authoritative once the create operation has completed.
+            id = client.identifiers().get(name)
+                    .map(HabState::getPrefix)
+                    .orElseThrow(() -> new IllegalStateException(
+                            "KERI identifier " + name + " not found after its create operation completed"));
 
             if (client.getAgent() != null && client.getAgent().getPre() != null) {
                 eid = client.getAgent().getPre();
@@ -111,9 +112,8 @@ public class KeriConfig {
             if (eid != null && !eid.isEmpty() && !hasEndRole(client, name, "agent", eid)) {
                 log.info("Adding agent endrole for identifier {} -> eid {}", name, eid);
                 try {
-                    EventResult results = client.identifiers().addEndRole(name, "agent", eid, null);
-                    Object ops = results.op();
-                    client.operations().wait(Operation.fromObject(ops));
+                    var results = client.identifiers().addEndRole(name, "agent", eid, null);
+                    client.operations().wait(results.op());
                 } catch (Exception e) {
                     log.warn("addEndRole failed: {}", e.getMessage());
                 }

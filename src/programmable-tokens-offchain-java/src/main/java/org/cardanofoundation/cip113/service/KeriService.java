@@ -33,7 +33,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.cardanofoundation.cip113.util.IpexNotificationHelper;
 import org.cardanofoundation.signify.app.Exchanging;
 import org.cardanofoundation.signify.app.clienting.SignifyClient;
-import org.cardanofoundation.signify.app.coring.Operation;
 import org.cardanofoundation.signify.app.credentialing.credentials.CredentialData;
 import org.cardanofoundation.signify.app.credentialing.credentials.IssueCredentialResult;
 import org.cardanofoundation.signify.app.credentialing.ipex.IpexAdmitArgs;
@@ -43,6 +42,7 @@ import org.cardanofoundation.signify.app.credentialing.registries.CreateRegistry
 import org.cardanofoundation.signify.app.credentialing.registries.RegistryResult;
 import org.cardanofoundation.signify.cesr.Saider;
 import org.cardanofoundation.signify.cesr.util.Utils;
+import org.cardanofoundation.signify.generated.keria.model.CompletedOperation;
 import org.cardanofoundation.signify.generated.keria.model.Credential;
 import org.cardanofoundation.signify.generated.keria.model.ExchangeResource;
 import org.cardanofoundation.signify.generated.keria.model.HabState;
@@ -168,9 +168,11 @@ public class KeriService {
     }
 
     public boolean resolveOobi(String sessionId, String oobi) throws Exception {
-        Object resolve = client.oobis().resolve(oobi, sessionId);
-        var wait = client.operations().wait(Operation.fromObject(resolve));
-        if (!wait.isDone()) {
+        var resolve = client.oobis().resolve(oobi, sessionId);
+        var wait = client.operations().wait(resolve);
+        // signify 0.1.2-d92f263 replaced the untyped Operation.isDone() flag with distinct
+        // Completed*/Pending* operation types, so completion is now a type test.
+        if (!(wait instanceof CompletedOperation)) {
             return false;
         }
 
@@ -259,9 +261,9 @@ public class KeriService {
             Exchanging.ExchangeMessageResult applyResult = client.exchanges().createExchangeMessage(
                     hab, "/ipex/apply", applyData, new LinkedHashMap<>(),
                     aid, nowKeriTimestamp(), null);
-            Object applyOp = client.ipex().submitApply(identifierName, applyResult.exn(),
+            var applyOp = client.ipex().submitApply(identifierName, applyResult.exn(),
                     applyResult.sigs(), Collections.singletonList(aid));
-            client.operations().wait(Operation.fromObject(applyOp));
+            client.operations().wait(applyOp);
 
             log.info("Waiting for wallet to respond with an offer...");
             IpexNotificationHelper.Notification offerNote = IpexNotificationHelper.waitForNotification(client,
@@ -278,9 +280,9 @@ public class KeriService {
                     .datetime(nowKeriTimestamp())
                     .build();
             Exchanging.ExchangeMessageResult agreeResult = client.ipex().agree(agreeArgs);
-            Object agreeOp = client.ipex().submitAgree(identifierName, agreeResult.exn(),
+            var agreeOp = client.ipex().submitAgree(identifierName, agreeResult.exn(),
                     agreeResult.sigs(), Collections.singletonList(aid));
-            client.operations().wait(Operation.fromObject(agreeOp));
+            client.operations().wait(agreeOp);
 
             IpexNotificationHelper.Notification grantNote = IpexNotificationHelper.waitForNotification(client,
                     "/exn/ipex/grant");
@@ -295,9 +297,9 @@ public class KeriService {
                     .message("")
                     .build();
             Exchanging.ExchangeMessageResult admit = client.ipex().admit(admitArgs);
-            Object admitOp = client.ipex().submitAdmit(identifierName, admit.exn(), admit.sigs(),
+            var admitOp = client.ipex().submitAdmit(identifierName, admit.exn(), admit.sigs(),
                     agreeResult.atc(), Collections.singletonList(aid));
-            client.operations().wait(Operation.fromObject(admitOp));
+            client.operations().wait(admitOp);
             IpexNotificationHelper.markAndDelete(client, grantNote);
 
             @SuppressWarnings("unchecked")
@@ -365,7 +367,7 @@ public class KeriService {
                 .build();
 
         IssueCredentialResult issueResult = client.credentials().issue(identifierName, credentialData);
-        client.operations().wait(Operation.fromObject(issueResult.getOp()));
+        client.operations().wait(issueResult.getOp());
 
         String credentialSaid = issueResult.getAcdc().getKed().get("d").toString();
         log.info("Issued credential SAID={} for session={}", credentialSaid, sessionId);
@@ -388,9 +390,9 @@ public class KeriService {
                 .build();
         Exchanging.ExchangeMessageResult grantResult = buildGrantExchange(grantArgs,
                 schemaConfig.getBaseUrl(), schemaEntry.getSaid());
-        Object grantOp = client.ipex().submitGrant(identifierName, grantResult.exn(),
+        var grantOp = client.ipex().submitGrant(identifierName, grantResult.exn(),
                 grantResult.sigs(), grantResult.atc(), Collections.singletonList(walletAid));
-        client.operations().wait(Operation.fromObject(grantOp));
+        client.operations().wait(grantOp);
 
         log.info("IPEX grant submitted for credential SAID={}, waiting for wallet admit...", credentialSaid);
 
@@ -642,8 +644,8 @@ public class KeriService {
         Thread.sleep(2000); // let the new ixn settle in KERIA before querying
         for (int attempt = 1; attempt <= 5; attempt++) {
             try {
-                Object queryOp = client.keyStates().query(userAid, null);
-                client.operations().wait(Operation.fromObject(queryOp));
+                var queryOp = client.keyStates().query(userAid, null);
+                client.operations().wait(queryOp);
                 Optional<KeyStateRecord> raw = client.keyStates().get(userAid);
                 if (raw.isPresent() && raw.get().getS() != null) {
                     seqNumber = raw.get().getS();
@@ -699,10 +701,10 @@ public class KeriService {
                 .noBackers(true)
                 .build();
         RegistryResult result = client.registries().create(args);
-        @SuppressWarnings("unchecked")
-        Map<String, Object> opMap = objectMapper.readValue(result.op(), Map.class);
-        client.operations().wait(Operation.fromObject(opMap));
-        return result.getRegser().getPre();
+        // signify 0.1.2-d92f263: RegistryResult.op() is already a typed RegistryOperation,
+        // so the JSON round-trip through a Map that the old untyped API needed is gone.
+        client.operations().wait(result.op());
+        return result.regser().getPre();
     }
 
     /**

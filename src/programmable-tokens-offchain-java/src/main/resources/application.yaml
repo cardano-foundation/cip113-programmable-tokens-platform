@@ -136,3 +136,34 @@ store:
     protocol-magic: 2
     sync-start-blockhash: ""
     sync-start-slot: 0
+
+---
+spring:
+  config:
+    activate:
+      on-profile: devnet
+
+network: devnet
+
+wallet:
+  mnemonic: ""
+
+# programmable.token.default.txHash: "7fab961bbf52d95c475b3ff8b994dcc9334ef3fb4d752b875c0d426eeb391cc8"
+
+blockfrost:
+  url: http://localhost:8081/api/v1/
+
+koios:
+  url: ${KOIOS_URL:https://preview.koios.rest/api/v1/}
+
+store:
+  cardano:
+    host: ""
+    port: 0
+    protocol-magic: 42
+    sync-start-blockhash: ""
+    sync-start-slot: 0
+    byron-genesis-file: classpath:/devkit/byron-genesis.json
+    shelley-genesis-file: classpath:/devkit/shelley-genesis.json
+    alonzo-genesis-file: classpath:/devkit/alonzo-genesis.json
+    conway-genesis-file: classpath:/devkit/conway-genesis.json
