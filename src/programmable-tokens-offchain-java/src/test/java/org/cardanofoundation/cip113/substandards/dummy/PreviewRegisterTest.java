@@ -1,5 +1,6 @@
 package org.cardanofoundation.cip113.substandards.dummy;
 
+import com.bloxbean.cardano.client.account.Account;
 import com.bloxbean.cardano.aiken.AikenTransactionEvaluator;
 import com.bloxbean.cardano.client.address.Address;
 import com.bloxbean.cardano.client.address.AddressProvider;
@@ -34,6 +35,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -448,9 +450,9 @@ public class PreviewRegisterTest extends AbstractPreviewTest {
     }
 
     /** Registers the given script reward accounts, skipping any the chain already knows. */
-    private void registerStakeAddressIfNeeded(com.bloxbean.cardano.client.account.Account payer,
+    private void registerStakeAddressIfNeeded(Account payer,
                                               String... rewardAddresses) throws Exception {
-        var toRegister = new java.util.ArrayList<String>();
+        var toRegister = new ArrayList<String>();
         for (var rewardAddress : rewardAddresses) {
             var accountInfo = bfBackendService.getAccountService().getAccountInformation(rewardAddress);
             var registered = accountInfo.isSuccessful()

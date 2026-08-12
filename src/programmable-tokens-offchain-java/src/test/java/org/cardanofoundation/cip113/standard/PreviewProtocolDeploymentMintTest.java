@@ -2,10 +2,12 @@ package org.cardanofoundation.cip113.standard;
 
 import com.bloxbean.cardano.aiken.AikenScriptUtil;
 import com.bloxbean.cardano.aiken.AikenTransactionEvaluator;
+import com.bloxbean.cardano.client.address.Address;
 import com.bloxbean.cardano.client.address.AddressProvider;
 import com.bloxbean.cardano.client.address.Credential;
 import com.bloxbean.cardano.client.api.MinAdaCalculator;
 import com.bloxbean.cardano.client.api.model.Amount;
+import com.bloxbean.cardano.client.api.util.ReferenceScriptUtil;
 import com.bloxbean.cardano.client.api.util.ValueUtil;
 import com.bloxbean.cardano.client.crypto.Blake2bUtil;
 import com.bloxbean.cardano.client.function.helper.SignerProviders;
@@ -20,10 +22,12 @@ import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
 import com.bloxbean.cardano.client.quicktx.Tx;
 import com.bloxbean.cardano.client.transaction.spec.Asset;
 import com.bloxbean.cardano.client.transaction.spec.MultiAsset;
+import com.bloxbean.cardano.client.transaction.spec.Transaction;
 import com.bloxbean.cardano.client.transaction.spec.TransactionOutput;
 import com.bloxbean.cardano.client.transaction.spec.Value;
 import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import com.bloxbean.cardano.client.util.HexUtil;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.AbstractPreviewTest;
@@ -34,6 +38,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -169,7 +180,7 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         // ---- 6. upgrade_multisig: the trampoline-2 authority named by upgrade_logic_cred.
         // Preview deployment: 1-of-1 on the admin key. Swappable later without redeploying
         // coordination_spend, since the authority lives in the datum.
-        var adminVkh = new com.bloxbean.cardano.client.address.Address(adminAccount.baseAddress())
+        var adminVkh = new Address(adminAccount.baseAddress())
                 .getPaymentCredentialHash().orElseThrow();
         var upgradeMultisigContract = applyParams(UPGRADE_MULTISIG_CONTRACT,
                 ListPlutusData.of(BytesPlutusData.of(adminVkh)),
@@ -482,16 +493,16 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
     }
 
     private static void writeBootstrapHandoff(ProtocolBootstrapParams params) throws Exception {
-        var handoffPath = java.nio.file.Path.of(
+        var handoffPath = Path.of(
                 System.getenv().getOrDefault("BOOTSTRAP_OUT", "build/bootstrap-params.json"));
         if (handoffPath.getParent() != null) {
-            java.nio.file.Files.createDirectories(handoffPath.getParent());
+            Files.createDirectories(handoffPath.getParent());
         }
 
-        var deployments = new java.util.ArrayList<ProtocolBootstrapParams>();
-        if (java.nio.file.Files.exists(handoffPath) && java.nio.file.Files.size(handoffPath) > 0) {
+        var deployments = new ArrayList<ProtocolBootstrapParams>();
+        if (Files.exists(handoffPath) && Files.size(handoffPath) > 0) {
             deployments.addAll(OBJECT_MAPPER.readValue(handoffPath.toFile(),
-                    new com.fasterxml.jackson.core.type.TypeReference<List<ProtocolBootstrapParams>>() {}));
+                    new TypeReference<List<ProtocolBootstrapParams>>() {}));
             // Re-running against the same bootstrap UTxOs reproduces the same txHash; replace
             // rather than duplicate, since ProtocolBootstrapService keys the map on it.
             deployments.removeIf(existing -> params.txHash().equals(existing.txHash()));
@@ -519,10 +530,10 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
             return false;
         }
         var url = backend.endsWith("/") ? backend + "stake/registrations" : backend + "/stake/registrations";
-        try (var client = java.net.http.HttpClient.newHttpClient()) {
+        try (var client = HttpClient.newHttpClient()) {
             var response = client.send(
-                    java.net.http.HttpRequest.newBuilder(java.net.URI.create(url)).GET().build(),
-                    java.net.http.HttpResponse.BodyHandlers.ofString());
+                    HttpRequest.newBuilder(URI.create(url)).GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
             return response.statusCode() == 200 && response.body().contains("\"" + rewardAddress + "\"");
         } catch (Exception e) {
             log.warn("could not check stake registration for {}: {}", rewardAddress, e.getMessage());
@@ -531,7 +542,7 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
     }
 
     private static int findRefScriptOutputIndex(
-            com.bloxbean.cardano.client.transaction.spec.Transaction tx,
+            Transaction tx,
             PlutusScript script) throws Exception {
         var wanted = HexUtil.encodeHexString(script.getScriptHash());
         var outputs = tx.getBody().getOutputs();
@@ -540,7 +551,7 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
             if (ref == null) {
                 continue;
             }
-            var deserialized = com.bloxbean.cardano.client.api.util.ReferenceScriptUtil.deserializeScriptRef(ref);
+            var deserialized = ReferenceScriptUtil.deserializeScriptRef(ref);
             if (wanted.equals(HexUtil.encodeHexString(deserialized.getScriptHash()))) {
                 return i;
             }
