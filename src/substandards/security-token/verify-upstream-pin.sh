@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 #
 # Verify that the vendored security-token contract tree is still a VERBATIM copy
-# of FluidTokens/fn-bafin-cardano-sc at the SHA recorded in UPSTREAM_PIN.json.
+# of the upstream repository at the SHA recorded in UPSTREAM_PIN.json. Both the
+# repo and the SHA are read from that file — the pin currently names the
+# easy1staking-com/fn-bafin-cardano-sc fork (it fixes the three defects in
+# docs/UPSTREAM-BAFIN-DEFECTS.md), having moved off FluidTokens/fn-bafin-cardano-sc.
+# Nothing here hard-codes an owner, so a future re-pin only edits UPSTREAM_PIN.json.
 #
 # This directory used to hold a hand-maintained fork that silently drifted from
 # upstream *while carrying a comment asserting it had not*. Two checks now make

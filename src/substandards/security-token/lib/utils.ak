@@ -98,17 +98,34 @@ pub fn derive_issuance_policy_id_from_registry_node(
   // The index of the registry node field which is taken into account for checking the correctnes of the registry node
   // and extracting the hashed params which are used to derive the issuance policy id
   registry_node_field_index: Int,
+  // Index into `ref_inputs` naming the registry node for THIS token.
+  registry_node_ref_input_index: Int,
 ) -> PolicyId {
   expect Script(hashed_params) = credential
 
-  // Finding the registry node utxo among the reference inputs.
-  // Assuming there aren't many reference inputs, a linear search should be fine.
-  let registry_ref_input = list.expect_find(
+  // The node is addressed BY INDEX rather than located by search. Searching on
+  // the registry policy alone returns the FIRST matching reference input, but
+  // every CIP-113 programmable token's node carries that same policy — so a
+  // transaction touching a second programmable token resolves whichever node
+  // sorts first and then traps on the identity assertion below. Reference
+  // inputs are ledger-sorted by output reference, so off-chain cannot reorder
+  // its way out of it; the caller must say which node is theirs.
+  //
+  // A caller-supplied index grants no privilege: `has_any_nft_strict` still
+  // requires a genuine single-NFT registry-node UTxO, and the identity
+  // assertion still requires that node to name THIS script at the field index.
+  // CIP-113 derives the issuance policy id from the minting-logic hash and the
+  // linked list keys nodes by that policy id, so at most one node can ever
+  // satisfy both. A wrong index only ever traps.
+  let registry_ref_input = safe_list_at(
     ref_inputs,
-    fn(input) {
-      assets.has_any_nft_strict(input.output.value, registry_policy_id)
-    },
+    registry_node_ref_input_index,
   )
+  expect
+    assets.has_any_nft_strict(
+      registry_ref_input.output.value,
+      registry_policy_id,
+    )
   let registry_raw: Data = expect_inline_datum(registry_ref_input.output)
   let registry_fields: List<Data> = builtin.unconstr_fields(registry_raw)
   // The indexed registry field holds the script `Credential` of the logic

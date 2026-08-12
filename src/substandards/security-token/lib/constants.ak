@@ -19,3 +19,12 @@ pub const minting_logic_script_registry_node_index = 2
 pub const transfer_logic_script_registry_node_index = 3
 
 pub const third_party_transfer_logic_script_registry_node_index = 4
+
+// Added in CIP-113 v0.4.0. `VerificationKey(#"")` (core's `empty_vkey`) means
+// unfracking is FORBIDDEN for the policy — the least-permission default. This
+// repo ships no unfracking hook, so registration must leave it unset.
+pub const unfracking_logic_script_registry_node_index = 5
+
+// The GlobalState NFT policy the registry node declares for this token. v0.4.0
+// pushed it from 5 to 6 when `unfracking_logic_script` was inserted ahead of it.
+pub const global_state_cs_registry_node_index = 6

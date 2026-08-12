@@ -25,11 +25,15 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * Drift guard for the vendored {@code src/substandards/security-token} tree.
  *
- * <p>That directory is a <em>verbatim</em> copy of
- * {@code FluidTokens/fn-bafin-cardano-sc} at the SHA recorded in
- * {@code UPSTREAM_PIN.json}. It previously held a hand-maintained fork that
- * silently drifted from upstream while carrying a comment asserting it had not
- * — 12 of 20 Aiken files had diverged by the time anyone checked.
+ * <p>That directory is a <em>verbatim</em> copy of the upstream repository at the
+ * SHA recorded in {@code UPSTREAM_PIN.json} — currently
+ * {@code easy1staking-com/fn-bafin-cardano-sc}, the fork whose
+ * {@code fix/cmta-requirements-fixes} branch merges {@code FluidTokens:main} and
+ * fixes the three defects in {@code docs/UPSTREAM-BAFIN-DEFECTS.md}. It previously
+ * held a hand-maintained fork that silently drifted from upstream while carrying a
+ * comment asserting it had not — 12 of 20 Aiken files had diverged by the time
+ * anyone checked. Neither this test nor {@code verify-upstream-pin.sh} hard-codes
+ * the owner: both read it from the manifest, so a re-pin edits only that file.
  *
  * <p>This test is the offline half of the pin (it needs no network, so it runs
  * on every build):
@@ -55,11 +59,16 @@ import static org.junit.jupiter.api.Assertions.fail;
  * declaration, editing a vendored file left {@code test} {@code UP-TO-DATE} and
  * this guard silently never ran.
  *
- * <p>Note also that running {@code aiken build} in the vendored directory
- * rewrites {@code plutus.json} — the locally installed compiler (v1.1.23) is not
- * the one upstream's committed blueprint was built with (v1.1.21+42babe5), so the
- * validator hashes would change. This test fails loudly if that happens, which is
- * the intent: the committed blueprint is the audited artifact.
+ * <p>Note also that running {@code aiken build} in the vendored directory rewrites
+ * {@code plutus.json}. At the current pin that rewrite happens to be a no-op —
+ * upstream's committed blueprint was built with {@code v1.1.23+8949565}, which is
+ * also the locally installed compiler, and rebuilding reproduces byte-identical
+ * {@code compiledCode} for all 21 validators (that is how the pin's
+ * {@code blueprint_reproduced} flag was established). Do not rely on it: under the
+ * previous pin the compilers differed ({@code v1.1.21+42babe5}) and a stray build
+ * silently changed every validator hash. This test fails loudly either way, which
+ * is the intent — the committed blueprint is the audited artifact, not a local
+ * rebuild of it.
  */
 class SecurityTokenUpstreamPinTest {
 

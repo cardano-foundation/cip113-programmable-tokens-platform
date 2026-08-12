@@ -11,7 +11,7 @@ use types/denylist.{
   AddToDenylist, Deinit, Denylist, Init, MintRedeemer, RemoveFromDenylist,
   SpendRedeemer, StateTransition,
 }
-use types/global_state.{admin_from_ref_input, gs_datum_from_ref_input}
+use types/global_state.{active_admin_from_ref_input, gs_datum_from_ref_input}
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential}
 
@@ -31,6 +31,8 @@ fn power_user_from_refs(
     global_state_ref_input_index,
     global_state_policy_id,
   )
+  // No sanctions administration on a decommissioned protocol.
+  expect !gs.deactivated
   let power_user_node_ref_input = utils.safe_list_at(
     self.reference_inputs,
     power_user_node_ref_input_index,
@@ -93,7 +95,7 @@ validator mint(
         }
       }
       Deinit { root_input_index, global_state_ref_input_index } -> {
-        let admin = admin_from_ref_input(
+        let admin = active_admin_from_ref_input(
           self.reference_inputs,
           global_state_ref_input_index,
           global_state_policy_id,

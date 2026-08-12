@@ -19,6 +19,10 @@ pub type TrustedEntityMetadata =
 pub type GlobalStateDatum {
   //If true, no transfer can be executed
   transfers_paused: Bool,
+  // If true, the protocol is deactivated and no action can be executed
+  // This flag is irreversible and can only be set to true. It is meant to be used in case of decimissioning the protocol or in case of a critical bug that requires the protocol to be deactivated.
+  // Can only be set if transfers are paused. Once set to true, it cannot be reverted back to false.
+  deactivated: Bool,
   //Goes to zero when new tokens are minted, increases when tokens are burnt
   mintable_amount: Int,
   //Key-hash of the protocol administrator. Rotatable via RotateAdmin action.
@@ -56,29 +60,35 @@ pub type GlobalStateDatum {
 
 pub const idx_transfers_paused = 0
 
-pub const idx_mintable_amount = 1
+pub const idx_deactivated = 1
 
-pub const idx_admin_credential_hash = 2
+pub const idx_mintable_amount = 2
 
-pub const idx_power_user_linked_list_policy_id = 3
+pub const idx_admin_credential_hash = 3
 
-pub const idx_denylist_linked_list_policy_id = 4
+pub const idx_power_user_linked_list_policy_id = 4
 
-pub const idx_security_info = 5
+pub const idx_denylist_linked_list_policy_id = 5
 
-pub const idx_trusted_entity_vkeys = 6
+pub const idx_security_info = 6
 
-pub const idx_member_root_hash = 7
+pub const idx_trusted_entity_vkeys = 7
 
-pub const idx_requires_sender_kyc = 8
+pub const idx_member_root_hash = 8
 
-pub const idx_requires_receiver_kyc = 9
+pub const idx_requires_sender_kyc = 9
 
-pub const idx_network_id = 10
+pub const idx_requires_receiver_kyc = 10
+
+pub const idx_network_id = 11
 
 // Getters take the already-unconstr'd field list (`builtin.unconstr_fields`),
 // hiding the index + builtin unwrap behind a typed name. Reading several fields?
 // Call `builtin.unconstr_fields` once and pass the list to each getter.
+
+pub fn get_deactivated(fields: List<Data>) -> Bool {
+  utils.data_to_bool(utils.safe_list_at(fields, idx_deactivated))
+}
 
 pub fn get_transfers_paused(fields: List<Data>) -> Bool {
   utils.data_to_bool(utils.safe_list_at(fields, idx_transfers_paused))
@@ -138,6 +148,13 @@ pub fn get_network_id(fields: List<Data>) -> Int {
 // field list with exactly one field replaced, hiding the constructor index, the
 // index, and the typed->Data conversion. Aiken inlines these, so there's no
 // runtime cost over the raw builtins. Guarded by `gs_setters_round_trip`.
+
+pub fn set_deactivated(fields: List<Data>, value: Bool) -> Data {
+  builtin.constr_data(
+    0,
+    utils.replace_data_field(fields, idx_deactivated, utils.bool_to_data(value)),
+  )
+}
 
 pub fn set_transfers_paused(fields: List<Data>, value: Bool) -> Data {
   builtin.constr_data(
@@ -244,6 +261,20 @@ pub fn is_paused(gs_input: Input, global_state_policy_id: ByteArray) -> Bool {
   get_transfers_paused(builtin.unconstr_fields(gs_datum))
 }
 
+pub fn is_deactivated(
+  gs_input: Input,
+  global_state_policy_id: ByteArray,
+) -> Bool {
+  expect
+    quantity_of(
+      gs_input.output.value,
+      global_state_policy_id,
+      constants.global_state_asset_name,
+    ) > 0
+  expect InlineDatum(gs_datum) = gs_input.output.datum
+  get_deactivated(builtin.unconstr_fields(gs_datum))
+}
+
 /// Resolves the GS reference input at `ref_index`, authenticates it via the GS
 /// NFT, and returns its parsed inline datum. Helper for validators (power_users,
 /// denylist) that read protocol state from the GS datum instead of holding a
@@ -279,6 +310,24 @@ pub fn admin_from_ref_input(
   gs_datum_from_ref_input(reference_inputs, ref_index, global_state_policy_id).admin_credential_hash
 }
 
+/// Like `admin_from_ref_input`, but additionally rejects (traps) if the
+/// protocol is `deactivated`. Used by admin-gated linked-list mutations so a
+/// decommissioned protocol truly executes no further administrative action
+/// (matches the `deactivated` field contract: "no action can be executed").
+pub fn active_admin_from_ref_input(
+  reference_inputs: List<Input>,
+  ref_index: Int,
+  global_state_policy_id: ByteArray,
+) -> ByteArray {
+  let gs = gs_datum_from_ref_input(
+    reference_inputs,
+    ref_index,
+    global_state_policy_id,
+  )
+  expect !gs.deactivated
+  gs.admin_credential_hash
+}
+
 /// Spend actions on the global_state UTxO. Admin-gated actions read the
 /// current admin credential hash from the input datum — which means the
 /// compile-time owner parameter is gone. Rotation happens via `RotateAdmin`
@@ -301,6 +350,13 @@ pub type GlobalStateSpendAction {
   SetRequiresReceiverKyc { enabled: Bool }
   UpdateMemberRootHash { new_member_root_hash: ByteArray }
   RotateAdmin { new_admin_credential_hash: ByteArray }
+  /// One-way decommissioning switch. Sets `deactivated = True`. Requires the
+  /// contract to already be paused and the admin to sign. Irreversible: no
+  /// action sets it back to False, and once set every spend of the
+  /// global_state UTxO is rejected (see the terminal guard in the spend
+  /// validator), which permanently freezes transfers (stays paused) and
+  /// mint/burn (MintSecurity can no longer run).
+  DeactivateContract
 }
 
 pub type GlobalStateSpendRedeemer {
@@ -320,8 +376,13 @@ const test_admin_pkh: ByteArray =
   #"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 fn test_gs_input(transfers_paused: Bool) -> Input {
+  test_gs_input_with(transfers_paused, False)
+}
+
+fn test_gs_input_with(transfers_paused: Bool, deactivated: Bool) -> Input {
   let datum = GlobalStateDatum {
     transfers_paused,
+    deactivated,
     mintable_amount: 1_000_000,
     admin_credential_hash: test_admin_pkh,
     power_user_linked_list_policy_id: #"",
@@ -350,6 +411,24 @@ fn test_gs_input(transfers_paused: Bool) -> Input {
   }
 }
 
+// active_admin_from_ref_input returns the admin when the protocol is live…
+test active_admin_returns_admin_when_not_deactivated() {
+  active_admin_from_ref_input(
+    [test_gs_input_with(True, False)],
+    0,
+    test_gs_policy_id,
+  ) == test_admin_pkh
+}
+
+// …and traps (blocking all admin-gated list actions) once deactivated.
+test active_admin_traps_when_deactivated() fail {
+  active_admin_from_ref_input(
+    [test_gs_input_with(True, True)],
+    0,
+    test_gs_policy_id,
+  ) == test_admin_pkh
+}
+
 // H-1 regression: `is_paused` must read the `transfers_paused` Bool correctly
 // via UPLC builtins. The previous implementation in `transfer_logic_script`
 // passed the fields *list* to `unconstr_index` (missing a `head_list` step)
@@ -370,6 +449,7 @@ test is_paused_returns_true_when_paused() {
 fn test_layout_datum() -> GlobalStateDatum {
   GlobalStateDatum {
     transfers_paused: True,
+    deactivated: False,
     mintable_amount: 42,
     admin_credential_hash: #"a2",
     power_user_linked_list_policy_id: #"a3",
@@ -393,6 +473,7 @@ test gs_getters_read_correct_fields() {
   let fields = builtin.unconstr_fields(d)
   and {
     get_transfers_paused(fields) == d.transfers_paused,
+    get_deactivated(fields) == d.deactivated,
     get_mintable_amount(fields) == d.mintable_amount,
     get_admin_credential_hash(fields) == d.admin_credential_hash,
     get_power_user_linked_list_policy_id(fields) == d.power_user_linked_list_policy_id,
@@ -400,6 +481,7 @@ test gs_getters_read_correct_fields() {
     builtin.equals_data(get_security_info(fields), d.security_info),
     get_trusted_entity_vkeys(fields) == d.trusted_entity_vkeys,
     get_member_root_hash(fields) == d.member_root_hash,
+    get_requires_sender_kyc(fields) == d.requires_sender_kyc,
     get_requires_receiver_kyc(fields) == d.requires_receiver_kyc,
     get_network_id(fields) == d.network_id,
   }
@@ -416,6 +498,10 @@ test gs_setters_round_trip() {
     builtin.equals_data(
       set_transfers_paused(fields, False),
       GlobalStateDatum { ..d, transfers_paused: False },
+    ),
+    builtin.equals_data(
+      set_deactivated(fields, True),
+      GlobalStateDatum { ..d, deactivated: True },
     ),
     builtin.equals_data(
       set_mintable_amount(fields, 999),
