@@ -84,4 +84,20 @@ tasks.named('test') {
 	inputs.dir(file("$projectDir/../substandards/security-token"))
 	      .withPropertyName('vendoredSecurityToken')
 	      .withPathSensitivity(PathSensitivity.RELATIVE)
+
+	// Gradle discards the test JVM's stdout/stderr, so log.info and System.out
+	// from a test are invisible by default — including the deployment test's
+	// BootstrapParams and derived script hashes. Opt in per-run:
+	//
+	//   ./gradlew test --tests '*Foo*' -PtestLogs
+	//
+	// Left off by default on purpose: the full suite is 116 tests and streaming
+	// every one of them buries the result.
+	if (project.hasProperty('testLogs')) {
+		testLogging {
+			showStandardStreams = true
+			events 'passed', 'skipped', 'failed'
+			exceptionFormat = 'full'
+		}
+	}
 }
