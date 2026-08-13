@@ -9,6 +9,7 @@ import org.cardanofoundation.cip113.model.Substandard;
 import org.cardanofoundation.cip113.model.SubstandardValidator;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -24,6 +25,14 @@ import java.util.concurrent.ConcurrentHashMap;
 public class SubstandardService {
 
     private final ObjectMapper objectMapper;
+
+    /**
+     * Substandards to hide from the API (and therefore the issuance wizard). Listed by
+     * folder id. The contracts stay vendored and any already-issued token keeps working —
+     * this only removes them as choices for NEW tokens.
+     */
+    @Value("${substandards.disabled:}")
+    private List<String> disabledSubstandards = new ArrayList<>();
 
     // Thread-safe in-memory cache of all substandards
     private final Map<String, Substandard> substandardsCache = new ConcurrentHashMap<>();
@@ -53,6 +62,11 @@ public class SubstandardService {
                     }
                     String folderName = parts[1].split("/")[0];
 
+                    if (disabledSubstandards.contains(folderName)) {
+                        log.info("Skipping disabled substandard: {}", folderName);
+                        continue;
+                    }
+
                     log.debug("Processing substandard: {}", folderName);
 
                     // Parse plutus.json
@@ -74,8 +88,24 @@ public class SubstandardService {
                         validators.add(new SubstandardValidator(title, compiledCode, hash));
                     }
 
+                    // Optional display metadata; absent for substandards that have not
+                    // supplied one, in which case the id is capitalised as before.
+                    String name = defaultName(folderName);
+                    String description = "";
+                    var metaResource = new PathMatchingResourcePatternResolver()
+                            .getResource("classpath:substandards/" + folderName + "/metadata.json");
+                    if (metaResource.exists()) {
+                        JsonNode meta = objectMapper.readTree(metaResource.getInputStream());
+                        if (meta.hasNonNull("name")) {
+                            name = meta.get("name").asText();
+                        }
+                        if (meta.hasNonNull("description")) {
+                            description = meta.get("description").asText();
+                        }
+                    }
+
                     // Create and cache the substandard
-                    Substandard substandard = new Substandard(folderName, validators);
+                    Substandard substandard = new Substandard(folderName, name, description, validators);
                     substandardsCache.put(folderName, substandard);
 
                     log.info("Loaded substandard '{}' with {} validators", folderName, validators.size());
@@ -90,6 +120,13 @@ public class SubstandardService {
         } catch (IOException e) {
             log.error("Error scanning substandards directory", e);
         }
+    }
+
+    /** Capitalised folder id — the label the UI used before metadata.json existed. */
+    private static String defaultName(String folderName) {
+        return folderName.isEmpty()
+                ? folderName
+                : folderName.substring(0, 1).toUpperCase() + folderName.substring(1);
     }
 
     /**
