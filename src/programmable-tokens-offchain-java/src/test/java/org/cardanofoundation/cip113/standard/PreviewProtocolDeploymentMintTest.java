@@ -46,7 +46,6 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 
 @Slf4j
@@ -104,13 +103,12 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         return ConstrPlutusData.of(1, BytesPlutusData.of(script.getScriptHash()));
     }
 
-    /** Lovelace held by a UTxO, ignoring any native assets on it. */
-    private static BigInteger lovelaceOf(Utxo utxo) {
-        return utxo.getAmount().stream()
+        private static BigInteger lovelaceOf(Utxo utxo) {
+                return utxo.getAmount().stream()
                 .filter(a -> "lovelace".equals(a.getUnit()))
                 .map(Amount::getQuantity)
                 .reduce(BigInteger.ZERO, BigInteger::add);
-    }
+        }
 
     @Test
     public void deploy() throws Exception {
@@ -122,15 +120,11 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         Assertions.assertTrue(utxosOpt.getValue().size() >= 2,
                 "need >=2 utxos at the admin address — run DevnetFundingTest first");
 
-        // Take the two fattest UTxOs. Wallet order is arbitrary, and on a faucet-funded
-        // preview account most entries are small change — picking the first two would fail
-        // the balance precondition below while the funds were sitting right there.
-        var walletUtxos = utxosOpt.getValue().stream()
-                .sorted(Comparator.comparing(PreviewProtocolDeploymentMintTest::lovelaceOf).reversed())
-                .limit(2)
-                .toList();
+        var walletUtxos = utxosOpt.getValue().stream().filter(a -> lovelaceOf(a).compareTo(BigInteger.valueOf(100000000)) > 0).limit(2).toList();
         var collectedLovelace = walletUtxos.stream()
-                .map(PreviewProtocolDeploymentMintTest::lovelaceOf)
+                .flatMap(u -> u.getAmount().stream())
+                .filter(a -> "lovelace".equals(a.getUnit()))
+                .map(Amount::getQuantity)
                 .reduce(BigInteger.ZERO, BigInteger::add);
         System.out.println(adminAccount.baseAddress() + " has " + collectedLovelace + " lovelace across " + walletUtxos.size() + " utxos");
         // Explicit output total is ~158 ADA (5 coordination + 5 registry + ~11 issuanceCborHex,
