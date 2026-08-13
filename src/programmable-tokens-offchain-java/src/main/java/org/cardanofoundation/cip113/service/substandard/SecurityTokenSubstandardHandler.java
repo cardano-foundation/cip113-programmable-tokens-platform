@@ -29,6 +29,7 @@ import com.bloxbean.cardano.client.transaction.spec.cert.RegCert;
 import com.bloxbean.cardano.client.transaction.spec.cert.StakeCredType;
 import com.bloxbean.cardano.client.transaction.spec.cert.StakeCredential;
 import com.bloxbean.cardano.client.transaction.spec.cert.StakeRegistration;
+import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import com.bloxbean.cardano.client.util.HexUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
@@ -251,7 +252,7 @@ public class SecurityTokenSubstandardHandler
             List<Utxo> feePayerUtxos;
             if (request.getChainingTransactionCborHex() != null) {
                 byte[] chainingTxBytes = HexUtil.decodeHexString(request.getChainingTransactionCborHex());
-                String chainingTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil.getTxHash(chainingTxBytes);
+                String chainingTxHash = TransactionUtil.getTxHash(chainingTxBytes);
                 Transaction chainingTx = Transaction.deserialize(chainingTxBytes);
                 Utxo inputUtxo = null;
                 List<TransactionOutput> outs = chainingTx.getBody().getOutputs();
@@ -495,7 +496,16 @@ public class SecurityTokenSubstandardHandler
             // carrying a first mint must SPEND it (so MintSecurity decrements the cap).
             // A UTxO cannot be both, which is exactly why RegisterToken carries two
             // separate index fields.
-            Utxo gsUtxoForRegistration = willMint
+            // Prefer a caller-supplied UTxO over a chain lookup, in BOTH branches. Inside
+            // buildFullRegistrationChain the GlobalState NFT is minted by the genesis tx,
+            // which is still unsubmitted when this tx is built — so it cannot be found by
+            // querying the chain, whether we go on to spend it or merely reference it.
+            // Gating the override on willMint made a chained structural registration
+            // (quantity 0) fall through to the lookup and fail with "run the genesis init
+            // step first" even though the orchestrator had passed the UTxO in.
+            // AddPowerUser sits between genesis and registration but only readFrom()s the
+            // GS UTxO, so the genesis output is still the live one here.
+            Utxo gsUtxoForRegistration = chainedGsUtxoOverride != null
                     ? chainedGsUtxoOverride
                     : utxoProvider.findUtxoByAsset(gsPolicy,
                             SecurityTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX).orElse(null);
@@ -2306,7 +2316,7 @@ public class SecurityTokenSubstandardHandler
             }
             String genesisCbor = genesisResult.unsignedCborTx();
             Transaction genesisTx = Transaction.deserialize(HexUtil.decodeHexString(genesisCbor));
-            String genesisTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil
+            String genesisTxHash = TransactionUtil
                     .getTxHash(genesisTx.serialize());
             String progTokenPolicyId = genesisResult.metadata() != null
                     ? genesisResult.metadata().policyId() : null;
@@ -2389,7 +2399,7 @@ public class SecurityTokenSubstandardHandler
             }
             String addPuCbor = addPuResult.unsignedCborTx();
             Transaction addPuTx = Transaction.deserialize(HexUtil.decodeHexString(addPuCbor));
-            String addPuTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil
+            String addPuTxHash = TransactionUtil
                     .getTxHash(addPuTx.serialize());
 
             // Find AddPowerUser's admin change output to fund the registration tx.
@@ -2411,11 +2421,6 @@ public class SecurityTokenSubstandardHandler
             // The supply cap is enforced by ALSO spending GS with MintSecurity
             // in this tx (via the 3-arg overload), which decrements
             // mintable_amount independently of the substandard's withdraw.
-            //
-            // BLOCKED at the upstream pin: minting_logic_script.withdraw no
-            // longer has the registration-mode short-circuit the vendored fork
-            // had, so this tx cannot validate as shaped. See the detailed note
-            // in buildRegistrationTransaction.
             request.setChainingTransactionCborHex(addPuCbor);
             // Register STRUCTURALLY. This used to force quantity to "1" so the
             // registration carried a first mint; the registration path no longer folds
@@ -2432,7 +2437,7 @@ public class SecurityTokenSubstandardHandler
             }
             String regCbor = regResult.unsignedCborTx();
             Transaction regTx = Transaction.deserialize(HexUtil.decodeHexString(regCbor));
-            String regTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil
+            String regTxHash = TransactionUtil
                     .getTxHash(regTx.serialize());
 
             // ── PHASE 4 ─ Register transferLogic stake credential ─────────
@@ -2466,7 +2471,7 @@ public class SecurityTokenSubstandardHandler
                 if (certResult.isSuccessful()) {
                     certCbor = certResult.unsignedCborTx();
                     Transaction certTx = Transaction.deserialize(HexUtil.decodeHexString(certCbor));
-                    certTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil
+                    certTxHash = TransactionUtil
                             .getTxHash(certTx.serialize());
                     log.info("chain[registerTransferLogic] built cert tx {} (chain length: 4)", certTxHash);
                 } else {
@@ -3494,7 +3499,7 @@ public class SecurityTokenSubstandardHandler
                     // lookups) can resolve them on the next iteration.
                     byte[] builtBytes = HexUtil.decodeHexString(stepCtx.unsignedCborTx());
                     Transaction builtTx = Transaction.deserialize(builtBytes);
-                    String nextTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil
+                    String nextTxHash = TransactionUtil
                             .getTxHash(builtBytes);
                     List<TransactionOutput> outs = builtTx.getBody().getOutputs();
                     gsUtxo = utxoFromOutput(nextTxHash, 0, outs.get(0));
