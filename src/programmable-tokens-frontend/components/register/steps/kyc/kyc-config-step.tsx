@@ -327,7 +327,7 @@ export function KycConfigStep({
           });
         } else {
           showToast({
-            title: 'Security token registered',
+            title: 'RWA token registered',
             description: `All ${submitted.length} transactions submitted: ${submitted.map(h => h.slice(0, 8)).join(', ')}…`,
             variant: 'default',
           });
@@ -673,7 +673,7 @@ export function KycConfigStep({
           isLoading={isProcessing}
           disabled={isProcessing}
         >
-          {isSecurityTokenFlow ? 'Register Security Token' : 'Initialize Global State & Continue'}
+          {isSecurityTokenFlow ? 'Register RWA Token' : 'Initialize Global State & Continue'}
         </Button>
       </div>
     </div>

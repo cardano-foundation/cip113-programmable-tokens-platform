@@ -805,7 +805,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       )}
       {isSecurityToken && (
         <p className="text-xs text-dark-400 -mt-3">
-          Security tokens are minted via the backend (BaFin MintSecurity flow:
+          RWA tokens are minted via the backend (BaFin MintSecurity flow:
           spends the global-state UTxO and decrements the on-chain supply cap).
         </p>
       )}

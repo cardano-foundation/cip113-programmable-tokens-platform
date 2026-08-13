@@ -1,4 +1,4 @@
 {
-  "name": "Security Token (CMTA — German & Swiss profiles)",
-  "description": "Programmable asset tokens designed as reference profiles for the CMTA framework, supporting the implementation of German (eWpG) and Swiss (OR, ledger-based securities) requirements. Provides KYC-gated transfers, denylisting, global pause, forced transfers and seizures, supply caps, role-based permissions and an irreversible decommission mechanism, plus a SecurityInfo metadata schema covering ISIN, terms of issue, issuer details, nominal amount and register/custodian references. Technical functionality only — it does not imply or ensure legal or regulatory compliance in any jurisdiction."
+  "name": "RWA Token (German & Swiss profiles)",
+  "description": "Programmable real-world-asset tokens designed as reference profiles supporting the implementation of German (eWpG) and Swiss (OR, ledger-based securities) requirements. Provides KYC-gated transfers, denylisting, global pause, forced transfers and seizures, supply caps, role-based permissions and an irreversible decommission mechanism, plus a metadata schema covering ISIN, terms of issue, issuer details, nominal amount and register/custodian references. Technical functionality only — it does not imply or ensure legal or regulatory compliance in any jurisdiction."
 }
