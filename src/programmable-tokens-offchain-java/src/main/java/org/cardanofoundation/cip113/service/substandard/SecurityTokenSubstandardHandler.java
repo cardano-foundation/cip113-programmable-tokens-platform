@@ -29,6 +29,7 @@ import com.bloxbean.cardano.client.transaction.spec.cert.RegCert;
 import com.bloxbean.cardano.client.transaction.spec.cert.StakeCredType;
 import com.bloxbean.cardano.client.transaction.spec.cert.StakeCredential;
 import com.bloxbean.cardano.client.transaction.spec.cert.StakeRegistration;
+import com.bloxbean.cardano.client.transaction.spec.cert.Certificate;
 import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import com.bloxbean.cardano.client.util.HexUtil;
 import lombok.RequiredArgsConstructor;
@@ -1488,13 +1489,17 @@ public class SecurityTokenSubstandardHandler
                     .payToContract(powerUsersSpendAddress.getAddress(), ValueUtil.toAmountList(powerUsersValue), linkedListRootDatum)
                     .withChangeAddress(adminAddress);
 
-            // Attach script + cert intent. The preBalanceTx below swaps the
-            // pre-Conway StakeRegistration to Conway RegCert (script credentials
-            // require a deposit and a publish redeemer in Conway).
+            // Registering a script stake credential needs the deposit, but NOT the script:
+            // Conway's RegCert carries no witness requirement, so the publish handler never
+            // runs. Attaching minting_logic here cost 7211 bytes inline and pushed this tx
+            // to 18027 / 16384. Verified empirically by the protocol deployment, which
+            // registers three script credentials with a bare registerStakeAddress and no
+            // validator attached — including upgrade_multisig, which has no publish handler
+            // at all (`else(_) fail`) and could not have registered if a witness were
+            // required. The preBalanceTx below still rewrites the cert to RegCert for the
+            // deposit; it no longer injects a Cert redeemer.
             if (!mintingLogicCredAlreadyRegistered) {
-                tx = tx
-                        .attachCertificateValidator(mintingLogicScript)
-                        .registerStakeAddress(mintingLogicRewardAddress);
+                tx = tx.registerStakeAddress(mintingLogicRewardAddress);
             }
 
             Utxo firstUtilityUtxo = utilityUtxos.getFirst();
@@ -1505,11 +1510,12 @@ public class SecurityTokenSubstandardHandler
                             .transactionId(firstUtilityUtxo.getTxHash())
                             .index(firstUtilityUtxo.getOutputIndex()).build())
                     .preBalanceTx((bctx, txn) -> {
-                        // Conway-era cert swap (see comments in buildRegistrationTransaction
-                        // for the upstream BaFin pattern). For each StakeRegistration
-                        // with a SCRIPT credential, replace with RegCert + inject a
-                        // publish redeemer pointing at the cert's index.
-                        List<com.bloxbean.cardano.client.transaction.spec.cert.Certificate> certs = txn.getBody().getCerts();
+                        // Conway-era cert swap: a script stake credential must be registered
+                        // with RegCert, which carries the 2 ADA deposit explicitly. No Cert
+                        // redeemer is injected — RegCert requires no witness, so the script's
+                        // publish handler never runs (see the note at the registerStakeAddress
+                        // call above).
+                        List<Certificate> certs = txn.getBody().getCerts();
                         if (certs == null) return;
                         for (int i = 0; i < certs.size(); i++) {
                             if (!(certs.get(i)
@@ -1521,20 +1527,6 @@ public class SecurityTokenSubstandardHandler
                                     .stakeCredential(cred)
                                     .coin(BigInteger.valueOf(2_000_000L))
                                     .build());
-                            TransactionWitnessSet ws = txn.getWitnessSet();
-                            if (ws.getRedeemers() == null) {
-                                ws.setRedeemers(new ArrayList<>());
-                            }
-                            Redeemer publishRedeemer = Redeemer.builder()
-                                    .tag(RedeemerTag.Cert)
-                                    .data(PlutusData.unit())
-                                    .exUnits(ExUnits.builder()
-                                            .mem(BigInteger.valueOf(1_000_000))
-                                            .steps(BigInteger.valueOf(500_000_000))
-                                            .build())
-                                    .build();
-                            publishRedeemer.setIndex(i);
-                            ws.getRedeemers().add(publishRedeemer);
                         }
                     })
                     .build();
@@ -3065,7 +3057,7 @@ public class SecurityTokenSubstandardHandler
                         // + inject a Cert publish redeemer. Same pattern as the
                         // genesis tx, isolated here so it's the ONLY thing in
                         // the tx.
-                        List<com.bloxbean.cardano.client.transaction.spec.cert.Certificate> certs = txn.getBody().getCerts();
+                        List<Certificate> certs = txn.getBody().getCerts();
                         if (certs != null) {
                             for (int i = 0; i < certs.size(); i++) {
                                 if (!(certs.get(i)
