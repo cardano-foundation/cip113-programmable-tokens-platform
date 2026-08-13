@@ -25,10 +25,6 @@ import com.bloxbean.cardano.client.transaction.spec.TransactionInput;
 import com.bloxbean.cardano.client.transaction.spec.TransactionOutput;
 import com.bloxbean.cardano.client.transaction.spec.TransactionWitnessSet;
 import com.bloxbean.cardano.client.transaction.spec.Value;
-import com.bloxbean.cardano.client.transaction.spec.cert.RegCert;
-import com.bloxbean.cardano.client.transaction.spec.cert.StakeCredType;
-import com.bloxbean.cardano.client.transaction.spec.cert.StakeCredential;
-import com.bloxbean.cardano.client.transaction.spec.cert.StakeRegistration;
 import com.bloxbean.cardano.client.transaction.spec.cert.Certificate;
 import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import com.bloxbean.cardano.client.util.HexUtil;
@@ -1509,26 +1505,17 @@ public class SecurityTokenSubstandardHandler
                     .withCollateralInputs(TransactionInput.builder()
                             .transactionId(firstUtilityUtxo.getTxHash())
                             .index(firstUtilityUtxo.getOutputIndex()).build())
-                    .preBalanceTx((bctx, txn) -> {
-                        // Conway-era cert swap: a script stake credential must be registered
-                        // with RegCert, which carries the 2 ADA deposit explicitly. No Cert
-                        // redeemer is injected — RegCert requires no witness, so the script's
-                        // publish handler never runs (see the note at the registerStakeAddress
-                        // call above).
-                        List<Certificate> certs = txn.getBody().getCerts();
-                        if (certs == null) return;
-                        for (int i = 0; i < certs.size(); i++) {
-                            if (!(certs.get(i)
-                                    instanceof StakeRegistration sr)) continue;
-                            StakeCredential cred = sr.getStakeCredential();
-                            if (cred.getType()
-                                    != StakeCredType.SCRIPTHASH) continue;
-                            certs.set(i, RegCert.builder()
-                                    .stakeCredential(cred)
-                                    .coin(BigInteger.valueOf(2_000_000L))
-                                    .build());
-                        }
-                    })
+                    // No cert rewrite. The legacy StakeRegistration that Bloxbean emits is
+                    // still valid in Conway and requires NO witness, so the stake credential
+                    // registers without attaching the 7211-byte minting_logic script.
+                    //
+                    // Rewriting it to RegCert is what forces a witness: RegCert IS
+                    // witness-required for a script credential, which is why doing the swap
+                    // without the attached script fails with MissingScriptWitnessesUTXOW.
+                    // Both halves have to move together — either legacy cert + no script, or
+                    // RegCert + attached script + Cert redeemer. We take the former; it is
+                    // what the protocol deployment does, and every script-credential
+                    // registration on preview is a STAKE_REGISTRATION, none a RegCert.
                     .build();
 
             // 7. Persist the registration row. issuancePolicyId IS the prog-token
