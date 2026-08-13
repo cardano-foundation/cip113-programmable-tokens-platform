@@ -7,6 +7,7 @@ import com.bloxbean.cardano.client.address.AddressProvider;
 import com.bloxbean.cardano.client.address.Credential;
 import com.bloxbean.cardano.client.api.MinAdaCalculator;
 import com.bloxbean.cardano.client.api.model.Amount;
+import com.bloxbean.cardano.client.api.model.Utxo;
 import com.bloxbean.cardano.client.api.util.ReferenceScriptUtil;
 import com.bloxbean.cardano.client.api.util.ValueUtil;
 import com.bloxbean.cardano.client.crypto.Blake2bUtil;
@@ -45,6 +46,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 @Slf4j
@@ -102,6 +104,14 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         return ConstrPlutusData.of(1, BytesPlutusData.of(script.getScriptHash()));
     }
 
+    /** Lovelace held by a UTxO, ignoring any native assets on it. */
+    private static BigInteger lovelaceOf(Utxo utxo) {
+        return utxo.getAmount().stream()
+                .filter(a -> "lovelace".equals(a.getUnit()))
+                .map(Amount::getQuantity)
+                .reduce(BigInteger.ZERO, BigInteger::add);
+    }
+
     @Test
     public void deploy() throws Exception {
 
@@ -112,12 +122,17 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         Assertions.assertTrue(utxosOpt.getValue().size() >= 2,
                 "need >=2 utxos at the admin address — run DevnetFundingTest first");
 
-        var walletUtxos = utxosOpt.getValue().stream().limit(2).toList();
+        // Take the two fattest UTxOs. Wallet order is arbitrary, and on a faucet-funded
+        // preview account most entries are small change — picking the first two would fail
+        // the balance precondition below while the funds were sitting right there.
+        var walletUtxos = utxosOpt.getValue().stream()
+                .sorted(Comparator.comparing(PreviewProtocolDeploymentMintTest::lovelaceOf).reversed())
+                .limit(2)
+                .toList();
         var collectedLovelace = walletUtxos.stream()
-                .flatMap(u -> u.getAmount().stream())
-                .filter(a -> "lovelace".equals(a.getUnit()))
-                .map(Amount::getQuantity)
+                .map(PreviewProtocolDeploymentMintTest::lovelaceOf)
                 .reduce(BigInteger.ZERO, BigInteger::add);
+        System.out.println(adminAccount.baseAddress() + " has " + collectedLovelace + " lovelace across " + walletUtxos.size() + " utxos");
         // Explicit output total is ~158 ADA (5 coordination + 5 registry + ~11 issuanceCborHex,
         // dynamically sized below from the ledger-exact min-utxo + a small buffer + 5 PLB ref +
         // 20 PLG ref + 12 unfracking ref + 50 + 50 re-fragmentation), plus 6 ADA across three
