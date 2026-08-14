@@ -81,6 +81,29 @@ public class SecurityTokenRegisterRequest extends RegisterTokenRequest {
      *  other recipient has no provable membership. */
     private String initialMintQuantity;
 
+    /** OPT-IN: seed the compliance allowlist at genesis with the mint recipient's stake
+     *  credential, and write the resulting MPF root into the GlobalState datum's
+     *  {@code member_root_hash}.
+     *
+     *  <p>Why it exists. {@code requires_receiver_kyc = true} plus an empty
+     *  {@code member_root_hash} makes a registration-with-mint impossible for any
+     *  ordinary recipient: {@code verify_mint_destinations} needs a membership proof and
+     *  there is nothing to prove against, while the contract's self-mint exemption
+     *  compares the recipient's STAKE credential against the power-user node key — which
+     *  this chain sets to the wallet's PAYMENT key hash, so for a normal base address it
+     *  can never fire. No root can be published beforehand either: publishing one is a
+     *  GlobalState spend, and the GlobalState UTxO does not exist until genesis.
+     *
+     *  <p><b>Compliance meaning.</b> Setting this enrolls the recipient in the token's
+     *  KYC allowlist on the issuer's say-so, with no KYC process behind it. The
+     *  resulting on-chain {@code member_root_hash} asserts to every later validator run
+     *  — transfers included, not just this mint — that the recipient is a verified
+     *  member. It is off by default and the UI labels it as such; nothing in the
+     *  platform infers it.
+     *
+     *  <p>Ignored unless the chain actually mints. */
+    private boolean seedRecipientInAllowlistAtGenesis;
+
     /** Optional: bootstrap power user inserted into the off-chain DB at registration.
      *  Lets the registering admin see themselves on the admin page immediately.
      *  Defaults to {@code adminPubKeyHash} with all-capabilities if not provided

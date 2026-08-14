@@ -310,15 +310,23 @@ public class SecurityTokenController {
     }
 
     /** Build the full security-token registration chain (genesis → AddPowerUser →
-     *  registration -> transfer registration) as four unsigned CBORs. The frontend signs all four in one
-     *  CIP-30 {@code signTxs} call, then POSTs the signed CBORs (in order) to
-     *  {@code /issue-token/submit-chain} which submits them sequentially via the
-     *  backend's submission service — bypassing the wallet's submission backend so
-     *  mempool-chained txs aren't rejected.
+     *  publishScripts → registration → transfer-logic cert) as up to five unsigned
+     *  CBORs. The frontend signs them all in one CIP-30 {@code signTxs} call, then
+     *  POSTs the signed CBORs (in order) to {@code /issue-token/submit-chain} which
+     *  submits them sequentially via the backend's submission service — bypassing the
+     *  wallet's submission backend so mempool-chained txs aren't rejected.
      *
-     *  <p>Returns {@code { genesisCborHex, addPowerUserCborHex, registrationCborHex,
-     *  globalStatePolicyId, programmableTokenPolicyId, denylistPolicyId,
-     *  powerUsersPolicyId, genesisTxHash, addPowerUserTxHash, registrationTxHash } }. */
+     *  <p>{@code publishScriptsCborHex} publishes {@code minting_logic} and the
+     *  {@code global_state} spend validator as reference scripts. It is not optional:
+     *  attached inline those two are 11 394 of the ledger's 16 384-byte budget and the
+     *  registration tx's full validator set is 16 584, so the registration cannot exist
+     *  without them being referenced.
+     *
+     *  <p>Returns {@code { genesisCborHex, addPowerUserCborHex, publishScriptsCborHex,
+     *  registrationCborHex, registerTransferLogicCborHex?, globalStatePolicyId,
+     *  programmableTokenPolicyId, denylistPolicyId, powerUsersPolicyId, genesisTxHash,
+     *  addPowerUserTxHash, publishScriptsTxHash, registrationTxHash,
+     *  registerTransferLogicTxHash? } }. */
     @PostMapping("/build-chain")
     public ResponseEntity<?> buildChain(@RequestBody SecurityTokenRegisterRequest request) {
         try {
@@ -340,6 +348,13 @@ public class SecurityTokenController {
             Map<String, Object> resp = new java.util.HashMap<>();
             resp.put("genesisCborHex", meta.genesisCborHex());
             resp.put("addPowerUserCborHex", meta.addPowerUserCborHex());
+            // Present only when the registration carries a first mint — that is the only
+            // case whose validator set does not fit inline. Omitted (not null) otherwise,
+            // matching the optional 4th tx and keeping the wire shape forward-compatible.
+            if (meta.publishScriptsCborHex() != null) {
+                resp.put("publishScriptsCborHex", meta.publishScriptsCborHex());
+                resp.put("publishScriptsTxHash", meta.publishScriptsTxHash());
+            }
             resp.put("registrationCborHex", meta.registrationCborHex());
             if (meta.registerTransferLogicCborHex() != null) {
                 resp.put("registerTransferLogicCborHex", meta.registerTransferLogicCborHex());

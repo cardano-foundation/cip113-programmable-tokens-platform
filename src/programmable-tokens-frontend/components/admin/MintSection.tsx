@@ -41,6 +41,9 @@ import {
 } from "@/lib/api/keri";
 import {
   getSecurityTokenGlobalState,
+  buildGlobalStateUpdateChain,
+  submitTokenChain,
+  parseSubmitChainFailure,
   type SecurityTokenGlobalState,
 } from "@/lib/api/security-token";
 
@@ -101,6 +104,25 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const [quantity, setQuantity] = useState("");
   const [recipientAddress, setRecipientAddress] = useState(feePayerAddress);
   const [enableAttestation, setEnableAttestation] = useState(false);
+
+  // Receiver-KYC control on the minting step.
+  //
+  // This is a SEPARATE transaction, not a field of the mint, and it cannot be
+  // otherwise: the mint spends the global state under MintSecurity, whose branch in
+  // global_state.ak rebuilds the expected output datum from the input with ONLY
+  // mintable_amount changed and compares the whole thing with builtin.equals_data.
+  // Any other datum edit in the same transaction fails that check. The flag is
+  // therefore set the way the admin page already sets it — the SetRequiresReceiverKyc
+  // global-state action — and the mint has to be built afterwards, because the mint
+  // builder reads the live GS UTxO from chain rather than chaining off an unsubmitted
+  // one.
+  //
+  // null until the on-chain value has been read; after that it mirrors the datum and
+  // the admin can diverge from it.
+  const [desiredReceiverKyc, setDesiredReceiverKyc] = useState<boolean | null>(null);
+  const [kycFlagBusy, setKycFlagBusy] = useState(false);
+  const [kycFlagError, setKycFlagError] = useState<string | null>(null);
+  const [kycFlagTxHash, setKycFlagTxHash] = useState<string | null>(null);
 
   // Flow state
   const [step, setStep] = useState<MintStep>("form");
@@ -187,6 +209,9 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       setSecurityTokenGs(null);
       setSecurityTokenGsError(null);
       setSecurityTokenGsLoading(false);
+      setDesiredReceiverKyc(null);
+      setKycFlagError(null);
+      setKycFlagTxHash(null);
       return null;
     }
     const seq = ++gsFetchSeq.current;
@@ -196,6 +221,9 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       const gs = await getSecurityTokenGlobalState(selectedToken.policyId);
       if (seq !== gsFetchSeq.current) return null;
       setSecurityTokenGs(gs);
+      // Re-seed the toggle from the datum on every successful read, so it always
+      // starts from what is actually on chain rather than from a stale edit.
+      setDesiredReceiverKyc(gs.requiresReceiverKyc);
       return gs;
     } catch (err: unknown) {
       if (seq !== gsFetchSeq.current) return null;
@@ -204,6 +232,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       // point of D8 is that stale figures were being read as fresh ones.
       setSecurityTokenGs(null);
       setSecurityTokenGsError(err instanceof Error ? err.message : String(err));
+      setDesiredReceiverKyc(null);
       return null;
     } finally {
       if (seq === gsFetchSeq.current) setSecurityTokenGsLoading(false);
@@ -243,6 +272,89 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       if (seq === gsFetchSeq.current) setConfirmPolling(false);
     }
   }, []);
+
+  /** True when the toggle has been moved away from what the chain currently says. */
+  const receiverKycDirty =
+    securityTokenGs !== null
+    && desiredReceiverKyc !== null
+    && desiredReceiverKyc !== securityTokenGs.requiresReceiverKyc;
+
+  /** Apply the receiver-KYC flag on chain via SetRequiresReceiverKyc, then poll the
+   *  global state until the datum reflects it.
+   *
+   *  Deliberately its own transaction and its own button rather than something the
+   *  Mint button folds in. Two reasons, both structural:
+   *
+   *   - MintSecurity rebuilds the expected GS output datum from the input with only
+   *     mintable_amount changed and compares it with builtin.equals_data, so the flag
+   *     cannot ride along in the mint transaction.
+   *   - The mint builder resolves the GS UTxO by querying the chain, so it cannot be
+   *     mempool-chained onto an unsubmitted flag change. The new datum has to be in a
+   *     block before the mint is built, which is what the poll below waits for. */
+  const applyReceiverKycFlag = async () => {
+    if (!wallet || !selectedToken || desiredReceiverKyc === null) return;
+    setKycFlagBusy(true);
+    setKycFlagError(null);
+    setKycFlagTxHash(null);
+    const target = desiredReceiverKyc;
+    try {
+      const { unsignedCborTxs } = await buildGlobalStateUpdateChain(
+        selectedToken.policyId,
+        feePayerAddress,
+        [{ action: "SetRequiresReceiverKyc", requiresReceiverKycEnabled: target }],
+      );
+      const signedCbors = await wallet.signTxs(unsignedCborTxs, true);
+      const submit = await submitTokenChain(signedCbors);
+      if (submit.error) throw new Error(submit.error);
+      const hash = submit.txHashes[0] ?? null;
+      setKycFlagTxHash(hash);
+      showToast({
+        title: `Receiver KYC ${target ? "enabled" : "disabled"}`,
+        description: "Waiting for the global state to reflect the change on chain…",
+        variant: "success",
+      });
+      // Poll until the datum agrees. Until it does, a mint built now would be built
+      // against the OLD flag — which is the whole reason this is a separate step.
+      //
+      // Reads the global state DIRECTLY rather than through refreshSecurityTokenGs:
+      // that helper bumps gsFetchSeq on every call, so a loop that both calls it and
+      // guards on the sequence would abandon itself on the second iteration. Same
+      // shape as pollForMintOnChain, for the same reason.
+      const policyId = selectedToken.policyId;
+      const seq = gsFetchSeq.current;
+      for (let attempt = 0; attempt < 12; attempt++) {
+        await new Promise((r) => setTimeout(r, 5_000));
+        if (seq !== gsFetchSeq.current) return;   // token switched — abandon
+        try {
+          const gs = await getSecurityTokenGlobalState(policyId);
+          if (seq !== gsFetchSeq.current) return;
+          setSecurityTokenGs(gs);
+          setDesiredReceiverKyc(gs.requiresReceiverKyc);
+          if (gs.requiresReceiverKyc === target) return;
+        } catch {
+          // Transient read failure — keep trying for the remaining attempts.
+        }
+      }
+      setKycFlagError(
+        "Submitted, but the global state has not shown the new value yet. "
+        + "Refresh before minting — building a mint against the old flag would "
+        + "produce the wrong KYC proof requirement.",
+      );
+    } catch (e) {
+      const failure = parseSubmitChainFailure(e);
+      setKycFlagError(failure.error);
+      showToast({
+        title: "Could not change receiver KYC",
+        description: failure.error,
+        variant: "error",
+      });
+      // Put the toggle back where the chain has it, so the UI never shows a value
+      // that was never applied.
+      void refreshSecurityTokenGs();
+    } finally {
+      setKycFlagBusy(false);
+    }
+  };
 
   const validateForm = (): boolean => {
     const newErrors = {
@@ -1037,6 +1149,75 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
               </p>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Receiver-KYC control. Sets the on-chain flag via SetRequiresReceiverKyc —
+          it cannot be part of the mint tx, see applyReceiverKycFlag. */}
+      {isSecurityToken && securityTokenGs && (
+        <div className="px-4 py-3 bg-dark-900 rounded-lg border border-dark-700 space-y-2">
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={desiredReceiverKyc ?? securityTokenGs.requiresReceiverKyc}
+              onChange={(e) => setDesiredReceiverKyc(e.target.checked)}
+              disabled={kycFlagBusy || isBuilding || securityTokenGs.deactivated}
+              className="mt-1 h-4 w-4 shrink-0 accent-primary-500 cursor-pointer disabled:cursor-not-allowed"
+            />
+            <span>
+              <span className="block text-sm font-medium text-white">
+                Require receiver KYC
+              </span>
+              <span className="block text-xs text-dark-400 mt-1">
+                Currently{" "}
+                <span className="font-mono text-primary-400">
+                  {securityTokenGs.requiresReceiverKyc ? "on" : "off"}
+                </span>{" "}
+                on chain. When on, every mint and transfer destination must present a
+                membership proof against{" "}
+                <span className="font-mono text-primary-400">member_root_hash</span>.
+                Independent of the sender-side flag, which is currently{" "}
+                <span className="font-mono text-primary-400">
+                  {securityTokenGs.requiresSenderKyc ? "on" : "off"}
+                </span>
+                .
+              </span>
+            </span>
+          </label>
+
+          {receiverKycDirty && (
+            <div className="rounded border border-amber-700/50 bg-amber-900/20 p-3 text-xs text-amber-200 space-y-2">
+              <p>
+                This is a separate transaction, and it has to land before you mint. The
+                mint spends the global state under{" "}
+                <span className="font-mono">MintSecurity</span>, whose validator
+                requires the output datum to match the input with only{" "}
+                <span className="font-mono">mintable_amount</span> changed — so the flag
+                cannot ride along, and the mint builder reads the global state from
+                chain rather than from an unsubmitted transaction.
+              </p>
+              <Button
+                onClick={() => { void applyReceiverKycFlag(); }}
+                disabled={kycFlagBusy}
+                isLoading={kycFlagBusy}
+                className="text-xs h-7 px-3"
+              >
+                {kycFlagBusy
+                  ? "Applying…"
+                  : `Apply: turn receiver KYC ${desiredReceiverKyc ? "on" : "off"}`}
+              </Button>
+            </div>
+          )}
+
+          {kycFlagTxHash && !receiverKycDirty && (
+            <p className="text-xs text-green-400">
+              Applied on chain in{" "}
+              <span className="font-mono">{kycFlagTxHash.slice(0, 12)}…</span>
+            </p>
+          )}
+          {kycFlagError && (
+            <p className="text-xs text-red-400">{kycFlagError}</p>
+          )}
         </div>
       )}
 

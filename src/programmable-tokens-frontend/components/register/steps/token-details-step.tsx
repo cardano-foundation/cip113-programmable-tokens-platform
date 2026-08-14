@@ -10,11 +10,17 @@ interface TokenDetailsStepProps extends StepComponentProps<TokenDetailsData, Tok
 
 export function TokenDetailsStep({
   stepData,
+  wizardState,
   onDataChange,
   onComplete,
   onBack,
   isProcessing,
 }: TokenDetailsStepProps) {
+  // For the RWA/security-token flow this figure IS `initialMintQuantity` — the
+  // supply the registration transaction itself mints. Zero is meaningful there: it
+  // registers the policy structurally and leaves the first mint as a separate admin
+  // action. Every other flow mints unconditionally, so zero stays an error.
+  const allowsZeroSupply = wizardState?.flowId === 'security-token';
   const { connected, wallet } = useWallet();
   const [assetName, setAssetName] = useState(stepData.assetName || '');
   const [quantity, setQuantity] = useState(stepData.quantity || '');
@@ -69,8 +75,8 @@ export function TokenDetailsStep({
     if (!quantity.trim()) {
       newErrors.quantity = 'Quantity is required';
     } else if (!/^\d+$/.test(quantity)) {
-      newErrors.quantity = 'Quantity must be a positive number';
-    } else if (BigInt(quantity) <= 0) {
+      newErrors.quantity = 'Quantity must be a whole, non-negative number';
+    } else if (!allowsZeroSupply && BigInt(quantity) <= 0) {
       newErrors.quantity = 'Quantity must be greater than 0';
     }
 
@@ -179,7 +185,9 @@ export function TokenDetailsStep({
           placeholder="e.g., 1000000"
           disabled={isProcessing}
           error={errors.quantity}
-          helperText="Number of tokens to mint during registration"
+          helperText={allowsZeroSupply
+            ? 'Minted by the registration transaction itself. Enter 0 to register the policy only and mint later from the admin page.'
+            : 'Number of tokens to mint during registration'}
         />
 
         <Input

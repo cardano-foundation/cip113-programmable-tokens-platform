@@ -4,6 +4,7 @@ import com.bloxbean.cardano.client.exception.CborDeserializationException;
 import com.bloxbean.cardano.client.address.AddressProvider;
 import com.easy1staking.cardano.comparator.TransactionInputComparator;
 import org.cardanofoundation.conversions.CardanoConverters;
+import com.bloxbean.cardano.client.api.MinAdaCalculator;
 import com.bloxbean.cardano.client.api.util.ValueUtil;
 import com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
@@ -52,6 +53,7 @@ import org.cardanofoundation.cip113.repository.SecurityTokenDenylistEntryReposit
 import org.cardanofoundation.cip113.repository.SecurityTokenPowerUserRepository;
 import org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository;
 import org.cardanofoundation.cip113.service.AccountService;
+import org.cardanofoundation.cip113.service.HybridScriptSupplier;
 import org.cardanofoundation.cip113.service.HybridUtxoSupplier;
 import org.cardanofoundation.cip113.service.LinkedListService;
 import org.cardanofoundation.cip113.service.ProtocolScriptBuilderService;
@@ -143,6 +145,15 @@ public class SecurityTokenSubstandardHandler
     /** Hex of an empty (32-byte) MPF root: 32 zero bytes. */
     static final String EMPTY_ROOT_HEX = "0000000000000000000000000000000000000000000000000000000000000000";
 
+    /** Validity window granted to a member enrolled by the opt-in genesis allowlist
+     *  seed (one year).
+     *
+     *  <p>It is deliberately finite. Every membership proof clamps its transaction's
+     *  TTL to this expiry, so an unbounded grant would be an unbounded compliance
+     *  claim; when it lapses the issuer has to re-enroll the member through the normal
+     *  allowlist path, which is where a real KYC check belongs. */
+    private static final long GENESIS_SEEDED_MEMBERSHIP_MS = 365L * 24 * 60 * 60 * 1000L;
+
     private final SecurityTokenScriptBuilderService scriptBuilder;
     private final ProtocolScriptBuilderService protocolScriptBuilderService;
     private final SecurityTokenAllowlistService allowlistService;
@@ -157,8 +168,16 @@ public class SecurityTokenSubstandardHandler
     private final RegistryNodeParser registryNodeParser;
     private final LinkedListService linkedListService;
     private final HybridUtxoSupplier hybridUtxoSupplier;
+    /** Twin of {@link #hybridUtxoSupplier} for reference SCRIPTS. A reference script
+     *  lives in a transaction output and is resolved by hash through a
+     *  {@code ScriptSupplier}; the backend cannot answer for the unsubmitted outputs
+     *  this chain publishes, so the chain registers them here. */
+    private final HybridScriptSupplier hybridScriptSupplier;
     private final CustomStakeRegistrationRepository stakeRegistrationRepository;
     private final CardanoConverters cardanoConverters;
+    /** Used to size reference-script outputs with the ledger-exact min-UTxO formula
+     *  rather than a guessed constant (see {@link #buildPublishScriptsTransaction}). */
+    private final com.bloxbean.cardano.client.api.ProtocolParamsSupplier protocolParamsSupplier;
 
     @Setter
     private SecurityTokenContext context;
@@ -221,9 +240,15 @@ public class SecurityTokenSubstandardHandler
      *  uses. */
     public record RegistrationChainInputs(Utxo globalState,
                                           Utxo powerUserNode,
-                                          Utxo denylistCoveringNode) {
+                                          Utxo denylistCoveringNode,
+                                          /** The {@code minting_logic} + {@code global_state}
+                                           *  spend scripts published as reference scripts by
+                                           *  the preceding publish tx. Null falls back to
+                                           *  attaching both inline — which only fits when the
+                                           *  registration does NOT mint. */
+                                          PublishedRefScripts refScripts) {
         public static final RegistrationChainInputs NONE =
-                new RegistrationChainInputs(null, null, null);
+                new RegistrationChainInputs(null, null, null, null);
     }
 
     /** Chain-aware overload of {@link #buildRegistrationTransaction}.
@@ -658,6 +683,56 @@ public class SecurityTokenSubstandardHandler
                 }
             }
 
+            // 6c. Reference scripts. A registration that mints attaches five validators;
+            // inline they are 16 584 bytes against a 16 384-byte max-tx-size, so the two
+            // biggest MUST come from reference inputs or the transaction cannot exist.
+            // buildFullRegistrationChain publishes them in the phase before this one.
+            //
+            // Only the scripts this transaction actually RUNS are referenced: minting_logic
+            // is the reward validator on both paths, but the global_state spend exists only
+            // on the mint path (a structural registration references GlobalState rather than
+            // spending it). Referencing an unused script would buy a reference input and a
+            // tiered ref-script fee for nothing.
+            //
+            // When nothing was published (the standalone, non-chained call) both lists stay
+            // empty and every validator is attached inline exactly as before — which still
+            // fits, because a standalone registration is structural.
+            PublishedRefScripts publishedRefScripts = chained != null && chained.refScripts() != null
+                    ? chained.refScripts()
+                    : new PublishedRefScripts(null, null, null, null, null, null);
+            List<Utxo> refScriptUtxosInUse = new ArrayList<>();
+            List<PlutusScript> refScriptsInUse = new ArrayList<>();
+            if (publishedRefScripts.mintingLogicRefUtxo() != null) {
+                // Guard: the published script must BE the one this builder derived. Both are
+                // parameterised by (asset name, GS policy, registry policy, PU policy) and
+                // both derivations read from the same registration row, so a mismatch means
+                // the two halves of the chain disagree about the token — a reference input
+                // to the wrong script fails on chain as "script not found", with nothing in
+                // the message pointing at the cause.
+                if (!Arrays.equals(publishedRefScripts.mintingLogicScript().getScriptHash(),
+                        mintingLogicScript.getScriptHash())) {
+                    return TransactionContext.typedError(
+                            "published minting_logic reference script "
+                            + HexUtil.encodeHexString(publishedRefScripts.mintingLogicScript().getScriptHash())
+                            + " does not match the one this registration needs ("
+                            + HexUtil.encodeHexString(mintingLogicScript.getScriptHash()) + ")");
+                }
+                refScriptUtxosInUse.add(publishedRefScripts.mintingLogicRefUtxo());
+                refScriptsInUse.add(publishedRefScripts.mintingLogicScript());
+            }
+            if (willMint && publishedRefScripts.globalStateSpendRefUtxo() != null) {
+                if (!Arrays.equals(publishedRefScripts.globalStateSpendScript().getScriptHash(),
+                        mintGsSpendScript.getScriptHash())) {
+                    return TransactionContext.typedError(
+                            "published global_state spend reference script "
+                            + HexUtil.encodeHexString(publishedRefScripts.globalStateSpendScript().getScriptHash())
+                            + " does not match the one this registration needs ("
+                            + HexUtil.encodeHexString(mintGsSpendScript.getScriptHash()) + ")");
+                }
+                refScriptUtxosInUse.add(publishedRefScripts.globalStateSpendRefUtxo());
+                refScriptsInUse.add(publishedRefScripts.globalStateSpendScript());
+            }
+
             Tx tx = new Tx()
                     .collectFrom(feePayerUtxos)
                     .collectFrom(directoryUtxo, ConstrPlutusData.of(0))
@@ -723,6 +798,13 @@ public class SecurityTokenSubstandardHandler
                 regRefInputs.add(txInputOf(mintDenylistNode));
             } else {
                 regRefInputs.add(txInputOf(gsUtxoForRegistration));
+            }
+            // Reference-script inputs, when the chain published them. They carry no datum
+            // and are never named by a redeemer, but they DO join the same lex-sorted list,
+            // so they shift every index the redeemer computes below. That is why they are
+            // added here, before the sort, rather than tacked on at readFrom() time.
+            for (Utxo refScriptUtxo : refScriptUtxosInUse) {
+                regRefInputs.add(txInputOf(refScriptUtxo));
             }
             List<TransactionInput> regRefInputsSorted = regRefInputs.stream()
                     .sorted(new TransactionInputComparator()).toList();
@@ -799,6 +881,23 @@ public class SecurityTokenSubstandardHandler
                         }
                     })
                     .ignoreScriptCostEvaluationError(false);
+            if (!refScriptsInUse.isEmpty()) {
+                // The validators are still ATTACHED above, because attaching is how
+                // cardano-client binds a redeemer to a script. This pair then moves them
+                // out of the witness set.
+                //
+                // withReferenceScripts declares what the reference inputs carry, so the
+                // Conway tiered ref-script fee is charged and the cost-model languages are
+                // right, WITHOUT ReferenceScriptResolver having to fetch them — it could
+                // not, the publishing transaction is unsubmitted.
+                // removeDuplicateScriptWitnesses then drops exactly those hashes from the
+                // witness set. It defaults to FALSE, so omitting it would leave both copies
+                // in the transaction: over max-tx-size, and rejected by the ledger as
+                // ExtraneousScriptWitnessesUTXOW.
+                txContext = txContext
+                        .withReferenceScripts(refScriptsInUse.toArray(new PlutusScript[0]))
+                        .removeDuplicateScriptWitnesses(true);
+            }
             if (willMint) {
                 // verify_membership_proof (lib/kyc/verify.ak:137-142) needs a Finite upper
                 // bound <= proof.valid_until_ms; an unbounded tx fails that clause no
@@ -1828,6 +1927,42 @@ public class SecurityTokenSubstandardHandler
             PlutusScript powerUsersSpendScript = scriptBuilder.buildPowerUsersSpendScript(globalStatePolicyId, powerUsersPolicyId);
             Address powerUsersSpendAddress = AddressProvider.getEntAddress(powerUsersSpendScript, network.getCardanoNetwork());
 
+            // 4b. OPT-IN genesis allowlist seed. Off by default; when off, member_root_hash
+            // stays empty exactly as before and nothing below runs.
+            //
+            // With requires_receiver_kyc on, an empty root makes a first mint unbuildable
+            // for any ordinary recipient (verify_mint_destinations wants a membership proof
+            // and there is no root to prove against), and the self-mint exemption cannot
+            // rescue it: that exemption compares the recipient's STAKE credential against
+            // the power-user node key, which this chain sets from the wallet's PAYMENT key
+            // hash. Publishing a root beforehand is impossible — UpdateMemberRootHash is a
+            // GlobalState spend and the GlobalState UTxO is created by THIS transaction.
+            // Seeding the root here is the only ordering that works.
+            //
+            // COMPLIANCE: this enrolls the recipient in the KYC allowlist on the issuer's
+            // say-so, with no KYC process behind it, and the resulting root is what every
+            // later transfer proves membership against — not just this mint.
+            byte[] seededMemberPkh = null;
+            long seededMemberValidUntilMs = 0L;
+            byte[] genesisMemberRootHash = new byte[0];
+            if (request.isSeedRecipientInAllowlistAtGenesis()) {
+                String seedRecipient = (request.getRecipientAddress() == null
+                        || request.getRecipientAddress().isBlank())
+                        ? adminAddress : request.getRecipientAddress();
+                seededMemberPkh = new Address(seedRecipient).getDelegationCredentialHash()
+                        .orElseThrow(() -> new BuildPreconditionException(
+                                "seedRecipientInAllowlistAtGenesis needs a base address with a stake "
+                                + "credential (the allowlist is keyed on the STAKE credential under "
+                                + "the CIP-113 address model), got " + seedRecipient));
+                seededMemberValidUntilMs = System.currentTimeMillis() + GENESIS_SEEDED_MEMBERSHIP_MS;
+                genesisMemberRootHash = allowlistService
+                        .rootForSingleMember(seededMemberPkh, seededMemberValidUntilMs);
+                log.warn("security-token genesis: OPT-IN allowlist seed enabled — enrolling stake "
+                         + "credential {} with NO KYC verification, member_root_hash={}",
+                        HexUtil.encodeHexString(seededMemberPkh),
+                        HexUtil.encodeHexString(genesisMemberRootHash));
+            }
+
             // 4. Build the initial datums.
             PlutusData gsDatum = buildInitialGlobalStateDatum(
                     adminPkh, powerUsersPolicyId, denylistPolicyId,
@@ -1835,7 +1970,8 @@ public class SecurityTokenSubstandardHandler
                     request.isRequiresSenderKyc(),
                     request.isRequiresReceiverKyc(),
                     kycNetworkId(),
-                    request.getInitialTrustedEntityVkeys());
+                    request.getInitialTrustedEntityVkeys(),
+                    genesisMemberRootHash);
             PlutusData linkedListRootDatum = buildLinkedListRootDatum();
 
             // 5. Build the values for the three NFT outputs.
@@ -1937,9 +2073,36 @@ public class SecurityTokenSubstandardHandler
                     // to cause currentRoot()-for-empty-trie to falsely diverge
                     // from the recorded on-chain value, triggering phantom
                     // publishes of 0x0000…0000 into the GS datum.
-                    .memberRootHashOnchain("")
-                    .memberRootHashLocal("")
+                    .memberRootHashOnchain(HexUtil.encodeHexString(genesisMemberRootHash))
+                    .memberRootHashLocal(HexUtil.encodeHexString(genesisMemberRootHash))
                     .build());
+
+            // 7b. The opt-in genesis allowlist seed, now that the row its leaves hang off
+            // exists. seedPublishedMember also marks the leaf PUBLISHED — inclusionProof
+            // proves against published leaves only (that is the trie whose root matches the
+            // chain), and this member's publishing transaction IS the genesis transaction,
+            // so no UpdateMemberRootHash will ever come along to mark it.
+            if (seededMemberPkh != null) {
+                allowlistService.seedPublishedMember(
+                        issuancePolicyId, seededMemberPkh, seededMemberValidUntilMs);
+                byte[] persistedRoot = allowlistService.currentRoot(issuancePolicyId);
+                if (!Arrays.equals(persistedRoot, genesisMemberRootHash)) {
+                    // The datum is already sealed into the built transaction at this point,
+                    // so a divergence here means every later membership proof would be
+                    // rejected as root drift. Fail the build rather than emit a token whose
+                    // allowlist can never verify.
+                    return TransactionContext.typedError(
+                            "genesis allowlist seed produced root "
+                            + HexUtil.encodeHexString(persistedRoot)
+                            + " in the database but " + HexUtil.encodeHexString(genesisMemberRootHash)
+                            + " was written into the global-state datum — refusing to register a "
+                            + "token whose membership proofs could never verify. The usual cause is "
+                            + "leftover allowlist leaves for policy " + issuancePolicyId
+                            + " from an earlier aborted registration: the datum root is computed over "
+                            + "the single seeded member, the database root over every leaf. Clear "
+                            + "them and retry.");
+                }
+            }
 
             // 8. Auto-seed the bootstrap power-user DB row so the admin sees themselves
             // immediately on the admin page. The matching on-chain AddPowerUser tx is
@@ -2006,7 +2169,8 @@ public class SecurityTokenSubstandardHandler
             boolean requiresSenderKyc,
             boolean requiresReceiverKyc,
             int networkId,
-            List<String> initialTrustedEntityVkeys) {
+            List<String> initialTrustedEntityVkeys,
+            byte[] memberRootHash) {
         // Build trusted_entity_vkeys as a sorted MapPlutusData with each
         // 32-byte vkey → unit metadata (Constr 0 []). Sorting by vkey bytes
         // matches BaFin's on-chain invariant — verify_kyc_proof + AddTrusted
@@ -2038,7 +2202,10 @@ public class SecurityTokenSubstandardHandler
                 BytesPlutusData.of(HexUtil.decodeHexString(denylistPolicyId)),    // denylist_linked_list_policy_id
                 ConstrPlutusData.of(0),                                           // security_info = Unit (Data placeholder)
                 trustedMap,                                                       // trusted_entity_vkeys
-                BytesPlutusData.of(new byte[0]),                                  // member_root_hash = empty (matches upstream E2ETest)
+                // member_root_hash. Empty by default (matches upstream E2ETest and the
+                // long-proven path); non-empty only when the caller opted into the genesis
+                // allowlist seed, in which case it is the MPF root over that one member.
+                BytesPlutusData.of(memberRootHash == null ? new byte[0] : memberRootHash),
                 ConstrPlutusData.of(requiresSenderKyc ? 1 : 0),                   // requires_sender_kyc
                 ConstrPlutusData.of(requiresReceiverKyc ? 1 : 0),                 // requires_receiver_kyc
                 BigIntPlutusData.of(BigInteger.valueOf(networkId))                // network_id
@@ -2637,13 +2804,255 @@ public class SecurityTokenSubstandardHandler
         }
     }
 
-    /** Result of {@link #buildFullRegistrationChain}: three unsigned tx CBORs that
+    // ── Reference-script publishing ──────────────────────────────────────────
+
+    /** The two per-token scripts the registration transaction reads from reference
+     *  inputs instead of carrying inline, plus the UTxOs that hold them.
+     *
+     *  <p>{@code refUtxo}s carry {@code referenceScriptHash} so
+     *  {@link HybridUtxoSupplier} + {@link HybridScriptSupplier} can resolve them
+     *  while the publishing transaction is still unsubmitted. */
+    public record PublishedRefScripts(String cborHex,
+                                      String txHash,
+                                      PlutusScript mintingLogicScript,
+                                      Utxo mintingLogicRefUtxo,
+                                      PlutusScript globalStateSpendScript,
+                                      Utxo globalStateSpendRefUtxo) {
+
+        /** The reference inputs the registration tx must read. */
+        public List<Utxo> refUtxos() {
+            List<Utxo> out = new ArrayList<>();
+            if (mintingLogicRefUtxo != null) out.add(mintingLogicRefUtxo);
+            if (globalStateSpendRefUtxo != null) out.add(globalStateSpendRefUtxo);
+            return out;
+        }
+
+        public List<PlutusScript> scripts() {
+            List<PlutusScript> out = new ArrayList<>();
+            if (mintingLogicScript != null) out.add(mintingLogicScript);
+            if (globalStateSpendScript != null) out.add(globalStateSpendScript);
+            return out;
+        }
+    }
+
+    /** Publish {@code minting_logic_script} and {@code global_state} spend as
+     *  REFERENCE SCRIPTS, so the registration transaction can name them by
+     *  {@code TransactionInput} rather than carry 11 394 bytes of them inline.
+     *
+     *  <h3>Why this transaction has to exist</h3>
+     *  A registration that also mints attaches five validators inline:
+     *  <pre>
+     *    7211  minting_logic       (reward validator, per token)
+     *    4183  global_state spend  (per token)
+     *    1928  registry_mint       (CIP-113 core)
+     *    1722  issuance_mint       (per token, but small)
+     *    1540  registry_spend      (CIP-113 core)
+     *   -----
+     *   16584  &gt; 16384 max-tx-size, before datums, outputs or witnesses
+     *  </pre>
+     *  That is structurally over budget, not marginally: no fee tuning or output
+     *  trimming recovers 200 bytes plus the ~5 KB the rest of the transaction needs.
+     *  Publishing the two dominant scripts drops the inline total to 5190 bytes.
+     *
+     *  <p>The CIP-113 core does exactly this for PLB/PLG/unfracking, published once
+     *  at protocol deployment and referenced from
+     *  {@code protocol-bootstraps-&lt;network&gt;.json}. These two cannot follow that
+     *  pattern: both are parameterised per token (security asset name, GS policy,
+     *  registry policy, power-users policy — and the GS spend additionally by the
+     *  issuance policy that derives from the minting logic), so their hashes do not
+     *  exist until this token's genesis transaction has picked its bootstrap UTxO.
+     *  They therefore have to be published per registration, in their own
+     *  transaction: genesis already carries ~9.4 KB of inline minting scripts and
+     *  cannot also carry ~11.4 KB of reference-script outputs.
+     *
+     *  <p>{@code registry_mint} / {@code registry_spend} are deliberately left
+     *  inline. They are protocol-global rather than per-token, so their proper home
+     *  is the protocol deployment's reference-script set, not a per-token publish;
+     *  paying ~15 ADA of min-UTxO per registration to duplicate them would be waste,
+     *  and 5190 bytes inline leaves ~11 KB of headroom in the registration tx.
+     *
+     *  <h3>Where the outputs go</h3>
+     *  To the fee payer's ENTERPRISE address — same payment credential, so the admin
+     *  can still spend them and recover the ~51 ADA of min-UTxO once the token is
+     *  registered, but a distinct address from the base address every other builder
+     *  funds itself from. That separation is load-bearing twice over: the
+     *  registration builder picks its funding input by scanning the chaining tx for
+     *  an output at the fee-payer address, and {@link AccountService#findAdaOnlyUtxo}
+     *  queries by address — either would happily consume a reference-script UTxO and
+     *  destroy it.
+     *
+     *  <p>Amounts come from {@link MinAdaCalculator} against the live protocol
+     *  params, with the real address and the real script attached, so the figure is
+     *  the ledger's own (160 + serSize) * coinsPerUtxoByte rather than a guess. */
+    public TransactionContext<PublishedRefScripts> buildPublishScriptsTransaction(
+            String feePayerAddress,
+            PlutusScript mintingLogicScript,
+            PlutusScript globalStateSpendScript,
+            Utxo funding) {
+        try {
+            Credential feePayerPaymentCred = new Address(feePayerAddress).getPaymentCredential()
+                    .orElseThrow(() -> new BuildPreconditionException(
+                            "fee payer address has no payment credential: " + feePayerAddress));
+            String refScriptAddress = AddressProvider
+                    .getEntAddress(feePayerPaymentCred, network.getCardanoNetwork()).getAddress();
+
+            var protocolParams = protocolParamsSupplier.getProtocolParams();
+            MinAdaCalculator minAda = new MinAdaCalculator(protocolParams);
+
+            List<PlutusScript> toPublish = List.of(mintingLogicScript, globalStateSpendScript);
+            List<BigInteger> coins = new ArrayList<>();
+            for (PlutusScript script : toPublish) {
+                TransactionOutput candidate = TransactionOutput.builder()
+                        .address(refScriptAddress)
+                        .value(Value.builder().coin(MinAdaCalculator.DUMMY_COIN_VAL).build())
+                        .scriptRef(script)
+                        .build();
+                // Small flat buffer over the ledger-exact minimum, then round up to a whole
+                // ADA. The calculation is already exact (real params, real address, real
+                // script), so it only needs to absorb the few-byte CBOR-width slack between
+                // DUMMY_COIN_VAL and the real coin.
+                BigInteger exact = minAda.calculateMinAda(candidate);
+                BigInteger coin = exact.add(BigInteger.valueOf(1_000_000L));
+                coin = coin.add(BigInteger.valueOf(999_999L))
+                        .divide(BigInteger.valueOf(1_000_000L))
+                        .multiply(BigInteger.valueOf(1_000_000L));
+                log.info("publishScripts: script {} is {} bytes, min-utxo {} lovelace, using {}",
+                        HexUtil.encodeHexString(script.getScriptHash()),
+                        script.serializeScriptBody().length, exact, coin);
+                coins.add(coin);
+            }
+
+            // Refuse rather than let the balancer top up. collectFrom() names one input,
+            // but if it does not cover the outputs plus the fee cardano-client reaches for
+            // more UTxOs at the sender address — and inside a chain those are the ON-CHAIN
+            // ones, including the bootstrap UTxO the unsubmitted genesis tx is already
+            // spending. That produces a chain whose third transaction double-spends its
+            // first, and it would only surface at submit time.
+            BigInteger fundingLovelace = funding.getAmount().stream()
+                    .filter(a -> "lovelace".equals(a.getUnit()))
+                    .map(Amount::getQuantity)
+                    .reduce(BigInteger.ZERO, BigInteger::add);
+            BigInteger needed = coins.get(0).add(coins.get(1))
+                    .add(BigInteger.valueOf(2_000_000L))   // fee headroom
+                    .add(BigInteger.valueOf(1_000_000L));  // min-utxo for the change output
+            if (fundingLovelace.compareTo(needed) < 0) {
+                return TransactionContext.typedError(
+                        "publishScripts: the funding UTxO holds " + fundingLovelace
+                        + " lovelace but publishing minting_logic + global_state as reference "
+                        + "scripts needs at least " + needed
+                        + " (their min-UTxO plus fee and change). Top up the admin wallet; a "
+                        + "registration that carries a first mint cannot be built without them.");
+            }
+
+            // from() as well as collectFrom(): this is the only transaction the chain builds
+            // that runs no script at all, and cardano-client's Tx demands an explicit sender
+            // whenever there are no script intents to infer one from.
+            Tx tx = new Tx()
+                    .from(feePayerAddress)
+                    .collectFrom(List.of(funding))
+                    .payToAddress(refScriptAddress, Amount.lovelace(coins.get(0)), mintingLogicScript)
+                    .payToAddress(refScriptAddress, Amount.lovelace(coins.get(1)), globalStateSpendScript)
+                    .withChangeAddress(feePayerAddress);
+
+            Transaction transaction = quickTxBuilder.compose(tx)
+                    .feePayer(feePayerAddress)
+                    .mergeOutputs(false)
+                    .build();
+            String txHash = TransactionUtil.getTxHash(transaction.serialize());
+
+            // Locate the two reference-script outputs by the script hash the builder
+            // actually wrote, never by a hard-coded index: the balancer inserts the change
+            // output and cardano-client has moved it between first and last across
+            // versions. A misidentified output here would put a *spendable* UTxO in the
+            // registration tx's reference inputs and the script would simply not resolve.
+            Utxo mintingLogicRef = findRefScriptOutput(transaction, txHash, mintingLogicScript);
+            Utxo gsSpendRef = findRefScriptOutput(transaction, txHash, globalStateSpendScript);
+            if (mintingLogicRef == null || gsSpendRef == null) {
+                return TransactionContext.typedError(
+                        "publishScripts: could not locate the reference-script outputs in the "
+                        + "built transaction (mintingLogic=" + (mintingLogicRef != null)
+                        + ", globalStateSpend=" + (gsSpendRef != null) + ")");
+            }
+
+            log.info("publishScripts: tx {} publishes minting_logic at {}:{} and global_state spend at {}:{}",
+                    txHash, txHash, mintingLogicRef.getOutputIndex(), txHash, gsSpendRef.getOutputIndex());
+
+            return TransactionContext.ok(transaction.serializeToHex(), new PublishedRefScripts(
+                    transaction.serializeToHex(), txHash,
+                    mintingLogicScript, mintingLogicRef,
+                    globalStateSpendScript, gsSpendRef));
+        } catch (BuildPreconditionException bpe) {
+            return TransactionContext.typedError(bpe.getMessage());
+        } catch (Exception e) {
+            log.error("security-token publish-scripts failed", e);
+            return TransactionContext.typedError("publish reference scripts failed: " + e.getMessage());
+        }
+    }
+
+    /** Serialized size of {@code tx}, refusing it when it does not fit the ledger's
+     *  {@code maxTxSize}.
+     *
+     *  <p>Nothing in cardano-client checks this: the builder happily produces an
+     *  over-budget transaction and the evaluator happily scores it, so the first
+     *  sign of trouble is a rejection at submit — after the earlier links of a
+     *  mempool-chain have already been broadcast. Checking here turns that into a
+     *  build-time refusal that names the transaction and its size. */
+    private int checkedTxSize(String label, Transaction tx) throws Exception {
+        int size = tx.serialize().length;
+        long maxTxSize = 16384L;
+        try {
+            var pp = protocolParamsSupplier.getProtocolParams();
+            if (pp != null && pp.getMaxTxSize() != null) {
+                maxTxSize = pp.getMaxTxSize();
+            }
+        } catch (Exception e) {
+            log.debug("could not read maxTxSize from protocol params, using {}: {}", maxTxSize, e.toString());
+        }
+        log.info("chain[{}] serialized size = {} bytes (max {})", label, size, maxTxSize);
+        if (size > maxTxSize) {
+            throw new BuildPreconditionException(
+                    "the " + label + " transaction is " + size + " bytes, over the ledger's "
+                    + maxTxSize + "-byte maximum. It would be rejected at submit, after the "
+                    + "earlier transactions in the chain had already been broadcast.");
+        }
+        return size;
+    }
+
+    /** Find the output of {@code tx} whose reference script is {@code script}, as a
+     *  {@link Utxo} carrying {@code referenceScriptHash} — which is the field both
+     *  {@code AikenTransactionEvaluator} and cardano-client's fee calculator key on
+     *  when they ask a {@code ScriptSupplier} for the script bytes. */
+    private static Utxo findRefScriptOutput(Transaction tx, String txHash, PlutusScript script)
+            throws Exception {
+        byte[] wantedRefBytes = script.scriptRefBytes();
+        String scriptHashHex = HexUtil.encodeHexString(script.getScriptHash());
+        List<TransactionOutput> outputs = tx.getBody().getOutputs();
+        for (int i = 0; i < outputs.size(); i++) {
+            TransactionOutput out = outputs.get(i);
+            if (out.getScriptRef() == null) continue;
+            if (!Arrays.equals(out.getScriptRef(), wantedRefBytes)) continue;
+            return Utxo.builder()
+                    .address(out.getAddress())
+                    .txHash(txHash)
+                    .outputIndex(i)
+                    .amount(ValueUtil.toAmountList(out.getValue()))
+                    .referenceScriptHash(scriptHashHex)
+                    .build();
+        }
+        return null;
+    }
+
+    /** Result of {@link #buildFullRegistrationChain}: the unsigned tx CBORs that
      *  the frontend signs in a single CIP-30 {@code signTxs} call and submits
      *  via {@code POST /issue-token/submit-chain} so the wallet's submission
      *  backend never sees the chain (which would reject mempool-chained txs). */
     public record ChainBuildResult(
             String genesisCborHex,
             String addPowerUserCborHex,
+            /** Publishes {@code minting_logic} + {@code global_state} spend as reference
+             *  scripts. Without it the registration tx cannot fit under max-tx-size when
+             *  it carries a first mint — see {@link #buildPublishScriptsTransaction}. */
+            String publishScriptsCborHex,
             String registrationCborHex,
             /** Conway RegCert for the BaFin transfer_logic_script stake
              *  credential — published in the same CIP-103 batch so the user
@@ -2657,6 +3066,7 @@ public class SecurityTokenSubstandardHandler
             String powerUsersPolicyId,
             String genesisTxHash,
             String addPowerUserTxHash,
+            String publishScriptsTxHash,
             String registrationTxHash,
             String registerTransferLogicTxHash) {}
 
@@ -2836,7 +3246,13 @@ public class SecurityTokenSubstandardHandler
                 // which compares the recipient's STAKE credential against the
                 // power-user node key.
                 if (request.isRequiresReceiverKyc()) {
-                    if (!Arrays.equals(recipientStakeHash, HexUtil.decodeHexString(bootstrapPkh))) {
+                    // …unless the caller opted into the genesis allowlist seed, which writes
+                    // a real member_root_hash covering exactly this recipient into the same
+                    // genesis datum. That makes the ordinary Membership proof path
+                    // satisfiable, at the cost of asserting a KYC status nobody checked —
+                    // see SecurityTokenRegisterRequest#seedRecipientInAllowlistAtGenesis.
+                    if (!request.isSeedRecipientInAllowlistAtGenesis()
+                            && !Arrays.equals(recipientStakeHash, HexUtil.decodeHexString(bootstrapPkh))) {
                         return TransactionContext.typedError(
                                 "cannot mint at registration while requiresReceiverKyc is on. The "
                                 + "minting logic demands a KYC membership proof against the global "
@@ -2868,6 +3284,7 @@ public class SecurityTokenSubstandardHandler
             Transaction genesisTx = Transaction.deserialize(HexUtil.decodeHexString(genesisCbor));
             String genesisTxHash = TransactionUtil
                     .getTxHash(genesisTx.serialize());
+            checkedTxSize("genesis", genesisTx);
             String progTokenPolicyId = genesisResult.metadata() != null
                     ? genesisResult.metadata().policyId() : null;
             if (progTokenPolicyId == null) {
@@ -2947,6 +3364,7 @@ public class SecurityTokenSubstandardHandler
             Transaction addPuTx = Transaction.deserialize(HexUtil.decodeHexString(addPuCbor));
             String addPuTxHash = TransactionUtil
                     .getTxHash(addPuTx.serialize());
+            checkedTxSize("addPowerUser", addPuTx);
 
             // Find AddPowerUser's admin change output to fund the registration tx.
             Utxo addPuChange = findOutputAtAddress(addPuTx, addPuTxHash, adminAddress,
@@ -2956,6 +3374,66 @@ public class SecurityTokenSubstandardHandler
                         "chain[addPowerUser]: no admin change output found to fund registration tx");
             }
             hybridUtxoSupplier.add(addPuChange);
+
+            // ── PHASE 2.5 ─ Publish the two big per-token scripts ──────────
+            // The registration tx attaches five validators inline; minting_logic (7211 B)
+            // and the global_state spend (4183 B) alone are 11 394 of the 16 384-byte
+            // max-tx-size, and the full set is 16 584 — over budget before a single datum,
+            // output or witness. Publishing those two as reference scripts leaves 5190 B
+            // inline. See buildPublishScriptsTransaction for the full reasoning.
+            //
+            // ORDERING. This has to sit after genesis (both scripts are parameterised by
+            // policy ids genesis derives from its bootstrap UTxO, so their hashes do not
+            // exist earlier) and before registration (which reads them). Putting it after
+            // AddPowerUser rather than before is what keeps phases 1 and 2 byte-identical
+            // to the proven chain: only the registration tx's funding input moves, from
+            // AddPowerUser's change to this tx's change.
+            //
+            // Both scripts are already built above, for the address derivations.
+            //
+            // ONLY ON THE MINT PATH. A structural registration attaches minting_logic,
+            // registry_mint and registry_spend and comes to ~10.7 KB, which fits — it is
+            // the first mint that adds the global_state spend and issuance_mint and takes
+            // the total to 16 584. Publishing there anyway would cost ~55 ADA of min-UTxO
+            // and a fifth signature to reference scripts nothing in that chain needs, and
+            // would move the proven zero-mint chain off its byte-frozen shape for no gain.
+            PublishedRefScripts published = null;
+            String publishCbor = null;
+            String publishTxHash = null;
+            Utxo publishChange = null;
+            if (chainWillMint) {
+                TransactionContext<PublishedRefScripts> publishResult = buildPublishScriptsTransaction(
+                        adminAddress, mintingLogicScript, gsSpendScript, addPuChange);
+                if (!publishResult.isSuccessful()) {
+                    return TransactionContext.typedError("chain[publishScripts]: " + publishResult.error());
+                }
+                published = publishResult.metadata();
+                publishCbor = published.cborHex();
+                publishTxHash = published.txHash();
+                Transaction publishTx = Transaction.deserialize(HexUtil.decodeHexString(publishCbor));
+                checkedTxSize("publishScripts", publishTx);
+
+                // The reference-script UTxOs must be resolvable while this tx is unsubmitted:
+                // the utxo supplier answers "what is at this output reference" (and carries
+                // the referenceScriptHash), the script supplier answers "what script is that
+                // hash". Both are consulted by AikenTransactionEvaluator and by the fee
+                // calculator; without the pair the local evaluator errors and the app's
+                // three-tier evaluator quietly fabricates ex-units instead.
+                published.refUtxos().forEach(hybridUtxoSupplier::add);
+                published.scripts().forEach(hybridScriptSupplier::add);
+
+                publishChange = findOutputAtAddress(publishTx, publishTxHash, adminAddress,
+                        BigInteger.valueOf(5_000_000L));
+                if (publishChange == null) {
+                    return TransactionContext.typedError(
+                            "chain[publishScripts]: no admin change output >= 5 ADA left to fund the "
+                            + "registration tx. Publishing minting_logic + global_state costs about "
+                            + "55 ADA of min-UTxO (reclaimable — the outputs sit at the admin's own "
+                            + "enterprise address), so a registration that carries a first mint needs "
+                            + "that much more in the admin wallet than a structural one.");
+                }
+                hybridUtxoSupplier.add(publishChange);
+            }
 
             // ── PHASE 3 ─ Build the registration tx ────────────────────────
             // A registration does NOT have to mint. `registry_mint`'s RegistryInsert is
@@ -2970,7 +3448,12 @@ public class SecurityTokenSubstandardHandler
             // GS under MintSecurity in the same tx, which decrements mintable_amount.
             // firstMintQuantity / chainWillMint were parsed and validated in PHASE 0,
             // before any DB row existed.
-            request.setChainingTransactionCborHex(addPuCbor);
+            // On the mint path funding now comes from the publish tx's change rather than
+            // AddPowerUser's — the publish tx spent that one. The reference-script outputs
+            // it also created sit at the admin's ENTERPRISE address precisely so this scan
+            // (which matches on the fee-payer address) cannot pick one of them as a funding
+            // input and destroy the reference script.
+            request.setChainingTransactionCborHex(chainWillMint ? publishCbor : addPuCbor);
             request.setQuantity(firstMintQuantity);
             request.setGlobalStatePolicyId(reg.getGlobalStatePolicyId());
 
@@ -3000,7 +3483,8 @@ public class SecurityTokenSubstandardHandler
 
             TransactionContext<RegistrationResult> regResult =
                     buildRegistrationTransaction(request, protocolParams,
-                            new RegistrationChainInputs(chainedGsUtxo, chainedPuNode, chainedDenylistRoot));
+                            new RegistrationChainInputs(chainedGsUtxo, chainedPuNode,
+                                    chainedDenylistRoot, published));
             if (!regResult.isSuccessful()) {
                 return TransactionContext.typedError("chain[registration]: " + regResult.error());
             }
@@ -3008,6 +3492,7 @@ public class SecurityTokenSubstandardHandler
             Transaction regTx = Transaction.deserialize(HexUtil.decodeHexString(regCbor));
             String regTxHash = TransactionUtil
                     .getTxHash(regTx.serialize());
+            checkedTxSize("registration", regTx);
 
             // ── PHASE 4 ─ Register transferLogic stake credential ─────────
             // BaFin's transfer_logic_script needs its script-stake credential
@@ -3042,6 +3527,7 @@ public class SecurityTokenSubstandardHandler
                     Transaction certTx = Transaction.deserialize(HexUtil.decodeHexString(certCbor));
                     certTxHash = TransactionUtil
                             .getTxHash(certTx.serialize());
+                    checkedTxSize("registerTransferLogic", certTx);
                     log.info("chain[registerTransferLogic] built cert tx {} (chain length: 4)", certTxHash);
                 } else {
                     log.warn("chain[registerTransferLogic] failed (chain will return 3 txs; "
@@ -3053,18 +3539,20 @@ public class SecurityTokenSubstandardHandler
             }
 
             return TransactionContext.ok(null, new ChainBuildResult(
-                    genesisCbor, addPuCbor, regCbor, certCbor,
+                    genesisCbor, addPuCbor, publishCbor, regCbor, certCbor,
                     reg.getGlobalStatePolicyId(), progTokenPolicyId,
                     reg.getDenylistPolicyId(), reg.getPowerUsersPolicyId(),
-                    genesisTxHash, addPuTxHash, regTxHash, certTxHash));
+                    genesisTxHash, addPuTxHash, publishTxHash, regTxHash, certTxHash));
         } catch (Exception e) {
             log.error("security-token chain build failed", e);
             return TransactionContext.typedError("chain build failed: " + e.getMessage());
         } finally {
-            // Single exit point for the mempool-UTxO scratchpad. Previously each of
-            // the early returns had to remember its own clear() and the catch block
-            // was the only net; the mint path added five more ways to bail out.
+            // Single exit point for the mempool scratchpads. Previously each of the early
+            // returns had to remember its own clear() and the catch block was the only
+            // net; the mint path added five more ways to bail out. The script supplier
+            // has the same thread-local contract as the utxo supplier.
             hybridUtxoSupplier.clear();
+            hybridScriptSupplier.clear();
         }
     }
 

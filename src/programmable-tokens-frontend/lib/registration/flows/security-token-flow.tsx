@@ -21,28 +21,39 @@ import { SuccessStep } from '@/components/register/steps/success-step';
 
 function SecurityTokenSuccessStep(props: StepComponentProps) {
   // The chained kyc-config step does everything (genesis + AddPowerUser +
-  // registration) and writes the chain's metadata to its own result.data.
+  // [publishScripts] + registration + [transferLogic cert]) and writes the chain's
+  // metadata to its own result.data.
   const chainResult = props.wizardState.stepStates['kyc-config']?.result?.data as {
     globalStatePolicyId?: string;
     programmableTokenPolicyId?: string;
     denylistPolicyId?: string;
     powerUsersPolicyId?: string;
     chainTxHashes?: string[];
+    chainTxHashesByName?: Record<string, string | undefined>;
+    initialMintQuantity?: string;
   } | undefined;
+
+  // Read the hashes BY NAME. They used to be indexed positionally
+  // (chainTxHashes[0|1|2]), which quietly mislabelled every one of them as soon as
+  // an optional transaction was inserted before the registration — which is exactly
+  // what publishScripts does on the mint path.
+  const byName = chainResult?.chainTxHashesByName;
 
   const enhancedResult = props.wizardState.finalResult || {
     policyId: chainResult?.programmableTokenPolicyId || '',
-    txHash: chainResult?.chainTxHashes?.[2] || '',  // registration tx hash
+    txHash: byName?.registration || '',
     substandardId: 'security-token',
     assetName: '',
-    quantity: '',
+    quantity: chainResult?.initialMintQuantity || '',
     metadata: {
       globalStatePolicyId: chainResult?.globalStatePolicyId,
       denylistPolicyId: chainResult?.denylistPolicyId,
       powerUsersPolicyId: chainResult?.powerUsersPolicyId,
-      genesisTxHash: chainResult?.chainTxHashes?.[0],
-      addPowerUserTxHash: chainResult?.chainTxHashes?.[1],
-      registrationTxHash: chainResult?.chainTxHashes?.[2],
+      genesisTxHash: byName?.genesis,
+      addPowerUserTxHash: byName?.addPowerUser,
+      publishScriptsTxHash: byName?.publishScripts,
+      registrationTxHash: byName?.registration,
+      registerTransferLogicTxHash: byName?.registerTransferLogic,
     },
   };
 
@@ -79,7 +90,7 @@ const securityTokenFlow: RegistrationFlow = {
     {
       id: 'kyc-config',
       title: 'Configure & Register',
-      description: 'Configure the Trusted Entity List, then build + sign + submit the full registration chain (genesis + AddPowerUser + registration) in one wallet popup',
+      description: 'Configure the Trusted Entity List, then build + sign + submit the full registration chain (genesis + AddPowerUser + publish reference scripts + registration + transfer-logic cert) in one wallet popup',
       requiresWalletSign: true,
       component: KycConfigStep as React.ComponentType<StepComponentProps<unknown, unknown>>,
     },

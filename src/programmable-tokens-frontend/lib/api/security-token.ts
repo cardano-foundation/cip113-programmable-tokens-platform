@@ -109,6 +109,22 @@ export interface SecurityTokenInitRequest {
    *  so KYC proofs issued here verify on chain without a separate
    *  AddTrustedEntity update tx beforehand. */
   initialTrustedEntityVkeys?: string[];
+  /** OPT-IN. Seed the compliance allowlist at genesis with the recipient's stake
+   *  credential and write the resulting MPF root into the GlobalState datum's
+   *  member_root_hash.
+   *
+   *  Without it, `requiresReceiverKyc: true` and a non-zero initialMintQuantity are
+   *  mutually exclusive for any ordinary recipient: the minting logic wants a
+   *  membership proof, genesis writes the root empty, and no root can be published
+   *  beforehand (publishing one is a GlobalState spend, and GlobalState is created by
+   *  genesis). The contract's self-mint exemption does not rescue it either — it
+   *  compares the recipient's STAKE credential against the power-user node key, which
+   *  the wizard sets from the wallet's PAYMENT key hash.
+   *
+   *  COMPLIANCE: this asserts on chain that the recipient is a verified allowlist
+   *  member with no KYC process behind it, and that assertion is what every later
+   *  transfer proves membership against — not just this first mint. Off by default. */
+  seedRecipientInAllowlistAtGenesis?: boolean;
   // Fields below are required by the discriminated request shape on the backend
   // but carry no meaning here:
   substandardId?: 'security-token';
@@ -138,6 +154,13 @@ export const initSecurityTokenGlobalState = (body: SecurityTokenInitRequest) =>
 export interface SecurityTokenChainBuildResponse {
   genesisCborHex: string;
   addPowerUserCborHex: string;
+  /** Publishes minting_logic (~7.3 KB) and the global_state spend validator (~4.3 KB)
+   *  as REFERENCE SCRIPTS. Present iff the registration carries a first mint, which is
+   *  the only case whose validator set does not fit inline: attached inline the five
+   *  validators a registration-with-mint needs come to 16 584 bytes against the
+   *  ledger's 16 384-byte maximum. Must be signed and submitted BEFORE the
+   *  registration tx, which reads both scripts from it. */
+  publishScriptsCborHex?: string;
   registrationCborHex: string;
   /** Conway RegCert for the BaFin transfer_logic_script stake credential.
    *  Included in the same CIP-103 signing batch so Eternl signs it cleanly
@@ -151,17 +174,26 @@ export interface SecurityTokenChainBuildResponse {
   powerUsersPolicyId: string;
   genesisTxHash: string;
   addPowerUserTxHash: string;
+  publishScriptsTxHash?: string;
   registrationTxHash: string;
   registerTransferLogicTxHash?: string;
 }
 
-/** Build all three security-token registration txs at once: genesis (mints GS +
- *  denylist root + PU root), AddPowerUser (insert admin into PU list), registration
- *  (CIP-113 directory insert + stake-cred registration, plus — when
- *  {@link SecurityTokenInitRequest.initialMintQuantity} is set — the token's first
- *  mint in that same transaction).
- *  The frontend signs all three in a single CIP-30 signTxs popup and posts the
- *  signed CBORs (in order) to {@link submitTokenChain}. */
+/** Build the whole security-token registration chain at once, in submission order:
+ *
+ *    1. genesis            mints GS + denylist root + PU root
+ *    2. addPowerUser       inserts the admin into the power-user linked list
+ *    3. publishScripts     mint path only — publishes minting_logic + global_state
+ *                          spend as reference scripts, without which the registration
+ *                          tx exceeds max-tx-size
+ *    4. registration       CIP-113 directory insert + stake-cred registration, plus —
+ *                          when {@link SecurityTokenInitRequest.initialMintQuantity}
+ *                          is set — the token's first mint in that same transaction
+ *    5. registerTransferLogic  optional Conway RegCert for the transfer-logic cred
+ *
+ *  The frontend signs them all in a single CIP-30 signTxs popup and posts the signed
+ *  CBORs, IN THIS ORDER, to {@link submitTokenChain}. Steps 3 and 5 are optional; the
+ *  order of the rest is load-bearing, because each spends the previous one's change. */
 export const buildSecurityTokenChain = (body: SecurityTokenInitRequest) =>
   apiPost<SecurityTokenInitRequest, SecurityTokenChainBuildResponse>(
     `/security-token/build-chain`,
