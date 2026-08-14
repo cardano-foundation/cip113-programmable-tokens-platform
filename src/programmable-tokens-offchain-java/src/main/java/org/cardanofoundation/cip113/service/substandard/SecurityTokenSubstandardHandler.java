@@ -130,6 +130,11 @@ public class SecurityTokenSubstandardHandler
 
     private static final String SUBSTANDARD_ID = "security-token";
 
+    /** Minimum remaining validity window for a mint whose TTL is clamped to a
+     *  membership expiry. Below this the transaction would expire before it could
+     *  realistically be signed and submitted. */
+    private static final long MIN_MINT_TTL_MS = 120_000L;
+
     /** Hex of an empty (32-byte) MPF root: 32 zero bytes. */
     static final String EMPTY_ROOT_HEX = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -624,16 +629,18 @@ public class SecurityTokenSubstandardHandler
      *  <pre>
      *    Inputs:
      *      [0]  GS UTxO       (spent, with GlobalStateSpendRedeemer.MintSecurity)
-     *      [1]  funding UTxO  (admin's ADA, for fees + collateral)
+     *      [1]  funding UTxO  (the CALLER's ADA, for fees + collateral)
      *
      *    Reference inputs:
      *      directory entry for our prog-token policy
      *           (mintingLogic.withdraw uses this to derive issuance_policy_id;
      *            issuance contract uses it to find the registered substandard)
-     *      power-user node for the admin
-     *           (mintingLogic.withdraw checks can_mint=true)
+     *      power-user node for the CALLER
+     *           (mintingLogic.withdraw checks can_mint=true AND that this
+     *            node's own key signed — hence caller-keyed, not admin-keyed)
      *      protocol params UTxO  (CIP-113 reference)
      *      issuance params UTxO  (CIP-113 reference)
+     *      denylist covering node for the recipient's stake credential
      *
      *    Mints:
      *      `quantity` security tokens under issuance contract
@@ -641,7 +648,7 @@ public class SecurityTokenSubstandardHandler
      *    Outputs:
      *      [0]  minted prog tokens at recipient (under prog-logic-base stake cred)
      *      [1]  new GS UTxO at gsSpendAddress (mintable_amount decremented)
-     *      [N]  change to admin (moved to end by preBalanceTx)
+     *      [N]  change to the caller (moved to end by preBalanceTx)
      *
      *    Withdrawals:
      *      withdraw-0 from mintingLogic stake credential
@@ -653,6 +660,17 @@ public class SecurityTokenSubstandardHandler
      *  GS spend's {@code MintSecurity} branch checks
      *  {@code remaining_amount = mintable_amount - minted_amount >= 0} and
      *  enforces that the new GS datum carries the decremented value.
+     *
+     *  <h3>Receiver KYC — supported proof variants</h3>
+     *  When {@code requires_receiver_kyc} is set and the self-mint exemption does
+     *  not apply, this builder emits the {@code Membership} variant of
+     *  {@code KycProof} only, i.e. an MPF inclusion proof against the GS datum's
+     *  {@code member_root_hash}. {@code verify_kyc_proof} also accepts
+     *  {@code Attestation} (a TEL-signed 66-byte payload), but {@link MintTokenRequest}
+     *  carries no field for one, so a deployment that gates receiver KYC on
+     *  attestations rather than on the allowlist is not served by this path — it
+     *  will be refused up front with the "member_root_hash is empty" precondition.
+     *  Deliberate scope narrowing, matching the transfer path.
      */
     @Override
     public TransactionContext<Void> buildMintTransaction(
@@ -677,9 +695,28 @@ public class SecurityTokenSubstandardHandler
             }
 
             // ── 2. Resolve scripts + on-chain inputs via shared helpers ────
+            //
+            // D6: the power-user node MUST be the CALLER's, not the registration
+            // row's genesis admin. On chain, minting_logic_script.ak:364 does
+            // `must_be_signed_by_credential(self, power_user_node_key)` against the
+            // node passed by reference index, so referencing a node whose key never
+            // signs is unsatisfiable — which is exactly what happens after a
+            // RotateAdmin (the DB row still holds the old PKH) and for any non-admin
+            // power user who legitimately holds can_mint.
             MintLikeScripts s = buildMintLikeScripts(reg, protocolParams);
+            byte[] callerPkh = callerPaymentCredential(request.feePayerAddress());
             Utxo gsUtxo = findGsUtxo(reg);
-            Utxo puNode = findPuNode(reg, HexUtil.decodeHexString(reg.getIssuerAdminPkh()), "admin");
+            Utxo puNode = findPuNode(reg, callerPkh, "caller");
+            PowerUserCaps callerCaps = parsePowerUser(puNode);
+            if (!callerCaps.canMint()) {
+                throw new BuildPreconditionException(
+                        "caller " + HexUtil.encodeHexString(callerPkh) + " has a power-user node but "
+                        + "not the can_mint capability, which the on-chain minting logic requires "
+                        + "(minting_logic_script.ak: power_user_data.can_mint). Granting it means "
+                        + "the power-users validator's ModifyPowerUser action, which this platform "
+                        + "does not yet build — the capability has to be set when the node is "
+                        + "created. Mint from a wallet whose node already holds can_mint.");
+            }
             Utxo directoryEntry = findDirectoryEntry(request.tokenPolicyId(), protocolParams);
             List<Utxo> protoIssue = findProtocolAndIssuanceUtxos(protocolParams);
             Utxo protocolParamsUtxo = protoIssue.get(0);
@@ -709,6 +746,64 @@ public class SecurityTokenSubstandardHandler
                     recipientAddress.getDelegationCredential().orElseThrow(() ->
                             new IllegalArgumentException("recipient must be a base address (need stake credential)")),
                     network.getCardanoNetwork());
+
+            // ── 3c. Receiver-KYC gate (D1) ─────────────────────────────────
+            // minting_logic_script.ak:415-432, per unique destination stake credential:
+            //
+            //   if gs_datum.requires_receiver_kyc {
+            //     or { dest_pkh == power_user_node_key,
+            //          verify_kyc_proof(action.destination_proof, dest_pkh, …) }
+            //   } else { True }
+            //
+            // dest_pkh is the destination's STAKE credential; power_user_node_key is
+            // the linked-list node key of the power user authorising this mint (the
+            // caller, resolved in step 2). Under the CIP-113 address model the two
+            // are the same kind of thing — an owner identity — so the exemption is
+            // reachable exactly when the caller mints to a prog-token address whose
+            // stake credential IS their own power-user node key. For a power-user
+            // node registered under a wallet's PAYMENT credential (which is what
+            // buildAddPowerUserTransaction does) and an ordinary HD recipient, they
+            // differ, so the KYC branch is the one that must work — hence the real
+            // MPF proof below rather than the old hardcoded placeholder.
+            boolean requiresReceiverKyc = boolFromConstr(gsFields.get(GS_IDX_REQUIRES_RECEIVER_KYC));
+            boolean selfMintExempt = Arrays.equals(mintRecipientStakeHash, callerPkh);
+            boolean needRecipientProof = requiresReceiverKyc && !selfMintExempt;
+
+            String mintMpfProofCborHex = null;
+            Long mintMpfValidUntilMs = null;
+            if (needRecipientProof) {
+                byte[] onchainRoot = gsFields.get(GS_IDX_MEMBER_ROOT_HASH) instanceof BytesPlutusData rootBytes
+                        ? rootBytes.getValue() : new byte[0];
+                if (onchainRoot.length == 0) {
+                    throw new BuildPreconditionException(
+                            "token has requires_receiver_kyc=true but its on-chain member_root_hash is empty, "
+                            + "so no membership proof can verify. Enroll the recipient in the allowlist and "
+                            + "publish the member root (UpdateMemberRootHash) before minting.");
+                }
+                long now = System.currentTimeMillis();
+                SecurityTokenAllowlistService.MpfLeafView leaf = allowlistService
+                        .inclusionProof(request.tokenPolicyId(), mintRecipientStakeHash, now)
+                        .orElseThrow(() -> new BuildPreconditionException(
+                                "recipient " + HexUtil.encodeHexString(mintRecipientStakeHash)
+                                + " is not an allowlisted member of " + request.tokenPolicyId()
+                                + " (or their membership has expired) — add them and publish the "
+                                + "member root first"));
+                if (!Arrays.equals(leaf.rootHashLocal(), onchainRoot)) {
+                    throw new BuildPreconditionException(
+                            "allowlist root drift: the published-leaf trie root "
+                            + HexUtil.encodeHexString(leaf.rootHashLocal())
+                            + " does not match the GS datum's member_root_hash "
+                            + HexUtil.encodeHexString(onchainRoot)
+                            + " — re-publish the member root (UpdateMemberRootHash) before minting");
+                }
+                if (leaf.proofCbor() == null || leaf.proofCbor().length == 0) {
+                    throw new BuildPreconditionException(
+                            "could not serialise the MPF inclusion proof for recipient "
+                            + HexUtil.encodeHexString(mintRecipientStakeHash));
+                }
+                mintMpfProofCborHex = HexUtil.encodeHexString(leaf.proofCbor());
+                mintMpfValidUntilMs = leaf.validUntilMs();
+            }
 
             // ── 4. Compute redeemer indices ────────────────────────────────
             // Cardano lex-sorts inputs and reference_inputs by (txHash, outIdx)
@@ -746,11 +841,11 @@ public class SecurityTokenSubstandardHandler
             // token-bearing outputs, in first-appearance order — this tx has exactly one
             // such output (the recipient), so exactly one action. The KYC proof inside it
             // is only evaluated when GS.requires_receiver_kyc is true AND the recipient
-            // is not the authorising power user, so the placeholder Membership shape is
-            // correct here for the common admin-mints-to-self case; a real proof would
-            // additionally require a finite tx validity upper bound.
+            // is not the authorising power user; `needRecipientProof` (step 3c) is
+            // exactly that condition, and carries a real MPF membership proof when set.
             PlutusData mintDestinationAction = buildDestinationAction(
-                    mintRecipientStakeHash, /*includeKycProof=*/ false, null, null, denylistRefIdx);
+                    mintRecipientStakeHash, needRecipientProof,
+                    mintMpfProofCborHex, mintMpfValidUntilMs, denylistRefIdx);
             PlutusData withdrawRedeemer = ConstrPlutusData.of(0,
                     BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx)),
                     BigIntPlutusData.of(BigInteger.valueOf(gsInputIdx)),
@@ -801,14 +896,47 @@ public class SecurityTokenSubstandardHandler
                     .attachRewardValidator(s.mintingLogic())
                     .withChangeAddress(request.feePayerAddress());
 
+            // Finite validity upper bound (D1). verify_membership_proof
+            // (lib/kyc/verify.ak:137-142) returns False unless
+            // validity_range.upper_bound is Finite AND <= proof.valid_until_ms — an
+            // unbounded tx fails that clause no matter how good the proof is. Set a
+            // TTL on every mint (harmless when no proof is verified) and clamp it to
+            // the membership's expiry when one is.
+            long ttlNow = System.currentTimeMillis();
+            long ttlMs = ttlNow + 15 * 60 * 1000L;
+            if (needRecipientProof && mintMpfValidUntilMs != null) {
+                ttlMs = Math.min(ttlMs, mintMpfValidUntilMs);
+                // `inclusionProof` only rejects memberships that have ALREADY expired,
+                // so a leaf expiring seconds from now clamps the TTL to (almost) the
+                // current slot. `ttl` is invalid-hereafter, so the ledger would reject
+                // the tx with OutsideValidityIntervalUTxO — and any window under a
+                // minute expires while the user is still in the wallet dialog. Refuse
+                // with the expiry timestamp instead of emitting a doomed transaction.
+                if (ttlMs - ttlNow < MIN_MINT_TTL_MS) {
+                    throw new BuildPreconditionException(
+                            "recipient " + HexUtil.encodeHexString(mintRecipientStakeHash)
+                            + "'s allowlist membership expires at " + Instant.ofEpochMilli(mintMpfValidUntilMs)
+                            + ", too soon to build a mint against (needs at least "
+                            + (MIN_MINT_TTL_MS / 1000) + "s). Renew their membership and "
+                            + "re-publish the member root.");
+                }
+            }
+            long ttlSlot = cardanoConverters.time().toSlot(
+                    java.time.LocalDateTime.ofInstant(
+                            Instant.ofEpochMilli(ttlMs), java.time.ZoneOffset.UTC));
+
             String feePayerAddress = request.feePayerAddress();
             Transaction transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(HexUtil.decodeHexString(reg.getIssuerAdminPkh()))
+                    // D6: the signature the minting logic checks is the power-user
+                    // NODE key, i.e. the caller's — not the registration row's
+                    // genesis admin.
+                    .withRequiredSigners(callerPkh)
                     .feePayer(feePayerAddress)
                     .mergeOutputs(false)
                     .withCollateralInputs(TransactionInput.builder()
                             .transactionId(funding.getTxHash())
                             .index(funding.getOutputIndex()).build())
+                    .validTo(ttlSlot)
                     .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
                     .ignoreScriptCostEvaluationError(false)
                     .build();
@@ -3408,25 +3536,46 @@ public class SecurityTokenSubstandardHandler
             Utxo funding = fundingUtxos.getFirst();
             byte[] signerKeyHash = HexUtil.decodeHexString(signerPkh);
 
-            // PauseTransfers' on-chain branch reads the admin's power-user node as a
-            // reference input (validator does safe_list_at(self.reference_inputs, …)
-            // and fails with EmptyList otherwise). Fetch it once up front if any
-            // change needs it; same node is used for every iteration.
+            // PauseTransfers' on-chain branch reads a power-user node as a reference
+            // input (validator does safe_list_at(self.reference_inputs, …) and fails
+            // with EmptyList otherwise), then requires that node to hold can_pause AND
+            // that node's OWN key to have signed (global_state.ak:278-282).
+            //
+            // D6: the node must therefore be the CALLER's, not the registration row's
+            // genesis admin. requiredSigners only ever carries signerKeyHash (derived
+            // from feePayerAddress), so keying off reg.getIssuerAdminPkh() produced an
+            // unsatisfiable branch after any RotateAdmin, and locked out every
+            // non-admin power user who legitimately holds can_pause.
             List<Utxo> pauseTransfersRefInputs = List.of();
             boolean needsPuRef = changes.stream()
                     .anyMatch(c -> "PauseTransfers".equals(c.action()));
             if (needsPuRef) {
-                byte[] adminKeyHash = HexUtil.decodeHexString(reg.getIssuerAdminPkh());
-                byte[] adminNodeAssetName = concat(LL_NODE_KEY_PREFIX, adminKeyHash);
-                String adminNodeAssetNameHex = HexUtil.encodeHexString(adminNodeAssetName);
+                byte[] callerNodeAssetName = concat(LL_NODE_KEY_PREFIX, signerKeyHash);
+                String callerNodeAssetNameHex = HexUtil.encodeHexString(callerNodeAssetName);
                 Utxo puNode = utxoProvider.findUtxoByAsset(
-                        reg.getPowerUsersPolicyId(), adminNodeAssetNameHex).orElse(null);
+                        reg.getPowerUsersPolicyId(), callerNodeAssetNameHex).orElse(null);
                 if (puNode == null) {
                     return TransactionContext.typedError(
-                            "PauseTransfers requires the admin's power-user node on chain, but it "
-                            + "could not be found (asset: " + reg.getPowerUsersPolicyId()
-                            + "/" + adminNodeAssetNameHex
-                            + "). Run AddPowerUser for the admin first.");
+                            "PauseTransfers requires the CALLER's power-user node on chain, but "
+                            + signerPkh + " has none (asset: " + reg.getPowerUsersPolicyId()
+                            + "/" + callerNodeAssetNameHex
+                            + "). Pause from a wallet that already has a power-user node — "
+                            + "AddPowerUser currently only builds the FIRST insertion "
+                            + "(anchor = linked-list root), so a second node cannot be added yet.");
+                }
+                PowerUserCaps callerCaps;
+                try {
+                    callerCaps = parsePowerUser(puNode);
+                } catch (BuildPreconditionException bpe) {
+                    return TransactionContext.typedError("PauseTransfers: " + bpe.getMessage());
+                }
+                if (!callerCaps.canPause()) {
+                    return TransactionContext.typedError(
+                            "PauseTransfers: caller " + signerPkh + " has a power-user node but not "
+                            + "the can_pause capability, which global_state.ak requires. Granting it "
+                            + "means the power-users validator's ModifyPowerUser action, which this "
+                            + "platform does not yet build — the capability has to be set when the "
+                            + "node is created. Pause from a wallet whose node already holds can_pause.");
                 }
                 pauseTransfersRefInputs = List.of(puNode);
             }
@@ -4118,6 +4267,79 @@ public class SecurityTokenSubstandardHandler
                 role + " power-user node not found on chain — "
                 + HexUtil.encodeHexString(signerPkh) + " may not be a registered power user "
                 + "(asset: " + reg.getPowerUsersPolicyId() + "/" + nodeAssetNameHex + ")"));
+    }
+
+    /** The five on-chain {@code PowerUser} capability flags
+     *  ({@code lib/types/power_users.ak:11-24}), decoded from a linked-list node's
+     *  inline datum. */
+    record PowerUserCaps(byte[] credentialHash, boolean isAdmin, boolean canMint,
+                         boolean canBurn, boolean canPause, boolean canForceTransfer) {}
+
+    /** Decode a power-user linked-list node's inline datum into its capability flags.
+     *
+     *  <p>The node datum is {@code linked_list.Element}:
+     *  {@code Constr 0 [ Constr 1 [PowerUser], link ]} (constructor 1 = Node,
+     *  constructor 0 = Root — see {@link #linkedListElement}). The inner
+     *  {@code PowerUser} is {@code Constr 0 [credential_hash, is_admin, can_mint,
+     *  can_burn, can_pause, can_force_transfer]}, the exact inverse of
+     *  {@link #powerUserData}.
+     *
+     *  <p>Reading the flags off chain lets the builder refuse a transaction the
+     *  validator would reject anyway, with an actionable message instead of an
+     *  evaluator trap. */
+    private static PowerUserCaps parsePowerUser(Utxo puNode) {
+        String datumHex = puNode.getInlineDatum();
+        if (datumHex == null || datumHex.isBlank()) {
+            throw new BuildPreconditionException(
+                    "power-user node " + puNode.getTxHash() + "#" + puNode.getOutputIndex()
+                    + " has no inline datum");
+        }
+        PlutusData element;
+        try {
+            element = PlutusData.deserialize(HexUtil.decodeHexString(datumHex));
+        } catch (Exception e) {
+            throw new BuildPreconditionException(
+                    "could not decode power-user node datum: " + e.getMessage());
+        }
+        if (!(element instanceof ConstrPlutusData elementConstr)
+                || elementConstr.getData().getPlutusDataList().isEmpty()) {
+            throw new BuildPreconditionException("power-user node datum is not a linked_list.Element");
+        }
+        PlutusData nodeWrapper = elementConstr.getData().getPlutusDataList().get(0);
+        if (!(nodeWrapper instanceof ConstrPlutusData nodeConstr)
+                || nodeConstr.getAlternative() != 1
+                || nodeConstr.getData().getPlutusDataList().isEmpty()) {
+            throw new BuildPreconditionException(
+                    "power-user linked-list element is the ROOT, not a Node — no capabilities to read");
+        }
+        PlutusData powerUser = nodeConstr.getData().getPlutusDataList().get(0);
+        if (!(powerUser instanceof ConstrPlutusData puConstr)) {
+            throw new BuildPreconditionException("power-user node payload is not a PowerUser Constr");
+        }
+        List<PlutusData> f = puConstr.getData().getPlutusDataList();
+        if (f.size() != 6 || !(f.get(0) instanceof BytesPlutusData credHash)) {
+            throw new BuildPreconditionException(
+                    "PowerUser datum has " + f.size() + " fields, expected 6 "
+                    + "(credential_hash + 5 capability flags)");
+        }
+        return new PowerUserCaps(credHash.getValue(),
+                boolFromConstr(f.get(1)), boolFromConstr(f.get(2)), boolFromConstr(f.get(3)),
+                boolFromConstr(f.get(4)), boolFromConstr(f.get(5)));
+    }
+
+    /** The caller's identity for power-user purposes: the payment credential of the
+     *  address that pays for (and therefore signs) the transaction. This is what
+     *  {@code withRequiredSigners} puts into {@code extra_signatories}, so it is the
+     *  only key {@code must_be_signed_by_credential} can match — which is why the
+     *  power-user node must be looked up under it rather than under the registration
+     *  row's genesis admin PKH (D6). */
+    private static byte[] callerPaymentCredential(String callerAddress) {
+        if (callerAddress == null || callerAddress.isBlank()) {
+            throw new BuildPreconditionException("feePayerAddress is required");
+        }
+        return new Address(callerAddress).getPaymentCredentialHash()
+                .orElseThrow(() -> new BuildPreconditionException(
+                        "feePayerAddress has no payment credential: " + callerAddress));
     }
 
     /** Look up the CIP-113 directory entry for the given prog-token policy by
