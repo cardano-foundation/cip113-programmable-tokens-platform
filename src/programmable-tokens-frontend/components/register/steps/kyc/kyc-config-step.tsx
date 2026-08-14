@@ -69,6 +69,37 @@ export function KycConfigStep({
   const [mintableAmount, setMintableAmount] = useState(defaultQuantity);
   const [securityInfo, setSecurityInfo] = useState('');
 
+  // Supply minted BY the registration transaction itself. The wizard used to
+  // collect a supply in the token-details step, register zero, and then have the
+  // success screen report the number the user typed — so nothing was minted and
+  // nothing said so. This is the value the backend actually honours
+  // (`initialMintQuantity`); the request's `quantity` field is ignored by the
+  // chained registration, which overwrites it.
+  const [initialMintQuantity, setInitialMintQuantity] = useState(defaultQuantity);
+
+  // BaFin's compliance posture is receiver-KYC ON, but with it on the token's
+  // first mint cannot be folded into the registration: the minting logic wants a
+  // membership proof against `member_root_hash`, genesis writes that root EMPTY,
+  // and no root can be published beforehand because the policy id does not exist
+  // until genesis picks its bootstrap UTxO. So it has to be the issuer's call,
+  // not a hardcoded default that silently makes the mint unbuildable.
+  const [requiresReceiverKyc, setRequiresReceiverKyc] = useState(true);
+
+  const trimmedMint = initialMintQuantity.trim();
+  const trimmedCap = mintableAmount.trim();
+  const mintQty = /^\d+$/.test(trimmedMint) ? BigInt(trimmedMint) : null;
+  const capQty = /^\d+$/.test(trimmedCap) ? BigInt(trimmedCap) : null;
+  const mintQtyInvalid = trimmedMint !== '' && mintQty === null;
+  // BigInt(0), not a `0n` literal: tsconfig targets below ES2020.
+  const willFirstMint = mintQty !== null && mintQty > BigInt(0);
+  // Mirrors the backend's up-front refusals in buildFullRegistrationChain, so the
+  // wizard never starts a chain whose phase 1 would persist rows for a token that
+  // can never be registered.
+  const mintBlockedByKyc = willFirstMint && requiresReceiverKyc;
+  const mintExceedsCap = willFirstMint && capQty !== null && mintQty > capQty;
+  const registrationBlocked =
+    isSecurityTokenFlow && (mintQtyInvalid || mintBlockedByKyc || mintExceedsCap);
+
   // Trusted entities list — pre-populated with own vkey
   const [trustedEntities, setTrustedEntities] = useState<string[]>([]);
   const [ownVkey, setOwnVkey] = useState<string | null>(null);
@@ -233,14 +264,33 @@ export function KycConfigStep({
       // submission service, so the wallet's submission backend (which would
       // typically reject mempool-chained txs) never sees the chain.
       //
-      // No initial mint of security tokens happens here — registration sets
-      // up the prog-token policy in the CIP-113 directory + registers the
-      // substandard's stake credentials. The first actual MintSecurity is
-      // a separate admin action once everything is on chain.
+      // The registration tx always inserts the prog-token policy into the
+      // CIP-113 directory and registers the substandard's stake credentials.
+      // Whether it ALSO mints the first supply is up to `initialMintQuantity`
+      // below: non-zero folds a MintSecurity GlobalState spend into the same
+      // transaction; zero leaves the first mint as a separate admin action.
       if (isSecurityToken) {
+        // Refuse before the backend writes anything. Phase 1 of the chain persists
+        // a registration row and a bootstrap power-user row as a side effect of
+        // BUILDING the genesis tx, so a combination that can never produce a valid
+        // registration must be stopped here rather than half-way through.
+        if (registrationBlocked) {
+          showToast({
+            title: 'Cannot register with these settings',
+            description: mintQtyInvalid
+              ? 'Initial supply must be a whole, non-negative number.'
+              : mintBlockedByKyc
+                ? 'Turn off "Require receiver KYC" to mint the initial supply at registration, or set the initial supply to 0 and mint later once the member root is published.'
+                : 'Initial supply cannot exceed the mintable amount.',
+            variant: 'error',
+          });
+          return;
+        }
+
         const tokenDetails = wizardState.stepStates['token-details']?.data as {
           assetName?: string;
           quantity?: string;
+          recipientAddress?: string;
         } | undefined;
         const allCaps =
           PowerUserCapability.ADMIN |
@@ -267,21 +317,32 @@ export function KycConfigStep({
             ? Buffer.from(tokenDetails.assetName, 'utf8').toString('hex')
             : '',
           adminPubKeyHash: adminPkh!,
-          // Defaults to ON per BaFin's compliance posture: recipients must
-          // hold a fresh KYC attestation to receive tokens. The admin can
-          // toggle this off later from the admin page via the
-          // SetRequiresReceiverKyc global-state action.
-          requiresReceiverKyc: true,
+          // Issuer's choice (defaults ON per BaFin's compliance posture). It has
+          // to be a choice because a first mint at registration is unsatisfiable
+          // while it is on — see the toggle below. Can also be flipped later from
+          // the admin page via the SetRequiresReceiverKyc global-state action.
+          requiresReceiverKyc,
           initialMintableAmount: mintableAmount ? parseInt(mintableAmount, 10) : 0,
           bootstrapPowerUserPkh: adminPkh,
           bootstrapPowerUserCapabilities: allCaps,
           bootstrapPowerUserLabel: 'Bootstrap admin',
           initialTrustedEntityVkeys,
-          // Initial supply minted at registration (directory-mint validator requires
-          // a non-zero prog-token mint). The BaFin mintingLogic.withdraw runs in
-          // its registration-mode rubber-stamp branch — no GS spend / supply-cap
-          // enforcement at registration. Subsequent mints go through MintSecurity.
-          quantity: tokenDetails?.quantity || '1',
+          // Supply minted BY the registration transaction. When non-zero the
+          // registration additionally SPENDS GlobalState under MintSecurity, so
+          // mintable_amount is decremented and the supply cap is enforced on chain
+          // by global_state.ak — there is no rubber-stamp branch. Zero registers
+          // structurally and the first mint becomes a separate admin action.
+          //
+          // `quantity` is deliberately NOT sent: buildFullRegistrationChain
+          // overwrites it with this value before delegating, so sending it would
+          // only look meaningful.
+          initialMintQuantity: trimmedMint || '0',
+          // Where the first mint lands. The token-details step already collects
+          // (and pre-fills) this; omitting it here silently paid every initial
+          // supply to the fee payer instead, and made the backend's self-mint
+          // escape hatch — "send it to an address whose STAKE credential is the
+          // power user" — unreachable from the wizard.
+          recipientAddress: tokenDetails?.recipientAddress || undefined,
         });
 
         // ── Phase 2: single wallet popup signs all txs in the chain ──
@@ -317,27 +378,37 @@ export function KycConfigStep({
         setStatusMessage(`Phase 3/3 — submitting ${totalTxs} chained transactions to the network…`);
         const submitResp = await submitTokenChain(signedCbors);
         const submitted = submitResp.txHashes ?? [];
-        if (submitted.length < totalTxs || submitResp.error) {
-          showToast({
-            title: 'Chain submission incomplete',
-            description: submitResp.error
-              ? `Submitted ${submitted.length}/${totalTxs} — ${submitResp.error}`
-              : `Only ${submitted.length}/${totalTxs} transactions accepted by the network.`,
-            variant: 'error',
-          });
-        } else {
-          showToast({
-            title: 'RWA token registered',
-            description: `All ${submitted.length} transactions submitted: ${submitted.map(h => h.slice(0, 8)).join(', ')}…`,
-            variant: 'default',
-          });
-        }
-
-        // Persist on BOTH .data and .result paths so downstream steps (e.g. the
-        // success step) can read globalStatePolicyId via onDataChange.
+        // Persist the policy ids either way — on a partial failure they are what
+        // the operator needs to work out the real on-chain state.
         onDataChange({
           globalStatePolicyId: chain.globalStatePolicyId,
           programmableTokenPolicyId: chain.programmableTokenPolicyId,
+        });
+
+        if (submitted.length < totalTxs || submitResp.error) {
+          // The chain is mempool-chained, so a failure at index i leaves txs
+          // 0..i-1 on chain. Do NOT complete the step: onComplete advances the
+          // wizard to the success screen, which would announce "Token Registered!"
+          // and an initial supply that may never have been minted — the exact
+          // dishonesty this pass exists to remove. Stay here with the hashes that
+          // did land so the user can recover.
+          showToast({
+            title: 'Chain submission incomplete — token NOT registered',
+            description: (submitResp.error
+              ? `Submitted ${submitted.length}/${totalTxs} — ${submitResp.error}. `
+              : `Only ${submitted.length}/${totalTxs} transactions were accepted. `)
+              + (submitted.length > 0
+                ? `Accepted so far: ${submitted.map(h => h.slice(0, 8)).join(', ')}…`
+                : 'Nothing reached the chain.'),
+            variant: 'error',
+          });
+          return;
+        }
+
+        showToast({
+          title: 'RWA token registered',
+          description: `All ${submitted.length} transactions submitted: ${submitted.map(h => h.slice(0, 8)).join(', ')}…`,
+          variant: 'default',
         });
         onComplete({
           stepId: 'kyc-config',
@@ -347,6 +418,11 @@ export function KycConfigStep({
             denylistPolicyId: chain.denylistPolicyId,
             powerUsersPolicyId: chain.powerUsersPolicyId,
             mintableAmount,
+            // What was ACTUALLY minted by the registration tx. The success step
+            // reads this rather than the token-details "quantity", which is only
+            // the number the user typed.
+            initialMintQuantity: trimmedMint || '0',
+            requiresReceiverKyc,
             securityInfo,
             trustedEntities,
             chainTxHashes: submitted,
@@ -434,7 +510,9 @@ export function KycConfigStep({
       setIsProcessing(false);
       setStatusMessage('');
     }
-  }, [wallet, selectedVersion, showToast, onDataChange, onComplete, mintableAmount, securityInfo, trustedEntities]);
+  }, [wallet, selectedVersion, showToast, onDataChange, onComplete, mintableAmount, securityInfo,
+      trustedEntities, signingEntityVkey, wizardState, trimmedMint, requiresReceiverKyc,
+      registrationBlocked, mintQtyInvalid, mintBlockedByKyc]);
 
   return (
     <div className="space-y-6">
@@ -468,7 +546,12 @@ export function KycConfigStep({
               all 5 capabilities (admin, mint, burn, pause, force-transfer).
             </li>
             <li>
-              <span className="text-white">Registration</span> — inserts the policy into the CIP-113 directory and mints the initial token supply.
+              <span className="text-white">Registration</span> — inserts the policy into the CIP-113 directory
+              {willFirstMint
+                ? <> and mints the initial supply of <span className="text-white">{trimmedMint}</span> in
+                  the same transaction (spending the Global State under <span className="font-mono text-primary-400">MintSecurity</span>,
+                  which decrements <span className="font-mono text-primary-400">mintable_amount</span>).</>
+                : <>. No tokens are minted — the first mint is a separate admin action once everything is on chain.</>}
             </li>
             <li>
               <span className="text-white">TransferLogic cert</span> — registers the transfer-logic stake credential (Conway RegCert) so the first transfer can issue a withdraw-0.
@@ -522,7 +605,7 @@ export function KycConfigStep({
               </li>
               <li className="flex items-start gap-2">
                 <span className="text-primary-400 font-mono text-xs mt-0.5">requires_receiver_kyc</span>
-                <span>If on, recipients must hold a fresh KYC attestation to receive tokens. Toggle later from the admin page.</span>
+                <span>If on, recipients must hold a fresh KYC attestation to receive tokens. Set below, and toggleable later from the admin page.</span>
               </li>
             </>
           )}
@@ -539,8 +622,30 @@ export function KycConfigStep({
           value={mintableAmount}
           onChange={(e) => setMintableAmount(e.target.value)}
           disabled={isProcessing}
-          helperText={`Defaults to the token supply (${defaultQuantity}). Set to 0 for no cap.`}
+          helperText={`Hard cap on how many tokens can ever be minted. Defaults to the token supply (${defaultQuantity}); 0 means no tokens can be minted at all, not "no cap".`}
         />
+
+        {isSecurityTokenFlow && (
+          <Input
+            label="Initial Supply Minted at Registration"
+            type="number"
+            min="0"
+            value={initialMintQuantity}
+            onChange={(e) => setInitialMintQuantity(e.target.value)}
+            disabled={isProcessing}
+            error={
+              mintQtyInvalid
+                ? 'Must be a whole, non-negative number.'
+                : mintExceedsCap
+                  ? `Cannot exceed the mintable amount (${trimmedCap}).`
+                  : undefined
+            }
+            helperText={
+              'Minted by the registration transaction itself and deducted from the mintable amount. '
+              + 'Set to 0 to register the policy only and mint later from the admin page.'
+            }
+          />
+        )}
 
         <Input
           label="Security Info (hex, optional)"
@@ -551,6 +656,47 @@ export function KycConfigStep({
           helperText="Optional hex-encoded compliance metadata."
         />
       </Card>
+
+      {isSecurityTokenFlow && (
+        <Card className="p-4 space-y-3">
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={requiresReceiverKyc}
+              onChange={(e) => setRequiresReceiverKyc(e.target.checked)}
+              disabled={isProcessing}
+              className="mt-1 h-4 w-4 shrink-0 accent-primary-500 cursor-pointer disabled:cursor-not-allowed"
+            />
+            <span>
+              <span className="block text-sm font-medium text-white">Require receiver KYC</span>
+              <span className="block text-xs text-dark-400 mt-1">
+                Recipients must present a fresh KYC proof to receive tokens, checked on-chain against
+                the allowlist root in <span className="font-mono text-primary-400">member_root_hash</span>.
+                Can be toggled later from the admin page.
+              </span>
+            </span>
+          </label>
+
+          {mintBlockedByKyc && (
+            <div className="rounded border border-red-700/50 bg-red-900/20 p-3 text-xs text-red-200 space-y-1">
+              <p className="font-semibold">
+                Receiver KYC and an initial supply cannot be combined in one registration.
+              </p>
+              <p className="text-red-300/90">
+                The mint would need a membership proof against{' '}
+                <span className="font-mono">member_root_hash</span>, but genesis writes that root
+                empty and no root can be published beforehand — the token&apos;s policy id does not
+                exist until this very transaction picks its bootstrap UTxO.
+              </p>
+              <p className="text-red-300/90">
+                Either turn receiver KYC off here (and switch it on afterwards from the admin page),
+                or set the initial supply to 0, enroll recipients, publish the member root, and mint
+                separately.
+              </p>
+            </div>
+          )}
+        </Card>
+      )}
 
       <Card className="p-4 space-y-4">
         <div className="flex items-center justify-between">
@@ -671,7 +817,7 @@ export function KycConfigStep({
           className="flex-1"
           onClick={handleContinue}
           isLoading={isProcessing}
-          disabled={isProcessing}
+          disabled={isProcessing || registrationBlocked}
         >
           {isSecurityTokenFlow ? 'Register RWA Token' : 'Initialize Global State & Continue'}
         </Button>

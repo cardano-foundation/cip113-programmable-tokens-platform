@@ -110,8 +110,12 @@ export interface SecurityTokenInitRequest {
    *  AddTrustedEntity update tx beforehand. */
   initialTrustedEntityVkeys?: string[];
   // Fields below are required by the discriminated request shape on the backend
-  // but ignored by the init endpoint:
+  // but carry no meaning here:
   substandardId?: 'security-token';
+  /** IGNORED. buildFullRegistrationChain overwrites it with
+   *  {@link initialMintQuantity} before delegating to the registration builder,
+   *  and /init mints nothing at all. Both helpers below default it to '0' purely
+   *  to satisfy the request shape — set the supply via initialMintQuantity. */
   quantity?: string;
 }
 
