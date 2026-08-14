@@ -19,7 +19,15 @@ public abstract class AbstractPreviewTest {
 
     protected static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    protected static final Network network = Networks.preview();
+    /** Devnet override: unset means preview, so existing preview tests are unchanged. */
+    private static final String BACKEND_URL = System.getenv().getOrDefault("CARDANO_BACKEND_URL", BLOCKFROST_PREVIEW_URL);
+
+    private static final String BACKEND_KEY = System.getenv().getOrDefault("CARDANO_BACKEND_KEY",
+            BLOCKFROST_KEY_PREVIEW == null ? "dummy" : BLOCKFROST_KEY_PREVIEW);
+
+    protected static final Network network = System.getenv("CARDANO_NETWORK_MAGIC") == null
+            ? Networks.preview()
+            : new Network(0b0000, Long.parseLong(System.getenv("CARDANO_NETWORK_MAGIC")));
 
     protected static final Account adminAccount = Account.createFromMnemonic(network, PreviewConstants.ADMIN_MNEMONIC);
 
@@ -38,7 +46,7 @@ public abstract class AbstractPreviewTest {
         log.info("Wipe Address: {}", userWipeAccount.baseAddress());
     }
 
-    protected final BFBackendService bfBackendService = new BFBackendService(BLOCKFROST_PREVIEW_URL, BLOCKFROST_KEY_PREVIEW);
+    protected final BFBackendService bfBackendService = new BFBackendService(BACKEND_URL, BACKEND_KEY);
 
     protected final QuickTxBuilder quickTxBuilder = new QuickTxBuilder(bfBackendService);
 

@@ -30,18 +30,21 @@ public class ProtocolScriptBuilderService {
 
     /**
      * Get parameterized Directory Mint (registry_mint) script
-     * Parameters: utxo (tx hash + output index), issuance script hash
+     * Parameters (plutus.json validators[].parameters for registry_mint.registry_mint.mint):
+     * utxo_ref (OutputReference), issuance_cbor_hex_cs (PolicyId), registry_spend_cred (Credential)
      */
     public PlutusScript getParameterizedDirectoryMintScript(ProtocolBootstrapParams protocolParams) {
         return getCachedOrBuild(protocolParams.txHash(), "directory_mint", () -> {
             var utxo1 = protocolParams.directoryMintParams().txInput();
             var issuanceScriptHash = protocolParams.directoryMintParams().issuanceScriptHash();
+            var registrySpendScriptHash = protocolParams.directorySpendParams().scriptHash();
 
             var directoryParameters = ListPlutusData.of(
                     ConstrPlutusData.of(0,
                             BytesPlutusData.of(HexUtil.decodeHexString(utxo1.txHash())),
                             BigIntPlutusData.of(utxo1.outputIndex())),
-                    BytesPlutusData.of(HexUtil.decodeHexString(issuanceScriptHash))
+                    BytesPlutusData.of(HexUtil.decodeHexString(issuanceScriptHash)),
+                    ConstrPlutusData.of(1, BytesPlutusData.of(HexUtil.decodeHexString(registrySpendScriptHash)))
             );
 
             var contractOpt = protocolBootstrapService.getProtocolContract("registry_mint.registry_mint.mint");
@@ -96,7 +99,9 @@ public class ProtocolScriptBuilderService {
 
     /**
      * Get parameterized Issuance Mint script
-     * Parameters: programmable logic base credential, registry node cs (directory mint policy), minting logic credential
+     * Parameters (plutus.json validators[].parameters for issuance_mint.issuance_mint.mint):
+     * programmable_logic_base (Credential), registry_node_cs (PolicyId), minting_logic_cred (Credential),
+     * plg_stake_cred (Credential)
      */
     public PlutusScript getParameterizedIssuanceMintScript(
             ProtocolBootstrapParams protocolParams,
@@ -106,6 +111,7 @@ public class ProtocolScriptBuilderService {
             // Don't cache this one since it depends on substandard script which varies
             var programmableLogicBaseScriptHash = protocolParams.programmableLogicBaseParams().scriptHash();
             var registryNodeCs = protocolParams.directoryMintParams().scriptHash();
+            var programmableLogicGlobalScriptHash = protocolParams.programmableLogicGlobalPrams().scriptHash();
 
             var issuanceParameters = ListPlutusData.of(
                     ConstrPlutusData.of(1,
@@ -114,6 +120,9 @@ public class ProtocolScriptBuilderService {
                     BytesPlutusData.of(HexUtil.decodeHexString(registryNodeCs)),
                     ConstrPlutusData.of(1,
                             BytesPlutusData.of(substandardIssueScript.getScriptHash())
+                    ),
+                    ConstrPlutusData.of(1,
+                            BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicGlobalScriptHash))
                     )
             );
 
@@ -140,17 +149,21 @@ public class ProtocolScriptBuilderService {
 
     /**
      * Get parameterized Programmable Logic Base script
-     * Parameters: protocol params script hash, programmable logic global script hash
+     * Parameters (plutus.json validators[].parameters for programmable_logic_base.programmable_logic_base.spend):
+     * params_policy — a bare protocol-params policy id ByteArray, not a Credential.
      */
     public PlutusScript getParameterizedProgrammableLogicBaseScript(ProtocolBootstrapParams protocolParams) {
 
         return getCachedOrBuild(protocolParams.txHash(), "programmable_logic_base", () -> {
 
-            var programmableLogicGlobalScriptHash = protocolParams.programmableLogicGlobalPrams().scriptHash();
+            var protocolParamsPolicyId = protocolParams.programmableLogicBaseParams().protocolParamsPolicyId();
 
-            var parameters = ListPlutusData.of(ConstrPlutusData.of(1, BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicGlobalScriptHash))));
+            var parameters = ListPlutusData.of(BytesPlutusData.of(HexUtil.decodeHexString(protocolParamsPolicyId)));
 
             var contractOpt = protocolBootstrapService.getProtocolContract("programmable_logic_base.programmable_logic_base.spend");
+            if (contractOpt.isEmpty()) {
+                throw new IllegalStateException("Programmable logic base contract not found");
+            }
 
             return PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
                     AikenScriptUtil.applyParamToScript(parameters, contractOpt.get()),

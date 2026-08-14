@@ -154,6 +154,7 @@ public class SecurityTokenController {
                         (String) change.get("trustedOldVkeyHex"),
                         (String) change.get("trustedNewVkeyHex"),
                         (String) change.get("trustedNewMetadataHex"),
+                        (Boolean) change.get("requiresSenderKycEnabled"),
                         (Boolean) change.get("requiresReceiverKycEnabled"),
                         (String) change.get("newMemberRootHashHex"),
                         (String) change.get("newAdminCredentialHashHex")

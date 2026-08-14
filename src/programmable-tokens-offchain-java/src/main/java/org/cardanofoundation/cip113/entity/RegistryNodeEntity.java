@@ -41,10 +41,16 @@ public class RegistryNodeEntity {
     private String next;
 
     @Column(nullable = false, length = 56)
+    private String mintingLogicScript;
+
+    @Column(nullable = false, length = 56)
     private String transferLogicScript;
 
     @Column(nullable = false, length = 56)
     private String thirdPartyTransferLogicScript;
+
+    @Column(nullable = false, length = 56)
+    private String unfrackingLogicScript;
 
     @Column(length = 56)
     private String globalStatePolicyId;

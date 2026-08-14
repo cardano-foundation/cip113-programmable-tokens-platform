@@ -130,9 +130,44 @@ public class SecurityTokenScriptBuilderService {
         return applyParameters(contract, params, "transfer_logic");
     }
 
-    // Third-party transfer (admin seizure) is deferred from v1 — its builder is
-    // intentionally absent. The ported validator code is still on disk under
-    // src/substandards/security-token/validators/ so a future PR can wire it up.
+    // ── Third-party transfer logic (power-user seizure / forced transfer) ────
+
+    /**
+     * The substandard's dedicated third-party transfer validator.
+     *
+     * <p>Wired into {@code RegistryNode.third_party_transfer_logic_script} (index 4) by
+     * {@code SecurityTokenSubstandardHandler.buildRegistrationTransaction}.
+     *
+     * <p>It could not go there at the previous pin: {@code third_party_transfer_logic_script.ak:44}
+     * passed {@code constants.transfer_logic_script_registry_node_index} (= 3) to
+     * {@code utils.derive_issuance_policy_id_from_registry_node}, which asserts that the
+     * indexed registry-node field equals the withdrawing script's own hash. Field 3 must
+     * hold {@code transfer_logic_script} for CIP-113's {@code validate_transfer}, so this
+     * validator could only ever self-locate in a node that could not support regular
+     * transfers — mutually exclusive, and the feature was dead in every deployment
+     * (docs/UPSTREAM-BAFIN-DEFECTS.md, defect A). At {@code easy1staking-com/fn-bafin-cardano-sc}
+     * {@code e69c66a} line 65 passes {@code third_party_transfer_logic_script_registry_node_index}
+     * (= 4), so it self-locates correctly and occupies its own slot.
+     *
+     * <p>Parameter order mirrors {@code third_party_transfer_logic_script.ak}:
+     * {@code (security_asset_name, power_users_linked_list_policy_id, global_state_policy_id,
+     * registry_policy_id)} — note {@code power_users} comes <em>before</em>
+     * {@code global_state} here, unlike in {@code minting_logic_script}.
+     */
+    public PlutusScript buildThirdPartyTransferLogicScript(String securityAssetNameHex,
+                                                           String powerUsersLinkedListPolicyId,
+                                                           String globalStatePolicyId,
+                                                           String registryPolicyId) {
+        SubstandardValidator contract =
+                getContract("third_party_transfer_logic_script.third_party_transfer_logic_validator.withdraw");
+        ListPlutusData params = ListPlutusData.of(
+                BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
+                BytesPlutusData.of(HexUtil.decodeHexString(powerUsersLinkedListPolicyId)),
+                BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
+                BytesPlutusData.of(HexUtil.decodeHexString(registryPolicyId))
+        );
+        return applyParameters(contract, params, "third_party_transfer_logic");
+    }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 

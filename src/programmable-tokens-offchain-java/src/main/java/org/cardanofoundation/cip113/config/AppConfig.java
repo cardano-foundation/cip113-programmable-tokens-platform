@@ -78,6 +78,16 @@ public class AppConfig {
             return switch (network) {
                 case "preprod" -> Networks.preprod();
                 case "preview" -> Networks.preview();
+                // Local Yaci DevKit devnet: network id 0 (shared by every testnet-flavoured
+                // network — see Networks.preprod()/preview()), magic 42 is this project's
+                // established devnet convention (see docs/DEPLOYMENT.md and the deployment
+                // records under protocol-bootstraps-devnet.json). Without this case "devnet"
+                // silently fell through to Networks.mainnet(), so every address derived from the
+                // devnet bootstrap (protocol-bootstraps-devnet.json) would be mainnet-shaped
+                // while the actual on-chain UTxOs are testnet-shaped addr_test1.../stake_test1...
+                // — the same "valid-looking hash, wrong address" failure mode WP-2 fixed, just at
+                // the network-tag layer instead of the script-parameter layer.
+                case "devnet" -> new com.bloxbean.cardano.client.common.model.Network(0b0000, 42);
                 default -> Networks.mainnet();
             };
         }

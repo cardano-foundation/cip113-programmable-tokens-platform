@@ -11,7 +11,7 @@ import com.bloxbean.cardano.client.common.model.Networks;
 import com.bloxbean.cardano.client.function.helper.SignerProviders;
 import com.bloxbean.cardano.client.plutus.blueprint.PlutusBlueprintUtil;
 import com.bloxbean.cardano.client.plutus.blueprint.model.PlutusVersion;
-import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
 import com.bloxbean.cardano.client.quicktx.ScriptTx;
@@ -108,7 +108,17 @@ public class PreviewWipeTest extends AbstractPreviewTest {
         var issuanceContract = protocolScriptBuilderService.getParameterizedIssuanceMintScript(protocolBootstrapParams, substandardIssueContract);
         log.info("issuanceContract: {}", issuanceContract.getPolicyId());
 
-        var issuanceRedeemer = ConstrPlutusData.of(0, ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())));
+        // v0.4.0 wire format: issuance_mint's redeemer IS types.MintingRegistryProof
+        // (RefInput { index } = Constr 0 [Int]); the pre-v0.4.0 SmartTokenMintingAction
+        // { minting_logic_cred, proof } wrapper is gone.
+        //
+        // NOT PORTED — this whole method body is unreachable (`if (true) return;` above)
+        // and was never migrated to v0.4.0. Beyond the redeemer shape below, the tx as
+        // written carries NO registry reference input, so `list.at(self.reference_inputs,
+        // index)` would resolve nothing. Before re-enabling this test, model it on
+        // dummy/PreviewRegisterTest.mint(): look the registry node up at the directory
+        // spend address, `.readFrom(registryRefInput)`, and set the index accordingly.
+        var issuanceRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(0));
 
         // Programmable Token Mint
         var programmableToken = Asset.builder()

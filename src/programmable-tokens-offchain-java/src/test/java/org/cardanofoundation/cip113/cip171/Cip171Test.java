@@ -53,7 +53,7 @@ public class Cip171Test extends AbstractPreviewTest {
 
         var programmableLogicBaseParams = protocolBootstrapParams.programmableLogicBaseParams();
         var plbParameters = ConstrPlutusData.of(1,
-                BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicBaseParams.programmableLogicGlobalScriptHash()))
+                BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicBaseParams.protocolParamsPolicyId()))
         );
         log.info("plbParameters.serializeToHex(): {}", plbParameters.serializeToHex());
         log.info("programmableLogicBaseParams.scriptHash(): {}", programmableLogicBaseParams.scriptHash());

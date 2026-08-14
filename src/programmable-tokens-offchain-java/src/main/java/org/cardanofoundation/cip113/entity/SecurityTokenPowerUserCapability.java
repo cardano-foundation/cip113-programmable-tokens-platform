@@ -6,10 +6,15 @@ package org.cardanofoundation.cip113.entity;
  *  {@code can_force_transfer}) — see {@code lib/types/power_users.ak}.
  *
  *  <p>Note on absent capabilities: BaFin deliberately does NOT have separate
- *  Blacklister / Verifier roles — denylist mutations are gated directly by the
- *  admin credential in the GS datum, and KYC verification is delegated to the
- *  off-chain trusted entities listed in {@code trusted_entity_vkeys}. */
+ *  Blacklister / Verifier roles. KYC verification is delegated to the off-chain
+ *  trusted entities listed in {@code trusted_entity_vkeys}; sanctions (denylist
+ *  add/remove) are gated by {@link #ADMIN} — see the note on that constant. */
 public enum SecurityTokenPowerUserCapability {
+    /** {@code is_admin}. Since upstream fn-bafin-cardano-sc @7ae4ce3, holders of
+     *  this flag may add to / remove from the denylist (signed by themselves),
+     *  which is what lets a compliance role sanction wallets without holding the
+     *  GS master admin key. The GS admin still owns the power-user list lifecycle
+     *  and grants/revokes this flag. */
     ADMIN          (1 << 0),
     MINTER         (1 << 1),
     BURNER         (1 << 2),

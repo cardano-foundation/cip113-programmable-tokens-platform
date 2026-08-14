@@ -55,7 +55,7 @@ dependencies {
 
     implementation('com.easy1staking:cardano-client-lib-extensions:0.0.4')
 
-	implementation 'org.cardanofoundation:signify:0.1.2-71dbd8d-SNAPSHOT'
+	implementation 'org.cardanofoundation:signify:0.1.2-d92f263-SNAPSHOT'
 
 	implementation 'io.micrometer:micrometer-registry-prometheus:latest.release'
 
@@ -76,4 +76,28 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
+	// SecurityTokenUpstreamPinTest hashes the vendored security-token contract
+	// tree, which lives OUTSIDE this Gradle project and is therefore not one of
+	// the test task's implicit inputs. Without this declaration, editing a
+	// vendored Aiken file leaves `test` UP-TO-DATE and the drift guard silently
+	// never runs — exactly the failure mode the pin exists to prevent.
+	inputs.dir(file("$projectDir/../substandards/security-token"))
+	      .withPropertyName('vendoredSecurityToken')
+	      .withPathSensitivity(PathSensitivity.RELATIVE)
+
+	// Gradle discards the test JVM's stdout/stderr, so log.info and System.out
+	// from a test are invisible by default — including the deployment test's
+	// BootstrapParams and derived script hashes. Opt in per-run:
+	//
+	//   ./gradlew test --tests '*Foo*' -PtestLogs
+	//
+	// Left off by default on purpose: the full suite is 116 tests and streaming
+	// every one of them buries the result.
+	if (project.hasProperty('testLogs')) {
+		testLogging {
+			showStandardStreams = true
+			events 'passed', 'skipped', 'failed'
+			exceptionFormat = 'full'
+		}
+	}
 }

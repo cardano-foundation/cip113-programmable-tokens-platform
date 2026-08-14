@@ -13,7 +13,6 @@ import com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
-import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.quicktx.Tx;
 import com.bloxbean.cardano.client.transaction.spec.Asset;
 import com.bloxbean.cardano.client.transaction.spec.MultiAsset;
@@ -27,6 +26,7 @@ import org.cardanofoundation.cip113.model.blueprint.Plutus;
 import org.cardanofoundation.cip113.model.bootstrap.*;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
@@ -72,6 +72,12 @@ public class PreprodProtocolDeploymentMintTest extends AbstractPreprodTest {
         ISSUANCE_CONTRACT = getCompiledCodeFor("issuance_mint.issuance_mint.mint", validators);
     }
 
+    @Disabled("pre-v0.4.0 and unmigrated: no coordination_spend/unfracking/upgrade_multisig "
+            + "wiring exists in this file, so the ProtocolBootstrapParams it builds has null "
+            + "coordinationParams/unfrackingParams/upgradeMultisigParams/unfrackingRefInput; "
+            + "dryRun=false here means running it submits a real preprod transaction and logs "
+            + "that incomplete BootstrapParams JSON as if it were a valid deployment handoff. "
+            + "Re-enable only once this file is ported to v0.4.0 (see PreviewProtocolDeploymentMintTest).")
     @Test
     public void deploy() throws Exception {
 
@@ -321,14 +327,24 @@ public class PreprodProtocolDeploymentMintTest extends AbstractPreprodTest {
         var programmableBaseRefInput = new TxInput(txHash, 3);
         var programmableGlobalRefInput = new TxInput(txHash, 4);
 
+        // NOTE: this preprod flow predates v0.4.0's coordination/unfracking/upgrade-multisig
+        // contracts (still parameterizes programmable_logic_base as Constr(1, plgHash) above,
+        // no coordination_spend/unfracking/upgrade_multisig loaded anywhere in this file) — it
+        // was not migrated as part of the v0.4.0 bootstrap work, so these four fields have no
+        // real value to carry here. Left null rather than guessed at; porting this whole test to
+        // v0.4.0 is separate, larger follow-up work (see PreviewProtocolDeploymentMintTest).
         var protocolBootstrapParams = new ProtocolBootstrapParams(protocolParams,
+                null,
                 programmableLogicGlobalParams,
                 programmableLogicBaseParams,
+                null,
+                null,
                 issuanceParams,
                 directoryParams,
                 directorySpendParams,
                 programmableBaseRefInput,
                 programmableGlobalRefInput,
+                null,
                 txHash);
 
 //        var stakeRegistrationTx = new Tx()
@@ -345,24 +361,5 @@ public class PreprodProtocolDeploymentMintTest extends AbstractPreprodTest {
         log.info("BootstrapParams: {}", OBJECT_MAPPER.writeValueAsString(protocolBootstrapParams));
 
     }
-
-    @Test
-    public void registerAddress() throws Exception {
-        var utxosOpt = bfBackendService.getUtxoService().getUtxos(adminAccount.baseAddress(), 100, 1);
-
-        var allWalletUtxos = utxosOpt.getValue();
-
-        var stakeRegistrationTx = new Tx()
-                .from(adminAccount.baseAddress())
-                .collectFrom(List.of(allWalletUtxos.get(2)))
-                .registerStakeAddress("stake_test17qma20wkn4dwuweaudjqelpra78m2x5qyqd3psmwfa7lj4g5qmpkq")
-                .withChangeAddress(adminAccount.baseAddress());
-
-        new QuickTxBuilder(bfBackendService).compose(stakeRegistrationTx)
-                .feePayer(adminAccount.baseAddress())
-                .withSigner(SignerProviders.signerFrom(adminAccount))
-                .completeAndWait();
-    }
-
 
 }

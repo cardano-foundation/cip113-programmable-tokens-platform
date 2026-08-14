@@ -1,6 +1,9 @@
 # IDE and editor
 .vscode/
 .idea/
+# Claude Code agent scratch space. Holds git worktrees — full second copies of
+# this repository — which must never be committed back into the tree.
+.claude/
 *.iml
 *.swp
 *.swo
