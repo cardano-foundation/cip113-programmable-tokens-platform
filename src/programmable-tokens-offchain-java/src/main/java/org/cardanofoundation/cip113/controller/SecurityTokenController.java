@@ -420,6 +420,13 @@ public class SecurityTokenController {
                         resp.put("memberRootHash", gs.memberRootHash() != null ? gs.memberRootHash() : "");
                         resp.put("memberRootHashLocal", localRootHex);
                         resp.put("requiresReceiverKyc", gs.requiresReceiverKyc());
+                        // D4: the UI cannot offer SetRequiresSenderKyc without knowing
+                        // the current value to diff against.
+                        resp.put("requiresSenderKyc", gs.requiresSenderKyc());
+                        // D3: terminal decommissioning flag. The admin panel needs it to
+                        // render the "already decommissioned" state instead of offering
+                        // actions that can no longer be applied.
+                        resp.put("deactivated", gs.deactivated());
                         resp.put("adminCredentialHash", gs.adminCredentialHash());
                         return ResponseEntity.ok(resp);
                     })

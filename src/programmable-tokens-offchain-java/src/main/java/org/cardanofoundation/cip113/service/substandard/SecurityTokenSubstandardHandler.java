@@ -130,10 +130,15 @@ public class SecurityTokenSubstandardHandler
 
     private static final String SUBSTANDARD_ID = "security-token";
 
-    /** Minimum remaining validity window for a mint whose TTL is clamped to a
-     *  membership expiry. Below this the transaction would expire before it could
-     *  realistically be signed and submitted. */
-    private static final long MIN_MINT_TTL_MS = 120_000L;
+    /** Minimum remaining validity window for a transaction whose TTL is clamped to
+     *  an allowlist membership expiry. Below this the transaction would expire
+     *  before it could realistically be signed and submitted. Applies to both the
+     *  mint and the burn — {@code verify_membership_proof} demands a Finite upper
+     *  bound {@code <= proof.valid_until_ms} on either path. */
+    private static final long MIN_KYC_TTL_MS = 120_000L;
+
+    /** Default validity window for mint/burn transactions. */
+    private static final long DEFAULT_TTL_MS = 15 * 60 * 1000L;
 
     /** Hex of an empty (32-byte) MPF root: 32 zero bytes. */
     static final String EMPTY_ROOT_HEX = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -772,37 +777,11 @@ public class SecurityTokenSubstandardHandler
             String mintMpfProofCborHex = null;
             Long mintMpfValidUntilMs = null;
             if (needRecipientProof) {
-                byte[] onchainRoot = gsFields.get(GS_IDX_MEMBER_ROOT_HASH) instanceof BytesPlutusData rootBytes
-                        ? rootBytes.getValue() : new byte[0];
-                if (onchainRoot.length == 0) {
-                    throw new BuildPreconditionException(
-                            "token has requires_receiver_kyc=true but its on-chain member_root_hash is empty, "
-                            + "so no membership proof can verify. Enroll the recipient in the allowlist and "
-                            + "publish the member root (UpdateMemberRootHash) before minting.");
-                }
-                long now = System.currentTimeMillis();
-                SecurityTokenAllowlistService.MpfLeafView leaf = allowlistService
-                        .inclusionProof(request.tokenPolicyId(), mintRecipientStakeHash, now)
-                        .orElseThrow(() -> new BuildPreconditionException(
-                                "recipient " + HexUtil.encodeHexString(mintRecipientStakeHash)
-                                + " is not an allowlisted member of " + request.tokenPolicyId()
-                                + " (or their membership has expired) — add them and publish the "
-                                + "member root first"));
-                if (!Arrays.equals(leaf.rootHashLocal(), onchainRoot)) {
-                    throw new BuildPreconditionException(
-                            "allowlist root drift: the published-leaf trie root "
-                            + HexUtil.encodeHexString(leaf.rootHashLocal())
-                            + " does not match the GS datum's member_root_hash "
-                            + HexUtil.encodeHexString(onchainRoot)
-                            + " — re-publish the member root (UpdateMemberRootHash) before minting");
-                }
-                if (leaf.proofCbor() == null || leaf.proofCbor().length == 0) {
-                    throw new BuildPreconditionException(
-                            "could not serialise the MPF inclusion proof for recipient "
-                            + HexUtil.encodeHexString(mintRecipientStakeHash));
-                }
-                mintMpfProofCborHex = HexUtil.encodeHexString(leaf.proofCbor());
-                mintMpfValidUntilMs = leaf.validUntilMs();
+                ResolvedMembership m = resolveMembershipProof(
+                        request.tokenPolicyId(), mintRecipientStakeHash, gsFields,
+                        "recipient", "minting");
+                mintMpfProofCborHex = m.proofCborHex();
+                mintMpfValidUntilMs = m.validUntilMs();
             }
 
             // ── 4. Compute redeemer indices ────────────────────────────────
@@ -902,28 +881,9 @@ public class SecurityTokenSubstandardHandler
             // unbounded tx fails that clause no matter how good the proof is. Set a
             // TTL on every mint (harmless when no proof is verified) and clamp it to
             // the membership's expiry when one is.
-            long ttlNow = System.currentTimeMillis();
-            long ttlMs = ttlNow + 15 * 60 * 1000L;
-            if (needRecipientProof && mintMpfValidUntilMs != null) {
-                ttlMs = Math.min(ttlMs, mintMpfValidUntilMs);
-                // `inclusionProof` only rejects memberships that have ALREADY expired,
-                // so a leaf expiring seconds from now clamps the TTL to (almost) the
-                // current slot. `ttl` is invalid-hereafter, so the ledger would reject
-                // the tx with OutsideValidityIntervalUTxO — and any window under a
-                // minute expires while the user is still in the wallet dialog. Refuse
-                // with the expiry timestamp instead of emitting a doomed transaction.
-                if (ttlMs - ttlNow < MIN_MINT_TTL_MS) {
-                    throw new BuildPreconditionException(
-                            "recipient " + HexUtil.encodeHexString(mintRecipientStakeHash)
-                            + "'s allowlist membership expires at " + Instant.ofEpochMilli(mintMpfValidUntilMs)
-                            + ", too soon to build a mint against (needs at least "
-                            + (MIN_MINT_TTL_MS / 1000) + "s). Renew their membership and "
-                            + "re-publish the member root.");
-                }
-            }
-            long ttlSlot = cardanoConverters.time().toSlot(
-                    java.time.LocalDateTime.ofInstant(
-                            Instant.ofEpochMilli(ttlMs), java.time.ZoneOffset.UTC));
+            long ttlSlot = kycClampedTtlSlot(
+                    needRecipientProof ? mintMpfValidUntilMs : null,
+                    mintRecipientStakeHash, "recipient", "mint");
 
             String feePayerAddress = request.feePayerAddress();
             Transaction transaction = quickTxBuilder.compose(tx)
@@ -1479,6 +1439,99 @@ public class SecurityTokenSubstandardHandler
                         BytesPlutusData.of(stakeHash),
                         BigIntPlutusData.of(BigInteger.ZERO),
                         ListPlutusData.of()));
+    }
+
+    /** A resolved MPF inclusion proof: the CBOR the redeemer carries plus the
+     *  membership expiry the transaction's TTL must respect. */
+    private record ResolvedMembership(String proofCborHex, long validUntilMs) {}
+
+    /** Resolve a real MPF inclusion proof for {@code subjectStakeHash} against the
+     *  GS datum's {@code member_root_hash}, or refuse up front with a message that
+     *  names the operator action which fixes it.
+     *
+     *  <p>Shared by the mint ({@code minting_logic_script}'s
+     *  {@code verify_mint_destinations}) and the burn ({@code
+     *  third_party_transfer_logic_script}'s per-destination loop). Both call the
+     *  same {@code verify_kyc_proof} → {@code verify_membership_proof} pair, so
+     *  both need the same three preconditions to hold: a non-empty on-chain root,
+     *  a live leaf for the subject, and local/on-chain root agreement. Failing
+     *  here rather than inside the evaluator is the whole point — a trapped
+     *  script gives the operator nothing to act on.
+     *
+     *  @param subjectLabel  what the subject is to the caller ("recipient" / "burn destination")
+     *  @param verb          gerund naming the operation, for the error copy ("minting" / "burning") */
+    private ResolvedMembership resolveMembershipProof(String policyId, byte[] subjectStakeHash,
+                                                      List<PlutusData> gsFields,
+                                                      String subjectLabel, String verb) {
+        byte[] onchainRoot = gsFields.get(GS_IDX_MEMBER_ROOT_HASH) instanceof BytesPlutusData rootBytes
+                ? rootBytes.getValue() : new byte[0];
+        if (onchainRoot.length == 0) {
+            throw new BuildPreconditionException(
+                    "token has requires_receiver_kyc=true but its on-chain member_root_hash is empty, "
+                    + "so no membership proof can verify. Enroll the " + subjectLabel
+                    + " in the allowlist and publish the member root (UpdateMemberRootHash) before "
+                    + verb + ".");
+        }
+        long now = System.currentTimeMillis();
+        SecurityTokenAllowlistService.MpfLeafView leaf = allowlistService
+                .inclusionProof(policyId, subjectStakeHash, now)
+                .orElseThrow(() -> new BuildPreconditionException(
+                        subjectLabel + " " + HexUtil.encodeHexString(subjectStakeHash)
+                        + " is not an allowlisted member of " + policyId
+                        + " (or their membership has expired) — add them and publish the "
+                        + "member root first"));
+        if (!Arrays.equals(leaf.rootHashLocal(), onchainRoot)) {
+            throw new BuildPreconditionException(
+                    "allowlist root drift: the published-leaf trie root "
+                    + HexUtil.encodeHexString(leaf.rootHashLocal())
+                    + " does not match the GS datum's member_root_hash "
+                    + HexUtil.encodeHexString(onchainRoot)
+                    + " — re-publish the member root (UpdateMemberRootHash) before " + verb);
+        }
+        if (leaf.proofCbor() == null || leaf.proofCbor().length == 0) {
+            throw new BuildPreconditionException(
+                    "could not serialise the MPF inclusion proof for " + subjectLabel + " "
+                    + HexUtil.encodeHexString(subjectStakeHash));
+        }
+        return new ResolvedMembership(HexUtil.encodeHexString(leaf.proofCbor()), leaf.validUntilMs());
+    }
+
+    /** Transaction TTL slot, clamped to an allowlist membership's expiry whenever a
+     *  Membership KYC proof is being emitted.
+     *
+     *  <p>{@code verify_membership_proof} (lib/kyc/verify.ak:137-142) returns False
+     *  unless {@code validity_range.upper_bound} is {@code Finite} AND
+     *  {@code <= proof.valid_until_ms}, so an unbounded transaction fails that
+     *  clause no matter how good the proof is. We therefore always set a bound.
+     *
+     *  <p>{@code inclusionProof} only rejects memberships that have ALREADY expired,
+     *  so a leaf expiring seconds from now would clamp the TTL to (almost) the
+     *  current slot. {@code ttl} is invalid-hereafter, so the ledger would reject
+     *  such a transaction with {@code OutsideValidityIntervalUTxO} — and any window
+     *  under a minute expires while the user is still in the wallet dialog. Refuse
+     *  with the expiry timestamp instead of emitting a doomed transaction.
+     *
+     *  @param membershipValidUntilMs the proof's expiry, or null when no proof is
+     *                                being verified (bound is then the default window) */
+    private long kycClampedTtlSlot(Long membershipValidUntilMs, byte[] subjectStakeHash,
+                                   String subjectLabel, String operation) {
+        long now = System.currentTimeMillis();
+        long ttlMs = now + DEFAULT_TTL_MS;
+        if (membershipValidUntilMs != null) {
+            ttlMs = Math.min(ttlMs, membershipValidUntilMs);
+            if (ttlMs - now < MIN_KYC_TTL_MS) {
+                throw new BuildPreconditionException(
+                        subjectLabel + " " + HexUtil.encodeHexString(subjectStakeHash)
+                        + "'s allowlist membership expires at "
+                        + Instant.ofEpochMilli(membershipValidUntilMs)
+                        + ", too soon to build a " + operation + " against (needs at least "
+                        + (MIN_KYC_TTL_MS / 1000) + "s). Renew their membership and "
+                        + "re-publish the member root.");
+            }
+        }
+        return cardanoConverters.time().toSlot(
+                java.time.LocalDateTime.ofInstant(
+                        Instant.ofEpochMilli(ttlMs), java.time.ZoneOffset.UTC));
     }
 
     /** Global-state genesis. One tx that mints all three NFTs (GlobalState, denylist
@@ -2644,7 +2697,9 @@ public class SecurityTokenSubstandardHandler
      *
      *    Reference inputs:
      *      directory entry for the prog-token policy
-     *      power-user node for the admin (mintingLogic checks can_burn)
+     *      power-user node for the BURNER (mintingLogic checks can_burn; the
+     *           third-party transfer logic checks can_force_transfer on the
+     *           same node — a burner needs both)
      *      protocol params UTxO
      *      issuance params UTxO
      *
@@ -2669,6 +2724,16 @@ public class SecurityTokenSubstandardHandler
      *  admin-seizure flow (third-party transfer) would be required —
      *  intentionally deferred until the upstream BaFin seizure validator is
      *  wired through.
+     *
+     *  <h3>Receiver KYC on a PARTIAL burn</h3>
+     *  A partial burn leaves a token-bearing continuation output, which
+     *  {@code third_party_transfer_logic_script} treats as a destination and
+     *  subjects to {@code verify_kyc_proof} when {@code requires_receiver_kyc} is
+     *  set. That branch has <em>no</em> self-exemption (contrast
+     *  {@code minting_logic_script}, which lets a power user mint to itself), so
+     *  the burner must be an allowlisted member in their own right, and the
+     *  transaction must carry a Finite validity upper bound. Both are handled
+     *  below. A FULL burn emits no token-bearing output and needs neither.
      */
     @Override
     public TransactionContext<Void> buildBurnTransaction(
@@ -2713,6 +2778,32 @@ public class SecurityTokenSubstandardHandler
             MintLikeScripts s = buildMintLikeScripts(reg, protocolParams);
             Utxo gsUtxo = findGsUtxo(reg);
             Utxo puNode = findPuNode(reg, burnerKeyHash, "burner");
+            // A burn drives TWO validators that each gate on a different capability
+            // of this one node, and both read it from the node we reference here:
+            //   minting_logic_script.ak:368-371 — negative mint ⇒ can_burn
+            //   third_party_transfer_logic_script.ak:170 — ThirdPartyAct ⇒ can_force_transfer
+            // Read them off chain so a burner missing either gets a message naming
+            // the capability instead of an evaluator trap.
+            PowerUserCaps burnerCaps = parsePowerUser(puNode);
+            if (!burnerCaps.canBurn()) {
+                throw new BuildPreconditionException(
+                        "burner " + HexUtil.encodeHexString(burnerKeyHash) + " has a power-user node "
+                        + "but not the can_burn capability, which the on-chain minting logic requires "
+                        + "on the negative-mint branch (minting_logic_script.ak: power_user_data.can_burn). "
+                        + "Granting it means the power-users validator's ModifyPowerUser action, which "
+                        + "this platform does not yet build — the capability has to be set when the node "
+                        + "is created. Burn from a wallet whose node already holds can_burn.");
+            }
+            if (!burnerCaps.canForceTransfer()) {
+                throw new BuildPreconditionException(
+                        "burner " + HexUtil.encodeHexString(burnerKeyHash) + " has a power-user node "
+                        + "but not the can_force_transfer capability. A burn spends the token UTxO "
+                        + "through CIP-113's ThirdPartyAct branch, whose validator "
+                        + "(third_party_transfer_logic_script.ak: power_user_data.can_force_transfer) "
+                        + "gates on that flag IN ADDITION to minting_logic's can_burn — so a burner "
+                        + "needs both. Burn from a wallet whose node holds can_burn AND "
+                        + "can_force_transfer.");
+            }
             Utxo directoryEntry = findDirectoryEntry(request.tokenPolicyId(), protocolParams);
             List<Utxo> protoIssue = findProtocolAndIssuanceUtxos(protocolParams);
             Utxo protocolParamsUtxo = protoIssue.get(0);
@@ -2760,6 +2851,36 @@ public class SecurityTokenSubstandardHandler
             long currentMintable = ((BigIntPlutusData) gsFields.get(GS_IDX_MINTABLE_AMOUNT)).getValue().longValueExact();
             PlutusData newGsDatum = applyMintableDelta(gsFields, burnQuantity.longValueExact());
             long newMintable = currentMintable + burnQuantity.longValueExact();
+
+            // ── 4b. Receiver-KYC gate on the partial-burn continuation ─────
+            // A PARTIAL burn leaves a token-bearing continuation output, which
+            // third_party_transfer_logic_script.ak:81-98 counts as a destination and
+            // then runs through its per-destination loop:
+            //
+            //   let kyc_ok = if gs_datum.requires_receiver_kyc {
+            //     verify_kyc_proof(action.destination_proof, dest_pkh, …)
+            //   } else { True }
+            //
+            // Note what is NOT there: unlike minting_logic_script.ak:419-424, this
+            // branch has NO `dest_pkh == power_user_node_key` self-exemption. So a
+            // power user burning part of their OWN holding still needs a real
+            // membership proof for their own stake credential — the placeholder that
+            // used to be passed here (includeKycProof=false) could never verify. A
+            // FULL burn emits no token-bearing output, so the destination list is
+            // empty and no proof is needed.
+            boolean requiresReceiverKyc = boolFromConstr(gsFields.get(GS_IDX_REQUIRES_RECEIVER_KYC));
+            boolean isPartialBurn = remainingTokenInUtxo.signum() > 0;
+            boolean needBurnDestinationProof = requiresReceiverKyc && isPartialBurn;
+
+            String burnMpfProofCborHex = null;
+            Long burnMpfValidUntilMs = null;
+            if (needBurnDestinationProof) {
+                ResolvedMembership m = resolveMembershipProof(
+                        request.tokenPolicyId(), burnerStakeHash, gsFields,
+                        "burn destination", "burning");
+                burnMpfProofCborHex = m.proofCborHex();
+                burnMpfValidUntilMs = m.validUntilMs();
+            }
 
             // ── 5. Redeemer indices ────────────────────────────────────────
             // The continuation output of a PARTIAL burn still carries the security
@@ -2873,6 +2994,18 @@ public class SecurityTokenSubstandardHandler
                     reg.getGlobalStatePolicyId(), protocolParams.directoryMintParams().scriptHash());
             Address thirdPartyRewardAddress = AddressProvider.getRewardAddress(
                     thirdPartyTransferLogicScript, network.getCardanoNetwork());
+            // KNOWN BLOCKER — this reward account is never registered by any code path.
+            // The withdrawal below requires it to exist on chain, but the only stake
+            // registrations in this substandard are mintingLogic (genesis, ~line 1679)
+            // and transferLogic (buildRegisterTransferLogicTransaction) — a DIFFERENT
+            // script. There is no counterpart for this one, so a burn builds and
+            // evaluates fine (script evaluation does not check reward-account
+            // existence) and is then rejected phase-1 at submit with
+            // WithdrawalsNotInRewardsCERTS. Fixing it means a
+            // buildRegisterThirdPartyTransferLogicTransaction mirroring
+            // buildRegisterTransferLogicTransaction, wired into
+            // buildFullRegistrationChain and the admin UI. Not yet done — no burn has
+            // ever been submitted, so this has never been observed, only derived.
             // ThirdPartyTransferLogicScriptWithdrawRedeemer { registry_node_ref_input_index,
             //   global_state_ref_input_index, power_user_node_ref_input_index,
             //   destination_actions }. One action per unique destination stake credential
@@ -2882,9 +3015,10 @@ public class SecurityTokenSubstandardHandler
                     BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx)),
                     BigIntPlutusData.of(BigInteger.valueOf(gsRefIdxForBurn)),
                     BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)),
-                    remainingTokenInUtxo.signum() > 0
+                    isPartialBurn
                             ? ListPlutusData.of(buildDestinationAction(
-                                    burnerStakeHash, /*includeKycProof=*/ false, null, null,
+                                    burnerStakeHash, needBurnDestinationProof,
+                                    burnMpfProofCborHex, burnMpfValidUntilMs,
                                     denylistRefIdxForBurn))
                             : ListPlutusData.of());
 
@@ -2907,21 +3041,29 @@ public class SecurityTokenSubstandardHandler
                         continuationMultiAssets.add(ma);
                         continue;
                     }
-                    if (remainingTokenInUtxo.signum() == 0) continue;
-                    // Keep all OTHER asset names under the same policy verbatim
-                    // (if any), and the burned asset at the reduced quantity.
+                    // Keep all OTHER asset names under the same policy verbatim, and the
+                    // burned asset at the reduced quantity. A FULL burn drops only the
+                    // burned asset — skipping the whole policy entry would silently
+                    // discard any sibling asset names, and the balancer would sweep them
+                    // into the fee-payer's change output, moving programmable tokens out
+                    // of the prog-logic-base address.
                     List<Asset> kept = new ArrayList<>();
                     for (Asset a : ma.getAssets()) {
                         String aHexName = a.getName().startsWith("0x")
                                 ? a.getName().substring(2) : a.getName();
                         if (aHexName.equalsIgnoreCase(request.assetName())) {
-                            kept.add(Asset.builder()
-                                    .name("0x" + request.assetName())
-                                    .value(remainingTokenInUtxo).build());
+                            // Zero-quantity assets are rejected by the ledger, so on a
+                            // full burn the entry is omitted rather than set to 0.
+                            if (remainingTokenInUtxo.signum() > 0) {
+                                kept.add(Asset.builder()
+                                        .name("0x" + request.assetName())
+                                        .value(remainingTokenInUtxo).build());
+                            }
                         } else {
                             kept.add(a);
                         }
                     }
+                    if (kept.isEmpty()) continue;
                     continuationMultiAssets.add(MultiAsset.builder()
                             .policyId(ma.getPolicyId())
                             .assets(kept).build());
@@ -2938,10 +3080,22 @@ public class SecurityTokenSubstandardHandler
             //   spending → programmableLogicBase  (REFERENCED via progBaseRefInput)
             //   minting  → issuanceContract       (attached — wrapped per-token)
             //   reward   → mintingLogic           (attached — BaFin, parameterised, can_burn)
+            //   reward   → thirdPartyTransferLogic (attached — BaFin, parameterised,
+            //                                       can_force_transfer)
             //   reward   → programmableLogicGlobal (REFERENCED via progGlobalRefInput)
             //
             // The protocol scripts MUST be referenced (not attached) — attaching
             // both inline pushes the tx over the 16 KB ledger size limit.
+            //
+            // SIZE WARNING: this transaction now attaches FOUR validators. The
+            // headroom note below was written when the third-party script was not
+            // among them; a parameterised third-party validator is in the same size
+            // class as transferLogic (~6 KB), so it is spending exactly the headroom
+            // that note says was needed. If a real burn is ever rejected for size,
+            // the fix is to publish thirdPartyTransferLogic as a reference script and
+            // read it in like progBaseRefInput / progGlobalRefInput, rather than
+            // attaching it inline. Unmeasured — no burn has ever been built against a
+            // real token UTxO.
             //
             // transferLogic is intentionally NOT in the witness set. Registry
             // node field 3 (transfer_logic_script) is only consulted by
@@ -2951,12 +3105,10 @@ public class SecurityTokenSubstandardHandler
             //   lib/registry_node.ak :: with_key_and_3rd_party_logic
             //   validators/programmable_logic/third_party.ak ::
             //     expect pairs.has_key_or_fail(self.withdrawals, third_party_logic)
-            // buildRegistrationTransaction writes mintingLogic into field 4
-            // (see the comment there for why the BaFin
-            // third_party_transfer_logic_validator cannot go in that slot at
-            // the pinned upstream commit), and mintingLogic IS in our
-            // withdrawals below — so the ThirdPartyAct check is satisfied by
-            // the withdrawal the burn needs anyway. That also saves ~5952
+            // Slot 4 now holds the substandard's REAL
+            // third_party_transfer_logic_validator (that was the fix in 0ec401a), so
+            // this tx withdraws from that script's reward account — see the
+            // withdrawal below. Keeping transferLogic out still saves ~5952
             // bytes of transferLogic script witness, keeping the tx under 16 KB.
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
@@ -2985,6 +3137,14 @@ public class SecurityTokenSubstandardHandler
             //     collect_input_assets check on the prog-token UTxO's stake
             //     credential. Wallets sign for BOTH payment and stake when
             //     signing as themselves, so this just declares the requirement.
+            // Finite validity upper bound — same requirement as the mint: a
+            // Membership proof only verifies against a Finite upper bound that is
+            // <= proof.valid_until_ms. Set on every burn (harmless when no proof is
+            // verified) and clamped to the membership expiry when one is.
+            long burnTtlSlot = kycClampedTtlSlot(
+                    needBurnDestinationProof ? burnMpfValidUntilMs : null,
+                    burnerStakeHash, "burn destination", "burn");
+
             String feePayerAddress = request.feePayerAddress();
             Transaction transaction = quickTxBuilder.compose(tx)
                     .withRequiredSigners(burnerKeyHash, burnerStakeHash)
@@ -2993,6 +3153,7 @@ public class SecurityTokenSubstandardHandler
                     .withCollateralInputs(TransactionInput.builder()
                             .transactionId(funding.getTxHash())
                             .index(funding.getOutputIndex()).build())
+                    .validTo(burnTtlSlot)
                     .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
                     .postBalanceTx((bctx, txn) -> {
                         // Same fee-too-small pattern we saw in transfer:
@@ -3465,7 +3626,8 @@ public class SecurityTokenSubstandardHandler
             String action,                          // "PauseTransfers" | "ModifySecurityInfo" | "AddTrustedEntity" |
                                                     // "RemoveTrustedEntity" | "UpdateTrustedEntity" |
                                                     // "SetRequiresSenderKyc" | "SetRequiresReceiverKyc" |
-                                                    // "UpdateMemberRootHash" | "RotateAdmin"
+                                                    // "UpdateMemberRootHash" | "RotateAdmin" |
+                                                    // "DeactivateContract" (no fields; irreversible)
             Boolean transfersPaused,                // PauseTransfers
             String newSecurityInfoHex,              // ModifySecurityInfo (CBOR-encoded Data)
             String trustedVkeyHex,                  // AddTrustedEntity / RemoveTrustedEntity (32-byte hex)
@@ -3655,6 +3817,116 @@ public class SecurityTokenSubstandardHandler
         String error;
     }
 
+    /** Thrown by the {@code requireXxx} validators below to abort
+     *  {@link #computeActionAndDatum} with a field-level message. Caught there and
+     *  turned into {@code ActionAndDatum.error}, which the orchestrator prefixes
+     *  with {@code change[i]:} and the controller returns as HTTP 400. */
+    private static final class ChangeValidationException extends RuntimeException {
+        ChangeValidationException(String message) { super(message); }
+    }
+
+    /** Decode a caller-supplied hex string, rejecting a bad charset or an odd
+     *  length with a message naming the field (D7). {@code HexUtil} throws an
+     *  {@code IllegalArgumentException} whose text does not say which input was
+     *  at fault, which is what made these surface as opaque build failures. */
+    private static byte[] requireHex(String field, String value) {
+        if (value == null || value.isBlank()) {
+            throw new ChangeValidationException(field + " is required");
+        }
+        String v = value.trim();
+        if (v.length() % 2 != 0) {
+            throw new ChangeValidationException(
+                    field + " must be an even number of hex characters (got " + v.length() + ")");
+        }
+        if (!v.matches("(?i)[0-9a-f]+")) {
+            throw new ChangeValidationException(
+                    field + " must be hex ([0-9a-fA-F] only)");
+        }
+        return HexUtil.decodeHexString(v);
+    }
+
+    /** Same as {@link #requireHex} plus an exact byte-length check — used for the
+     *  32-byte Ed25519 trusted-entity vkeys and the 28-byte admin credential hash
+     *  (the latter is checked on chain too:
+     *  {@code global_state.ak}'s {@code bytearray.length(new_admin_credential_hash) == 28}). */
+    private static byte[] requireHexOfLength(String field, String value, int expectedBytes) {
+        byte[] bytes = requireHex(field, value);
+        if (bytes.length != expectedBytes) {
+            throw new ChangeValidationException(
+                    field + " must be exactly " + expectedBytes + " bytes ("
+                    + (expectedBytes * 2) + " hex characters), got " + bytes.length);
+        }
+        return bytes;
+    }
+
+    /** Decode a caller-supplied hex payload as CBOR {@code PlutusData} (D7).
+     *
+     *  <p>The GS datum's {@code security_info} and a trusted entity's
+     *  {@code metadata} are both opaque {@code Data} on chain, so the platform
+     *  relays whatever the operator supplies — but it must actually BE {@code Data}.
+     *  Valid-hex-but-invalid-CBOR (the canonical example is {@code deadbeef}) used
+     *  to reach {@code PlutusData.deserialize} and surface as a raw parser message
+     *  from deep in the build, with no indication of which field was wrong.
+     *
+     *  <p>Two failure modes are caught: input that does not parse at all, and input
+     *  that parses but leaves trailing bytes unconsumed. The latter matters because
+     *  the decoder would silently drop the tail, and the operator would never learn
+     *  that part of their payload did not make it on chain.
+     *
+     *  <p>Trailing bytes are detected by measuring how much of the input the CBOR
+     *  decoder actually <em>consumed</em>, NOT by comparing the input's length to a
+     *  re-serialisation. A round-trip length comparison is wrong in both directions:
+     *  canonicalisation can expand a value (a 65-byte bytestring re-encodes to the
+     *  chunked indefinite form, which is longer, hiding a real trailing byte) or
+     *  shrink it (non-minimal but perfectly legal input like {@code 1a00000001}
+     *  re-encodes to {@code 01}, which would be reported as four trailing bytes that
+     *  do not exist). Consumption is the only sound measure. */
+    private static PlutusData requireCborPlutusData(String field, String value) {
+        byte[] bytes = requireHex(field, value);
+
+        // Pass 1 — structural: decode exactly one item and require the whole input
+        // to have been consumed.
+        try {
+            java.io.ByteArrayInputStream in = new java.io.ByteArrayInputStream(bytes);
+            co.nstant.in.cbor.model.DataItem item = new co.nstant.in.cbor.CborDecoder(in).decodeNext();
+            if (item == null) {
+                throw new ChangeValidationException(field + " contains no CBOR value");
+            }
+            int remaining = in.available();
+            if (remaining > 0) {
+                throw new ChangeValidationException(
+                        field + " has " + remaining + " trailing byte(s) after a complete CBOR "
+                        + "value — the extra bytes would be silently dropped. Supply exactly one "
+                        + "CBOR Data value.");
+            }
+        } catch (ChangeValidationException cve) {
+            throw cve;
+        } catch (Exception e) {
+            throw new ChangeValidationException(
+                    field + " is not valid CBOR: " + e.getMessage()
+                    + ". It must be the hex of a CBOR-encoded Plutus Data value "
+                    + "(e.g. \"a0\" for an empty map, \"40\" for empty bytes, \"d87980\" for "
+                    + "Constr 0 []) — not arbitrary hex.");
+        }
+
+        // Pass 2 — semantic: the item must be representable as Plutus Data. CBOR has
+        // constructs Data does not (floats, simple values, text strings), so a
+        // well-formed CBOR value is not automatically a valid datum payload.
+        PlutusData parsed;
+        try {
+            parsed = PlutusData.deserialize(bytes);
+        } catch (Exception e) {
+            throw new ChangeValidationException(
+                    field + " is well-formed CBOR but not valid Plutus Data: " + e.getMessage()
+                    + ". Plutus Data is limited to integers, byte strings, lists, maps and "
+                    + "constructors — no floats, text strings or simple values.");
+        }
+        if (parsed == null) {
+            throw new ChangeValidationException(field + " decoded to no PlutusData value");
+        }
+        return parsed;
+    }
+
     /** {@code admin_credential_hash} — GS datum field 2. Read from the datum the tx
      *  is actually spending rather than from the cached DB row, because RotateAdmin
      *  can have moved it since registration. */
@@ -3683,11 +3955,36 @@ public class SecurityTokenSubstandardHandler
 
     /** Compute (action redeemer, new datum) for one change. The new datum mutates
      *  only the field the action owns; all other fields are preserved verbatim.
-     *  Throws CborDeserializationException if a metadata/security-info hex payload
-     *  fails to parse — the orchestrator catches and turns into a typed error. */
+     *
+     *  <p>Every caller-supplied payload is validated first, so a malformed hex or
+     *  CBOR field comes back as {@code ActionAndDatum.error} — which the
+     *  orchestrator prefixes with {@code change[i]:} and the controller returns as
+     *  a 400 naming the field — rather than as a parser message escaping from the
+     *  middle of a transaction build (D7). */
     private ActionAndDatum computeActionAndDatum(GsChangeSpec change, PlutusData currentDatum,
-                                                 String policyId)
-            throws CborDeserializationException {
+                                                 String policyId) {
+        try {
+            return computeActionAndDatumChecked(change, currentDatum, policyId);
+        } catch (ChangeValidationException e) {
+            ActionAndDatum out = new ActionAndDatum();
+            out.error = e.getMessage();
+            return out;
+        } catch (ClassCastException e) {
+            // The trusted-entity branches cast field 7 to MapPlutusData. Aiken emits
+            // `Pairs` as a CBOR map so that holds in practice, but `trustedEntitiesFrom`
+            // shows the alternative list-of-Constr encoding is representable — and an
+            // unhandled CCE here would escape as an opaque "GS update chain failed:
+            // …cannot be cast to…". Name the actual problem instead.
+            ActionAndDatum out = new ActionAndDatum();
+            out.error = change.action() + ": the on-chain global-state datum has an unexpected "
+                    + "shape for this action (" + e.getMessage() + "). The trusted-entity field "
+                    + "is expected to be a CBOR map.";
+            return out;
+        }
+    }
+
+    private ActionAndDatum computeActionAndDatumChecked(GsChangeSpec change, PlutusData currentDatum,
+                                                        String policyId) {
         ActionAndDatum out = new ActionAndDatum();
         if (!(currentDatum instanceof ConstrPlutusData currentConstr)) {
             out.error = "current GS datum is not a Constr";
@@ -3697,6 +3994,20 @@ public class SecurityTokenSubstandardHandler
         if (f.size() != GS_DATUM_FIELD_COUNT) {
             out.error = "current GS datum has " + f.size() + " fields, expected "
                     + GS_DATUM_FIELD_COUNT + " (pre-@7ae4ce3 global state — must be re-bootstrapped)";
+            return out;
+        }
+
+        // Terminal guard, mirroring `expect !input_datum.deactivated` at
+        // global_state.ak:185. That check runs BEFORE branch dispatch, so once
+        // DeactivateContract has landed NO action can ever spend the GS UTxO again —
+        // not an unpause, not a burn, not another deactivation. Refuse here so the
+        // operator gets told the contract is decommissioned rather than watching
+        // every admin action trap in the evaluator.
+        if (boolFromConstr(f.get(GS_IDX_DEACTIVATED))) {
+            out.error = "this token's global state is DEACTIVATED (decommissioned). "
+                    + "global_state.ak rejects every spend of a deactivated global-state UTxO, "
+                    + "so no admin action — including unpausing, burning, or deactivating again "
+                    + "— can be applied. This is irreversible by design.";
             return out;
         }
 
@@ -3722,68 +4033,114 @@ public class SecurityTokenSubstandardHandler
                 out.newDatum = replaceGsField(f, GS_IDX_TRANSFERS_PAUSED, boolToConstr(change.transfersPaused()));
             }
             case "ModifySecurityInfo" -> {
-                if (change.newSecurityInfoHex() == null) {
-                    out.error = "ModifySecurityInfo requires newSecurityInfoHex"; return out;
-                }
-                PlutusData newSecInfo = PlutusData.deserialize(
-                        HexUtil.decodeHexString(change.newSecurityInfoHex()));
+                // D7: security_info is opaque `Data` on chain, so the platform relays
+                // whatever the operator supplies — but validate that it IS Data before
+                // it reaches the tx builder, so bad input comes back as a field-level
+                // 400 rather than a CBOR parser message from deep inside the build.
+                PlutusData newSecInfo = requireCborPlutusData(
+                        "ModifySecurityInfo: newSecurityInfoHex", change.newSecurityInfoHex());
                 out.actionRedeemer = ConstrPlutusData.of(2, newSecInfo);
                 out.newDatum = replaceGsField(f, GS_IDX_SECURITY_INFO, newSecInfo);
             }
             case "AddTrustedEntity" -> {
-                if (change.trustedVkeyHex() == null || change.trustedMetadataHex() == null) {
-                    out.error = "AddTrustedEntity requires trustedVkeyHex + trustedMetadataHex"; return out;
-                }
-                PlutusData vkey = BytesPlutusData.of(HexUtil.decodeHexString(change.trustedVkeyHex()));
-                PlutusData meta = PlutusData.deserialize(HexUtil.decodeHexString(change.trustedMetadataHex()));
+                byte[] vkeyBytes = requireHexOfLength(
+                        "AddTrustedEntity: trustedVkeyHex", change.trustedVkeyHex(), 32);
+                String vkeyHex = HexUtil.encodeHexString(vkeyBytes);
+                PlutusData vkey = BytesPlutusData.of(vkeyBytes);
+                PlutusData meta = requireCborPlutusData(
+                        "AddTrustedEntity: trustedMetadataHex", change.trustedMetadataHex());
                 out.actionRedeemer = ConstrPlutusData.of(3, vkey, meta);
                 // trusted_entity_vkeys is a Map (Pairs) — read existing, add the new
-                // (vkey -> meta) pair. The validator may require sorted-by-vkey
-                // order; we sort ascending.
+                // (vkey -> meta) pair. On chain the insert goes through
+                // pairs.insert_by_ascending_key with bytearray.compare
+                // (global_state.ak:303-308); for uniform 32-byte keys a TreeMap over
+                // the lowercase hex encoding gives the same ascending order.
                 MapPlutusData oldMap = (MapPlutusData) f.get(GS_IDX_TRUSTED_ENTITY_VKEYS);
-                MapPlutusData newMap = MapPlutusData.builder().build();
+                MapPlutusData newMap = MapPlutusData.builder().map(new java.util.LinkedHashMap<>()).build();
                 java.util.SortedMap<String, PlutusData> sorted = new java.util.TreeMap<>();
                 oldMap.getMap().forEach((k, v) ->
                         sorted.put(HexUtil.encodeHexString(((BytesPlutusData) k).getValue()), v));
-                sorted.put(change.trustedVkeyHex().toLowerCase(), meta);
+                // On chain: `!has_key` — AddTrustedEntity rejects a duplicate outright.
+                // A TreeMap.put would silently overwrite instead, producing a datum the
+                // validator refuses; catch it here with a message that says so.
+                if (sorted.containsKey(vkeyHex)) {
+                    out.error = "AddTrustedEntity: " + vkeyHex + " is already a trusted entity "
+                            + "of this token — use UpdateTrustedEntity to change its metadata";
+                    return out;
+                }
+                sorted.put(vkeyHex, meta);
                 sorted.forEach((kHex, v) -> newMap.put(
                         BytesPlutusData.of(HexUtil.decodeHexString(kHex)), v));
                 out.newDatum = replaceGsField(f, GS_IDX_TRUSTED_ENTITY_VKEYS, newMap);
             }
             case "RemoveTrustedEntity" -> {
-                if (change.trustedVkeyHex() == null) {
-                    out.error = "RemoveTrustedEntity requires trustedVkeyHex"; return out;
-                }
-                PlutusData vkey = BytesPlutusData.of(HexUtil.decodeHexString(change.trustedVkeyHex()));
-                out.actionRedeemer = ConstrPlutusData.of(4, vkey);
+                byte[] vkeyBytes = requireHexOfLength(
+                        "RemoveTrustedEntity: trustedVkeyHex", change.trustedVkeyHex(), 32);
+                String vkeyHex = HexUtil.encodeHexString(vkeyBytes);
+                out.actionRedeemer = ConstrPlutusData.of(4, BytesPlutusData.of(vkeyBytes));
                 MapPlutusData oldMap = (MapPlutusData) f.get(GS_IDX_TRUSTED_ENTITY_VKEYS);
-                MapPlutusData newMap = MapPlutusData.builder().build();
+                // On chain: `has_key` — removing an absent vkey fails the branch.
+                boolean present = oldMap.getMap().keySet().stream().anyMatch(k ->
+                        HexUtil.encodeHexString(((BytesPlutusData) k).getValue()).equals(vkeyHex));
+                if (!present) {
+                    out.error = "RemoveTrustedEntity: " + vkeyHex + " is not currently a trusted "
+                            + "entity of this token — nothing to remove";
+                    return out;
+                }
+                // On chain RemoveTrustedEntity is a list.filter, which preserves the
+                // surviving entries' order; MapPlutusData is backed by a LinkedHashMap,
+                // so iterating it here preserves decode (i.e. ascending) order too.
+                MapPlutusData newMap = MapPlutusData.builder().map(new java.util.LinkedHashMap<>()).build();
                 oldMap.getMap().forEach((k, v) -> {
                     String kHex = HexUtil.encodeHexString(((BytesPlutusData) k).getValue());
-                    if (!kHex.equalsIgnoreCase(change.trustedVkeyHex())) {
+                    if (!kHex.equals(vkeyHex)) {
                         newMap.put(k, v);
                     }
                 });
                 out.newDatum = replaceGsField(f, GS_IDX_TRUSTED_ENTITY_VKEYS, newMap);
             }
             case "UpdateTrustedEntity" -> {
-                if (change.trustedOldVkeyHex() == null || change.trustedNewVkeyHex() == null
-                        || change.trustedNewMetadataHex() == null) {
-                    out.error = "UpdateTrustedEntity requires trustedOldVkeyHex + trustedNewVkeyHex + trustedNewMetadataHex";
+                byte[] oldVkeyBytes = requireHexOfLength(
+                        "UpdateTrustedEntity: trustedOldVkeyHex", change.trustedOldVkeyHex(), 32);
+                byte[] newVkeyBytes = requireHexOfLength(
+                        "UpdateTrustedEntity: trustedNewVkeyHex", change.trustedNewVkeyHex(), 32);
+                PlutusData newMeta = requireCborPlutusData(
+                        "UpdateTrustedEntity: trustedNewMetadataHex", change.trustedNewMetadataHex());
+                PlutusData oldVkey = BytesPlutusData.of(oldVkeyBytes);
+                PlutusData newVkey = BytesPlutusData.of(newVkeyBytes);
+                out.actionRedeemer = ConstrPlutusData.of(5, oldVkey, newVkey, newMeta);
+                String oldVkeyHex = HexUtil.encodeHexString(oldVkeyBytes);
+                String newVkeyHex = HexUtil.encodeHexString(newVkeyBytes);
+                MapPlutusData oldMap = (MapPlutusData) f.get(GS_IDX_TRUSTED_ENTITY_VKEYS);
+                boolean oldPresent = oldMap.getMap().keySet().stream().anyMatch(k ->
+                        HexUtil.encodeHexString(((BytesPlutusData) k).getValue()).equals(oldVkeyHex));
+                if (!oldPresent) {
+                    out.error = "UpdateTrustedEntity: trustedOldVkeyHex " + oldVkeyHex
+                            + " is not currently a trusted entity of this token — nothing to update";
                     return out;
                 }
-                PlutusData oldVkey = BytesPlutusData.of(HexUtil.decodeHexString(change.trustedOldVkeyHex()));
-                PlutusData newVkey = BytesPlutusData.of(HexUtil.decodeHexString(change.trustedNewVkeyHex()));
-                PlutusData newMeta = PlutusData.deserialize(HexUtil.decodeHexString(change.trustedNewMetadataHex()));
-                out.actionRedeemer = ConstrPlutusData.of(5, oldVkey, newVkey, newMeta);
-                MapPlutusData oldMap = (MapPlutusData) f.get(GS_IDX_TRUSTED_ENTITY_VKEYS);
+                // On chain: when renaming (old != new) the new vkey must not already
+                // exist, or the update would collapse two entries into one.
+                if (!oldVkeyHex.equals(newVkeyHex)) {
+                    boolean newClashes = oldMap.getMap().keySet().stream().anyMatch(k ->
+                            HexUtil.encodeHexString(((BytesPlutusData) k).getValue()).equals(newVkeyHex));
+                    if (newClashes) {
+                        out.error = "UpdateTrustedEntity: trustedNewVkeyHex " + newVkeyHex
+                                + " is already a trusted entity of this token, so renaming "
+                                + oldVkeyHex + " onto it would merge two entries. Remove one first.";
+                        return out;
+                    }
+                }
+                // Drop the old key, insert the new one, re-sort ascending. When
+                // old == new this is a metadata-only edit, which the on-chain branch
+                // (global_state.ak:344-382) explicitly permits.
                 java.util.SortedMap<String, PlutusData> sorted = new java.util.TreeMap<>();
                 oldMap.getMap().forEach((k, v) -> {
                     String kHex = HexUtil.encodeHexString(((BytesPlutusData) k).getValue());
-                    if (!kHex.equalsIgnoreCase(change.trustedOldVkeyHex())) sorted.put(kHex, v);
+                    if (!kHex.equals(oldVkeyHex)) sorted.put(kHex, v);
                 });
-                sorted.put(change.trustedNewVkeyHex().toLowerCase(), newMeta);
-                MapPlutusData newMap = MapPlutusData.builder().build();
+                sorted.put(newVkeyHex, newMeta);
+                MapPlutusData newMap = MapPlutusData.builder().map(new java.util.LinkedHashMap<>()).build();
                 sorted.forEach((kHex, v) -> newMap.put(
                         BytesPlutusData.of(HexUtil.decodeHexString(kHex)), v));
                 out.newDatum = replaceGsField(f, GS_IDX_TRUSTED_ENTITY_VKEYS, newMap);
@@ -3814,19 +4171,56 @@ public class SecurityTokenSubstandardHandler
             case "UpdateMemberRootHash" -> {
                 // If newMemberRootHashHex is null, caller wants the current local root.
                 byte[] root = change.newMemberRootHashHex() != null
-                        ? HexUtil.decodeHexString(change.newMemberRootHashHex())
+                        ? requireHex("UpdateMemberRootHash: newMemberRootHashHex",
+                                     change.newMemberRootHashHex())
                         : allowlistService.currentRoot(policyId);
+                // On chain: `new_root_len == 0 || new_root_len == 32`
+                // (global_state.ak:424-427) — any other length makes mpf.from_root
+                // trap on every subsequent transfer, i.e. it soft-bricks the token.
+                if (root.length != 0 && root.length != 32) {
+                    out.error = "UpdateMemberRootHash: newMemberRootHashHex must be empty or exactly "
+                            + "32 bytes (64 hex characters), got " + root.length + " bytes. Any other "
+                            + "length is rejected on chain because it would break every later transfer.";
+                    return out;
+                }
                 out.actionRedeemer = ConstrPlutusData.of(8, BytesPlutusData.of(root));
                 out.newDatum = replaceGsField(f, GS_IDX_MEMBER_ROOT_HASH, BytesPlutusData.of(root));
             }
             case "RotateAdmin" -> {
-                if (change.newAdminCredentialHashHex() == null) {
-                    out.error = "RotateAdmin requires newAdminCredentialHashHex"; return out;
-                }
-                PlutusData newAdmin = BytesPlutusData.of(
-                        HexUtil.decodeHexString(change.newAdminCredentialHashHex()));
+                // 28 bytes is enforced on chain too
+                // (global_state.ak: bytearray.length(new_admin_credential_hash) == 28).
+                byte[] newAdminBytes = requireHexOfLength(
+                        "RotateAdmin: newAdminCredentialHashHex",
+                        change.newAdminCredentialHashHex(), 28);
+                PlutusData newAdmin = BytesPlutusData.of(newAdminBytes);
                 out.actionRedeemer = ConstrPlutusData.of(9, newAdmin);
                 out.newDatum = replaceGsField(f, GS_IDX_ADMIN_CREDENTIAL_HASH, newAdmin);
+            }
+            case "DeactivateContract" -> {
+                // D3. Constructor 10, and NULLARY — `DeactivateContract` carries no
+                // fields (lib/types/global_state.ak:358), so the redeemer is a bare
+                // Constr 10 [].
+                //
+                // Two on-chain preconditions (global_state.ak:451-466), both checked
+                // here so the operator learns which one they tripped:
+                //   1. input_datum.transfers_paused must ALREADY be true. Note this
+                //      reads the datum being SPENT, so a chain of
+                //      [PauseTransfers, DeactivateContract] satisfies it — the
+                //      orchestrator rolls `currentDatum` forward between steps.
+                //   2. the admin must sign (handled by the caller's required signers).
+                //
+                // The deactivated==true guard at the top of this method covers the
+                // "already deactivated" case.
+                if (!boolFromConstr(f.get(GS_IDX_TRANSFERS_PAUSED))) {
+                    out.error = "DeactivateContract requires transfers to be paused first "
+                            + "(global_state.ak: `input_datum.transfers_paused`). Submit a "
+                            + "PauseTransfers change before it — the two can go in the same "
+                            + "batch, since each transaction in the chain spends the previous "
+                            + "one's global state.";
+                    return out;
+                }
+                out.actionRedeemer = ConstrPlutusData.of(10);
+                out.newDatum = replaceGsField(f, GS_IDX_DEACTIVATED, boolToConstr(true));
             }
             default -> {
                 out.error = "unknown action: " + change.action();
@@ -4012,6 +4406,7 @@ public class SecurityTokenSubstandardHandler
             boolean requiresSenderKyc = boolFromConstr(fields.get(GS_IDX_REQUIRES_SENDER_KYC));
             boolean requiresReceiverKyc = boolFromConstr(fields.get(GS_IDX_REQUIRES_RECEIVER_KYC));
             long networkId = intFrom(fields.get(GS_IDX_NETWORK_ID));
+            boolean deactivated = boolFromConstr(fields.get(GS_IDX_DEACTIVATED));
 
             return Optional.of(new GlobalStateData(
                     policyId,
@@ -4023,7 +4418,8 @@ public class SecurityTokenSubstandardHandler
                     requiresReceiverKyc,
                     adminCredentialHash,
                     requiresSenderKyc,
-                    networkId));
+                    networkId,
+                    deactivated));
         } catch (Exception e) {
             log.debug("readGlobalState({}) failed: {}", policyId, e.getMessage());
             return Optional.empty();
@@ -4458,8 +4854,9 @@ public class SecurityTokenSubstandardHandler
 
     /** Read view of the on-chain global state datum surfaced to off-chain callers.
      *
-     *  <p>{@code requiresSenderKyc} and {@code networkId} were appended (rather
-     *  than inserted in datum order) so existing positional callers keep working. */
+     *  <p>{@code requiresSenderKyc}, {@code networkId} and {@code deactivated} were
+     *  appended (rather than inserted in datum order) so existing positional callers
+     *  keep working. */
     public record GlobalStateData(
             String policyId,
             boolean transfersPaused,
@@ -4470,6 +4867,10 @@ public class SecurityTokenSubstandardHandler
             boolean requiresReceiverKyc,
             String adminCredentialHash,
             boolean requiresSenderKyc,
-            long networkId
+            long networkId,
+            /** Terminal decommissioning flag. Once true, {@code global_state.ak}
+             *  rejects every spend of the GS UTxO, so no admin action, mint or burn
+             *  can ever run again. */
+            boolean deactivated
     ) {}
 }
