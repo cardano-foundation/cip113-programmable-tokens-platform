@@ -471,6 +471,34 @@ public class SecurityTokenSubstandardHandler
             // exactly like the chained GlobalState UTxO. Both are threaded in through
             // RegistrationChainInputs.
             boolean willMint = mintQuantity.signum() > 0;
+
+            // The asset name is used TWICE and the two uses come from different places:
+            // `security_asset_name` parameterises minting_logic_script from the
+            // PERSISTED context, while the minted Asset below is named from the
+            // REQUEST. verify_token_registration (minting_logic_script.ak:197-208)
+            // hard-`expect`s the single asset name minted under the issuance policy to
+            // equal its `security_asset_name` parameter — a raw `expect`, so a mismatch
+            // is an untyped script trap with nothing for the operator to act on.
+            //
+            // On the chained path both values come from one request and cannot differ.
+            // The public two-arg overload (dispatched from TokenOperationsService) is
+            // the exposure: a client-supplied asset name meets a DB-loaded context, and
+            // that path can now mint. Refuse off chain instead.
+            if (willMint) {
+                String requestedAssetNameHex = request.getAssetName() == null
+                        ? "" : request.getAssetName().trim();
+                if (!securityAssetNameHex.equalsIgnoreCase(requestedAssetNameHex)) {
+                    return TransactionContext.typedError(
+                            "asset name mismatch: this policy's minting logic is parameterised with "
+                            + "security_asset_name=" + securityAssetNameHex
+                            + " but the request asks to mint '" + requestedAssetNameHex
+                            + "'. minting_logic_script.ak requires them to be equal, so the "
+                            + "transaction would trap on chain. Mint "
+                            + securityAssetNameHex + ", or register a separate token for '"
+                            + requestedAssetNameHex + "'.");
+                }
+            }
+
             Asset programmableToken = Asset.builder()
                     .name("0x" + request.getAssetName())
                     .value(mintQuantity).build();
@@ -807,13 +835,18 @@ public class SecurityTokenSubstandardHandler
                     .substandardId(SUBSTANDARD_ID)
                     .assetName(request.getAssetName())
                     .build());
-            hybridUtxoSupplier.clear();
 
             return TransactionContext.ok(transaction.serializeToHex(),
                     new RegistrationResult(progTokenPolicyId));
         } catch (Exception e) {
             log.error("security-token registration failed", e);
             return TransactionContext.typedError("registration failed: " + e.getMessage());
+        } finally {
+            // The chaining branch above seeds the supplier with the fee-payer UTxO it
+            // synthesised from the predecessor tx. That used to be released only on the
+            // success path, so every early return (and the catch) leaked entries into a
+            // process-wide scratchpad; the mint path added five more such returns.
+            hybridUtxoSupplier.clear();
         }
     }
 
@@ -2659,6 +2692,168 @@ public class SecurityTokenSubstandardHandler
                 return TransactionContext.typedError("feePayerAddress is required");
             }
 
+            // ── PHASE 0 ─ Preconditions decidable from the request alone ───
+            //
+            // Phase 1 does not merely BUILD the genesis tx, it PERSISTS a
+            // SecurityTokenRegistrationEntity row plus the bootstrap power-user row as
+            // a side effect. Every mint precondition that used to fire in phase 3
+            // (supply cap, signer identity, receiver-KYC) therefore left orphan genesis
+            // rows behind for a token that would never reach the chain. Anything
+            // derivable from the request is refused HERE instead, before a single row
+            // is written. The remaining phase-3 checks (denylist covering node,
+            // can_mint, index re-derivation) depend on transactions that do not exist
+            // yet and cannot be hoisted.
+            String firstMintQuantity = request.getInitialMintQuantity() != null
+                    && !request.getInitialMintQuantity().isBlank()
+                    ? request.getInitialMintQuantity().trim()
+                    : "0";
+            BigInteger firstMint;
+            try {
+                firstMint = new BigInteger(firstMintQuantity);
+            } catch (NumberFormatException nfe) {
+                return TransactionContext.typedError(
+                        "initialMintQuantity must be a non-negative integer, got '"
+                        + firstMintQuantity + "'");
+            }
+            if (firstMint.signum() < 0) {
+                return TransactionContext.typedError(
+                        "initialMintQuantity must be >= 0, got " + firstMint);
+            }
+            boolean chainWillMint = firstMint.signum() > 0;
+
+            // Normalise once, here. Genesis PERSISTS the asset name verbatim while the
+            // registration's mismatch guard compares against a trimmed copy, so a
+            // whitespace-padded name would be refused in phase 3 — after the rows were
+            // written — for differing from itself.
+            if (request.getAssetName() != null) {
+                request.setAssetName(request.getAssetName().trim());
+            }
+
+            // Same derivation buildGlobalStateInitTransaction and phase 2 use; hoisted
+            // here so the mint preconditions can check it. Kept null-only (not
+            // blank-aware) so it stays byte-identical to the other two call sites.
+            String bootstrapPkh = request.getBootstrapPowerUserPkh() != null
+                    ? request.getBootstrapPowerUserPkh()
+                    : request.getAdminPubKeyHash();
+
+            // Unconditional: phase 2 runs on EVERY chain and feeds this value straight
+            // into HexUtil.decodeHexString. A malformed value used to throw there —
+            // i.e. after phase 1 had persisted both rows. A 40-char hex is worse than
+            // a non-hex one: it decodes, mints a node with a wrong-length key, and only
+            // fails at submit on the required_signers length.
+            if (bootstrapPkh == null || !bootstrapPkh.matches("[0-9a-fA-F]{56}")) {
+                return TransactionContext.typedError(
+                        "bootstrapPowerUserPkh (or adminPubKeyHash) must be 28-byte hex, got '"
+                        + bootstrapPkh + "'");
+            }
+
+            // Unconditional for the same reason: buildRegistrationTransaction resolves
+            // the recipient's stake credential on BOTH paths (it builds the
+            // prog-logic-base target address from it), so an enterprise or malformed
+            // recipient throws in phase 3 even for a structural registration.
+            String recipient = (request.getRecipientAddress() == null
+                    || request.getRecipientAddress().isBlank())
+                    ? adminAddress : request.getRecipientAddress();
+            byte[] recipientStakeHash;
+            try {
+                recipientStakeHash = new Address(recipient)
+                        .getDelegationCredentialHash().orElse(null);
+            } catch (Exception e) {
+                return TransactionContext.typedError(
+                        "recipientAddress is not a valid Cardano address: " + recipient);
+            }
+            if (recipientStakeHash == null) {
+                return TransactionContext.typedError(
+                        "recipient must be a base address with a stake credential (the minting "
+                        + "logic vets the STAKE credential under the CIP-113 address model): "
+                        + recipient);
+            }
+
+            if (chainWillMint) {
+                // (a) Supply cap. global_state.ak's MintSecurity branch recomputes
+                // `mintable_amount - minted` and rejects a negative remainder. The cap
+                // is written by THIS chain's genesis tx from initialMintableAmount, so
+                // the comparison is exact here — no chain lookup needed.
+                long cap = request.getInitialMintableAmount() != null
+                        ? request.getInitialMintableAmount() : 0L;
+                if (firstMint.compareTo(BigInteger.valueOf(cap)) > 0) {
+                    return TransactionContext.typedError(
+                            "initialMintQuantity " + firstMint + " exceeds initialMintableAmount "
+                            + cap + ". The supply cap is written by this same genesis transaction, "
+                            + "so raise initialMintableAmount or lower the first mint.");
+                }
+
+                // (b) The registration tx names the power-user node's OWN key in
+                // required_signers (minting_logic_script.ak's
+                // must_be_signed_by_credential against power_user_node_key). The only
+                // key the fee payer can witness is its own payment credential, so a
+                // bootstrap PU pkh that differs would demand a witness only a third
+                // party holds — and that surfaces at SUBMIT time, after genesis and
+                // AddPowerUser have already been broadcast and mempool-chained.
+                byte[] callerPkh;
+                try {
+                    callerPkh = callerPaymentCredential(adminAddress);
+                } catch (BuildPreconditionException bpe) {
+                    return TransactionContext.typedError(bpe.getMessage());
+                }
+                if (!HexUtil.encodeHexString(callerPkh).equalsIgnoreCase(bootstrapPkh)) {
+                    return TransactionContext.typedError(
+                            "registration with a first mint must be signed by the bootstrap power "
+                            + "user itself, but bootstrapPowerUserPkh=" + bootstrapPkh
+                            + " differs from the fee payer's payment credential "
+                            + HexUtil.encodeHexString(callerPkh)
+                            + ". Either pay for this chain from that power user's wallet, or "
+                            + "register with initialMintQuantity=0 and let them mint separately.");
+                }
+
+                // (b2) Same argument for the ADMIN credential. The registration tx puts
+                // it in required_signers too (must_be_signed_by_credential against the
+                // GS datum's admin_credential_hash), so a first mint needs BOTH keys and
+                // the fee payer can only witness one. Scoped to the mint path
+                // deliberately: the admin key is a required signer on the structural
+                // path as well, but that path is long-proven and byte-frozen, so
+                // tightening it is left as a separate, separately-verified change.
+                if (request.getAdminPubKeyHash() == null
+                        || !HexUtil.encodeHexString(callerPkh)
+                                .equalsIgnoreCase(request.getAdminPubKeyHash())) {
+                    return TransactionContext.typedError(
+                            "registration with a first mint must be signed by the admin too, but "
+                            + "adminPubKeyHash=" + request.getAdminPubKeyHash()
+                            + " differs from the fee payer's payment credential "
+                            + HexUtil.encodeHexString(callerPkh)
+                            + ". The registration transaction names both the admin credential and "
+                            + "the power-user node key in required_signers, and only the fee payer "
+                            + "signs — so pay for this chain from the admin's wallet, or register "
+                            + "with initialMintQuantity=0.");
+                }
+
+                // (c) Receiver KYC. verify_mint_destinations reads
+                // requires_receiver_kyc off the GS datum this same genesis tx writes,
+                // and genesis always writes member_root_hash EMPTY — no root can be
+                // published beforehand, because the prog-token policy id the allowlist
+                // is keyed on does not exist until genesis picks its bootstrap UTxO.
+                // The only satisfiable case is the contract's self-mint exemption,
+                // which compares the recipient's STAKE credential against the
+                // power-user node key.
+                if (request.isRequiresReceiverKyc()) {
+                    if (!Arrays.equals(recipientStakeHash, HexUtil.decodeHexString(bootstrapPkh))) {
+                        return TransactionContext.typedError(
+                                "cannot mint at registration while requiresReceiverKyc is on. The "
+                                + "minting logic demands a KYC membership proof against the global "
+                                + "state's member_root_hash, and genesis writes that root EMPTY — no "
+                                + "root can be published beforehand, because the token's policy id "
+                                + "does not exist until this transaction picks its bootstrap UTxO. "
+                                + "Fix by one of: (1) set requiresReceiverKyc=false for this chain "
+                                + "and turn it on afterwards from the admin page "
+                                + "(SetRequiresReceiverKyc); (2) register with initialMintQuantity=0, "
+                                + "enroll the recipient, publish the root (UpdateMemberRootHash), "
+                                + "then mint separately; or (3) send the first mint to an address "
+                                + "whose STAKE credential is the power user " + bootstrapPkh
+                                + ", which the contract exempts from the receiver-KYC check.");
+                    }
+                }
+            }
+
             // ── PHASE 1 ─ Build the genesis tx ─────────────────────────────
             // Delegates to buildGlobalStateInitTransaction, which also persists
             // the SecurityTokenRegistrationEntity row keyed on the prog-token
@@ -2742,14 +2937,10 @@ public class SecurityTokenSubstandardHandler
             // ref input are taken directly from the genesis chained UTxOs (no
             // polling — those NFTs aren't on chain yet).
             int allCaps = ALL_CAPABILITIES_BITFIELD;
-            String bootstrapPkh = request.getBootstrapPowerUserPkh() != null
-                    ? request.getBootstrapPowerUserPkh()
-                    : request.getAdminPubKeyHash();
             TransactionContext<Void> addPuResult = buildAddPowerUserTransaction(
                     progTokenPolicyId, bootstrapPkh, allCaps, adminAddress,
                     chainedPuRoot, chainedGsUtxo, chainedAdminChange);
             if (!addPuResult.isSuccessful()) {
-                hybridUtxoSupplier.clear();
                 return TransactionContext.typedError("chain[addPowerUser]: " + addPuResult.error());
             }
             String addPuCbor = addPuResult.unsignedCborTx();
@@ -2761,7 +2952,6 @@ public class SecurityTokenSubstandardHandler
             Utxo addPuChange = findOutputAtAddress(addPuTx, addPuTxHash, adminAddress,
                     BigInteger.valueOf(5_000_000L));
             if (addPuChange == null) {
-                hybridUtxoSupplier.clear();
                 return TransactionContext.typedError(
                         "chain[addPowerUser]: no admin change output found to fund registration tx");
             }
@@ -2778,20 +2968,9 @@ public class SecurityTokenSubstandardHandler
             //
             // When a quantity IS asked for, the supply cap is enforced by also spending
             // GS under MintSecurity in the same tx, which decrements mintable_amount.
+            // firstMintQuantity / chainWillMint were parsed and validated in PHASE 0,
+            // before any DB row existed.
             request.setChainingTransactionCborHex(addPuCbor);
-            String firstMintQuantity = request.getInitialMintQuantity() != null
-                    && !request.getInitialMintQuantity().isBlank()
-                    ? request.getInitialMintQuantity().trim()
-                    : "0";
-            boolean chainWillMint;
-            try {
-                chainWillMint = new BigInteger(firstMintQuantity).signum() > 0;
-            } catch (NumberFormatException nfe) {
-                hybridUtxoSupplier.clear();
-                return TransactionContext.typedError(
-                        "chain[registration]: initialMintQuantity must be a non-negative integer, got '"
-                        + firstMintQuantity + "'");
-            }
             request.setQuantity(firstMintQuantity);
             request.setGlobalStatePolicyId(reg.getGlobalStatePolicyId());
 
@@ -2809,7 +2988,6 @@ public class SecurityTokenSubstandardHandler
                 chainedDenylistRoot = findOutputWithAsset(genesisTx, genesisTxHash,
                         reg.getDenylistPolicyId(), "");
                 if (chainedPuNode == null || chainedDenylistRoot == null) {
-                    hybridUtxoSupplier.clear();
                     return TransactionContext.typedError(
                             "chain[registration]: registration with a first mint needs the "
                             + "AddPowerUser node and the denylist root as reference inputs, but "
@@ -2824,7 +3002,6 @@ public class SecurityTokenSubstandardHandler
                     buildRegistrationTransaction(request, protocolParams,
                             new RegistrationChainInputs(chainedGsUtxo, chainedPuNode, chainedDenylistRoot));
             if (!regResult.isSuccessful()) {
-                hybridUtxoSupplier.clear();
                 return TransactionContext.typedError("chain[registration]: " + regResult.error());
             }
             String regCbor = regResult.unsignedCborTx();
@@ -2875,8 +3052,6 @@ public class SecurityTokenSubstandardHandler
                 log.warn("chain[registerTransferLogic] skipped: no admin change output >= 5.5 ADA in registration tx (chain will return 3 txs)");
             }
 
-            hybridUtxoSupplier.clear();
-
             return TransactionContext.ok(null, new ChainBuildResult(
                     genesisCbor, addPuCbor, regCbor, certCbor,
                     reg.getGlobalStatePolicyId(), progTokenPolicyId,
@@ -2884,8 +3059,12 @@ public class SecurityTokenSubstandardHandler
                     genesisTxHash, addPuTxHash, regTxHash, certTxHash));
         } catch (Exception e) {
             log.error("security-token chain build failed", e);
-            hybridUtxoSupplier.clear();
             return TransactionContext.typedError("chain build failed: " + e.getMessage());
+        } finally {
+            // Single exit point for the mempool-UTxO scratchpad. Previously each of
+            // the early returns had to remember its own clear() and the catch block
+            // was the only net; the mint path added five more ways to bail out.
+            hybridUtxoSupplier.clear();
         }
     }
 

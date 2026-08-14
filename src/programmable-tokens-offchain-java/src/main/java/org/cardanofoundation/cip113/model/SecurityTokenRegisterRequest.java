@@ -66,7 +66,19 @@ public class SecurityTokenRegisterRequest extends RegisterTokenRequest {
      *  power-user node created by the preceding {@code AddPowerUser} tx, and carries a
      *  destination action for the recipient. Must not exceed
      *  {@link #initialMintableAmount}: the supply cap is enforced on chain by
-     *  {@code global_state.ak}, which rejects a negative remainder. */
+     *  {@code global_state.ak}, which rejects a negative remainder.
+     *
+     *  <p>This — not {@code quantity} — is the field the chained registration honours.
+     *  {@code buildFullRegistrationChain} overwrites {@code quantity} with this value
+     *  before delegating, so anything a client sends in {@code quantity} is discarded.
+     *
+     *  <p>Two further preconditions are checked up front, before the chain writes any
+     *  database row: {@link #bootstrapPowerUserPkh} must equal the fee payer's payment
+     *  credential (the registration tx names the power user in {@code required_signers},
+     *  and only the fee payer can witness it), and {@link #requiresReceiverKyc} must be
+     *  off unless the recipient's STAKE credential IS that power user — genesis writes
+     *  {@code member_root_hash} empty and no root can be published beforehand, so any
+     *  other recipient has no provable membership. */
     private String initialMintQuantity;
 
     /** Optional: bootstrap power user inserted into the off-chain DB at registration.
