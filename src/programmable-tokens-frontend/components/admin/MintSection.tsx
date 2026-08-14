@@ -166,29 +166,83 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const [securityTokenGsError, setSecurityTokenGsError] = useState<string | null>(null);
   const [securityTokenGsLoading, setSecurityTokenGsLoading] = useState(false);
 
-  useEffect(() => {
+  // D8 — a failed mint must not look like a successful one. The old flow reset the
+  // form and left the previously-fetched mintable_amount on screen, so a mint that
+  // never reached the chain was indistinguishable from one that did: the number
+  // hadn't moved either way. These three pieces of state make the difference
+  // legible — a persistent failure banner, the pre-mint figure to compare against,
+  // and whether the chain has actually reflected the mint yet.
+  const [mintFailure, setMintFailure] = useState<string | null>(null);
+  const [preMintMintable, setPreMintMintable] = useState<number | null>(null);
+  const [mintConfirmed, setMintConfirmed] = useState(false);
+  const [confirmPolling, setConfirmPolling] = useState(false);
+
+  // Guards against a stale in-flight read overwriting a newer one when the admin
+  // switches tokens quickly, or when a manual refetch races the mount effect.
+  const gsFetchSeq = useRef(0);
+
+  const refreshSecurityTokenGs = useCallback(async () => {
     if (!isSecurityToken || !selectedToken) {
+      gsFetchSeq.current++;
       setSecurityTokenGs(null);
       setSecurityTokenGsError(null);
-      return;
+      setSecurityTokenGsLoading(false);
+      return null;
     }
-    let cancelled = false;
+    const seq = ++gsFetchSeq.current;
     setSecurityTokenGsLoading(true);
     setSecurityTokenGsError(null);
-    getSecurityTokenGlobalState(selectedToken.policyId)
-      .then((gs) => {
-        if (cancelled) return;
-        setSecurityTokenGs(gs);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setSecurityTokenGsError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setSecurityTokenGsLoading(false);
-      });
-    return () => { cancelled = true; };
+    try {
+      const gs = await getSecurityTokenGlobalState(selectedToken.policyId);
+      if (seq !== gsFetchSeq.current) return null;
+      setSecurityTokenGs(gs);
+      return gs;
+    } catch (err: unknown) {
+      if (seq !== gsFetchSeq.current) return null;
+      // Drop the previous value rather than keeping it on screen. A number we
+      // can no longer verify is worse than an explicit "unknown" — the whole
+      // point of D8 is that stale figures were being read as fresh ones.
+      setSecurityTokenGs(null);
+      setSecurityTokenGsError(err instanceof Error ? err.message : String(err));
+      return null;
+    } finally {
+      if (seq === gsFetchSeq.current) setSecurityTokenGsLoading(false);
+    }
   }, [isSecurityToken, selectedToken]);
+
+  useEffect(() => { void refreshSecurityTokenGs(); }, [refreshSecurityTokenGs]);
+
+  /** Poll the GS datum until `mintable_amount` moves off `before`, i.e. until the
+   *  mint is actually in a block.
+   *
+   *  `wallet.submitTx` returning a hash means "accepted into the mempool", not
+   *  "applied" — the old flow declared success there and never looked again. That
+   *  is precisely how a mint that never landed could present as a stale number.
+   *  Bounded, best-effort: giving up just leaves the UI saying "not yet visible",
+   *  which is the honest state. */
+  const pollForMintOnChain = useCallback(async (policyId: string, before: number) => {
+    const seq = gsFetchSeq.current;
+    setConfirmPolling(true);
+    try {
+      for (let attempt = 0; attempt < 12; attempt++) {
+        await new Promise((r) => setTimeout(r, 5_000));
+        if (seq !== gsFetchSeq.current) return;   // token switched — abandon
+        try {
+          const gs = await getSecurityTokenGlobalState(policyId);
+          if (seq !== gsFetchSeq.current) return;
+          setSecurityTokenGs(gs);
+          if (gs.mintableAmount !== before) {
+            setMintConfirmed(true);
+            return;
+          }
+        } catch {
+          // Transient read failure — keep trying for the remaining attempts.
+        }
+      }
+    } finally {
+      if (seq === gsFetchSeq.current) setConfirmPolling(false);
+    }
+  }, []);
 
   const validateForm = (): boolean => {
     const newErrors = {
@@ -247,9 +301,16 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   ) => {
     if (!selectedToken) return;
 
+    // Snapshot what the chain said before we touched it, so the post-mint poll
+    // has something to compare against.
+    const mintableBefore = securityTokenGs?.mintableAmount ?? null;
+
     try {
       setIsBuilding(true);
       setStep("signing");
+      setMintFailure(null);
+      setMintConfirmed(false);
+      setPreMintMintable(mintableBefore);
 
       let unsignedCborTx: string;
 
@@ -290,10 +351,20 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       setStep("success");
 
       showToast({
-        title: "Mint Successful",
-        description: `Minted ${quantity} ${decodeAssetNameDisplay(selectedToken.assetName)} tokens`,
+        title: "Mint Submitted",
+        description: `Submitted a mint of ${quantity} ${decodeAssetNameDisplay(selectedToken.assetName)} tokens`,
         variant: "success",
       });
+
+      // D8 — the mint changed on-chain state, so the cached global state is now
+      // wrong by definition. Refetch immediately, then keep polling until
+      // mintable_amount actually moves (or we give up saying so).
+      if (isSecurityToken && selectedToken) {
+        void refreshSecurityTokenGs();
+        if (mintableBefore !== null) {
+          void pollForMintOnChain(selectedToken.policyId, mintableBefore);
+        }
+      }
     } catch (error) {
       console.error("Mint error:", error);
 
@@ -312,7 +383,12 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         variant: "error",
       });
 
+      // D8 — a toast disappears; the reason a failed mint has to stay on screen is
+      // that the form looks identical either way. Keep the message, and re-read the
+      // chain so the displayed cap is known-current rather than assumed-unchanged.
+      setMintFailure(errorMessage);
       setStep("form");
+      if (isSecurityToken) void refreshSecurityTokenGs();
     } finally {
       setIsBuilding(false);
       setIsSigning(false);
@@ -449,6 +525,13 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     setQuantity("");
     setRecipientAddress(feePayerAddress);
     setTxHash(null);
+    // D8 — "Mint More" used to return to a form still showing the PRE-mint
+    // mintable_amount, because the fetch effect keys on [isSecurityToken,
+    // selectedToken] and neither changes here. Refetch explicitly.
+    setMintFailure(null);
+    setMintConfirmed(false);
+    setPreMintMintable(null);
+    if (isSecurityToken) void refreshSecurityTokenGs();
     setEnableAttestation(false);
     setAttestationData(null);
     setAttestError(null);
@@ -492,10 +575,11 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           <CheckCircle className="h-8 w-8 text-green-500" />
         </div>
         <h3 className="text-lg font-semibold text-white mb-2">
-          Mint Complete!
+          {isSecurityToken && !mintConfirmed ? "Mint Submitted" : "Mint Complete!"}
         </h3>
         <p className="text-sm text-dark-400 text-center mb-4">
-          Successfully minted {quantity}{" "}
+          {isSecurityToken && !mintConfirmed ? "Submitted a mint of " : "Successfully minted "}
+          {quantity}{" "}
           {selectedToken ? decodeAssetNameDisplay(selectedToken.assetName) : ""}{" "}
           tokens
         </p>
@@ -506,6 +590,50 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
             {txHash}
           </p>
         </div>
+
+        {/* D8 — submitting is not the same as landing. Report which one we have
+            observed, by watching mintable_amount rather than assuming. */}
+        {isSecurityToken && (
+          <div className={`w-full px-4 py-3 rounded-lg mb-4 border ${
+            mintConfirmed
+              ? "bg-green-500/5 border-green-500/40"
+              : "bg-dark-900 border-dark-700"
+          }`}>
+            {mintConfirmed ? (
+              <>
+                <p className="text-xs text-green-400 font-medium">Confirmed on chain</p>
+                <p className="text-xs text-dark-400 mt-1">
+                  Remaining mintable went from{" "}
+                  <span className="font-mono text-dark-300">{preMintMintable ?? "?"}</span> to{" "}
+                  <span className="font-mono text-green-300">
+                    {securityTokenGs?.mintableAmount ?? "?"}
+                  </span>.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-dark-300 font-medium">
+                  {confirmPolling
+                    ? "Waiting for the transaction to appear on chain…"
+                    : "Not yet visible on chain"}
+                </p>
+                <p className="text-xs text-dark-400 mt-1">
+                  The wallet accepted the transaction into the mempool. Remaining mintable
+                  still reads{" "}
+                  <span className="font-mono text-dark-300">
+                    {securityTokenGs?.mintableAmount ?? "unknown"}
+                  </span>
+                  {preMintMintable !== null && (
+                    <>, the same as before the mint (
+                    <span className="font-mono">{preMintMintable}</span>)</>
+                  )}
+                  {" "}— it will change once the transaction is included in a block.
+                  {!confirmPolling && " If it never does, the mint did not reach the chain."}
+                </p>
+              </>
+            )}
+          </div>
+        )}
 
         {attestationData && (
           <div className="w-full px-4 py-3 bg-dark-900 rounded-lg mb-4">
@@ -828,6 +956,28 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         )}
       </div>
 
+      {/* D8 — a failed mint leaves the form looking exactly like an untouched one.
+          Keep the reason visible until the admin acts on it, and say plainly that
+          nothing changed on chain, since the identical mintable_amount below is
+          otherwise ambiguous. */}
+      {mintFailure && (
+        <div className="px-4 py-3 rounded-lg border border-red-500/50 bg-red-500/10">
+          <p className="text-sm font-semibold text-red-300">The last mint failed</p>
+          <p className="mt-1 text-xs text-red-200/90 break-words">{mintFailure}</p>
+          <p className="mt-2 text-xs text-red-200/70">
+            Nothing was written to the chain, so the figures below are unchanged — that is
+            the failure, not a stale view. They were re-read from the chain just now.
+          </p>
+          <button
+            type="button"
+            onClick={() => setMintFailure(null)}
+            className="mt-2 text-xs text-red-300 underline hover:text-red-200"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Security-token: remaining mintable_amount from the GS datum. The
           cap is enforced on-chain via the GS spend's MintSecurity branch;
           showing it here lets the admin size their mint accordingly. */}
@@ -835,17 +985,31 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         <div className="px-4 py-3 bg-dark-900 rounded-lg border border-dark-700">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-xs text-dark-400 uppercase tracking-wide">
-                Remaining mintable
-              </p>
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-dark-400 uppercase tracking-wide">
+                  Remaining mintable
+                </p>
+                <button
+                  type="button"
+                  onClick={() => { void refreshSecurityTokenGs(); }}
+                  disabled={securityTokenGsLoading}
+                  className="text-xs text-dark-500 hover:text-primary-400 transition-colors"
+                  title="Re-read the global state from chain"
+                >
+                  refresh
+                </button>
+              </div>
               {securityTokenGsLoading ? (
                 <p className="mt-1 text-sm text-dark-400 italic">
-                  Loading on-chain global state…
+                  Reading on-chain global state…
                 </p>
               ) : securityTokenGsError ? (
-                <p className="mt-1 text-sm text-red-400">
-                  Could not read GS datum: {securityTokenGsError}
-                </p>
+                <>
+                  <p className="mt-1 text-lg font-semibold text-dark-500">unknown</p>
+                  <p className="mt-1 text-sm text-red-400">
+                    Could not read GS datum: {securityTokenGsError}
+                  </p>
+                </>
               ) : securityTokenGs ? (
                 <>
                   <p className="mt-1 text-lg font-semibold text-white">
@@ -855,6 +1019,11 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
                   {securityTokenGs.transfersPaused && (
                     <p className="mt-1 text-xs text-orange-400">
                       Transfers are currently paused on this token.
+                    </p>
+                  )}
+                  {securityTokenGs.deactivated && (
+                    <p className="mt-1 text-xs text-red-400">
+                      This contract has been decommissioned — no further mint can succeed.
                     </p>
                   )}
                 </>

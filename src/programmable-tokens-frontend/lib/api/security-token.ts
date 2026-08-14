@@ -55,6 +55,14 @@ export interface SecurityTokenGlobalState {
    *  UpdateMemberRootHash tx to bring the chain in sync. */
   memberRootHashLocal: string;
   requiresReceiverKyc: boolean;
+  /** Written by SetRequiresSenderKyc. NB: no validator at the pinned contract
+   *  revision reads this field yet — transfer_logic_script gates the sender
+   *  check on {@link requiresReceiverKyc} — so it is state without enforcement. */
+  requiresSenderKyc: boolean;
+  /** Terminal decommissioning flag. Once true the on-chain global_state
+   *  validator rejects EVERY spend of the global-state UTxO, so no admin
+   *  action, mint or burn can ever run against this token again. */
+  deactivated: boolean;
   adminCredentialHash: string;
 }
 
@@ -158,6 +166,52 @@ export const submitTokenChain = (signedCborHexes: string[]) =>
     { signedCborHexes },
   );
 
+/** A partial-failure result from {@link submitTokenChain}.
+ *
+ *  The backend submits sequentially and stops at the first rejection, returning
+ *  HTTP 400 with the hashes that DID land plus the failing index. Because that
+ *  is a non-2xx status, {@link apiPost} throws before the caller can inspect the
+ *  body — so `if (result.error)` on the resolved value is dead code and the
+ *  successful hashes were being discarded (D9). That matters: the chain is
+ *  mempool-chained, so a failure at index i leaves changes 0..i-1 applied on
+ *  chain and the operator needs their hashes to work out the real state.
+ *
+ *  Call this in the catch block to recover the structured body. */
+export interface SubmitChainPartialFailure {
+  /** Hashes of the transactions that were accepted before the failure. */
+  txHashes: string[];
+  /** Index of the change whose transaction was rejected. */
+  failedIndex?: number;
+  /** Hash of the rejected transaction, when the backend could derive it. */
+  failedTxHash?: string;
+  /** Backend's reason string. */
+  error: string;
+}
+
+/** Parse a thrown {@link submitTokenChain} error into its structured body.
+ *
+ *  {@link ApiException.message} carries the raw response text, which for this
+ *  endpoint is the JSON `{ txHashes, failedIndex, failedTxHash, error }`.
+ *  Falls back to a bare message when the body isn't that shape (network error,
+ *  proxy HTML page, timeout, …) so callers always get something renderable. */
+export function parseSubmitChainFailure(err: unknown): SubmitChainPartialFailure {
+  const raw = err instanceof Error ? err.message : String(err);
+  try {
+    const body = JSON.parse(raw) as Partial<SubmitChainPartialFailure>;
+    if (body && typeof body === 'object') {
+      return {
+        txHashes: Array.isArray(body.txHashes) ? body.txHashes : [],
+        failedIndex: typeof body.failedIndex === 'number' ? body.failedIndex : undefined,
+        failedTxHash: typeof body.failedTxHash === 'string' ? body.failedTxHash : undefined,
+        error: typeof body.error === 'string' ? body.error : raw,
+      };
+    }
+  } catch {
+    // Not JSON — fall through to the raw message.
+  }
+  return { txHashes: [], error: raw };
+}
+
 /** A single GS field change to be applied as one transaction in the chain.
  *  Only the fields relevant to the chosen action should be populated. */
 export interface GsChangeSpec {
@@ -167,9 +221,13 @@ export interface GsChangeSpec {
     | "AddTrustedEntity"
     | "RemoveTrustedEntity"
     | "UpdateTrustedEntity"
+    | "SetRequiresSenderKyc"
     | "SetRequiresReceiverKyc"
     | "UpdateMemberRootHash"
-    | "RotateAdmin";
+    | "RotateAdmin"
+    /** Irreversible. Requires transfers to already be paused; afterwards the
+     *  on-chain validator rejects every further spend of the global state. */
+    | "DeactivateContract";
   transfersPaused?: boolean;
   newSecurityInfoHex?: string;
   trustedVkeyHex?: string;
@@ -177,6 +235,10 @@ export interface GsChangeSpec {
   trustedOldVkeyHex?: string;
   trustedNewVkeyHex?: string;
   trustedNewMetadataHex?: string;
+  /** SetRequiresSenderKyc. The backend has always read this key
+   *  (SecurityTokenController: `change.get("requiresSenderKycEnabled")`); it was
+   *  missing from this type, which made the action unreachable from the UI (D4). */
+  requiresSenderKycEnabled?: boolean;
   requiresReceiverKycEnabled?: boolean;
   newMemberRootHashHex?: string;
   newAdminCredentialHashHex?: string;

@@ -15,6 +15,12 @@ import {
   ExternalLink,
   RefreshCw,
   Loader2,
+  AlertTriangle,
+  Pencil,
+  KeyRound,
+  Copy,
+  Skull,
+  X,
 } from "lucide-react";
 import { AdminTokenSelector } from "./AdminTokenSelector";
 import {
@@ -27,9 +33,11 @@ import { readGlobalState, updateGlobalState } from "@/lib/api/compliance";
 import {
   buildGlobalStateUpdateChain,
   submitTokenChain,
+  parseSubmitChainFailure,
   getSecurityTokenGlobalState,
   acknowledgeRootPublish,
   type GsChangeSpec,
+  type SubmitChainPartialFailure,
 } from "@/lib/api/security-token";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useToast } from "@/components/ui/use-toast";
@@ -603,26 +611,38 @@ function SecurityTokenGlobalStatePanel({
   // On-chain (source of truth on load + after Refresh / save)
   const [onchain, setOnchain] = useState<{
     transfersPaused: boolean;
+    deactivated: boolean;
     mintableAmount: number;
     requiresReceiverKyc: boolean;
+    requiresSenderKyc: boolean;
     securityInfoHex: string | null;
     memberRootHash: string | null;
     memberRootHashLocal: string | null;
     trustedEntityVkeys: string[];
+    adminCredentialHash: string | null;
   } | null>(null);
 
   // Editable mirror — initialised from on-chain, modified by user
   const [transfersPaused, setTransfersPaused] = useState(false);
   const [requiresReceiverKyc, setRequiresReceiverKyc] = useState(false);
+  const [requiresSenderKyc, setRequiresSenderKyc] = useState(false);
   const [securityInfo, setSecurityInfo] = useState("");
   const [trustedEntities, setTrustedEntities] = useState<string[]>([]);
   const [newEntityInput, setNewEntityInput] = useState("");
   const [republishRoot, setRepublishRoot] = useState(false);
+  // D5 — staged UpdateTrustedEntity operations, keyed by the vkey being replaced.
+  // Kept separate from the add/remove diff so a rename is ONE transaction
+  // (Remove + Add is two, and leaves the entity briefly absent on chain).
+  const [trustedUpdates, setTrustedUpdates] = useState<TrustedEntityUpdate[]>([]);
+  const [editingEntity, setEditingEntity] = useState<TrustedEntityUpdate | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submittedHashes, setSubmittedHashes] = useState<string[]>([]);
+  // D9 — structured partial-failure result, so the hashes that DID land survive.
+  const [partialFailure, setPartialFailure] = useState<
+    (SubmitChainPartialFailure & { labels: string[] }) | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -631,19 +651,25 @@ function SecurityTokenGlobalStatePanel({
       const gs = await getSecurityTokenGlobalState(policyId);
       const next = {
         transfersPaused: gs.transfersPaused,
+        deactivated: gs.deactivated ?? false,
         mintableAmount: gs.mintableAmount,
         requiresReceiverKyc: gs.requiresReceiverKyc,
+        requiresSenderKyc: gs.requiresSenderKyc ?? false,
         securityInfoHex: gs.securityInfoHex ?? null,
         memberRootHash: gs.memberRootHash ?? null,
         memberRootHashLocal: gs.memberRootHashLocal ?? null,
         trustedEntityVkeys: gs.trustedEntityVkeys ?? [],
+        adminCredentialHash: gs.adminCredentialHash ?? null,
       };
       setOnchain(next);
       // Reset editable mirror to chain values
       setTransfersPaused(next.transfersPaused);
       setRequiresReceiverKyc(next.requiresReceiverKyc);
+      setRequiresSenderKyc(next.requiresSenderKyc);
       setSecurityInfo(next.securityInfoHex ?? "");
       setTrustedEntities([...next.trustedEntityVkeys]);
+      setTrustedUpdates([]);
+      setEditingEntity(null);
       // Default the re-publish checkbox to TRUE when the on-chain root is stale,
       // so the admin doesn't have to remember to tick it.
       setRepublishRoot(
@@ -660,108 +686,363 @@ function SecurityTokenGlobalStatePanel({
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // Detect changes
+  // Detect changes. Keys taking part in a staged UpdateTrustedEntity are excluded
+  // from the add/remove diff — the old key leaves the displayed list and the new
+  // one joins it, which would otherwise read as a removal plus an addition.
+  const updateOldKeys = new Set(trustedUpdates.map((u) => u.oldVkey));
+  const updateNewKeys = new Set(trustedUpdates.map((u) => u.newVkey));
   const trustedAdded = onchain
-    ? trustedEntities.filter((v) => !onchain.trustedEntityVkeys.includes(v))
+    ? trustedEntities.filter((v) => !onchain.trustedEntityVkeys.includes(v) && !updateNewKeys.has(v))
     : [];
   const trustedRemoved = onchain
-    ? onchain.trustedEntityVkeys.filter((v) => !trustedEntities.includes(v))
+    ? onchain.trustedEntityVkeys.filter((v) => !trustedEntities.includes(v) && !updateOldKeys.has(v))
     : [];
   const pauseChanged = onchain && transfersPaused !== onchain.transfersPaused;
   const requiresChanged = onchain && requiresReceiverKyc !== onchain.requiresReceiverKyc;
+  const senderKycChanged = onchain && requiresSenderKyc !== onchain.requiresSenderKyc;
   const securityChanged = onchain && securityInfo !== (onchain.securityInfoHex ?? "");
-  const hasChanges = pauseChanged || requiresChanged || securityChanged
-    || trustedAdded.length > 0 || trustedRemoved.length > 0 || republishRoot;
+  // D7 — the field is opaque `Data` on chain, so anything well-formed is allowed,
+  // but "valid hex" is NOT the same as "valid CBOR Data". `deadbeef` is perfectly
+  // good hex and not a CBOR value at all; forwarding it used to fail deep in the
+  // backend's build with a raw parser message. Catch it here instead.
+  //
+  // The empty string is its own case: it is "valid hex" by the regex, so it used to
+  // sail through and reach the backend as newSecurityInfoHex: "", which fails the
+  // whole chain build with a bare "is required" and no inline signal. There is no
+  // "unset" for this field — it is Data, so clearing it means choosing an empty
+  // VALUE.
+  const securityInfoError = !securityChanged
+    ? null
+    : securityInfo.length === 0
+      ? "cannot be empty — security_info is an on-chain Data value, so there is no "
+        + "\"unset\". Use d87980 for Constr 0 [] (the genesis default), a0 for an empty "
+        + "map, or 40 for empty bytes."
+      : isHex(securityInfo)
+        ? cborDataError(securityInfo)
+        : null;
+  const deactivated = onchain?.deactivated ?? false;
+  const hasChanges = pauseChanged || requiresChanged || senderKycChanged || securityChanged
+    || trustedAdded.length > 0 || trustedRemoved.length > 0 || trustedUpdates.length > 0
+    || republishRoot;
 
-  const buildChangeList = (): GsChangeSpec[] => {
-    const changes: GsChangeSpec[] = [];
-    if (pauseChanged) changes.push({ action: "PauseTransfers", transfersPaused });
+  /** Each staged change as (spec, human label). The labels are kept alongside so a
+   *  partial submit failure can name WHICH change failed and which ones landed —
+   *  the chain is index-aligned with what the backend submits. */
+  const buildChangeList = (): Array<{ spec: GsChangeSpec; label: string }> => {
+    const changes: Array<{ spec: GsChangeSpec; label: string }> = [];
+    if (pauseChanged) {
+      changes.push({
+        spec: { action: "PauseTransfers", transfersPaused },
+        label: transfersPaused ? "Pause transfers" : "Resume transfers",
+      });
+    }
     if (securityChanged) {
       // We treat the input as raw hex of a CBOR Data value. If the user typed
       // plain text, we wrap it as CBOR bytes (major type 2). For most BaFin
       // setups the field is opaque, so either is fine — backend just relays.
       changes.push({
-        action: "ModifySecurityInfo",
-        newSecurityInfoHex: isHex(securityInfo)
-          ? securityInfo
-          : textToCborBytesHex(securityInfo),
+        spec: {
+          action: "ModifySecurityInfo",
+          newSecurityInfoHex: isHex(securityInfo)
+            ? securityInfo
+            : textToCborBytesHex(securityInfo),
+        },
+        label: "Update security info",
       });
     }
     for (const v of trustedRemoved) {
-      changes.push({ action: "RemoveTrustedEntity", trustedVkeyHex: v });
+      changes.push({
+        spec: { action: "RemoveTrustedEntity", trustedVkeyHex: v },
+        label: `Remove trusted entity ${shortHex(v)}`,
+      });
+    }
+    // D5 — rename and/or re-key a trusted entity in a single transaction. The
+    // on-chain branch also accepts old == new as a metadata-only edit.
+    for (const u of trustedUpdates) {
+      changes.push({
+        spec: {
+          action: "UpdateTrustedEntity",
+          trustedOldVkeyHex: u.oldVkey,
+          trustedNewVkeyHex: u.newVkey,
+          trustedNewMetadataHex: u.metadataHex,
+        },
+        label: u.oldVkey === u.newVkey
+          ? `Update metadata for ${shortHex(u.oldVkey)}`
+          : `Replace trusted entity ${shortHex(u.oldVkey)} with ${shortHex(u.newVkey)}`,
+      });
     }
     for (const v of trustedAdded) {
       // Backend takes metadataHex as Data CBOR — pass an empty Map (a0).
       changes.push({
-        action: "AddTrustedEntity",
-        trustedVkeyHex: v,
-        trustedMetadataHex: "a0",
+        spec: { action: "AddTrustedEntity", trustedVkeyHex: v, trustedMetadataHex: "a0" },
+        label: `Add trusted entity ${shortHex(v)}`,
+      });
+    }
+    // D4 — previously unreachable: GsChangeSpec had no requiresSenderKycEnabled
+    // field, so the backend's `SetRequiresSenderKyc requires requiresSenderKycEnabled`
+    // check rejected every attempt.
+    if (senderKycChanged) {
+      changes.push({
+        spec: { action: "SetRequiresSenderKyc", requiresSenderKycEnabled: requiresSenderKyc },
+        label: `Set requires-sender-KYC ${requiresSenderKyc ? "on" : "off"}`,
       });
     }
     if (requiresChanged) {
       changes.push({
-        action: "SetRequiresReceiverKyc",
-        requiresReceiverKycEnabled: requiresReceiverKyc,
+        spec: {
+          action: "SetRequiresReceiverKyc",
+          requiresReceiverKycEnabled: requiresReceiverKyc,
+        },
+        label: `Set requires-receiver-KYC ${requiresReceiverKyc ? "on" : "off"}`,
       });
     }
     if (republishRoot) {
       // Backend pulls the current local MPF root when newMemberRootHashHex omitted.
-      changes.push({ action: "UpdateMemberRootHash" });
+      changes.push({ spec: { action: "UpdateMemberRootHash" }, label: "Publish member root" });
     }
     return changes;
   };
 
-  const handleSave = async () => {
-    if (!wallet) { setError("Connect a wallet first"); return; }
-    const changes = buildChangeList();
-    if (changes.length === 0) return;
+  /** Build → sign → submit a list of changes as one mempool chain.
+   *
+   *  Shared by the ordinary Save button and the decommission flow, because both
+   *  need identical partial-failure handling: the backend submits sequentially and
+   *  stops at the first rejection, so changes before that index ARE on chain. */
+  const runChain = async (
+    changes: Array<{ spec: GsChangeSpec; label: string }>,
+    successTitle: string,
+  ): Promise<boolean> => {
+    if (!wallet) { setError("Connect a wallet first"); return false; }
+    if (changes.length === 0) return false;
     setBusy(true);
     setError(null);
     setSubmittedHashes([]);
+    setPartialFailure(null);
+    const labels = changes.map((c) => c.label);
     try {
       const { unsignedCborTxs } = await buildGlobalStateUpdateChain(
-        policyId, adminAddress, changes);
+        policyId, adminAddress, changes.map((c) => c.spec));
       // Sign all N at once via CIP-103 batch signing (wallet wrapper falls
       // back to sequential signTx if the wallet doesn't support cip103).
       const signedCbors = await wallet.signTxs(unsignedCborTxs, true);
       const submit = await submitTokenChain(signedCbors);
+      // Defensive: the backend signals partial failure with HTTP 400, which
+      // apiPost turns into a throw, so this branch is not the primary path —
+      // but a 200 carrying an error field would otherwise pass silently.
       if (submit.error) throw new Error(submit.error);
       setSubmittedHashes(submit.txHashes);
       showToast({
-        title: "Global state updated",
+        title: successTitle,
         description: `${submit.txHashes.length} transaction${submit.txHashes.length !== 1 ? "s" : ""} submitted`,
         variant: "success",
       });
-      // If we just published a new member root, notify the backend so it can
-      // update memberRootHashOnchain / lastRootUpdateTxHash / lastRootUpdateAt
-      // and mark current leaves as published. The autonomous sync job used to
-      // do this after submit+confirm; now it's user-driven so we have to ack.
-      const rootIdx = changes.findIndex((c) => c.action === "UpdateMemberRootHash");
-      if (rootIdx >= 0 && submit.txHashes[rootIdx]) {
-        try {
-          const newRoot = changes[rootIdx].newMemberRootHashHex
-            ?? onchain?.memberRootHashLocal
-            ?? "";
-          if (newRoot) {
-            await acknowledgeRootPublish(policyId, {
-              txHash: submit.txHashes[rootIdx],
-              newRootHashHex: newRoot,
-            });
-          }
-        } catch (ackErr) {
-          // Non-fatal: the chain has the new root regardless; the DB just
-          // shows stale "needs publish" until the next refresh fixes it.
-          console.warn("root-publish ack failed:", ackErr);
-        }
-      }
-      // Optimistic refresh after a short delay (chain propagation)
+      await ackRootPublishIfNeeded(changes.map((c) => c.spec), submit.txHashes);
       setTimeout(() => { refresh(); }, 10_000);
+      return true;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
-      showToast({ title: "Save failed", description: msg, variant: "error" });
+      // D9 — recover the structured body. Losing the hashes of the transactions
+      // that DID land makes a half-applied chain very hard to reconstruct: the GS
+      // UTxO has moved, so the remaining changes have to be rebuilt against the
+      // new state, and without the hashes there is no record of what happened.
+      const failure = parseSubmitChainFailure(e);
+      if (failure.txHashes.length > 0 || failure.failedIndex !== undefined) {
+        setPartialFailure({ ...failure, labels });
+        setSubmittedHashes(failure.txHashes);
+        // Anything that landed before the failure is real on-chain state, so a
+        // member-root publish among them still needs acknowledging.
+        await ackRootPublishIfNeeded(changes.map((c) => c.spec), failure.txHashes);
+        showToast({
+          title: failure.txHashes.length > 0 ? "Chain partially applied" : "Submit failed",
+          description: failure.txHashes.length > 0
+            ? `${failure.txHashes.length} of ${changes.length} change(s) landed on chain before the failure.`
+            : failure.error,
+          variant: "error",
+        });
+        setTimeout(() => { refresh(); }, 10_000);
+      } else {
+        setError(failure.error);
+        showToast({ title: "Save failed", description: failure.error, variant: "error" });
+      }
+      return false;
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** If a member-root publish is among the changes that actually landed, tell the
+   *  backend so it can update memberRootHashOnchain / lastRootUpdateTxHash and
+   *  mark the current leaves as published. The autonomous sync job used to do this
+   *  after submit+confirm; with user-driven publishing the frontend has to ack. */
+  const ackRootPublishIfNeeded = async (specs: GsChangeSpec[], txHashes: string[]) => {
+    const rootIdx = specs.findIndex((c) => c.action === "UpdateMemberRootHash");
+    if (rootIdx < 0 || !txHashes[rootIdx]) return;
+    try {
+      const newRoot = specs[rootIdx].newMemberRootHashHex
+        ?? onchain?.memberRootHashLocal
+        ?? "";
+      if (newRoot) {
+        await acknowledgeRootPublish(policyId, {
+          txHash: txHashes[rootIdx],
+          newRootHashHex: newRoot,
+        });
+      }
+    } catch (ackErr) {
+      // Non-fatal: the chain has the new root regardless; the DB just
+      // shows stale "needs publish" until the next refresh fixes it.
+      console.warn("root-publish ack failed:", ackErr);
+    }
+  };
+
+  const handleSave = async () => {
+    if (securityInfoError) {
+      setError(`Security info: ${securityInfoError}`);
+      return;
+    }
+    await runChain(buildChangeList(), "Global state updated");
+  };
+
+  // ── D3: decommission (DeactivateContract) ─────────────────────────────────
+  // Deliberately NOT part of the ordinary Save batch. It is terminal — the
+  // on-chain validator's `expect !input_datum.deactivated` runs before branch
+  // dispatch, so afterwards NOTHING can spend the global state again: no unpause,
+  // no mint, no burn, no second deactivation. It gets its own control, its own
+  // confirmation, and its own submit.
+  const [showDecommission, setShowDecommission] = useState(false);
+  const [decommissionConfirm, setDecommissionConfirm] = useState("");
+  const DECOMMISSION_PHRASE = "DECOMMISSION";
+
+  const handleDecommission = async () => {
+    if (decommissionConfirm.trim() !== DECOMMISSION_PHRASE) return;
+    const changes: Array<{ spec: GsChangeSpec; label: string }> = [];
+    // The contract requires `input_datum.transfers_paused` — deactivating an
+    // unpaused token is rejected on chain. Chain the pause in front rather than
+    // making the operator discover the precondition from a failed transaction;
+    // each tx in the chain spends the previous one's global state, so the
+    // DeactivateContract step sees transfers_paused = True.
+    if (!onchain?.transfersPaused) {
+      changes.push({
+        spec: { action: "PauseTransfers", transfersPaused: true },
+        label: "Pause transfers (required before decommissioning)",
+      });
+    }
+    changes.push({
+      spec: { action: "DeactivateContract" },
+      label: "Decommission the contract (irreversible)",
+    });
+    const ok = await runChain(changes, "Contract decommissioned");
+    if (ok) {
+      setShowDecommission(false);
+      setDecommissionConfirm("");
+    }
+  };
+
+  // ── D2: RotateAdmin (dual-signature, two-step) ────────────────────────────
+  // global_state.ak requires BOTH `must_be_signed_by_credential(input_datum
+  // .admin_credential_hash)` AND `must_be_signed_by_credential(new_admin_
+  // credential_hash)`. The backend already declares both in required_signers, so
+  // this is a ledger-level requirement, not just a Plutus one — a single-wallet
+  // signature is rejected at submit with MissingRequiredSigners.
+  //
+  // One browser session holds one wallet at a time, so rotation is an explicit
+  // two-step: the outgoing admin partial-signs, the resulting CBOR is handed to
+  // the incoming admin (in-app after connecting their wallet, or copied out of
+  // band), and only the fully co-signed transaction is submitted.
+  const [rotateNewAdmin, setRotateNewAdmin] = useState("");
+  const [rotatePartialCbor, setRotatePartialCbor] = useState<string | null>(null);
+  const [rotatePastedCbor, setRotatePastedCbor] = useState("");
+  const [rotateBusy, setRotateBusy] = useState(false);
+  const [rotateError, setRotateError] = useState<string | null>(null);
+  const [rotateTxHash, setRotateTxHash] = useState<string | null>(null);
+
+  const rotateNewAdminValid = /^[0-9a-f]{56}$/i.test(rotateNewAdmin.trim());
+
+  const resetRotate = () => {
+    setRotateNewAdmin("");
+    setRotatePartialCbor(null);
+    setRotatePastedCbor("");
+    setRotateError(null);
+    setRotateTxHash(null);
+  };
+
+  /** Step 1 — build the RotateAdmin tx and add the CURRENT admin's signature.
+   *  `partialSign = true` matters: the transaction is knowingly incomplete at
+   *  this point, and a wallet asked to fully sign would refuse. */
+  const handleRotateBuildAndSign = async () => {
+    if (!wallet) { setRotateError("Connect a wallet first"); return; }
+    if (!rotateNewAdminValid) {
+      setRotateError("New admin credential hash must be 28 bytes (56 hex characters)");
+      return;
+    }
+    setRotateBusy(true);
+    setRotateError(null);
+    try {
+      const { unsignedCborTxs } = await buildGlobalStateUpdateChain(policyId, adminAddress, [
+        { action: "RotateAdmin", newAdminCredentialHashHex: rotateNewAdmin.trim().toLowerCase() },
+      ]);
+      const partial = await wallet.signTx(unsignedCborTxs[0], true);
+      setRotatePartialCbor(partial);
+      showToast({
+        title: "Signed by the current admin",
+        description: "Now collect the incoming admin's signature.",
+        variant: "default",
+      });
+    } catch (e) {
+      setRotateError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRotateBusy(false);
+    }
+  };
+
+  /** Step 2a — the incoming admin counter-signs with the wallet connected now.
+   *  Requires them to have switched wallets in the connector first; the merge in
+   *  `assembleSignedTxPreservingBody` unions the two witness sets rather than
+   *  replacing the first. */
+  const handleRotateCounterSign = async () => {
+    if (!wallet || !rotatePartialCbor) return;
+    setRotateBusy(true);
+    setRotateError(null);
+    try {
+      const cosigned = await wallet.signTx(rotatePartialCbor, true);
+      setRotatePartialCbor(cosigned);
+      showToast({
+        title: "Counter-signed",
+        description: "Both signatures collected — you can submit now.",
+        variant: "success",
+      });
+    } catch (e) {
+      setRotateError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRotateBusy(false);
+    }
+  };
+
+  /** Step 3 — submit. Goes through the backend's submit endpoint (same path the
+   *  change chain uses) rather than the wallet's, so the transaction is not
+   *  bounced by a wallet backend that dislikes multi-witness admin txs. */
+  const handleRotateSubmit = async (cborHex: string) => {
+    setRotateBusy(true);
+    setRotateError(null);
+    try {
+      const submit = await submitTokenChain([cborHex]);
+      if (submit.error) throw new Error(submit.error);
+      setRotateTxHash(submit.txHashes[0] ?? null);
+      showToast({
+        title: "Admin rotated",
+        description: "The new admin credential is now on chain.",
+        variant: "success",
+      });
+      setTimeout(() => { refresh(); }, 10_000);
+    } catch (e) {
+      const failure = parseSubmitChainFailure(e);
+      setRotateError(
+        failure.error.includes("MissingRequiredSigners")
+          ? "Rejected: MissingRequiredSigners — the transaction is still missing one of "
+            + "the two required signatures. Both the outgoing and the incoming admin "
+            + "must sign before it can be submitted."
+          : failure.error,
+      );
+    } finally {
+      setRotateBusy(false);
     }
   };
 
@@ -770,6 +1051,42 @@ function SecurityTokenGlobalStatePanel({
       <div className="flex items-center justify-center gap-3 py-8">
         <Loader2 className="h-5 w-5 text-primary-400 animate-spin" />
         <span className="text-sm text-dark-300">Loading on-chain state…</span>
+      </div>
+    );
+  }
+
+  // Terminal state. Once `deactivated` is set the on-chain validator rejects every
+  // spend of the global-state UTxO, so there is nothing left to edit — rendering
+  // the usual controls would only offer actions that cannot succeed.
+  if (deactivated) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-start gap-3 p-4 rounded-lg border border-red-500/40 bg-red-500/10">
+          <Skull className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <p className="text-sm font-semibold text-red-300">This contract has been decommissioned</p>
+            <p className="text-xs text-red-200/80">
+              Its global state carries <span className="font-mono">deactivated = True</span>. The
+              on-chain validator rejects every further spend of the global-state UTxO, so transfers
+              stay frozen and no admin action, mint, or burn can ever run against this token again.
+              This is irreversible by design — there is no action that clears the flag.
+            </p>
+            <p className="text-xs text-red-200/60">
+              Existing holders keep their tokens; they are immobilised, not destroyed.
+            </p>
+          </div>
+        </div>
+        <ReadOnlyField label="policy id" value={policyId} mono />
+        <ReadOnlyField label="transfers paused" value={String(onchain.transfersPaused)} />
+        <ReadOnlyField label="mintable_amount (frozen)" value={String(onchain.mintableAmount)} />
+        <button
+          type="button"
+          onClick={refresh}
+          className="flex items-center gap-1.5 text-xs text-dark-400 hover:text-primary-400 transition-colors"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          Refresh
+        </button>
       </div>
     );
   }
@@ -837,6 +1154,41 @@ function SecurityTokenGlobalStatePanel({
         {requiresChanged && <p className="mt-1 text-xs text-amber-400">Will submit: SetRequiresReceiverKyc</p>}
       </div>
 
+      {/* requires_sender_kyc (D4) */}
+      <div>
+        <label className="block text-sm font-medium text-white mb-2">Requires sender KYC</label>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setRequiresSenderKyc(true)}
+            disabled={busy}
+            className={cn("flex-1 px-4 py-2 rounded-lg border text-sm transition-colors",
+              requiresSenderKyc ? "bg-primary-500/10 border-primary-500 text-primary-300" : "bg-dark-800 border-dark-700 text-dark-400 hover:border-dark-600")}
+          >Enabled</button>
+          <button
+            type="button"
+            onClick={() => setRequiresSenderKyc(false)}
+            disabled={busy}
+            className={cn("flex-1 px-4 py-2 rounded-lg border text-sm transition-colors",
+              !requiresSenderKyc ? "bg-primary-500/10 border-primary-500 text-primary-300" : "bg-dark-800 border-dark-700 text-dark-400 hover:border-dark-600")}
+          >Disabled</button>
+        </div>
+        {/* Be honest about what this control does at the pinned contract revision:
+            the GS validator enforces the datum write, but no validator READS the
+            field — transfer_logic_script gates its sender check on
+            requires_receiver_kyc. Presenting it as a live compliance switch would
+            be misleading. */}
+        <p className="mt-1.5 text-xs text-dark-400">
+          <AlertTriangle className="inline h-3 w-3 text-amber-400 mr-1" />
+          Recorded in the datum, but <strong>not yet enforced</strong>: no validator at the pinned
+          contract revision reads <span className="font-mono">requires_sender_kyc</span> — the
+          transfer logic gates its sender check on{" "}
+          <span className="font-mono">requires_receiver_kyc</span>. Set it to keep the on-chain
+          record accurate, not to change transfer behaviour today.
+        </p>
+        {senderKycChanged && <p className="mt-1 text-xs text-amber-400">Will submit: SetRequiresSenderKyc</p>}
+      </div>
+
       {/* mintable_amount (read-only — there's no direct update action) */}
       <ReadOnlyField label="mintable_amount (no direct update — decremented by MintSecurity)"
                      value={String(onchain.mintableAmount)} />
@@ -850,7 +1202,14 @@ function SecurityTokenGlobalStatePanel({
           placeholder="hex (CBOR Data) or plain text"
           disabled={busy}
         />
-        {securityChanged && <p className="mt-1 text-xs text-amber-400">Will submit: ModifySecurityInfo</p>}
+        {securityInfoError ? (
+          <p className="mt-1 text-xs text-red-400">
+            {securityInfoError} Plain text is fine too — anything that isn&apos;t valid hex is
+            wrapped as a CBOR byte string automatically.
+          </p>
+        ) : securityChanged ? (
+          <p className="mt-1 text-xs text-amber-400">Will submit: ModifySecurityInfo</p>
+        ) : null}
       </div>
 
       {/* Trusted entities (KYC issuers) — fetched from on-chain GS datum's
@@ -882,23 +1241,86 @@ function SecurityTokenGlobalStatePanel({
             </p>
           )}
           {trustedEntities.map((v) => {
-            const isNew = !onchain.trustedEntityVkeys.includes(v);
+            const staged = trustedUpdates.find((u) => u.newVkey === v);
+            const isNew = !onchain.trustedEntityVkeys.includes(v) && !staged;
             return (
               <div key={v} className="flex items-center justify-between gap-2 p-2 bg-dark-900 rounded">
-                <p className={cn("text-xs font-mono break-all", isNew ? "text-amber-300" : "text-dark-300")}>{v}</p>
-                <button
-                  type="button"
-                  onClick={() => setTrustedEntities((cur) => cur.filter((x) => x !== v))}
-                  disabled={busy}
-                  className="text-dark-400 hover:text-red-400"
-                  title="Remove"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+                <div className="min-w-0">
+                  <p className={cn("text-xs font-mono break-all",
+                    staged ? "text-blue-300" : isNew ? "text-amber-300" : "text-dark-300")}>{v}</p>
+                  {staged && (
+                    <p className="text-[10px] text-blue-300/80 mt-0.5">
+                      {staged.oldVkey === staged.newVkey
+                        ? "metadata edit staged"
+                        : `replaces ${shortHex(staged.oldVkey)}`}
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {/* D5 — UpdateTrustedEntity in ONE transaction. Remove + Add is two
+                      txs and leaves the entity absent in between, which is visible
+                      on chain. Only offered for entities that actually exist on
+                      chain, since the action's `old_exists` check is on the
+                      committed datum. */}
+                  {onchain.trustedEntityVkeys.includes(v) && !staged && (
+                    <button
+                      type="button"
+                      onClick={() => setEditingEntity({ oldVkey: v, newVkey: v, metadataHex: "a0" })}
+                      disabled={busy}
+                      className="text-dark-400 hover:text-primary-400"
+                      title="Update this entity's key and/or metadata in one transaction"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                  )}
+                  {staged && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTrustedUpdates((cur) => cur.filter((u) => u.newVkey !== v));
+                        setTrustedEntities((cur) =>
+                          cur.map((x) => (x === staged.newVkey ? staged.oldVkey : x)));
+                      }}
+                      disabled={busy}
+                      className="text-dark-400 hover:text-amber-400"
+                      title="Discard the staged update"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTrustedEntities((cur) => cur.filter((x) => x !== v));
+                      setTrustedUpdates((cur) => cur.filter((u) => u.newVkey !== v));
+                    }}
+                    disabled={busy}
+                    className="text-dark-400 hover:text-red-400"
+                    title="Remove"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
             );
           })}
         </div>
+
+        {/* D5 — inline editor for UpdateTrustedEntity */}
+        {editingEntity && (
+          <TrustedEntityEditor
+            edit={editingEntity}
+            busy={busy}
+            existingVkeys={trustedEntities}
+            onChange={setEditingEntity}
+            onCancel={() => setEditingEntity(null)}
+            onStage={(u) => {
+              setTrustedUpdates((cur) => [...cur.filter((x) => x.oldVkey !== u.oldVkey), u]);
+              setTrustedEntities((cur) => cur.map((x) => (x === u.oldVkey ? u.newVkey : x)));
+              setEditingEntity(null);
+            }}
+          />
+        )}
         <div className="flex gap-2 mt-2">
           <Input
             value={newEntityInput}
@@ -918,6 +1340,21 @@ function SecurityTokenGlobalStatePanel({
                 return;
               }
               if (trustedEntities.includes(v)) return;
+              // Re-adding a key that a staged update is replacing would be silently
+              // dropped: it is not in `trustedEntities` (the update renamed it away)
+              // so it looks addable, but `trustedAdded` filters on "not already on
+              // chain" and this key IS on chain — so no AddTrustedEntity is emitted
+              // and the key quietly disappears. Refuse and say why.
+              const stagedAway = trustedUpdates.find((u) => u.oldVkey === v);
+              if (stagedAway) {
+                setError(
+                  `${shortHex(v)} is being replaced by a staged update `
+                  + `(→ ${shortHex(stagedAway.newVkey)}). Discard that update first if you `
+                  + `want to keep this key.`,
+                );
+                return;
+              }
+              setError(null);
               setTrustedEntities((cur) => [...cur, v]);
               setNewEntityInput("");
             }}
@@ -941,9 +1378,13 @@ function SecurityTokenGlobalStatePanel({
             + Add backend signing entity
           </Button>
         )}
-        {(trustedAdded.length > 0 || trustedRemoved.length > 0) && (
+        {(trustedAdded.length > 0 || trustedRemoved.length > 0 || trustedUpdates.length > 0) && (
           <p className="mt-1 text-xs text-amber-400">
-            Will submit: {trustedRemoved.length} RemoveTrustedEntity + {trustedAdded.length} AddTrustedEntity
+            Will submit: {[
+              trustedRemoved.length > 0 && `${trustedRemoved.length} RemoveTrustedEntity`,
+              trustedUpdates.length > 0 && `${trustedUpdates.length} UpdateTrustedEntity`,
+              trustedAdded.length > 0 && `${trustedAdded.length} AddTrustedEntity`,
+            ].filter(Boolean).join(" + ")}
           </p>
         )}
       </div>
@@ -1005,14 +1446,79 @@ function SecurityTokenGlobalStatePanel({
 
       {/* Save */}
       <div className="pt-3 border-t border-dark-700 space-y-2">
-        <Button type="button" variant="primary" onClick={handleSave} disabled={busy || !hasChanges}>
+        <Button
+          type="button"
+          variant="primary"
+          onClick={handleSave}
+          disabled={busy || !hasChanges || !!securityInfoError}
+        >
           {busy ? "Building + signing…" : hasChanges ? "Save & submit chain" : "No changes"}
         </Button>
         <p className="text-xs text-dark-400">
           Each change = one mempool-chained admin tx. Your wallet will be asked to
           sign N transactions in a single popup (CIP-103) where supported.
         </p>
-        {submittedHashes.length > 0 && (
+
+        {/* D9 — a partial failure is the dangerous case: the chain is mempool-
+            chained, so everything before the failing index IS on chain and the
+            global state has moved. Show exactly what landed. */}
+        {partialFailure && (
+          <div className="mt-2 p-3 rounded-lg border border-amber-500/40 bg-amber-500/10 space-y-2">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-semibold text-amber-300">
+                  {partialFailure.txHashes.length > 0
+                    ? `Chain partially applied — ${partialFailure.txHashes.length} of ${partialFailure.labels.length} change(s) are on chain`
+                    : "Nothing was submitted"}
+                </p>
+                {partialFailure.txHashes.length > 0 && (
+                  <p className="text-[11px] text-amber-200/80 mt-0.5">
+                    The on-chain state has already moved. Refresh before retrying — the
+                    remaining changes must be rebuilt against the new global state.
+                  </p>
+                )}
+              </div>
+            </div>
+            <ol className="space-y-1">
+              {partialFailure.labels.map((label, i) => {
+                const landed = i < partialFailure.txHashes.length;
+                const failed = partialFailure.failedIndex === i;
+                return (
+                  <li key={`${label}-${i}`} className="text-[11px] flex items-start gap-1.5">
+                    <span className={cn("shrink-0 font-mono",
+                      landed ? "text-green-400" : failed ? "text-red-400" : "text-dark-500")}>
+                      {landed ? "✓" : failed ? "✗" : "–"}
+                    </span>
+                    <span className="min-w-0">
+                      <span className={cn(
+                        landed ? "text-green-300" : failed ? "text-red-300" : "text-dark-500")}>
+                        {label}
+                      </span>
+                      {landed && (
+                        <span className="block font-mono text-green-400/70 break-all">
+                          {partialFailure.txHashes[i]}
+                        </span>
+                      )}
+                      {failed && !landed && (
+                        <span className="block text-red-300/80">
+                          rejected{partialFailure.failedTxHash
+                            ? ` (${shortHex(partialFailure.failedTxHash)})` : ""}
+                        </span>
+                      )}
+                      {!landed && !failed && (
+                        <span className="block text-dark-500">not attempted</span>
+                      )}
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+            <p className="text-[11px] text-red-300 break-all">{partialFailure.error}</p>
+          </div>
+        )}
+
+        {!partialFailure && submittedHashes.length > 0 && (
           <div className="space-y-1 pt-2">
             <p className="text-xs text-green-400">Submitted {submittedHashes.length} tx{submittedHashes.length !== 1 ? "es" : ""}:</p>
             {submittedHashes.map((h, i) => (
@@ -1022,12 +1528,402 @@ function SecurityTokenGlobalStatePanel({
         )}
         {error && <p className="text-xs text-red-400">{error}</p>}
       </div>
+
+      {/* ── D2: Rotate admin ─────────────────────────────────────────────── */}
+      <div className="pt-4 border-t border-dark-700 space-y-3">
+        <div className="flex items-center gap-2">
+          <KeyRound className="h-4 w-4 text-primary-400" />
+          <span className="text-sm font-medium text-white">Rotate admin</span>
+        </div>
+        <p className="text-xs text-dark-400">
+          Moves <span className="font-mono">admin_credential_hash</span> to a new credential.
+          The contract requires <strong>both</strong> the outgoing and the incoming admin to
+          sign, so this is a two-step flow: sign here, then have the new admin counter-sign.
+          A single signature is rejected at submit with{" "}
+          <span className="font-mono">MissingRequiredSigners</span>.
+        </p>
+        {onchain.adminCredentialHash && (
+          <ReadOnlyField label="current admin credential hash" value={onchain.adminCredentialHash} mono />
+        )}
+
+        {rotateTxHash ? (
+          <div className="p-3 rounded-lg border border-green-500/40 bg-green-500/10 space-y-2">
+            <p className="text-xs text-green-300">Admin rotated. Transaction:</p>
+            <p className="text-xs font-mono text-green-400 break-all">{rotateTxHash}</p>
+            <Button type="button" variant="outline" size="sm" onClick={resetRotate}>Done</Button>
+          </div>
+        ) : !rotatePartialCbor ? (
+          <>
+            <Input
+              value={rotateNewAdmin}
+              onChange={(e) => setRotateNewAdmin(e.target.value)}
+              placeholder="new admin credential hash — 28 bytes (56 hex chars)"
+              disabled={rotateBusy || busy}
+            />
+            {rotateNewAdmin.trim().length > 0 && !rotateNewAdminValid && (
+              <p className="text-xs text-red-400">
+                Must be exactly 56 hex characters (a 28-byte payment key hash).
+              </p>
+            )}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleRotateBuildAndSign}
+              disabled={rotateBusy || busy || !rotateNewAdminValid}
+            >
+              {rotateBusy ? "Building + signing…" : "1. Build & sign as current admin"}
+            </Button>
+          </>
+        ) : (
+          <div className="space-y-3">
+            <div className="p-3 rounded-lg border border-blue-500/40 bg-blue-500/10 space-y-2">
+              <p className="text-xs text-blue-300 font-semibold">
+                2. Collect the incoming admin&apos;s signature
+              </p>
+              <p className="text-[11px] text-blue-200/80">
+                Either connect the new admin&apos;s wallet in the header and press
+                &quot;Counter-sign&quot;, or copy this partially signed transaction, have them sign
+                it elsewhere, and paste the result below.
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(rotatePartialCbor).then(
+                      () => showToast({ title: "Copied", description: "Partially signed CBOR copied to clipboard", variant: "default" }),
+                      () => showToast({ title: "Copy failed", description: "Select and copy the text manually", variant: "error" }),
+                    );
+                  }}
+                >
+                  <Copy className="h-3.5 w-3.5 mr-1" /> Copy CBOR
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRotateCounterSign}
+                  disabled={rotateBusy}
+                >
+                  Counter-sign with connected wallet
+                </Button>
+              </div>
+              <p className="text-[10px] font-mono text-dark-400 break-all max-h-24 overflow-y-auto">
+                {rotatePartialCbor}
+              </p>
+            </div>
+
+            <Input
+              value={rotatePastedCbor}
+              onChange={(e) => setRotatePastedCbor(e.target.value)}
+              placeholder="…or paste the counter-signed CBOR here"
+              disabled={rotateBusy}
+            />
+
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={() => handleRotateSubmit(
+                  rotatePastedCbor.trim() ? rotatePastedCbor.trim() : rotatePartialCbor)}
+                disabled={rotateBusy}
+              >
+                {rotateBusy ? "Submitting…" : "3. Submit"}
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={resetRotate} disabled={rotateBusy}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+        {rotateError && <p className="text-xs text-red-400 break-all">{rotateError}</p>}
+      </div>
+
+      {/* ── D3: Danger zone — decommission ───────────────────────────────── */}
+      <div className="pt-4 border-t border-red-900/50 space-y-3">
+        <div className="flex items-center gap-2">
+          <Skull className="h-4 w-4 text-red-400" />
+          <span className="text-sm font-medium text-red-300">Danger zone — decommission</span>
+        </div>
+        {!showDecommission ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setShowDecommission(true)}
+            disabled={busy}
+            className="border-red-500/50 text-red-300 hover:bg-red-500/10"
+          >
+            Decommission this contract…
+          </Button>
+        ) : (
+          <div className="p-4 rounded-lg border border-red-500/50 bg-red-500/10 space-y-3">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
+              <div className="space-y-2">
+                <p className="text-sm font-semibold text-red-300">
+                  This is permanent and cannot be undone.
+                </p>
+                <ul className="text-xs text-red-200/90 space-y-1 list-disc list-inside">
+                  <li>
+                    Sets <span className="font-mono">deactivated = True</span> in the global state.
+                  </li>
+                  <li>
+                    Afterwards the validator rejects <strong>every</strong> spend of the
+                    global-state UTxO. No unpause, no mint, no burn, no admin action — ever.
+                  </li>
+                  <li>
+                    Transfers stay frozen permanently. Holders keep their tokens, but they are
+                    immobilised and can never move again.
+                  </li>
+                  <li>
+                    There is <strong>no</strong> reversing action in the contract. Recovering
+                    would mean bootstrapping an entirely new token.
+                  </li>
+                </ul>
+                {!onchain.transfersPaused && (
+                  <p className="text-xs text-amber-300 border-t border-red-500/30 pt-2">
+                    <AlertTriangle className="inline h-3 w-3 mr-1" />
+                    The contract requires transfers to be paused first. Transfers are currently
+                    <strong> active</strong>, so a <span className="font-mono">PauseTransfers</span>{" "}
+                    transaction will be chained ahead of the decommission — you will be asked to
+                    sign <strong>two</strong> transactions.
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="block text-xs text-red-200">
+                Type <span className="font-mono font-semibold">{DECOMMISSION_PHRASE}</span> to confirm:
+              </label>
+              <Input
+                value={decommissionConfirm}
+                onChange={(e) => setDecommissionConfirm(e.target.value)}
+                placeholder={DECOMMISSION_PHRASE}
+                disabled={busy}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={handleDecommission}
+                disabled={busy || decommissionConfirm.trim() !== DECOMMISSION_PHRASE}
+                className="bg-red-600 hover:bg-red-500"
+              >
+                {busy ? "Submitting…" : "Permanently decommission"}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => { setShowDecommission(false); setDecommissionConfirm(""); }}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** A staged {@code UpdateTrustedEntity}: replace {@code oldVkey} with
+ *  {@code newVkey} and set new metadata, in one transaction. When the two vkeys
+ *  are equal the on-chain branch treats it as a metadata-only edit. */
+interface TrustedEntityUpdate {
+  oldVkey: string;
+  newVkey: string;
+  /** CBOR Data hex. "a0" (empty map) is the platform's default. */
+  metadataHex: string;
+}
+
+function TrustedEntityEditor({
+  edit, busy, existingVkeys, onChange, onCancel, onStage,
+}: {
+  edit: TrustedEntityUpdate;
+  busy: boolean;
+  existingVkeys: string[];
+  onChange: (u: TrustedEntityUpdate) => void;
+  onCancel: () => void;
+  onStage: (u: TrustedEntityUpdate) => void;
+}) {
+  const newVkey = edit.newVkey.trim().toLowerCase();
+  const renaming = newVkey !== edit.oldVkey;
+  const vkeyValid = /^[0-9a-f]{64}$/.test(newVkey);
+  // Mirrors the contract's `new_clash_ok`: when renaming, the new vkey must not
+  // already be a trusted entity, or the update would merge two entries into one.
+  const clashes = renaming && existingVkeys.some((v) => v === newVkey);
+  const metaError = cborDataError(edit.metadataHex);
+  const canStage = vkeyValid && !clashes && !metaError;
+
+  return (
+    <div className="mt-2 p-3 rounded-lg border border-primary-500/40 bg-primary-500/5 space-y-2">
+      <p className="text-xs font-semibold text-primary-300">Update trusted entity</p>
+      <p className="text-[11px] text-dark-400 break-all">
+        Replacing <span className="font-mono">{edit.oldVkey}</span>
+      </p>
+      <Input
+        value={edit.newVkey}
+        onChange={(e) => onChange({ ...edit, newVkey: e.target.value })}
+        placeholder="new vkey hex (32 bytes) — leave unchanged to edit metadata only"
+        disabled={busy}
+      />
+      {!vkeyValid && edit.newVkey.trim().length > 0 && (
+        <p className="text-xs text-red-400">vkey must be 32 bytes hex (64 characters)</p>
+      )}
+      {clashes && (
+        <p className="text-xs text-red-400">
+          That vkey is already a trusted entity — renaming onto it would merge two entries.
+        </p>
+      )}
+      <Input
+        value={edit.metadataHex}
+        onChange={(e) => onChange({ ...edit, metadataHex: e.target.value })}
+        placeholder="metadata as CBOR Data hex (a0 = empty map)"
+        disabled={busy}
+      />
+      {metaError && <p className="text-xs text-red-400">Metadata: {metaError}</p>}
+      <p className="text-[11px] text-dark-500">
+        One transaction, versus two for Remove + Add — which would also leave the entity
+        absent on chain in between.
+      </p>
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => onStage({ ...edit, newVkey })}
+          disabled={busy || !canStage}
+        >
+          Stage update
+        </Button>
+        <Button type="button" variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+      </div>
     </div>
   );
 }
 
 function isHex(s: string): boolean {
   return /^[0-9a-fA-F]*$/.test(s) && s.length % 2 === 0;
+}
+
+function shortHex(s: string): string {
+  return s.length <= 16 ? s : `${s.slice(0, 8)}…${s.slice(-6)}`;
+}
+
+/** Validate that `hex` is exactly one well-formed CBOR data item (D7).
+ *  Returns null when it is, or a human-readable reason when it isn't.
+ *
+ *  The GS datum's `security_info` and a trusted entity's `metadata` are opaque
+ *  `Data` on chain, so the platform relays whatever the operator types — but
+ *  "even-length hex" was the only check, and that admits `deadbeef`, which is
+ *  perfectly good hex and not a CBOR value at all. The backend now returns a
+ *  typed 400 for this; catching it here saves the round trip and points at the
+ *  field directly.
+ *
+ *  This is a structural scan, not a decoder: it walks the item tree to confirm
+ *  every header is well-formed and that the item ends exactly at the end of the
+ *  input. That is enough to distinguish the two failure modes that matter —
+ *  unparseable input, and a valid item with trailing bytes that would be
+ *  silently dropped. */
+function cborDataError(hex: string): string | null {
+  const s = hex.trim();
+  if (s.length === 0) return "must not be empty.";
+  if (s.length % 2 !== 0) return "must be an even number of hex characters.";
+  if (!/^[0-9a-fA-F]+$/.test(s)) return "must be hex.";
+  const bytes = new Uint8Array(s.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(s.substring(i * 2, i * 2 + 2), 16);
+  }
+  let end: number;
+  try {
+    end = scanCborItem(bytes, 0);
+  } catch (e) {
+    return `is not valid CBOR: ${e instanceof Error ? e.message : String(e)}.`;
+  }
+  if (end < bytes.length) {
+    return `has ${bytes.length - end} trailing byte(s) after a complete CBOR value; `
+      + "those bytes would be silently dropped.";
+  }
+  return null;
+}
+
+/** Advance past one CBOR data item starting at `off`; returns the offset just
+ *  past it. Throws on a malformed or unsupported header. */
+function scanCborItem(buf: Uint8Array, off: number): number {
+  if (off >= buf.length) throw new Error("unexpected end of input");
+  const initial = buf[off];
+  const major = initial >> 5;
+  const ai = initial & 0x1f;
+  let cursor = off + 1;
+  let value = 0;
+
+  if (ai < 24) {
+    value = ai;
+  } else if (ai === 24) { value = readUint(buf, cursor, 1); cursor += 1; }
+  else if (ai === 25) { value = readUint(buf, cursor, 2); cursor += 2; }
+  else if (ai === 26) { value = readUint(buf, cursor, 4); cursor += 4; }
+  else if (ai === 27) { value = readUint(buf, cursor, 8); cursor += 8; }
+  else if (ai === 31) {
+    // Indefinite length — only legal for major types 2,3,4,5.
+    if (major < 2 || major > 5) throw new Error(`indefinite length is not allowed for major type ${major}`);
+    for (;;) {
+      if (cursor >= buf.length) throw new Error("unterminated indefinite-length item");
+      if (buf[cursor] === 0xff) return cursor + 1;
+      cursor = scanCborItem(buf, cursor);
+    }
+  } else {
+    throw new Error(`reserved additional-information value ${ai}`);
+  }
+
+  switch (major) {
+    case 0: // unsigned int
+    case 1: // negative int
+      return cursor;
+    case 2: // byte string
+    case 3: // text string
+      // Plutus Data has no text constructor, but the backend's decoder accepts a
+      // CBOR text string and silently stores it as a BYTE string (verified: input
+      // 6161 lands in the datum as 4161). Accepting it here keeps this check
+      // aligned with the server — a UI that rejects what the server accepts is as
+      // unhelpful as one that accepts what the server rejects.
+      if (cursor + value > buf.length) throw new Error("string length runs past the end of the input");
+      return cursor + value;
+    case 4: // array
+      for (let i = 0; i < value; i++) cursor = scanCborItem(buf, cursor);
+      return cursor;
+    case 5: // map
+      for (let i = 0; i < value; i++) {
+        cursor = scanCborItem(buf, cursor);
+        cursor = scanCborItem(buf, cursor);
+      }
+      return cursor;
+    case 6: // tag — one nested item follows
+      return scanCborItem(buf, cursor);
+    case 7:
+      // Simple values / floats. Plutus Data has no float or simple-value
+      // constructors, so anything here is a payload the on-chain `Data` type
+      // cannot represent.
+      throw new Error("floats and simple values are not valid Plutus Data");
+    default:
+      throw new Error(`unknown major type ${major}`);
+  }
+}
+
+function readUint(buf: Uint8Array, off: number, len: number): number {
+  if (off + len > buf.length) throw new Error("unexpected end of input while reading a length");
+  let n = 0;
+  for (let i = 0; i < len; i++) n = n * 256 + buf[off + i];
+  return n;
 }
 
 function textToCborBytesHex(s: string): string {
