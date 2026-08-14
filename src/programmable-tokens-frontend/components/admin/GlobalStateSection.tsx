@@ -1173,18 +1173,15 @@ function SecurityTokenGlobalStatePanel({
               !requiresSenderKyc ? "bg-primary-500/10 border-primary-500 text-primary-300" : "bg-dark-800 border-dark-700 text-dark-400 hover:border-dark-600")}
           >Disabled</button>
         </div>
-        {/* Be honest about what this control does at the pinned contract revision:
-            the GS validator enforces the datum write, but no validator READS the
-            field — transfer_logic_script gates its sender check on
-            requires_receiver_kyc. Presenting it as a live compliance switch would
-            be misleading. */}
+        {/* Enforced on chain: transfer_logic_script.ak:123 gates the per-sender KYC
+            loop on requires_sender_kyc, independently of the per-destination loop
+            at :157 which reads requires_receiver_kyc. (Before the re-pin to
+            @e69c66a both loops read the receiver flag — that was the F-20 bug.) */}
         <p className="mt-1.5 text-xs text-dark-400">
-          <AlertTriangle className="inline h-3 w-3 text-amber-400 mr-1" />
-          Recorded in the datum, but <strong>not yet enforced</strong>: no validator at the pinned
-          contract revision reads <span className="font-mono">requires_sender_kyc</span> — the
-          transfer logic gates its sender check on{" "}
-          <span className="font-mono">requires_receiver_kyc</span>. Set it to keep the on-chain
-          record accurate, not to change transfer behaviour today.
+          When enabled, every <strong>sender</strong> in a transfer must present a valid KYC
+          proof. Independent of the receiver requirement &mdash; the transfer logic gates the
+          sender loop on <span className="font-mono">requires_sender_kyc</span> and the
+          destination loop on <span className="font-mono">requires_receiver_kyc</span>.
         </p>
         {senderKycChanged && <p className="mt-1 text-xs text-amber-400">Will submit: SetRequiresSenderKyc</p>}
       </div>

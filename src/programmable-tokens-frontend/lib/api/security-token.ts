@@ -55,9 +55,9 @@ export interface SecurityTokenGlobalState {
    *  UpdateMemberRootHash tx to bring the chain in sync. */
   memberRootHashLocal: string;
   requiresReceiverKyc: boolean;
-  /** Written by SetRequiresSenderKyc. NB: no validator at the pinned contract
-   *  revision reads this field yet — transfer_logic_script gates the sender
-   *  check on {@link requiresReceiverKyc} — so it is state without enforcement. */
+  /** Written by SetRequiresSenderKyc and ENFORCED on chain: transfer_logic_script.ak:123
+   *  gates the per-sender KYC loop on this flag, independently of {@link requiresReceiverKyc}
+   *  which gates the per-destination loop at :157. */
   requiresSenderKyc: boolean;
   /** Terminal decommissioning flag. Once true the on-chain global_state
    *  validator rejects EVERY spend of the global-state UTxO, so no admin
