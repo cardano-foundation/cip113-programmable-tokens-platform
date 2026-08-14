@@ -58,6 +58,7 @@ public class TokenContextController {
         String blacklistInitTxHash = null;
         Integer blacklistInitOutputIndex = null;
         Boolean requiresReceiverKyc = null;
+        Boolean requiresSenderKyc = null;
         Boolean transfersPaused = null;
 
         if ("freeze-and-seize".equals(substandardId)) {
@@ -92,6 +93,7 @@ public class TokenContextController {
                         var live = handler.readGlobalState(policyId);
                         if (live.isPresent()) {
                             requiresReceiverKyc = live.get().requiresReceiverKyc();
+                            requiresSenderKyc = live.get().requiresSenderKyc();
                             transfersPaused = live.get().transfersPaused();
                         }
                     }
@@ -108,6 +110,7 @@ public class TokenContextController {
                 blacklistInitTxHash,
                 blacklistInitOutputIndex,
                 requiresReceiverKyc,
+                requiresSenderKyc,
                 transfersPaused
         ));
     }

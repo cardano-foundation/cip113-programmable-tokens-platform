@@ -428,6 +428,11 @@ public class SecurityTokenController {
                         // actions that can no longer be applied.
                         resp.put("deactivated", gs.deactivated());
                         resp.put("adminCredentialHash", gs.adminCredentialHash());
+                        // Both KYC gates are independent on chain (transfer_logic_script.ak:123
+                        // reads requires_sender_kyc, :157 reads requires_receiver_kyc), so the UI
+                        // needs both to decide which proofs to collect.
+                        resp.put("requiresSenderKyc", gs.requiresSenderKyc());
+                        resp.put("deactivated", gs.deactivated());
                         return ResponseEntity.ok(resp);
                     })
                     .orElse(ResponseEntity.status(404).body(Map.of(

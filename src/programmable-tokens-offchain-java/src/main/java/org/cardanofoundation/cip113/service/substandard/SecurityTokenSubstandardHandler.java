@@ -1051,6 +1051,7 @@ public class SecurityTokenSubstandardHandler
                 return TransactionContext.typedError("GS NFT not found on chain");
             }
             boolean liveRequiresReceiverKyc;
+            boolean liveRequiresSenderKyc;
             try {
                 PlutusData gsDatum = PlutusData.deserialize(
                         HexUtil.decodeHexString(gsUtxo.getInlineDatum()));
@@ -1068,6 +1069,7 @@ public class SecurityTokenSubstandardHandler
                 // requires_sender_kyc, so reading 8 here would silently gate on
                 // the wrong flag.
                 liveRequiresReceiverKyc = boolFromConstr(gsFields.get(GS_IDX_REQUIRES_RECEIVER_KYC));
+                liveRequiresSenderKyc = boolFromConstr(gsFields.get(GS_IDX_REQUIRES_SENDER_KYC));
             } catch (Exception e) {
                 return TransactionContext.typedError(
                         "could not parse GS datum to read requires_receiver_kyc: " + e.getMessage());
@@ -1081,31 +1083,24 @@ public class SecurityTokenSubstandardHandler
                         + "(token currently has requires_receiver_kyc=true on chain)");
             }
 
-            // Sender proof requirement — same flag, same gate. Upstream's
-            // per-sender loop is `let kyc_ok = if gs_datum.requires_receiver_kyc
-            // { verify_kyc_proof(action.source_proof, …) } else { True }`
-            // (validators/transfer_logic_script.ak, step 5), mirroring the
-            // per-destination loop in step 6. The fork this pin replaced checked
-            // the sender unconditionally, which is why this used to be a
-            // hard requirement.
-            //
-            // Demanding it unconditionally is not just redundant, it is wrong: a
-            // token bootstrapped with requiresReceiverKyc=false (a supported wizard
-            // option) has an empty member_root_hash and no enrolled members, so no
-            // sender can produce a Membership proof at all — every transfer would be
-            // rejected off-chain even though the chain accepts the placeholder
-            // Membership shape we already emit on the destination side.
+            // Sender proof requirement. The two gates are INDEPENDENT in the pinned
+            // contract: transfer_logic_script.ak:123 reads requires_sender_kyc for the
+            // per-sender loop, and :157 reads requires_receiver_kyc for the per-destination
+            // loop. Gating the sender on the receiver flag (as this did) is the F-20 bug the
+            // re-pin to @e69c66a fixed on chain — off-chain it made a token with
+            // sender-KYC off but receiver-KYC on demand a sender proof the chain never asks
+            // for, which no sender can produce when the member root is empty.
             //
             // Only the Membership shape is supported in v1; Attestation-style sender
             // proofs would need the KERI service to produce BaFin 66-byte payloads,
             // which is a separate workstream.
-            boolean needSenderProof = liveRequiresReceiverKyc;
+            boolean needSenderProof = liveRequiresSenderKyc;
             if (needSenderProof
                     && (request.senderMpfProofCborHex() == null || request.senderMpfProofCborHex().isBlank()
                         || request.senderMpfValidUntilMs() == null)) {
                 return TransactionContext.typedError(
                         "security-token sender Membership proof required: senderMpfProofCborHex "
-                        + "+ senderMpfValidUntilMs (token currently has requires_receiver_kyc=true on chain)");
+                        + "+ senderMpfValidUntilMs (token currently has requires_sender_kyc=true on chain)");
             }
 
             // Denylist root node (ref input) — for an empty denylist (v1 happy
