@@ -206,25 +206,51 @@ public class SecurityTokenSubstandardHandler
     public TransactionContext<RegistrationResult> buildRegistrationTransaction(
             SecurityTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
-        return buildRegistrationTransaction(request, protocolParams, /*chainedGsUtxoOverride=*/ null);
+        return buildRegistrationTransaction(request, protocolParams, RegistrationChainInputs.NONE);
     }
 
-    /** Chain-aware overload of {@link #buildRegistrationTransaction}. When
-     *  {@code chainedGsUtxoOverride} is non-null, the tx ALSO spends the GS
-     *  UTxO with the BaFin {@code MintSecurity} action — decrementing the
-     *  on-chain {@code mintable_amount} by the quantity being minted. This
-     *  enforces the supply cap for the initial mint that happens at
-     *  registration time.
+    /** The UTxOs a chained registration cannot discover by querying the chain,
+     *  because the transactions that create them are still unsubmitted when the
+     *  registration tx is built by {@link #buildFullRegistrationChain}.
      *
-     *  <p>Pre-condition: {@code chainedGsUtxoOverride} carries the inline GS
-     *  datum (so the script sees it during evaluation). Caller must populate
-     *  {@link SecurityTokenRegisterRequest#getInitialMintableAmount()} with
-     *  the SAME value the genesis tx used so we can compute the decremented
-     *  amount correctly without re-reading the chain. */
+     *  <p>{@code globalState} comes from the genesis tx; {@code powerUserNode} from
+     *  the AddPowerUser tx; {@code denylistCoveringNode} (the denylist linked-list
+     *  ROOT, which covers every key while the list is empty) from the genesis tx.
+     *  Any field may be null, in which case the builder falls back to on-chain
+     *  discovery — which is what the standalone (non-chained) registration path
+     *  uses. */
+    public record RegistrationChainInputs(Utxo globalState,
+                                          Utxo powerUserNode,
+                                          Utxo denylistCoveringNode) {
+        public static final RegistrationChainInputs NONE =
+                new RegistrationChainInputs(null, null, null);
+    }
+
+    /** Chain-aware overload of {@link #buildRegistrationTransaction}.
+     *
+     *  <p>When {@code request.getQuantity()} is greater than zero the tx carries the
+     *  token's FIRST MINT, which changes its shape substantially: GlobalState is
+     *  SPENT under {@code MintSecurity} (so {@code mintable_amount} is decremented
+     *  and the supply cap enforced) rather than merely referenced, a {@code can_mint}
+     *  power-user node joins the reference inputs and must sign, and every
+     *  token-bearing output needs a destination action carrying a denylist-absence
+     *  covering node. See {@code verify_token_registration}'s
+     *  {@code minted_amount > 0} branch in
+     *  {@code validators/minting_logic_script.ak}, which defers to the same
+     *  {@code verify_mint_or_burn} the steady-state mint path uses.
+     *
+     *  <p>With quantity 0 the tx is a STRUCTURAL registration: GlobalState is only
+     *  referenced and none of the mint machinery runs. That is the default and the
+     *  long-proven path.
+     *
+     *  <p>Pre-condition for the chained call: every supplied {@link
+     *  RegistrationChainInputs} UTxO carries its inline datum, so the evaluator can
+     *  see it. */
     public TransactionContext<RegistrationResult> buildRegistrationTransaction(
             SecurityTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams,
-            Utxo chainedGsUtxoOverride) {
+            RegistrationChainInputs chained) {
+        Utxo chainedGsUtxoOverride = chained != null ? chained.globalState() : null;
         try {
             // 0. Context + script construction. The genesis tx already wrote a
             // SecurityTokenRegistrationEntity row keyed on the prog-token policy
@@ -429,32 +455,22 @@ public class SecurityTokenSubstandardHandler
             if (mintQuantity.signum() < 0) {
                 return TransactionContext.typedError("quantity must be >= 0");
             }
-            // REGISTRATION + FIRST MINT IS NOT IMPLEMENTED HERE — deliberately, and it
-            // is not the upstream blocker that used to sit in this method.
+            // REGISTRATION + FIRST MINT.
             //
-            // `RegisterToken` with minted_amount > 0 is supported by the contract, but it
-            // layers the ENTIRE MintBurn gate on top of the registration
-            // (minting_logic_script.ak:232-266 → verify_mint_or_burn): the GlobalState
-            // must be SPENT under MintSecurity, a `can_mint` power-user node must be a
-            // reference input AND sign, and every token-bearing output needs a
-            // destination action carrying a denylist-absence covering node. At
-            // registration time no power user exists on chain yet — AddPowerUser is a
-            // separate admin transaction that runs after genesis — so this shape is
-            // unreachable for a first-time issuer anyway.
+            // `RegisterToken` with minted_amount > 0 layers the ENTIRE MintBurn gate on
+            // top of the registration (minting_logic_script.ak:232-266 →
+            // verify_mint_or_burn): GlobalState must be SPENT under MintSecurity, a
+            // `can_mint` power-user node must be a reference input AND sign, and every
+            // token-bearing output needs a destination action carrying a
+            // denylist-absence covering node.
             //
-            // Register with quantity 0, add the power user, then mint via
-            // buildMintTransaction. Failing here keeps the error legible instead of
-            // emitting a redeemer whose unset indices would trap in the evaluator.
-            if (mintQuantity.signum() > 0) {
-                return TransactionContext.typedError(
-                        "security-token registration does not carry a first mint: register with "
-                        + "quantity 0, add a can_mint power user, then mint separately. "
-                        + "(RegisterToken with minted_amount > 0 additionally requires the "
-                        + "GlobalState to be spent under MintSecurity, a can_mint power-user "
-                        + "reference input that signs, and a denylist covering node per "
-                        + "destination — none of which exist yet at registration time.)");
-            }
-            boolean willMint = false;
+            // This used to be refused up front on the grounds that "no power user exists
+            // on chain yet at registration time". That reasoning was stale: in
+            // buildFullRegistrationChain the AddPowerUser tx runs BEFORE the registration
+            // tx, so the node exists — as an output of an unsubmitted transaction,
+            // exactly like the chained GlobalState UTxO. Both are threaded in through
+            // RegistrationChainInputs.
+            boolean willMint = mintQuantity.signum() > 0;
             Asset programmableToken = Asset.builder()
                     .name("0x" + request.getAssetName())
                     .value(mintQuantity).build();
@@ -474,6 +490,13 @@ public class SecurityTokenSubstandardHandler
                     recipientAddress.getDelegationCredential().orElseThrow(() ->
                             new IllegalArgumentException("recipient must be a base address (need stake credential)")),
                     network.getCardanoNetwork());
+            // The destination identity the minting logic vets. Under the CIP-113 address
+            // model the payment credential is the shared prog-logic-base script, so the
+            // inline STAKE credential is the only owner identity there is
+            // (minting_logic_script.ak:394-399).
+            byte[] mintRecipientStakeHash = recipientAddress.getDelegationCredentialHash()
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            "recipient must be a base address with a stake credential: " + recipient));
 
             // 7. Compose the tx.
             //
@@ -524,13 +547,121 @@ public class SecurityTokenSubstandardHandler
                           + " — run the genesis init step first");
             }
 
+            // 6b. First-mint prerequisites. Everything below is inert on the structural
+            // path; the fields it feeds are the ones RegisterToken ignores when
+            // minted_amount == 0.
+            Utxo mintPuNode = null;                 // can_mint power user, reference input + signer
+            byte[] mintPuNodeKey = null;            // its linked-list node key (= what must sign)
+            Utxo mintDenylistNode = null;           // denylist-absence covering element for the recipient
+            PlutusData mintNewGsDatum = null;       // GS datum with mintable_amount decremented
+            PlutusScript mintGsSpendScript = null;
+            Long mintCurrentMintable = null;
+            boolean mintNeedsRecipientProof = false;
+            String mintMpfProofCborHex = null;
+            Long mintMpfValidUntilMs = null;
+            if (willMint) {
+                // The genesis tx persisted this row; it carries the denylist / power-users
+                // policy ids the fallback lookups need.
+                SecurityTokenRegistrationEntity reg = registrationRepository
+                        .findByProgrammableTokenPolicyId(progTokenPolicyId)
+                        .orElse(null);
+
+                // Power user. verify_mint_or_burn resolves the node from the reference
+                // inputs, requires can_mint, and requires the NODE'S OWN KEY to sign
+                // (minting_logic_script.ak:363-370) — so it has to be the caller's node,
+                // never the genesis admin's by assumption (D6).
+                byte[] callerPkh = callerPaymentCredential(request.getFeePayerAddress());
+                mintPuNode = chained != null && chained.powerUserNode() != null
+                        ? chained.powerUserNode()
+                        : (reg != null ? findPuNode(reg, callerPkh, "caller") : null);
+                if (mintPuNode == null) {
+                    return TransactionContext.typedError(
+                            "registration with a first mint needs a can_mint power-user node as a "
+                            + "reference input, and none was supplied or found on chain for "
+                            + HexUtil.encodeHexString(callerPkh)
+                            + " — use buildFullRegistrationChain, which builds AddPowerUser "
+                            + "before the registration tx");
+                }
+                mintPuNodeKey = linkedListNodeKey(mintPuNode, puPolicy);
+                PowerUserCaps caps = parsePowerUser(mintPuNode);
+                if (!caps.canMint()) {
+                    return TransactionContext.typedError(
+                            "power user " + HexUtil.encodeHexString(mintPuNodeKey)
+                            + " lacks the can_mint capability that the on-chain minting logic "
+                            + "requires (minting_logic_script.ak: power_user_data.can_mint). "
+                            + "Register structurally (quantity 0) and mint from a wallet whose "
+                            + "power-user node holds can_mint.");
+                }
+
+                // Denylist-absence covering element. With an empty list the ROOT covers
+                // every key (lib/denylist/absence.ak: covers_key(None, None, _)), and at
+                // registration time the list is always empty — but resolve it properly so
+                // a standalone registration against a populated denylist still works.
+                mintDenylistNode = chained != null && chained.denylistCoveringNode() != null
+                        ? chained.denylistCoveringNode()
+                        : (reg != null ? findDenylistCoveringNode(reg, mintRecipientStakeHash) : null);
+                if (mintDenylistNode == null) {
+                    return TransactionContext.typedError(
+                            "registration with a first mint needs a denylist covering node as a "
+                            + "reference input, and none was supplied or found on chain");
+                }
+
+                // GS: spent under MintSecurity, so mintable_amount is decremented and the
+                // supply cap enforced by global_state.ak rather than by us.
+                List<PlutusData> gsFields = parseGsFields(gsUtxoForRegistration);
+                mintCurrentMintable = ((BigIntPlutusData) gsFields.get(GS_IDX_MINTABLE_AMOUNT))
+                        .getValue().longValueExact();
+                mintNewGsDatum = applyMintableDelta(gsFields, -mintQuantity.longValueExact());
+                mintGsSpendScript = scriptBuilder.buildGlobalStateSpendScript(
+                        securityAssetNameHex, progTokenPolicyId, gsPolicy);
+
+                // Receiver-KYC gate, identical to the steady-state mint (D1): the proof is
+                // only consulted when GS.requires_receiver_kyc AND the receiver is not the
+                // authorising power user itself.
+                boolean requiresReceiverKyc = boolFromConstr(gsFields.get(GS_IDX_REQUIRES_RECEIVER_KYC));
+                boolean selfMintExempt = Arrays.equals(mintRecipientStakeHash, mintPuNodeKey);
+                mintNeedsRecipientProof = requiresReceiverKyc && !selfMintExempt;
+                if (mintNeedsRecipientProof) {
+                    ResolvedMembership m = resolveMembershipProof(
+                            progTokenPolicyId, mintRecipientStakeHash, gsFields,
+                            "recipient", "registering with a first mint");
+                    mintMpfProofCborHex = m.proofCborHex();
+                    mintMpfValidUntilMs = m.validUntilMs();
+                }
+            }
+
             Tx tx = new Tx()
                     .collectFrom(feePayerUtxos)
                     .collectFrom(directoryUtxo, ConstrPlutusData.of(0))
                     .mintAsset(directoryMintScript, directoryMintNft, directoryMintRedeemer);
 
+            // Redeemer indices for the mint half. Cardano lex-sorts inputs and
+            // reference_inputs by (txHash, outputIndex) before any script sees them, so
+            // off-chain indices MUST sort the same way.
+            int gsInputIdx = 0;
+            int puNodeRefIdx = 0;
+            int denylistRefIdx = 0;
+            int issuanceRedeemerIdx = 0;
             if (willMint) {
+                List<Utxo> regInputs = new ArrayList<>(feePayerUtxos);
+                regInputs.add(directoryUtxo);
+                regInputs.add(gsUtxoForRegistration);
+                gsInputIdx = lexIndex(regInputs, gsUtxoForRegistration);
+
+                // self.redeemers is ordered by (tag, index) with Spend(0) < Mint(1) <
+                // Cert(2) < Reward(3). This tx has exactly two script spends (the
+                // directory slot and GS) — extra fee-payer inputs are pubkey inputs and
+                // carry no redeemer — so the two Mint redeemers sit at 2 and 3, ordered by
+                // policy id the way the ledger sorts the mint field.
+                issuanceRedeemerIdx = 2
+                        + (progTokenPolicyId.compareTo(directoryMintPolicyId) < 0 ? 0 : 1);
+
                 tx = tx
+                        .collectFrom(gsUtxoForRegistration, ConstrPlutusData.of(0,
+                                BigIntPlutusData.of(BigInteger.ZERO),               // config_ref_input_index (unused)
+                                BigIntPlutusData.of(BigInteger.valueOf(3)),         // global_state_output_index
+                                ConstrPlutusData.of(0,                              // MintSecurity
+                                        BigIntPlutusData.of(BigInteger.valueOf(issuanceRedeemerIdx)))))
                         .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
                         .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue),
                                 ConstrPlutusData.of(0));   // output 0
@@ -542,13 +673,27 @@ public class SecurityTokenSubstandardHandler
                     .payToContract(directorySpendAddress.getAddress(), ValueUtil.toAmountList(directoryMintValue),
                             directoryMintDatum.toPlutusData());                            // NEW node
 
-            // Reference inputs. On the structural path GlobalState joins them, and the
-            // RegisterToken redeemer must name its position in the LEX-SORTED list —
-            // the ledger sorts reference inputs by output reference before the script
-            // ever sees them, so an unsorted off-chain index points at the wrong UTxO.
+            if (willMint) {
+                // Output 3: the re-emitted GS UTxO. Address and value must be preserved
+                // byte-for-byte (global_state.ak's address_preserved / value_preserved),
+                // and the datum must equal the input's with only mintable_amount changed.
+                tx = tx.payToContract(gsUtxoForRegistration.getAddress(),
+                        ValueUtil.toAmountList(buildPreservedGsValue(gsUtxoForRegistration, gsPolicy)),
+                        mintNewGsDatum);
+            }
+
+            // Reference inputs. On the structural path GlobalState joins them; on the
+            // mint path it is SPENT instead, and the power-user node plus the denylist
+            // covering element take its place. The RegisterToken redeemer must name each
+            // position in the LEX-SORTED list — the ledger sorts reference inputs by
+            // output reference before the script ever sees them, so an unsorted off-chain
+            // index points at the wrong UTxO.
             List<TransactionInput> regRefInputs = new ArrayList<>(List.of(
                     txInputOf(protocolParamsUtxo), txInputOf(issuanceUtxo)));
-            if (!willMint) {
+            if (willMint) {
+                regRefInputs.add(txInputOf(mintPuNode));
+                regRefInputs.add(txInputOf(mintDenylistNode));
+            } else {
                 regRefInputs.add(txInputOf(gsUtxoForRegistration));
             }
             List<TransactionInput> regRefInputsSorted = regRefInputs.stream()
@@ -556,6 +701,10 @@ public class SecurityTokenSubstandardHandler
             int gsRefIdxForRegistration = willMint
                     ? 0
                     : regRefInputsSorted.indexOf(txInputOf(gsUtxoForRegistration));
+            if (willMint) {
+                puNodeRefIdx = regRefInputsSorted.indexOf(txInputOf(mintPuNode));
+                denylistRefIdx = regRefInputsSorted.indexOf(txInputOf(mintDenylistNode));
+            }
 
             // MintingLogicScriptWithdrawRedeemer::RegisterToken (constructor 1) —
             // the registration mode added at @e69c66a. It resolves this token's registry
@@ -565,14 +714,22 @@ public class SecurityTokenSubstandardHandler
             // On the structural path (minted_amount == 0) the validator reads ONLY
             // registry_node_output_index and global_state_ref_input_index; the remaining
             // three fields are never dereferenced, so 0 is safe and matches upstream's
-            // own tests. Destination actions are ignored and stay empty.
+            // own tests. Destination actions are ignored and stay empty. When a first
+            // mint is carried the mirror image holds: global_state_ref_input_index is the
+            // ignored one and the other three plus destination_actions are live.
+            ListPlutusData destinationActions = ListPlutusData.of();
+            if (willMint) {
+                destinationActions = ListPlutusData.of(buildDestinationAction(
+                        mintRecipientStakeHash, mintNeedsRecipientProof,
+                        mintMpfProofCborHex, mintMpfValidUntilMs, denylistRefIdx));
+            }
             ConstrPlutusData withdrawRedeemer = ConstrPlutusData.of(1,
                     BigIntPlutusData.of(BigInteger.valueOf(registryNodeOutputIdx)),
                     BigIntPlutusData.of(BigInteger.valueOf(gsRefIdxForRegistration)),
-                    BigIntPlutusData.of(BigInteger.ZERO),   // global_state_input_index, set below when minting
-                    BigIntPlutusData.of(BigInteger.ZERO),   // power_user_node_ref_input_index
+                    BigIntPlutusData.of(BigInteger.valueOf(gsInputIdx)),
+                    BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)),
                     BigIntPlutusData.of(willMint ? mintQuantity : BigInteger.ZERO),
-                    ListPlutusData.of());                   // destination_actions
+                    destinationActions);
 
             tx = tx
                     .withdraw(mintingLogicRewardAddress.getAddress(), BigInteger.ZERO, withdrawRedeemer)
@@ -580,16 +737,23 @@ public class SecurityTokenSubstandardHandler
                     .attachSpendingValidator(directorySpendScript)
                     .attachRewardValidator(mintingLogicScript)
                     .withChangeAddress(request.getFeePayerAddress());
+            if (willMint) {
+                tx = tx.attachSpendingValidator(mintGsSpendScript);
+            }
 
-            // 7b. No chain-mode GS spend. Structural registration REFERENCES the
-            // GlobalState (added to regRefInputs above); it never spends it, and the
-            // validator's own comment is explicit that no GS spend action permits the
-            // no-op re-emit a zero-mint registration would need
-            // (minting_logic_script.ak:213-214). chainedGsUtxoOverride is therefore
-            // unused on this path and kept only for the signature the chain builder calls.
+            // 7b. Signers. The registration itself is authorised by the admin credential
+            // read off the GS datum; the mint half is additionally authorised by the
+            // power-user node's OWN key (must_be_signed_by_credential against
+            // power_user_node_key). Usually the same wallet, so dedupe.
+            List<byte[]> requiredSigners = new ArrayList<>();
+            requiredSigners.add(adminCredential.getBytes());
+            if (willMint && !Arrays.equals(mintPuNodeKey, adminCredential.getBytes())) {
+                requiredSigners.add(mintPuNodeKey);
+            }
+
             Utxo firstUtxo = feePayerUtxos.getFirst();
-            Transaction transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(adminCredential.getBytes())
+            var txContext = quickTxBuilder.compose(tx)
+                    .withRequiredSigners(requiredSigners.toArray(new byte[0][]))
                     .feePayer(request.getFeePayerAddress())
                     .mergeOutputs(false)
                     .withCollateralInputs(TransactionInput.builder()
@@ -606,8 +770,33 @@ public class SecurityTokenSubstandardHandler
                             outputs.addLast(first);
                         }
                     })
-                    .ignoreScriptCostEvaluationError(false)
-                    .build();
+                    .ignoreScriptCostEvaluationError(false);
+            if (willMint) {
+                // verify_membership_proof (lib/kyc/verify.ak:137-142) needs a Finite upper
+                // bound <= proof.valid_until_ms; an unbounded tx fails that clause no
+                // matter how good the proof is. Harmless when no proof is verified.
+                txContext = txContext.validTo(kycClampedTtlSlot(
+                        mintNeedsRecipientProof ? mintMpfValidUntilMs : null,
+                        mintRecipientStakeHash, "recipient", "registration mint"));
+            }
+            Transaction transaction = txContext.build();
+
+            if (willMint) {
+                String indexMismatch = verifyRegistrationMintIndices(
+                        transaction, gsUtxoForRegistration, mintPuNode, mintDenylistNode,
+                        gsInputIdx, puNodeRefIdx, denylistRefIdx, registryNodeOutputIdx,
+                        progTokenPolicyId, issuanceRedeemerIdx, issuanceRedeemer);
+                if (indexMismatch != null) {
+                    return TransactionContext.typedError(
+                            "registration-with-mint aborted: " + indexMismatch
+                            + ". The balancer reshaped the transaction after the redeemer "
+                            + "indices were computed, so submitting it would trap on chain.");
+                }
+                log.info("security-token registration carries a first mint: policy={} qty={} "
+                         + "(mintable_amount {} → {})",
+                        progTokenPolicyId, mintQuantity, mintCurrentMintable,
+                        mintCurrentMintable - mintQuantity.longValueExact());
+            }
 
             // 8. Persist the ProgrammableTokenRegistryEntity so the platform's
             // generic dispatcher knows this prog-token policy belongs to the
@@ -2446,10 +2635,21 @@ public class SecurityTokenSubstandardHandler
      *  registration and power-user rows behind on every attempt. The pin now carries
      *  a registration mode ({@code RegisterToken}), so the chain runs.
      *
-     *  <p>Phase 3 registers <em>structurally</em> (quantity 0). Folding the first
-     *  mint into the registration is a supported contract shape but is not built
-     *  here — see the note in {@code buildRegistrationTransaction}; mint separately
-     *  once the power user from phase 2 is on chain. */
+     *  <p>Phase 3 registers <em>structurally</em> (quantity 0) unless the request
+     *  carries {@link SecurityTokenRegisterRequest#getInitialMintQuantity()}, in which
+     *  case it folds the token's first mint into the same transaction — a supported
+     *  contract shape ({@code verify_token_registration}'s {@code minted_amount > 0}
+     *  branch). That is reachable precisely because phase 2 runs first: the
+     *  {@code can_mint} power-user node the mint needs as a signing reference input is
+     *  an output of the AddPowerUser tx, threaded in through
+     *  {@link RegistrationChainInputs} exactly like the chained GlobalState UTxO.
+     *
+     *  <p>Under {@code requires_receiver_kyc} the first mint is only buildable when the
+     *  recipient is the authorising power user itself (the contract's self-mint
+     *  exemption). Any other recipient needs a published {@code member_root_hash}, and
+     *  publishing one is a GlobalState spend that cannot happen before genesis is on
+     *  chain — so mint separately after {@code UpdateMemberRootHash} in that case. The
+     *  builder refuses up front rather than emitting a doomed transaction. */
     public TransactionContext<ChainBuildResult> buildFullRegistrationChain(
             SecurityTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
@@ -2568,24 +2768,61 @@ public class SecurityTokenSubstandardHandler
             hybridUtxoSupplier.add(addPuChange);
 
             // ── PHASE 3 ─ Build the registration tx ────────────────────────
-            // Registration MUST mint at least one prog token because the
-            // CIP-113 directory mint validator requires the issuance contract
-            // to mint in the same tx (consistency between the directory
-            // entry's recorded substandard hash and the actual mint).
+            // A registration does NOT have to mint. `registry_mint`'s RegistryInsert is
+            // explicit that "whether a first mint of `key` occurs in the same tx is NOT
+            // checked here", and the substandard's own RegisterToken branch validates
+            // minted_amount == 0 as its primary case. So register structurally by
+            // default and carry a first mint only when the caller asked for an initial
+            // supply — the zero-mint branch (GlobalState referenced, no GS spend, no
+            // power-user gate) is the one with on-chain mileage behind it.
             //
-            // The supply cap is enforced by ALSO spending GS with MintSecurity
-            // in this tx (via the 3-arg overload), which decrements
-            // mintable_amount independently of the substandard's withdraw.
+            // When a quantity IS asked for, the supply cap is enforced by also spending
+            // GS under MintSecurity in the same tx, which decrements mintable_amount.
             request.setChainingTransactionCborHex(addPuCbor);
-            // Register STRUCTURALLY. This used to force quantity to "1" so the
-            // registration carried a first mint; the registration path no longer folds
-            // a mint in (see buildRegistrationTransaction), and a structural
-            // registration is what the RegisterToken zero-mint branch validates —
-            // GlobalState referenced, no GS spend, no power-user gate.
-            request.setQuantity("0");
+            String firstMintQuantity = request.getInitialMintQuantity() != null
+                    && !request.getInitialMintQuantity().isBlank()
+                    ? request.getInitialMintQuantity().trim()
+                    : "0";
+            boolean chainWillMint;
+            try {
+                chainWillMint = new BigInteger(firstMintQuantity).signum() > 0;
+            } catch (NumberFormatException nfe) {
+                hybridUtxoSupplier.clear();
+                return TransactionContext.typedError(
+                        "chain[registration]: initialMintQuantity must be a non-negative integer, got '"
+                        + firstMintQuantity + "'");
+            }
+            request.setQuantity(firstMintQuantity);
             request.setGlobalStatePolicyId(reg.getGlobalStatePolicyId());
+
+            // The registration's mint half needs two more UTxOs that are not on chain
+            // yet: the power-user node AddPowerUser just created (reference input +
+            // signer) and the denylist ROOT from genesis (the absence-covering element,
+            // which covers every key while the list is empty).
+            Utxo chainedPuNode = null;
+            Utxo chainedDenylistRoot = null;
+            if (chainWillMint) {
+                String bootstrapNodeAssetNameHex = HexUtil.encodeHexString(
+                        concat(LL_NODE_KEY_PREFIX, HexUtil.decodeHexString(bootstrapPkh)));
+                chainedPuNode = findOutputWithAsset(addPuTx, addPuTxHash,
+                        reg.getPowerUsersPolicyId(), bootstrapNodeAssetNameHex);
+                chainedDenylistRoot = findOutputWithAsset(genesisTx, genesisTxHash,
+                        reg.getDenylistPolicyId(), "");
+                if (chainedPuNode == null || chainedDenylistRoot == null) {
+                    hybridUtxoSupplier.clear();
+                    return TransactionContext.typedError(
+                            "chain[registration]: registration with a first mint needs the "
+                            + "AddPowerUser node and the denylist root as reference inputs, but "
+                            + "they could not be located (puNode=" + (chainedPuNode != null)
+                            + ", denylistRoot=" + (chainedDenylistRoot != null) + ")");
+                }
+                hybridUtxoSupplier.add(chainedPuNode);
+                hybridUtxoSupplier.add(chainedDenylistRoot);
+            }
+
             TransactionContext<RegistrationResult> regResult =
-                    buildRegistrationTransaction(request, protocolParams, chainedGsUtxo);
+                    buildRegistrationTransaction(request, protocolParams,
+                            new RegistrationChainInputs(chainedGsUtxo, chainedPuNode, chainedDenylistRoot));
             if (!regResult.isSuccessful()) {
                 hybridUtxoSupplier.clear();
                 return TransactionContext.typedError("chain[registration]: " + regResult.error());
@@ -2673,6 +2910,52 @@ public class SecurityTokenSubstandardHandler
                     .txHash(txHash)
                     .outputIndex(i)
                     .amount(ValueUtil.toAmountList(out.getValue()))
+                    .inlineDatum(inlineDatumHex)
+                    .build();
+        }
+        return null;
+    }
+
+    /** Walk {@code tx}'s outputs and return the first one carrying exactly one unit of
+     *  {@code (policyId, assetNameHex)}, wrapped as a {@link Utxo} with inline datum
+     *  preserved. Returns null if no match.
+     *
+     *  <p>The sibling {@link #findOutputAtAddress} matches on address, which cannot
+     *  separate the two linked-list outputs an insert emits — the updated ROOT and the
+     *  new NODE sit at the same script address. Identity there comes from the NFT's
+     *  asset name ({@code ""} = root, {@code "Node" ++ key} = node), so this variant
+     *  matches on the asset instead. */
+    private static Utxo findOutputWithAsset(Transaction tx, String txHash,
+                                            String policyId, String assetNameHex) {
+        List<com.bloxbean.cardano.client.transaction.spec.TransactionOutput> outputs =
+                tx.getBody().getOutputs();
+        for (int i = 0; i < outputs.size(); i++) {
+            com.bloxbean.cardano.client.transaction.spec.TransactionOutput out = outputs.get(i);
+            // ADA-only outputs (the change) can carry a null multi-asset list, which
+            // ValueUtil.toAmountList would NPE on. They never match anyway.
+            if (out.getValue() == null || out.getValue().getMultiAssets() == null
+                    || out.getValue().getMultiAssets().isEmpty()) {
+                continue;
+            }
+            // Go through Amount/AssetType (unit = policyId ++ assetNameHex) rather than
+            // Asset.getName(), whose "0x"-prefixed-vs-raw representation depends on
+            // whether the Value was built here or round-tripped through CBOR.
+            List<Amount> amounts = ValueUtil.toAmountList(out.getValue());
+            boolean match = amounts.stream().anyMatch(a -> {
+                if ("lovelace".equals(a.getUnit())) return false;
+                AssetType at = AssetType.fromUnit(a.getUnit());
+                return policyId.equals(at.policyId())
+                        && assetNameHex.equalsIgnoreCase(at.assetName())
+                        && BigInteger.ONE.equals(a.getQuantity());
+            });
+            if (!match) continue;
+            String inlineDatumHex = out.getInlineDatum() != null
+                    ? out.getInlineDatum().serializeToHex() : null;
+            return Utxo.builder()
+                    .address(out.getAddress())
+                    .txHash(txHash)
+                    .outputIndex(i)
+                    .amount(amounts)
                     .inlineDatum(inlineDatumHex)
                     .build();
         }
@@ -4658,6 +4941,127 @@ public class SecurityTokenSubstandardHandler
                 role + " power-user node not found on chain — "
                 + HexUtil.encodeHexString(signerPkh) + " may not be a registered power user "
                 + "(asset: " + reg.getPowerUsersPolicyId() + "/" + nodeAssetNameHex + ")"));
+    }
+
+    /** The linked-list node key a {@code run_element_with} call would derive for this
+     *  element: the element NFT's asset name with the {@code "Node"} prefix stripped.
+     *
+     *  <p>This — not the credential hash inside the datum — is what
+     *  {@code must_be_signed_by_credential(self, power_user_node_key)} checks against
+     *  (the two agree for every node this platform writes, but the asset name is the
+     *  authority). */
+    private static byte[] linkedListNodeKey(Utxo element, String policyId) {
+        String assetName = element.getAmount().stream()
+                .map(a -> AssetType.fromUnit(a.getUnit()))
+                .filter(at -> policyId.equals(at.policyId()))
+                .map(AssetType::assetName)
+                .findFirst()
+                .orElseThrow(() -> new BuildPreconditionException(
+                        "linked-list element " + element.getTxHash() + "#" + element.getOutputIndex()
+                        + " carries no NFT under policy " + policyId));
+        int prefixHexLen = LL_NODE_KEY_PREFIX.length * 2;
+        if (assetName.length() <= prefixHexLen) {
+            throw new BuildPreconditionException(
+                    "linked-list element " + element.getTxHash() + "#" + element.getOutputIndex()
+                    + " is the ROOT (empty asset name), not a Node — it has no key");
+        }
+        return HexUtil.decodeHexString(assetName.substring(prefixHexLen));
+    }
+
+    /** Re-derive every index the registration-with-mint redeemers carry from the
+     *  FINISHED transaction and report the first disagreement, or null when all
+     *  agree.
+     *
+     *  <p>The indices are computed before {@code build()} from the input set we chose,
+     *  but the balancer may add inputs (which shifts the lex-sorted positions) or
+     *  reshape outputs. On the structural path a wrong index merely fails; here it
+     *  would point a live validator at the wrong UTxO, so it is checked rather than
+     *  hoped for. */
+    private static String verifyRegistrationMintIndices(
+            Transaction tx, Utxo gsUtxo, Utxo puNode, Utxo denylistNode,
+            int expectedGsInputIdx, int expectedPuRefIdx, int expectedDenylistRefIdx,
+            int expectedRegistryNodeOutputIdx, String progTokenPolicyId,
+            int expectedIssuanceRedeemerIdx, PlutusData issuanceRedeemer) {
+        // global_state.ak's MintSecurity branch does
+        //   expect self.redeemers[issuance_policy_redeemer_index].1st == Mint(issuance_policy_id)
+        // and self.redeemers is ordered by (tag, index) with Spend before Mint. So the
+        // issuance Mint redeemer's global position is spendCount + its own mint index,
+        // where that index is the policy's rank in the ledger-sorted mint field.
+        // Re-derive it from the finished witness set rather than trusting the
+        // lexicographic guess made before build().
+        List<Redeemer> redeemers = tx.getWitnessSet() != null
+                ? tx.getWitnessSet().getRedeemers() : null;
+        if (redeemers == null || redeemers.isEmpty()) {
+            return "the built transaction carries no redeemers";
+        }
+        String issuanceRedeemerHex;
+        try {
+            issuanceRedeemerHex = issuanceRedeemer.serializeToHex();
+        } catch (Exception e) {
+            return "could not re-serialise the issuance redeemer: " + e.getMessage();
+        }
+        long spendCount = redeemers.stream().filter(r -> r.getTag() == RedeemerTag.Spend).count();
+        Integer issuanceMintIndex = null;
+        for (Redeemer r : redeemers) {
+            if (r.getTag() != RedeemerTag.Mint) continue;
+            try {
+                if (issuanceRedeemerHex.equals(r.getData().serializeToHex())) {
+                    issuanceMintIndex = r.getIndex().intValue();
+                }
+            } catch (Exception ignored) {
+                // A redeemer we cannot re-serialise is not the one we are looking for.
+            }
+        }
+        if (issuanceMintIndex == null) {
+            return "the issuance mint redeemer is missing from the built transaction";
+        }
+        int actualIssuanceRedeemerIdx = (int) spendCount + issuanceMintIndex;
+        if (actualIssuanceRedeemerIdx != expectedIssuanceRedeemerIdx) {
+            return "MintSecurity's issuance_policy_redeemer_index is " + expectedIssuanceRedeemerIdx
+                   + " but the issuance mint redeemer sits at position " + actualIssuanceRedeemerIdx
+                   + " of self.redeemers (" + spendCount + " spend redeemer(s), mint index "
+                   + issuanceMintIndex + ")";
+        }
+        List<TransactionInput> inputs = new ArrayList<>(tx.getBody().getInputs());
+        inputs.sort(new TransactionInputComparator());
+        int actualGsIdx = inputs.indexOf(txInputOf(gsUtxo));
+        if (actualGsIdx != expectedGsInputIdx) {
+            return "global_state_input_index is " + expectedGsInputIdx
+                   + " but GlobalState landed at input " + actualGsIdx
+                   + " (" + inputs.size() + " inputs after balancing)";
+        }
+        List<TransactionInput> refs = new ArrayList<>(
+                tx.getBody().getReferenceInputs() != null
+                        ? tx.getBody().getReferenceInputs() : List.of());
+        refs.sort(new TransactionInputComparator());
+        int actualPuIdx = refs.indexOf(txInputOf(puNode));
+        if (actualPuIdx != expectedPuRefIdx) {
+            return "power_user_node_ref_input_index is " + expectedPuRefIdx
+                   + " but the power-user node landed at reference input " + actualPuIdx;
+        }
+        int actualDenylistIdx = refs.indexOf(txInputOf(denylistNode));
+        if (actualDenylistIdx != expectedDenylistRefIdx) {
+            return "the destination action's denylist covering index is " + expectedDenylistRefIdx
+                   + " but the covering node landed at reference input " + actualDenylistIdx;
+        }
+        List<TransactionOutput> outs = tx.getBody().getOutputs();
+        if (outs.size() < expectedRegistryNodeOutputIdx + 2) {
+            return "expected at least " + (expectedRegistryNodeOutputIdx + 2)
+                   + " outputs (prog-token, covering node, new node, GlobalState) but found "
+                   + outs.size();
+        }
+        boolean progTokenAtZero = outs.getFirst().getValue().getMultiAssets() != null
+                && outs.getFirst().getValue().getMultiAssets().stream()
+                        .anyMatch(ma -> progTokenPolicyId.equals(ma.getPolicyId()));
+        if (!progTokenAtZero) {
+            return "output 0 does not carry the freshly minted programmable token";
+        }
+        if (!outs.get(expectedRegistryNodeOutputIdx + 1).getAddress().equals(gsUtxo.getAddress())) {
+            return "global_state_output_index is " + (expectedRegistryNodeOutputIdx + 1)
+                   + " but output " + (expectedRegistryNodeOutputIdx + 1)
+                   + " is not at the GlobalState spend address";
+        }
+        return null;
     }
 
     /** The five on-chain {@code PowerUser} capability flags

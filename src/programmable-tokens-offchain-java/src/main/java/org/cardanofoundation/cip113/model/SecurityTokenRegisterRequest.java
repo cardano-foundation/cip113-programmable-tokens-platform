@@ -56,6 +56,19 @@ public class SecurityTokenRegisterRequest extends RegisterTokenRequest {
      *  be issued. Defaults to 0 (no minting until admin updates) if not provided. */
     private Long initialMintableAmount;
 
+    /** Optional initial supply minted BY the registration transaction itself, as a
+     *  decimal string. Defaults to {@code "0"} — a structural registration that only
+     *  inserts the CIP-113 directory entry and mints no security tokens.
+     *
+     *  <p>When set above zero, {@code buildFullRegistrationChain}'s registration tx
+     *  additionally SPENDS the GlobalState UTxO under {@code MintSecurity} (so
+     *  {@code initialMintableAmount} is decremented by this quantity), references the
+     *  power-user node created by the preceding {@code AddPowerUser} tx, and carries a
+     *  destination action for the recipient. Must not exceed
+     *  {@link #initialMintableAmount}: the supply cap is enforced on chain by
+     *  {@code global_state.ak}, which rejects a negative remainder. */
+    private String initialMintQuantity;
+
     /** Optional: bootstrap power user inserted into the off-chain DB at registration.
      *  Lets the registering admin see themselves on the admin page immediately.
      *  Defaults to {@code adminPubKeyHash} with all-capabilities if not provided

@@ -89,6 +89,18 @@ export interface SecurityTokenInitRequest {
   adminPubKeyHash: string;          // 28-byte hex
   requiresReceiverKyc: boolean;
   initialMintableAmount?: number;
+  /** Initial supply minted BY the registration transaction itself (decimal string).
+   *  Omit or '0' for a structural registration that mints nothing — the default,
+   *  and the path with the most on-chain mileage. When set, the registration tx
+   *  additionally spends GlobalState under MintSecurity (decrementing
+   *  initialMintableAmount by this quantity), references the power-user node the
+   *  chain's AddPowerUser tx creates, and pays the tokens to recipientAddress (or
+   *  the fee payer). Must not exceed initialMintableAmount — the cap is enforced
+   *  on chain. Only honoured by {@link buildSecurityTokenChain}. */
+  initialMintQuantity?: string;
+  /** Where a non-zero initialMintQuantity is paid. Defaults to feePayerAddress.
+   *  Must be a base address: the minting logic vets the STAKE credential. */
+  recipientAddress?: string;
   bootstrapPowerUserPkh?: string;
   bootstrapPowerUserCapabilities?: number;
   bootstrapPowerUserLabel?: string;
@@ -141,7 +153,9 @@ export interface SecurityTokenChainBuildResponse {
 
 /** Build all three security-token registration txs at once: genesis (mints GS +
  *  denylist root + PU root), AddPowerUser (insert admin into PU list), registration
- *  (CIP-113 directory insert + stake-cred registration, NO initial mint).
+ *  (CIP-113 directory insert + stake-cred registration, plus — when
+ *  {@link SecurityTokenInitRequest.initialMintQuantity} is set — the token's first
+ *  mint in that same transaction).
  *  The frontend signs all three in a single CIP-30 signTxs popup and posts the
  *  signed CBORs (in order) to {@link submitTokenChain}. */
 export const buildSecurityTokenChain = (body: SecurityTokenInitRequest) =>
