@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Service
@@ -27,9 +28,18 @@ public class SubstandardService {
     private final ObjectMapper objectMapper;
 
     /**
-     * Substandards to hide from the API (and therefore the issuance wizard). Listed by
-     * folder id. The contracts stay vendored and any already-issued token keeps working —
-     * this only removes them as choices for NEW tokens.
+     * Substandards to hide from {@link #getAllSubstandards()} — the list the issuance
+     * wizard offers. Listed by folder id.
+     *
+     * <p>Disabled substandards are still LOADED and still resolvable by
+     * {@link #getSubstandardById(String)} and {@link #getSubstandardValidator(String, String)}.
+     * That is deliberate: those lookups are the runtime path for tokens that were already
+     * issued, used by the script builders and by scheduled jobs such as MpfRootSyncJob.
+     * Dropping them from the cache made those fail with
+     * "kyc-extended contract not found: global_state.global_state.mint".
+     *
+     * <p>To stop a substandard's background jobs as well, use its own switch (e.g.
+     * KYC_EXTENDED_ENABLED=false) — this property governs issuance choices only.
      */
     @Value("${substandards.disabled:}")
     private List<String> disabledSubstandards = new ArrayList<>();
@@ -61,11 +71,6 @@ public class SubstandardService {
                         continue;
                     }
                     String folderName = parts[1].split("/")[0];
-
-                    if (disabledSubstandards.contains(folderName)) {
-                        log.info("Skipping disabled substandard: {}", folderName);
-                        continue;
-                    }
 
                     log.debug("Processing substandard: {}", folderName);
 
@@ -135,7 +140,9 @@ public class SubstandardService {
      * @return list of all substandards
      */
     public List<Substandard> getAllSubstandards() {
-        return new ArrayList<>(substandardsCache.values());
+        return substandardsCache.values().stream()
+                .filter(s -> !disabledSubstandards.contains(s.id()))
+                .collect(Collectors.toCollection(ArrayList::new));
     }
 
     /**
