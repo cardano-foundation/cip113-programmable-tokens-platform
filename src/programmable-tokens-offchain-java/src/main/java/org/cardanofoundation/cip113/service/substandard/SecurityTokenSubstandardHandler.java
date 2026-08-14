@@ -316,6 +316,10 @@ public class SecurityTokenSubstandardHandler
                 List<TransactionOutput> outs = chainingTx.getBody().getOutputs();
                 for (int i = 0; i < outs.size(); i++) {
                     TransactionOutput output = outs.get(i);
+                    // getScriptRef() == null: the predecessor may be the publish tx, whose
+                    // reference-script outputs are far larger than this threshold. Spending
+                    // one would destroy the script this very transaction references.
+                    if (output.getScriptRef() != null) continue;
                     if (output.getAddress().equals(request.getFeePayerAddress()) &&
                             output.getValue().getCoin().compareTo(BigInteger.valueOf(10_000_000L)) > 0) {
                         inputUtxo = Utxo.builder()
@@ -907,6 +911,13 @@ public class SecurityTokenSubstandardHandler
                         mintRecipientStakeHash, "recipient", "registration mint"));
             }
             Transaction transaction = txContext.build();
+
+            // Size-check HERE rather than only in the chain orchestrator. The public 2-arg
+            // overload (dispatched from TokenOperationsService) reaches this code with a
+            // caller-supplied quantity and no published reference scripts — the exact
+            // combination that produces a 16 584-byte transaction — and used to hand it back
+            // to the client with no diagnostic at all.
+            checkedTxSize("registration", transaction);
 
             if (willMint) {
                 String indexMismatch = verifyRegistrationMintIndices(
@@ -1945,7 +1956,28 @@ public class SecurityTokenSubstandardHandler
             byte[] seededMemberPkh = null;
             long seededMemberValidUntilMs = 0L;
             byte[] genesisMemberRootHash = new byte[0];
-            if (request.isSeedRecipientInAllowlistAtGenesis()) {
+            // Narrow the flag to the one situation it exists for. It is only ever needed
+            // when a first mint has to satisfy requires_receiver_kyc; honouring it otherwise
+            // would write a live, unverified compliance assertion into the datum for a token
+            // that never asked for one — and, worse, one nobody would see, because the UI
+            // only shows the checkbox while both conditions hold.
+            BigInteger genesisFirstMint = BigInteger.ZERO;
+            try {
+                String q = request.getInitialMintQuantity();
+                if (q != null && !q.isBlank()) genesisFirstMint = new BigInteger(q.trim());
+            } catch (NumberFormatException ignored) {
+                // Malformed quantities are refused by PHASE 0; treat as "not minting" here.
+            }
+            boolean seedApplies = request.isSeedRecipientInAllowlistAtGenesis()
+                    && request.isRequiresReceiverKyc()
+                    && genesisFirstMint.signum() > 0;
+            if (request.isSeedRecipientInAllowlistAtGenesis() && !seedApplies) {
+                log.info("security-token genesis: ignoring seedRecipientInAllowlistAtGenesis — "
+                         + "it only applies when a first mint has to satisfy requires_receiver_kyc "
+                         + "(requiresReceiverKyc={}, initialMintQuantity={})",
+                        request.isRequiresReceiverKyc(), genesisFirstMint);
+            }
+            if (seedApplies) {
                 String seedRecipient = (request.getRecipientAddress() == null
                         || request.getRecipientAddress().isBlank())
                         ? adminAddress : request.getRecipientAddress();
@@ -2895,6 +2927,19 @@ public class SecurityTokenSubstandardHandler
                             "fee payer address has no payment credential: " + feePayerAddress));
             String refScriptAddress = AddressProvider
                     .getEntAddress(feePayerPaymentCred, network.getCardanoNetwork()).getAddress();
+            // The whole point of the enterprise address is that it is NOT the address the
+            // next phases scan for funding. An enterprise fee payer collapses the two, and
+            // then the registration tx spends the very UTxO it is reading as a reference
+            // script — a self-inflicted "script not found" that would only surface at
+            // submit. Refuse instead of publishing into that trap.
+            if (refScriptAddress.equals(feePayerAddress)) {
+                return TransactionContext.typedError(
+                        "publishScripts: the fee payer is an enterprise address, which is the "
+                        + "same address the reference scripts would be published to (" + refScriptAddress
+                        + "). The registration tx picks its funding by scanning that address, so it "
+                        + "would spend its own reference script. Pay for a registration-with-mint "
+                        + "from a base address.");
+            }
 
             var protocolParams = protocolParamsSupplier.getProtocolParams();
             MinAdaCalculator minAda = new MinAdaCalculator(protocolParams);
@@ -2932,9 +2977,14 @@ public class SecurityTokenSubstandardHandler
                     .filter(a -> "lovelace".equals(a.getUnit()))
                     .map(Amount::getQuantity)
                     .reduce(BigInteger.ZERO, BigInteger::add);
+            // Change headroom is 11 ADA, not min-UTxO: phase 2.5 requires > 5 ADA of change
+            // and the registration's own chaining scan requires > 10 ADA. Guaranteeing only
+            // min-UTxO here let a 5–10 ADA change pass both earlier guards and then die in
+            // phase 3 with the opaque "could not chain tx", after the operator had been told
+            // the chain was buildable.
             BigInteger needed = coins.get(0).add(coins.get(1))
-                    .add(BigInteger.valueOf(2_000_000L))   // fee headroom
-                    .add(BigInteger.valueOf(1_000_000L));  // min-utxo for the change output
+                    .add(BigInteger.valueOf(2_000_000L))    // fee headroom
+                    .add(BigInteger.valueOf(11_000_000L));  // change the next two phases demand
             if (fundingLovelace.compareTo(needed) < 0) {
                 return TransactionContext.typedError(
                         "publishScripts: the funding UTxO holds " + fundingLovelace
@@ -3492,7 +3542,6 @@ public class SecurityTokenSubstandardHandler
             Transaction regTx = Transaction.deserialize(HexUtil.decodeHexString(regCbor));
             String regTxHash = TransactionUtil
                     .getTxHash(regTx.serialize());
-            checkedTxSize("registration", regTx);
 
             // ── PHASE 4 ─ Register transferLogic stake credential ─────────
             // BaFin's transfer_logic_script needs its script-stake credential
@@ -3570,6 +3619,11 @@ public class SecurityTokenSubstandardHandler
             com.bloxbean.cardano.client.transaction.spec.TransactionOutput out = outputs.get(i);
             if (!out.getAddress().equals(targetAddr)) continue;
             if (out.getValue().getCoin().compareTo(minLovelace) <= 0) continue;
+            // Never hand back a reference-script output. Callers use this to find spendable
+            // change; consuming a published reference script would break the very tx that
+            // reads it. Belt and braces — the publish tx pays them to a different address —
+            // but the cost of being wrong here is a chain that only fails at submit.
+            if (out.getScriptRef() != null) continue;
             String inlineDatumHex = out.getInlineDatum() != null
                     ? out.getInlineDatum().serializeToHex() : null;
             return Utxo.builder()

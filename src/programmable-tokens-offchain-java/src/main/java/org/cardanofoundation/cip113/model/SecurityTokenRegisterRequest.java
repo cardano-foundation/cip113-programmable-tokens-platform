@@ -101,7 +101,11 @@ public class SecurityTokenRegisterRequest extends RegisterTokenRequest {
      *  member. It is off by default and the UI labels it as such; nothing in the
      *  platform infers it.
      *
-     *  <p>Ignored unless the chain actually mints. */
+     *  <p><b>Ignored unless it is actually needed</b> — i.e. unless
+     *  {@link #requiresReceiverKyc} is on AND {@link #initialMintQuantity} is above
+     *  zero. Honouring it otherwise would write a live compliance assertion into the
+     *  datum for a token that never needed one, and one the UI would not be showing a
+     *  control for. */
     private boolean seedRecipientInAllowlistAtGenesis;
 
     /** Optional: bootstrap power user inserted into the off-chain DB at registration.

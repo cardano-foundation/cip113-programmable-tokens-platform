@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useWallet } from "@/hooks/use-wallet";
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -107,6 +107,17 @@ export function KycConfigStep({
   const mintExceedsCap = willFirstMint && capQty !== null && mintQty > capQty;
   const registrationBlocked =
     isSecurityTokenFlow && (mintQtyInvalid || mintBlockedByKyc || mintExceedsCap);
+
+  // Clear the opt-in the moment it stops being applicable. The checkbox only renders
+  // while receiver KYC is on AND something is being minted; without this, ticking it
+  // and then turning receiver KYC off would keep sending `true` from an invisible
+  // control — silently writing an unverified compliance assertion into the datum that
+  // goes live as soon as an admin later runs SetRequiresReceiverKyc.
+  useEffect(() => {
+    if (!(requiresReceiverKyc && willFirstMint) && seedRecipientInAllowlist) {
+      setSeedRecipientInAllowlist(false);
+    }
+  }, [requiresReceiverKyc, willFirstMint, seedRecipientInAllowlist]);
 
   // Trusted entities list — pre-populated with own vkey
   const [trustedEntities, setTrustedEntities] = useState<string[]>([]);
@@ -585,8 +596,9 @@ export function KycConfigStep({
                 outputs at your own enterprise address, so the registration can reference them
                 instead of carrying them inline. Without this the registration transaction is
                 16 584 bytes against the ledger&apos;s 16 384-byte limit and cannot be submitted at
-                all. Costs about 55 ADA of min-UTxO, which you can reclaim by spending those two
-                outputs once the token is registered.
+                all. This locks about 55 ADA of min-UTxO. It is recoverable in principle — the
+                outputs use your own payment key — but the platform has no reclaim action, and
+                most wallets will not show an enterprise address, so treat it as spent.
               </li>
             )}
             <li>

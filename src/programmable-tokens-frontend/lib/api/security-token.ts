@@ -123,7 +123,9 @@ export interface SecurityTokenInitRequest {
    *
    *  COMPLIANCE: this asserts on chain that the recipient is a verified allowlist
    *  member with no KYC process behind it, and that assertion is what every later
-   *  transfer proves membership against — not just this first mint. Off by default. */
+   *  transfer proves membership against — not just this first mint. Off by default,
+   *  and ignored by the backend unless `requiresReceiverKyc` is on AND
+   *  `initialMintQuantity` is above zero. */
   seedRecipientInAllowlistAtGenesis?: boolean;
   // Fields below are required by the discriminated request shape on the backend
   // but carry no meaning here:
