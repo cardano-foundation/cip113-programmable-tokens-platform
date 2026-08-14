@@ -51,12 +51,15 @@ function SecurityTokenSuccessStep(props: StepComponentProps) {
 
 const securityTokenFlow: RegistrationFlow = {
   id: 'security-token',
-  name: 'Security Token (BaFin)',
+  name: 'RWA Token (German & Swiss profiles)',
   description:
-    'Regulated-securities substandard with role-gated power users (Admin / Minter / Burner / ' +
-    'Pauser / Blacklister / Verifier), an on-chain denylist, and a togglable receiver-KYC ' +
-    'requirement. Choose this for tokenised assets that need to meet jurisdictional rules ' +
-    '(e.g. BaFin under German eWpG, Swiss CO Art. 973e). Ported from easy1staking-com/fn-bafin-cardano-sc.',
+    'Programmable real-world-asset tokens designed as reference profiles supporting the ' +
+    'implementation of German (eWpG) and Swiss (OR, ledger-based securities) requirements. ' +
+    'Provides KYC-gated transfers, denylisting, global pause, forced transfers and seizures, ' +
+    'supply caps, role-based permissions and an irreversible decommission mechanism, plus a ' +
+    'metadata schema covering ISIN, terms of issue, issuer details, nominal amount and ' +
+    'register/custodian references. Technical functionality only \u2014 it does not imply or ' +
+    'ensure legal or regulatory compliance in any jurisdiction.',
   enabled: isFlowEnabled('security-token', true),
   steps: [
     {

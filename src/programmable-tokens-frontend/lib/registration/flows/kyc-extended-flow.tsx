@@ -55,7 +55,8 @@ const kycExtendedFlow: RegistrationFlow = {
     'published on-chain on a regular cycle. Transfers are rejected if the recipient ' +
     'hasn\'t gone through KYC yet. Choose this when you need both sides verified — ' +
     'cost: receivers must onboard before they can receive.',
-  enabled: isFlowEnabled('kyc-extended', true),
+  // Disabled by default; NEXT_PUBLIC_FLOW_KYC_EXTENDED_ENABLED=true re-enables it.
+  enabled: isFlowEnabled('kyc-extended', false),
   steps: [
     {
       id: 'cip170-auth-begin',
