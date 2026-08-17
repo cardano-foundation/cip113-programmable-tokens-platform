@@ -134,20 +134,61 @@ export function labelAssetNameHex(label: 100 | 222 | 333, assetNameHex: string):
 }
 
 /**
- * The user-token label implied by a requested supply: exactly one is an NFT (222), anything
- * else is fungible (333).
+ * The user-token label for a substandard, given a requested supply.
  *
  * MUST match `Cip68.userTokenLabel` in the Java backend — the backend picks the label that
  * actually goes on chain, and the frontend only re-derives it to record the right asset name
  * locally. If the two ever disagree the recorded name stops resolving.
+ *
+ * The rule is NOT "one unit means 222". `(222)` asserts non-fungibility — one unit, forever —
+ * and only `security-token` can keep that promise, because its GlobalState `mintable_amount` is
+ * an on-chain ceiling that only ever decreases. `dummy` and `freeze-and-seize` cap nothing and
+ * expose an unconstrained later mint under the same policy and name, so a one-unit registration
+ * there can become a two-unit supply tomorrow; they are always `(333)`.
+ *
+ * @param quantity the supply — a lifetime ceiling only when `lifetimeSupplyCapped`
+ * @param lifetimeSupplyCapped whether a validator bounds total supply at `quantity`
  */
-export function userTokenLabelFor(quantity: string | number | bigint): 222 | 333 {
+export function userTokenLabelFor(
+  quantity: string | number | bigint,
+  lifetimeSupplyCapped = false
+): 222 | 333 {
+  if (!lifetimeSupplyCapped) return 333;
   // Compared as a normalised decimal string rather than via BigInt: supplies can exceed
   // Number.MAX_SAFE_INTEGER, and this module is compiled below the ES2020 target that BigInt
   // needs. Only "is it exactly one" matters, so digits alone answer it.
   const digits = String(quantity).trim().replace(/^\+/, "").replace(/^0+(?=\d)/, "");
   return digits === "1" ? 222 : 333;
 }
+
+/**
+ * The label a given substandard will apply. Keeps the capped/uncapped decision in one place
+ * rather than at each call site.
+ */
+export function userTokenLabelForSubstandard(
+  substandardId: string | null | undefined,
+  quantity: string | number | bigint
+): 222 | 333 {
+  return userTokenLabelFor(quantity, substandardId === "security-token");
+}
+
+/**
+ * Field ceilings for the CIP-68 metadata form, mirroring `Cip68`'s per-field limits in the Java
+ * backend. The datum rides inside a transaction bounded at 16384 bytes, and the tightest measured
+ * path (the security-token mint) leaves only ~1.4 KB of headroom — so these are enforced on the
+ * server regardless. They exist here to stop the user typing 2 KB of description and only finding
+ * out after they have paid for a blacklist init or a genesis.
+ *
+ * Nothing is ever truncated, on either side: the datum is the token's permanent on-chain
+ * description, and silently shipping half a sentence would be worse than an error.
+ */
+export const CIP68_FIELD_MAX_LENGTHS = {
+  name: 64,
+  description: 256,
+  ticker: 16,
+  url: 128,
+  logo: 128,
+} as const;
 
 /** Check if asset name hex has CIP-67 label 333 (FT user token). */
 export function isCIP68FT(assetNameHex: string): boolean {

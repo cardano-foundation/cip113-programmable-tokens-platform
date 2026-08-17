@@ -13,7 +13,7 @@ import { initBlacklist } from '@/lib/api/compliance';
 import { registerToken, stringToHex } from '@/lib/api';
 import { getPaymentKeyHash } from '@/lib/utils/address';
 import { toCip68Wire } from '@/lib/utils/cip68-wire';
-import { labelAssetNameHex, userTokenLabelFor } from '@/lib/utils/cip68';
+import { labelAssetNameHex, userTokenLabelForSubstandard } from '@/lib/utils/cip68';
 import { getExplorerTxUrl } from '@/lib/utils/format';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import type { FreezeAndSeizeRegisterRequest } from '@/types/api';
@@ -106,13 +106,13 @@ export function CombinedBuildSignSubmitStep({
 
   // CIP-68 forces the backend builder.
   //
-  // The two builders disagree on the CIP-67 label for a supply of exactly 1: the backend follows
-  // the platform rule (1 => (222) NFT, otherwise (333) FT), while cip113-sdk-ts@0.3.1 hardcodes
-  // (333) unconditionally. The labelled name is a script parameter of `issuer_admin`, and
-  // `issuance_mint` is parameterized by that script, so the same wizard input would produce two
-  // DIFFERENT token policy ids depending on this toggle. The SDK is a pinned dependency and
-  // cannot be taught the rule from here, so the toggle is disabled while CIP-68 is on rather
-  // than left as a trap.
+  // The LABEL itself no longer diverges: freeze-and-seize caps no lifetime supply, so the backend
+  // now applies (333) unconditionally — exactly what cip113-sdk-ts@0.3.1 hardcodes. What is still
+  // unverified is whether the two produce byte-identical reference-token datums, min-UTxO sizing
+  // and output ordering. The labelled name is a script parameter of `issuer_admin` and
+  // `issuance_mint` is parameterized by that script, so ANY divergence yields two different token
+  // policy ids for one wizard input — a silent, unrecoverable split. Until the two builders are
+  // compared directly, the toggle stays disabled while CIP-68 is on rather than left as a trap.
   const cip68Enabled = !!tokenDetails.cip68Metadata?.enabled;
   const effectiveUseSDK = useSDK && !cip68Enabled;
 
@@ -229,7 +229,11 @@ export function CombinedBuildSignSubmitStep({
         if (cip68Wire) {
           setUserAssetNameHex(
             labelAssetNameHex(
-              userTokenLabelFor(tokenDetails.quantity ?? '0'),
+              // freeze-and-seize caps no lifetime supply — issuer_admin ignores its asset-name
+              // parameter and the mint endpoint stays open — so the label is (333) whatever the
+              // registered quantity is. Passed explicitly rather than left to the default,
+              // because this must not silently drift from Cip68.userTokenLabel on the backend.
+              userTokenLabelForSubstandard('freeze-and-seize', tokenDetails.quantity ?? '0'),
               stringToHex(tokenDetails.assetName)
             )
           );

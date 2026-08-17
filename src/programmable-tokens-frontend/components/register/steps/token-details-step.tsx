@@ -5,7 +5,7 @@ import { useWallet } from '@/hooks/use-wallet';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
-import { supportsCIP68 } from '@/lib/utils/cip68';
+import { supportsCIP68, CIP68_FIELD_MAX_LENGTHS } from '@/lib/utils/cip68';
 
 interface TokenDetailsStepProps extends StepComponentProps<TokenDetailsData, TokenDetailsData> {}
 
@@ -238,8 +238,9 @@ export function TokenDetailsStep({
             }}
             placeholder="e.g., My Token"
             disabled={isProcessing}
+            maxLength={CIP68_FIELD_MAX_LENGTHS.name}
             error={errors.cip68Name}
-            helperText="Token display name stored on-chain (required)"
+            helperText={`Token display name stored on-chain (required, max ${CIP68_FIELD_MAX_LENGTHS.name} chars)`}
           />
 
           <Input
@@ -248,7 +249,8 @@ export function TokenDetailsStep({
             onChange={(e) => setCip68Description(e.target.value)}
             placeholder="A brief description of your token"
             disabled={isProcessing}
-            helperText="Brief description of your token (optional)"
+            maxLength={CIP68_FIELD_MAX_LENGTHS.description}
+            helperText={`Brief description (optional, max ${CIP68_FIELD_MAX_LENGTHS.description} chars)`}
           />
 
           <div className="grid grid-cols-2 gap-4">
@@ -258,7 +260,8 @@ export function TokenDetailsStep({
               onChange={(e) => setCip68Ticker(e.target.value)}
               placeholder="e.g., MYTKN"
               disabled={isProcessing}
-              helperText="Short symbol"
+              maxLength={CIP68_FIELD_MAX_LENGTHS.ticker}
+              helperText={`Short symbol (max ${CIP68_FIELD_MAX_LENGTHS.ticker} chars)`}
             />
             <Input
               label="Decimals"
@@ -277,7 +280,8 @@ export function TokenDetailsStep({
             onChange={(e) => setCip68Url(e.target.value)}
             placeholder="https://..."
             disabled={isProcessing}
-            helperText="Project website (optional)"
+            maxLength={CIP68_FIELD_MAX_LENGTHS.url}
+            helperText={`Project website (optional, max ${CIP68_FIELD_MAX_LENGTHS.url} chars)`}
           />
 
           <Input
@@ -286,7 +290,8 @@ export function TokenDetailsStep({
             onChange={(e) => setCip68Logo(e.target.value)}
             placeholder="https://..."
             disabled={isProcessing}
-            helperText="Token logo image URL (optional)"
+            maxLength={CIP68_FIELD_MAX_LENGTHS.logo}
+            helperText={`Token logo image URL (optional, max ${CIP68_FIELD_MAX_LENGTHS.logo} chars)`}
           />
         </div>
       )}
