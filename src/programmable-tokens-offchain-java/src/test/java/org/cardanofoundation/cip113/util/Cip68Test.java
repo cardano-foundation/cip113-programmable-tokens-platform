@@ -97,6 +97,11 @@ class Cip68Test {
         assertEquals(bogus, Cip68.stripLabel(bogus));
     }
 
+    /**
+     * The rule, in isolation. NOTE that no substandard on this platform passes {@code true} —
+     * see {@link #noSubstandardClaimsALifetimeCap}. This pins the decision function so that a
+     * future substandard which genuinely bounds lifetime issuance gets the right answer.
+     */
     @Test
     void userTokenLabelIsNftOnlyForACappedSupplyOfExactlyOne() {
         // Capped: `quantity` is a ceiling a validator enforces, so 1 really is non-fungible.
@@ -121,6 +126,49 @@ class Cip68Test {
         assertEquals(Cip68.LABEL_FT, Cip68.uncappedUserTokenLabel());
         assertThrows(IllegalArgumentException.class,
                 () -> Cip68.userTokenLabel(BigInteger.valueOf(-1), false));
+    }
+
+    /**
+     * H4: the {@code (222)} branch is unreachable from any shipped call site.
+     *
+     * <p>{@code security-token} used to reach it at a cap of 1, on the reasoning that GlobalState's
+     * {@code mintable_amount} only ever decreases. It does not — {@code global_state.ak:229-245}
+     * computes {@code remaining = mintable_amount - minted_amount} with a signed
+     * {@code minted_amount}, so a burn restores the allowance and {@code mint 1 → burn 1 → mint 1}
+     * is accepted. A cap bounds the amount OUTSTANDING, which is not what {@code (222)} claims.
+     *
+     * <p>This asserts on the source rather than on behaviour deliberately: the label is baked into
+     * a script parameter and therefore into the policy id, so a regression here is not a cosmetic
+     * relabel — it silently produces a different token. The end-to-end counterpart is
+     * {@code OfflineCip68EvalTest#securityTokenAtACapOfOneIsStillFungible}.
+     */
+    @Test
+    void noSubstandardClaimsALifetimeCap() throws Exception {
+        // Gradle runs the test JVM with the project directory as its working directory.
+        var handlers = java.nio.file.Path.of(
+                "src/main/java/org/cardanofoundation/cip113/service/substandard");
+        assertTrue(java.nio.file.Files.isDirectory(handlers),
+                "expected the substandard handlers at " + handlers.toAbsolutePath()
+                + " — this test reads source, so it fails loudly rather than silently passing "
+                + "if the layout moves");
+        try (var paths = java.nio.file.Files.list(handlers)) {
+            for (var file : paths.filter(p -> p.toString().endsWith(".java")).toList()) {
+                String source = java.nio.file.Files.readString(file);
+                // Strip block and line comments, so the explanatory prose about WHY (222) is
+                // wrong does not read as a call site.
+                String code = source
+                        .replaceAll("(?s)/\\*.*?\\*/", "")
+                        .replaceAll("(?m)//.*$", "");
+                assertFalse(code.contains("userTokenLabel("),
+                        file.getFileName() + " calls the capped/uncapped decision function "
+                        + "directly. Every substandard must use Cip68.uncappedUserTokenLabel(): "
+                        + "no pinned contract caps LIFETIME supply, so none may claim (222).");
+                assertFalse(code.contains("LABEL_NFT"),
+                        file.getFileName() + " references LABEL_NFT. A (222) label asserts one "
+                        + "unit forever, and a mintable_amount a burn can refill does not "
+                        + "establish that.");
+            }
+        }
     }
 
     @Test
@@ -245,10 +293,55 @@ class Cip68Test {
         assertTrue(thrown.getMessage().contains("16385"), thrown.getMessage());
         assertTrue(thrown.getMessage().contains("maxTxSize"), thrown.getMessage());
 
-        // No live parameter: say nothing rather than invent a ceiling. Fabricating a limit is the
-        // same class of mistake as ceilingCostFallback fabricating ex-units.
-        Cip68.preflightTxSize("test", new byte[99999], new com.bloxbean.cardano.client.api.model.ProtocolParams());
+        // Nothing to measure is not a size violation.
         Cip68.preflightTxSize("test", null, params);
+    }
+
+    /**
+     * M9: a missing or nonsensical {@code maxTxSize} must FAIL CLOSED.
+     *
+     * <p>This used to return silently, on the reasoning that inventing a ceiling would be the same
+     * class of mistake as {@code ceilingCostFallback} inventing ex-units. That reasoning is
+     * backwards for a guard: "the parameter could not be read" then produced the same outcome as
+     * "the transaction fits", so the one configuration where the check mattered most — an
+     * unreachable or misconfigured parameter source — was the one where it did nothing at all.
+     *
+     * <p>Refusing is not inventing a limit. It reports that no limit could be established and
+     * declines to release a transaction on that basis, which is a different statement.
+     */
+    @Test
+    void txSizePreflightFailsClosedWithoutALiveMaxTxSize() {
+        var bytes = new byte[99999];
+
+        // Absent parameter object entirely.
+        var noParams = assertThrows(IllegalArgumentException.class,
+                () -> Cip68.preflightTxSize("no-params", bytes, null));
+        assertTrue(noParams.getMessage().contains("cannot verify the transaction size"),
+                noParams.getMessage());
+
+        // Present, but carrying no maxTxSize — the shape a partially-populated or failed
+        // protocol-parameter fetch actually produces.
+        var empty = new com.bloxbean.cardano.client.api.model.ProtocolParams();
+        var noMaxTxSize = assertThrows(IllegalArgumentException.class,
+                () -> Cip68.preflightTxSize("no-maxTxSize", bytes, empty));
+        assertTrue(noMaxTxSize.getMessage().contains("maxTxSize"), noMaxTxSize.getMessage());
+
+        // Zero and negative are not usable ceilings either.
+        var zero = new com.bloxbean.cardano.client.api.model.ProtocolParams();
+        zero.setMaxTxSize(0);
+        assertThrows(IllegalArgumentException.class,
+                () -> Cip68.preflightTxSize("zero", bytes, zero));
+
+        var negative = new com.bloxbean.cardano.client.api.model.ProtocolParams();
+        negative.setMaxTxSize(-1);
+        assertThrows(IllegalArgumentException.class,
+                () -> Cip68.preflightTxSize("negative", bytes, negative));
+
+        // The control: a live parameter that genuinely clears the transaction still passes, so the
+        // test above is measuring "no evidence", not "always throws".
+        var live = new com.bloxbean.cardano.client.api.model.ProtocolParams();
+        live.setMaxTxSize(100000);
+        Cip68.preflightTxSize("live", bytes, live);
     }
 
     private static String textAt(MapPlutusData map, String key) {

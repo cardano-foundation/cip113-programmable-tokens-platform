@@ -451,118 +451,13 @@ public class OfflineCip68EvalTest {
      */
     @Test
     public void securityTokenChainAndCip68Mint() throws Exception {
-        var chain = new OfflineChain();
-        var boot = BootstrapFixture.bootstrap(chain);
+        var st = securityTokenChain(METADATA, 1_000_000L);
+        var chain = st.chain();
+        var boot = st.boot();
+        var handler = st.handler();
+        var registrations = st.registrations();
+        var built = st.built();
         var label = "security-token";
-
-        var registrations = new java.util.HashMap<String,
-                org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity>();
-
-        var utxoProvider = Mockito.mock(org.cardanofoundation.cip113.service.UtxoProvider.class);
-        Mockito.when(utxoProvider.findUtxo(Mockito.anyString(), Mockito.anyInt()))
-                .thenAnswer(inv -> chain.utxoSupplier().getTxOutput(inv.getArgument(0), inv.getArgument(1)));
-        Mockito.when(utxoProvider.findUtxos(Mockito.anyString()))
-                .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
-        Mockito.when(utxoProvider.findUtxoByAsset(Mockito.anyString(), Mockito.anyString()))
-                .thenAnswer(inv -> {
-                    String unit = inv.getArgument(0) + (String) inv.getArgument(1);
-                    return chain.findUtxoByUnit(unit);
-                });
-
-        var registrationRepository =
-                Mockito.mock(org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository.class);
-        Mockito.when(registrationRepository.save(Mockito.any())).thenAnswer(inv -> {
-            var entity = (org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity) inv.getArgument(0);
-            registrations.put(entity.getProgrammableTokenPolicyId(), entity);
-            return entity;
-        });
-        Mockito.when(registrationRepository.findByProgrammableTokenPolicyId(Mockito.anyString()))
-                .thenAnswer(inv -> java.util.Optional.ofNullable(registrations.get((String) inv.getArgument(0))));
-
-        var substandardService = HandlerFixtures.substandardService();
-
-        // The chain orchestrator builds genesis → AddPowerUser → registration back-to-back with
-        // nothing submitted in between, handing each transaction's outputs to this supplier so
-        // the next one can spend them. Production wires the QuickTxBuilder over the very same
-        // object, so the test must too.
-        var hybridUtxoSupplier =
-                new org.cardanofoundation.cip113.service.HybridUtxoSupplier(chain.utxoService());
-
-        var handler = new org.cardanofoundation.cip113.service.substandard.SecurityTokenSubstandardHandler(
-                new org.cardanofoundation.cip113.service.SecurityTokenScriptBuilderService(substandardService),
-                HandlerFixtures.protocolScriptBuilderService(),
-                Mockito.mock(org.cardanofoundation.cip113.service.SecurityTokenAllowlistService.class),
-                registrationRepository,
-                Mockito.mock(org.cardanofoundation.cip113.repository.SecurityTokenDenylistEntryRepository.class),
-                Mockito.mock(org.cardanofoundation.cip113.repository.SecurityTokenPowerUserRepository.class),
-                Mockito.mock(ProgrammableTokenRegistryRepository.class),
-                utxoProvider,
-                new AccountService(utxoProvider),
-                chain.quickTxBuilderOver(hybridUtxoSupplier),
-                chain.protocolParamsSupplier(),
-                HandlerFixtures.OBJECT_MAPPER,
-                HandlerFixtures.NETWORK,
-                new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
-                new org.cardanofoundation.cip113.service.LinkedListService(utxoProvider),
-                hybridUtxoSupplier,
-                Mockito.mock(CustomStakeRegistrationRepository.class),
-                Mockito.mock(org.cardanofoundation.conversions.CardanoConverters.class));
-
-        var adminPkh = new Address(BootstrapFixture.ADMIN.baseAddress())
-                .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
-
-        var registerRequest = org.cardanofoundation.cip113.model.SecurityTokenRegisterRequest.builder()
-                .substandardId("security-token")
-                .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
-                .recipientAddress(BootstrapFixture.ALICE.baseAddress())
-                .assetName(BASE_ASSET_NAME_HEX)
-                .quantity("0")                     // registration is structurally mint-free
-                .cip68Metadata(METADATA)
-                .adminPubKeyHash(adminPkh)
-                .initialMintableAmount(1_000_000L) // the cap the (333)/(222) label is chosen from
-                .bootstrapPowerUserPkh(adminPkh)
-                .bootstrapPowerUserCapabilities(255)
-                .bootstrapPowerUserLabel("admin")
-                .requiresReceiverKyc(false)
-                .requiresSenderKyc(false)
-                .build();
-
-        var chainResult = handler.buildFullRegistrationChain(registerRequest, boot.params());
-        Assertions.assertTrue(chainResult.isSuccessful(),
-                "security-token registration chain build failed: " + chainResult.error());
-
-        var built = chainResult.metadata();
-        log.info("[{}] chain built: globalStatePolicy={} progTokenPolicy={} denylistPolicy={}",
-                label, built.globalStatePolicyId(), built.programmableTokenPolicyId(),
-                built.denylistPolicyId());
-
-        // Virtually submit the chain in order, so each tx sees the previous one's outputs.
-        var stages = new java.util.LinkedHashMap<String, String>();
-        stages.put("genesis", built.genesisCborHex());
-        stages.put("addPowerUser", built.addPowerUserCborHex());
-        stages.put("registration", built.registrationCborHex());
-        if (built.registerTransferLogicCborHex() != null) {
-            stages.put("registerTransferLogic", built.registerTransferLogicCborHex());
-        }
-
-        for (var stage : stages.entrySet()) {
-            Assertions.assertNotNull(stage.getValue(), stage.getKey() + " cbor missing from chain result");
-            var stageTx = Transaction.deserialize(HexUtil.decodeHexString(stage.getValue()));
-            int evaluated = chain.reportAndCheckRedeemers(label + "/" + stage.getKey(), stageTx);
-            log.info("[{}/{}] {} redeemer(s) genuinely evaluated, size={} bytes",
-                    label, stage.getKey(), evaluated, stageTx.serialize().length);
-
-            // registerTransferLogic's ONLY redeemer is the Cert one injected in postBalanceTx
-            // with hand-picked ex-units, so it legitimately has nothing the evaluator could
-            // measure. Every other stage must have really run its scripts.
-            if (!"registerTransferLogic".equals(stage.getKey())) {
-                Assertions.assertTrue(evaluated > 0,
-                        stage.getKey() + " produced no genuinely evaluated redeemer");
-            }
-            Assertions.assertTrue(stageTx.serialize().length < 16384,
-                    stage.getKey() + " exceeds 16384 bytes");
-            chain.submit(stageTx);
-        }
 
         // ── the mint: this is where security-token's CIP-68 pair is completed ──
         var mintRequest = new org.cardanofoundation.cip113.model.MintTokenRequest(
@@ -690,8 +585,10 @@ public class OfflineCip68EvalTest {
         Assertions.assertNull(updateResult.unsignedCborTx(), "a refusal must not return a transaction");
         String updateError = String.valueOf(updateResult.error());
         log.info("[{}/mint-update] refused with: {}", label, updateError);
-        Assertions.assertTrue(updateError.contains("already exists"),
-                "the error must say the reference token already exists, got: " + updateError);
+        // H3 reworded this: the persisted cip68ReferenceMinted flag is now authoritative, so the
+        // refusal says "has already been issued" rather than asserting a live UTxO was observed.
+        Assertions.assertTrue(updateError.contains("has already been issued"),
+                "the error must say the reference token was already issued, got: " + updateError);
         // The advice must be possible to follow — the caller supplied the field, so "drop" is real.
         Assertions.assertTrue(updateError.contains("Drop cip68Metadata"),
                 "the error must give actionable advice, got: " + updateError);
@@ -700,6 +597,196 @@ public class OfflineCip68EvalTest {
         //     nothing clears it automatically.
         Assertions.assertTrue(registrations.get(built.programmableTokenPolicyId()).isCip68ReferenceMinted(),
                 "observing the reference token on chain must mark cip68ReferenceMinted permanently");
+    }
+
+    /**
+     * H3: a lookup that cannot be completed is not an absence, and the persisted flag is
+     * authoritative once set.
+     *
+     * <p>The previous round replaced a single-address scan with a chain-wide one, which fixed the
+     * misses — but {@code findUtxoByAsset} still collapsed every failure into
+     * {@link java.util.Optional#empty()}, so a throttled or unreachable Blockfrost read as "the
+     * reference token does not exist yet". Combined with the escape hatch that let an explicit
+     * {@code cip68Metadata} override a locally-set flag, a stale index plus a resend minted a
+     * second {@code (100)}.
+     *
+     * <p>The existing test above cannot see any of this: its lookup is an in-memory map over a
+     * chain that is immediately consistent, so it never returns anything but a definite yes or a
+     * definite no. This one drives the two states that map could not produce.
+     */
+    @Test
+    public void securityTokenRefusesToGuessWhenTheReferenceLookupFails() throws Exception {
+        var st = securityTokenChain(METADATA, 1_000_000L);
+        var policyId = st.built().programmableTokenPolicyId();
+        var assetName = st.registrations().get(policyId).getSecurityAssetNameHex();
+
+        // ── (1) The lookup FAILS. Nothing is on chain and the flag is clear, so under the old
+        //        "empty means absent" reading this would have happily minted the pair. UNKNOWN is
+        //        not evidence of absence, and a duplicate (100) cannot be undone, so it refuses.
+        Mockito.when(st.utxoProvider().assetPresence(Mockito.anyString(), Mockito.anyString()))
+                .thenReturn(org.cardanofoundation.cip113.service.UtxoProvider.AssetPresence.UNKNOWN);
+
+        var duringOutage = st.handler().buildMintTransaction(
+                mintTokenRequest(policyId, assetName, "1000", METADATA), st.boot().params());
+        Assertions.assertFalse(duringOutage.isSuccessful(),
+                "an unresolvable reference-token lookup must NOT be read as 'not minted yet'");
+        Assertions.assertNull(duringOutage.unsignedCborTx(), "a refusal must not return a transaction");
+        String outageError = String.valueOf(duringOutage.error());
+        log.info("[security-token/stale-lookup] refused with: {}", outageError);
+        Assertions.assertTrue(outageError.contains("cannot determine"),
+                "the error must say the question could not be answered, got: " + outageError);
+        Assertions.assertFalse(st.registrations().get(policyId).isCip68ReferenceMinted(),
+                "a refused build must not claim the reference mint");
+
+        // ── (2) The CONTROL. Same fixture, same request, but the backend now answers ABSENT — a
+        //        positive statement rather than a failure. The pair is minted. Without this, (1)
+        //        would only prove "it refuses", not "it distinguishes".
+        Mockito.when(st.utxoProvider().assetPresence(Mockito.anyString(), Mockito.anyString()))
+                .thenReturn(org.cardanofoundation.cip113.service.UtxoProvider.AssetPresence.ABSENT);
+
+        var confirmedAbsent = st.handler().buildMintTransaction(
+                mintTokenRequest(policyId, assetName, "1000", METADATA), st.boot().params());
+        Assertions.assertTrue(confirmedAbsent.isSuccessful(),
+                "a CONFIRMED absence must still authorise the pair: " + confirmedAbsent.error());
+        var pairTx = Transaction.deserialize(HexUtil.decodeHexString(confirmedAbsent.unsignedCborTx()));
+        Assertions.assertEquals(2, Cip68Evidence.tokensOfPolicy(pairTx, policyId).size(),
+                "the confirmed-absent build must mint the user token AND the (100)");
+        Assertions.assertTrue(st.registrations().get(policyId).isCip68ReferenceMinted(),
+                "handing out a reference-token mint must claim the flag");
+
+        // ── (3) THE FLAG IS AUTHORITATIVE. The transaction from (2) was never submitted, so the
+        //        chain still shows nothing — exactly the stale-index shape. An explicit
+        //        cip68Metadata used to be treated here as "a deliberate retry" and completed the
+        //        pair a second time. It must not: the flag says a signable reference mint is
+        //        already out there, and no repeated API call may override that.
+        Mockito.when(st.utxoProvider().assetPresence(Mockito.anyString(), Mockito.anyString()))
+                .thenReturn(org.cardanofoundation.cip113.service.UtxoProvider.AssetPresence.ABSENT);
+
+        var explicitRetry = st.handler().buildMintTransaction(
+                mintTokenRequest(policyId, assetName, "1000", METADATA), st.boot().params());
+        Assertions.assertFalse(explicitRetry.isSuccessful(),
+                "an explicit metadata resend must NOT re-authorise a second (100) once the flag is set");
+        Assertions.assertNull(explicitRetry.unsignedCborTx(), "a refusal must not return a transaction");
+        String retryError = String.valueOf(explicitRetry.error());
+        log.info("[security-token/flag-authoritative] refused with: {}", retryError);
+        Assertions.assertTrue(retryError.contains("already been issued"),
+                "the error must state the reference token is already issued, got: " + retryError);
+        // The way out is an operator clearing the flag, not another request — say so.
+        Assertions.assertTrue(retryError.contains("cip68ReferenceMinted"),
+                "the error must name the flag an operator has to clear, got: " + retryError);
+
+        // ── (4) An ORDINARY mint still works while the flag is set. The pair is someone else's
+        //        problem; minting more of the user token is not blocked by any of the above.
+        var ordinary = st.handler().buildMintTransaction(
+                mintTokenRequest(policyId, assetName, "500", null), st.boot().params());
+        Assertions.assertTrue(ordinary.isSuccessful(),
+                "an ordinary mint must not be blocked by the reference-token flag: " + ordinary.error());
+        var ordinaryTx = Transaction.deserialize(HexUtil.decodeHexString(ordinary.unsignedCborTx()));
+        var ordinaryTokens = Cip68Evidence.tokensOfPolicy(ordinaryTx, policyId);
+        Assertions.assertEquals(1, ordinaryTokens.size(),
+                "an ordinary mint must emit ONLY the user token");
+        Assertions.assertFalse(
+                ordinaryTokens.stream().anyMatch(t -> Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label())),
+                "no second (100) may be minted");
+    }
+
+    /**
+     * H3, the concurrency half: the reference-token claim is a compare-and-set.
+     *
+     * <p>Two builds that both start from a snapshot showing {@code cip68ReferenceMinted == false}
+     * both assemble a transaction minting the {@code (100)}. Only one may be handed back. The
+     * conditional UPDATE is what decides; this drives it directly, because the offline harness is
+     * single-threaded and a genuine race cannot be reproduced here.
+     */
+    @Test
+    public void securityTokenReferenceMintIsClaimedByCompareAndSet() throws Exception {
+        var st = securityTokenChain(METADATA, 1_000_000L);
+        var policyId = st.built().programmableTokenPolicyId();
+        var assetName = st.registrations().get(policyId).getSecurityAssetNameHex();
+
+        Mockito.when(st.utxoProvider().assetPresence(Mockito.anyString(), Mockito.anyString()))
+                .thenReturn(org.cardanofoundation.cip113.service.UtxoProvider.AssetPresence.ABSENT);
+
+        // A competitor claimed the mint while this build was being assembled: the CAS finds the
+        // row already set and updates 0 rows. The registration snapshot this build read still
+        // says false, so nothing earlier in the method can catch it — the CAS is the only guard.
+        Mockito.when(st.registrationRepository().claimCip68ReferenceMint(Mockito.anyString()))
+                .thenReturn(0);
+
+        var loser = st.handler().buildMintTransaction(
+                mintTokenRequest(policyId, assetName, "1000", METADATA), st.boot().params());
+        Assertions.assertFalse(loser.isSuccessful(),
+                "losing the compare-and-set must not yield a signable transaction");
+        Assertions.assertNull(loser.unsignedCborTx(),
+                "the loser must receive NO cbor — it is the only thing stopping a duplicate (100)");
+        String loserError = String.valueOf(loser.error());
+        log.info("[security-token/cas-loser] refused with: {}", loserError);
+        Assertions.assertTrue(loserError.contains("already claimed"),
+                "the error must name the race, got: " + loserError);
+
+        // The control: win the CAS and the same build succeeds. Proves the refusal above is the
+        // claim failing, not the build failing for some unrelated reason.
+        Mockito.when(st.registrationRepository().claimCip68ReferenceMint(Mockito.anyString()))
+                .thenReturn(1);
+        var winner = st.handler().buildMintTransaction(
+                mintTokenRequest(policyId, assetName, "1000", METADATA), st.boot().params());
+        Assertions.assertTrue(winner.isSuccessful(),
+                "winning the compare-and-set must return the transaction: " + winner.error());
+        Assertions.assertEquals(2,
+                Cip68Evidence.tokensOfPolicy(
+                        Transaction.deserialize(HexUtil.decodeHexString(winner.unsignedCborTx())),
+                        policyId).size(),
+                "the winner mints the pair");
+    }
+
+    /**
+     * H4: a security-token registered with a cap of ONE still takes the {@code (333)} label.
+     *
+     * <p>The cap was read as a lifetime bound, which made {@code (222)} look honest. It is not.
+     * {@code global_state.ak:229-245} computes {@code remaining = mintable_amount - minted_amount}
+     * with a <em>signed</em> {@code minted_amount}, so a burn passes a negative and restores the
+     * allowance — this handler mirrors exactly that arithmetic in {@code buildBurnTransaction}.
+     * {@code mint 1 → burn 1 → mint 1} is therefore accepted and lifetime issuance under a (222)
+     * label exceeds one, which is the one thing (222) promises cannot happen.
+     *
+     * <p>This is not a cosmetic relabel: the security asset name is a parameter of
+     * {@code minting_logic_script} and {@code transfer_logic_script}, and {@code issuance_mint} is
+     * parameterised by the former — so the label participates in the token policy id. The
+     * transaction is evaluated, not merely built, so the assertion covers the whole derivation.
+     */
+    @Test
+    public void securityTokenAtACapOfOneIsStillFungible() throws Exception {
+        var st = securityTokenChain(METADATA, 1L);
+        var policyId = st.built().programmableTokenPolicyId();
+        var registeredName = st.registrations().get(policyId).getSecurityAssetNameHex();
+
+        log.info("[security-token/cap-1] registered asset name = {} (label {})",
+                registeredName, Cip68.readLabel(registeredName));
+
+        Assertions.assertEquals(Integer.valueOf(Cip68.LABEL_FT), Cip68.readLabel(registeredName),
+                "a cap of 1 bounds the amount OUTSTANDING, not lifetime issuance — a burn restores "
+                + "the allowance, so the token is fungible and must carry (333)");
+        Assertions.assertEquals(Cip68.labeledAssetName(Cip68.LABEL_FT, BASE_ASSET_NAME_HEX),
+                registeredName,
+                "the on-chain name must be exactly the (333)-labelled base name");
+
+        // And the label really did reach the chain, not just the database row: mint one unit and
+        // read the asset name back off the evaluated transaction.
+        var mint = st.handler().buildMintTransaction(
+                mintTokenRequest(policyId, registeredName, "1", METADATA), st.boot().params());
+        Assertions.assertTrue(mint.isSuccessful(), "cap-1 mint failed: " + mint.error());
+
+        var mintTx = Transaction.deserialize(HexUtil.decodeHexString(mint.unsignedCborTx()));
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("security-token/cap-1", mintTx) > 0,
+                "no redeemer was evaluated on the cap-1 mint");
+
+        var userToken = Cip68Evidence.tokensOfPolicy(mintTx, policyId).stream()
+                .filter(t -> !Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label()))
+                .findFirst().orElseThrow(() -> new AssertionError("no user token minted"));
+        Assertions.assertEquals(Cip68.LABEL_FT, userToken.label().intValue(),
+                "the minted user token must carry (333) even though exactly one unit was minted "
+                + "against a cap of one");
+        Assertions.assertEquals(BigInteger.ONE, userToken.quantity());
     }
 
     // ------------------------------------------------------ freeze-and-seize regressions
@@ -1000,6 +1087,211 @@ public class OfflineCip68EvalTest {
         return repo;
     }
 
+    // ------------------------------------------------------------ security-token fixtures
+
+    /**
+     * A security-token protocol whose genesis → AddPowerUser → registration chain has been built,
+     * evaluated and virtually submitted, ready for a mint.
+     *
+     * <p>{@code utxoProvider} and {@code registrationRepository} are exposed because the H3 cases
+     * re-stub them mid-test: the whole finding is about what happens when the chain lookup gives a
+     * different answer from the one an immediately-consistent in-memory chain can produce.
+     */
+    private record SecurityTokenChain(
+            OfflineChain chain,
+            BootstrapFixture.Bootstrapped boot,
+            org.cardanofoundation.cip113.service.substandard.SecurityTokenSubstandardHandler handler,
+            java.util.Map<String, org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity>
+                    registrations,
+            org.cardanofoundation.cip113.service.substandard.SecurityTokenSubstandardHandler.ChainBuildResult
+                    built,
+            org.cardanofoundation.cip113.service.UtxoProvider utxoProvider,
+            org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository
+                    registrationRepository) {
+    }
+
+    /**
+     * A {@link org.cardanofoundation.cip113.service.UtxoProvider} backed by the offline chain.
+     *
+     * <p>{@code assetPresence} is answered from the same chain as {@code findUtxoByAsset}, so the
+     * default behaviour matches production on a healthy backend: a hit is {@code PRESENT}, a miss
+     * is {@code ABSENT}. It never returns {@code UNKNOWN} on its own — an in-memory chain has no
+     * failure mode — which is precisely why the H3 test re-stubs it.
+     */
+    private static org.cardanofoundation.cip113.service.UtxoProvider securityTokenUtxoProvider(
+            OfflineChain chain) {
+        var utxoProvider = Mockito.mock(org.cardanofoundation.cip113.service.UtxoProvider.class);
+        Mockito.when(utxoProvider.findUtxo(Mockito.anyString(), Mockito.anyInt()))
+                .thenAnswer(inv -> chain.utxoSupplier().getTxOutput(inv.getArgument(0), inv.getArgument(1)));
+        Mockito.when(utxoProvider.findUtxos(Mockito.anyString()))
+                .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
+        Mockito.when(utxoProvider.findUtxoByAsset(Mockito.anyString(), Mockito.anyString()))
+                .thenAnswer(inv -> {
+                    String unit = inv.getArgument(0) + (String) inv.getArgument(1);
+                    return chain.findUtxoByUnit(unit);
+                });
+        Mockito.when(utxoProvider.assetPresence(Mockito.anyString(), Mockito.anyString()))
+                .thenAnswer(inv -> {
+                    String unit = inv.getArgument(0) + (String) inv.getArgument(1);
+                    return chain.findUtxoByUnit(unit).isPresent()
+                            ? org.cardanofoundation.cip113.service.UtxoProvider.AssetPresence.PRESENT
+                            : org.cardanofoundation.cip113.service.UtxoProvider.AssetPresence.ABSENT;
+                });
+        return utxoProvider;
+    }
+
+    /**
+     * An in-memory {@code SecurityTokenRegistrationRepository}.
+     *
+     * <p>{@code claimCip68ReferenceMint} implements the real compare-and-set semantics against the
+     * map — set the flag and return 1 only if it was clear, otherwise return 0 and change nothing.
+     * A mock that returned Mockito's default {@code 0} would make every reference mint look like a
+     * lost race; one that always returned 1 would never exercise the guard.
+     */
+    private static org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository
+            securityTokenRegistrationRepository(
+                    java.util.Map<String,
+                            org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity> registrations) {
+        var repo = Mockito.mock(
+                org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository.class);
+        Mockito.when(repo.save(Mockito.any())).thenAnswer(inv -> {
+            var entity = (org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity)
+                    inv.getArgument(0);
+            registrations.put(entity.getProgrammableTokenPolicyId(), entity);
+            return entity;
+        });
+        Mockito.when(repo.findByProgrammableTokenPolicyId(Mockito.anyString()))
+                .thenAnswer(inv -> java.util.Optional.ofNullable(registrations.get((String) inv.getArgument(0))));
+        Mockito.when(repo.claimCip68ReferenceMint(Mockito.anyString())).thenAnswer(inv -> {
+            var row = registrations.get((String) inv.getArgument(0));
+            if (row == null || row.isCip68ReferenceMinted()) {
+                return 0;
+            }
+            row.setCip68ReferenceMinted(true);
+            return 1;
+        });
+        return repo;
+    }
+
+    /**
+     * Build, evaluate and virtually submit the whole security-token registration chain.
+     *
+     * @param metadata             CIP-68 metadata, or null for a non-CIP-68 registration
+     * @param initialMintableAmount the GlobalState cap — note this does NOT choose the label
+     */
+    private SecurityTokenChain securityTokenChain(Cip68Metadata metadata, long initialMintableAmount)
+            throws Exception {
+        var chain = new OfflineChain();
+        var boot = BootstrapFixture.bootstrap(chain);
+        var label = "security-token";
+
+        var registrations = new java.util.HashMap<String,
+                org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity>();
+
+        var utxoProvider = securityTokenUtxoProvider(chain);
+        var registrationRepository = securityTokenRegistrationRepository(registrations);
+
+        // The chain orchestrator builds genesis → AddPowerUser → registration back-to-back with
+        // nothing submitted in between, handing each transaction's outputs to this supplier so
+        // the next one can spend them. Production wires the QuickTxBuilder over the very same
+        // object, so the test must too.
+        var hybridUtxoSupplier =
+                new org.cardanofoundation.cip113.service.HybridUtxoSupplier(chain.utxoService());
+
+        var handler = new org.cardanofoundation.cip113.service.substandard.SecurityTokenSubstandardHandler(
+                new org.cardanofoundation.cip113.service.SecurityTokenScriptBuilderService(
+                        HandlerFixtures.substandardService()),
+                HandlerFixtures.protocolScriptBuilderService(),
+                Mockito.mock(org.cardanofoundation.cip113.service.SecurityTokenAllowlistService.class),
+                registrationRepository,
+                Mockito.mock(org.cardanofoundation.cip113.repository.SecurityTokenDenylistEntryRepository.class),
+                Mockito.mock(org.cardanofoundation.cip113.repository.SecurityTokenPowerUserRepository.class),
+                Mockito.mock(ProgrammableTokenRegistryRepository.class),
+                utxoProvider,
+                new AccountService(utxoProvider),
+                chain.quickTxBuilderOver(hybridUtxoSupplier),
+                chain.protocolParamsSupplier(),
+                HandlerFixtures.OBJECT_MAPPER,
+                HandlerFixtures.NETWORK,
+                new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
+                new org.cardanofoundation.cip113.service.LinkedListService(utxoProvider),
+                hybridUtxoSupplier,
+                Mockito.mock(CustomStakeRegistrationRepository.class),
+                Mockito.mock(org.cardanofoundation.conversions.CardanoConverters.class));
+
+        var adminPkh = new Address(BootstrapFixture.ADMIN.baseAddress())
+                .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
+
+        var registerRequest = org.cardanofoundation.cip113.model.SecurityTokenRegisterRequest.builder()
+                .substandardId("security-token")
+                .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
+                .recipientAddress(BootstrapFixture.ALICE.baseAddress())
+                .assetName(BASE_ASSET_NAME_HEX)
+                .quantity("0")                     // registration is structurally mint-free
+                .cip68Metadata(metadata)
+                .adminPubKeyHash(adminPkh)
+                .initialMintableAmount(initialMintableAmount)
+                .bootstrapPowerUserPkh(adminPkh)
+                .bootstrapPowerUserCapabilities(255)
+                .bootstrapPowerUserLabel("admin")
+                .requiresReceiverKyc(false)
+                .requiresSenderKyc(false)
+                .build();
+
+        var chainResult = handler.buildFullRegistrationChain(registerRequest, boot.params());
+        Assertions.assertTrue(chainResult.isSuccessful(),
+                "security-token registration chain build failed: " + chainResult.error());
+
+        var built = chainResult.metadata();
+        log.info("[{}] chain built: globalStatePolicy={} progTokenPolicy={} denylistPolicy={}",
+                label, built.globalStatePolicyId(), built.programmableTokenPolicyId(),
+                built.denylistPolicyId());
+
+        // Virtually submit the chain in order, so each tx sees the previous one's outputs.
+        var stages = new java.util.LinkedHashMap<String, String>();
+        stages.put("genesis", built.genesisCborHex());
+        stages.put("addPowerUser", built.addPowerUserCborHex());
+        stages.put("registration", built.registrationCborHex());
+        if (built.registerTransferLogicCborHex() != null) {
+            stages.put("registerTransferLogic", built.registerTransferLogicCborHex());
+        }
+
+        for (var stage : stages.entrySet()) {
+            Assertions.assertNotNull(stage.getValue(), stage.getKey() + " cbor missing from chain result");
+            var stageTx = Transaction.deserialize(HexUtil.decodeHexString(stage.getValue()));
+            int evaluated = chain.reportAndCheckRedeemers(label + "/" + stage.getKey(), stageTx);
+            log.info("[{}/{}] {} redeemer(s) genuinely evaluated, size={} bytes",
+                    label, stage.getKey(), evaluated, stageTx.serialize().length);
+
+            // registerTransferLogic's ONLY redeemer is the Cert one injected in postBalanceTx
+            // with hand-picked ex-units, so it legitimately has nothing the evaluator could
+            // measure. Every other stage must have really run its scripts.
+            if (!"registerTransferLogic".equals(stage.getKey())) {
+                Assertions.assertTrue(evaluated > 0,
+                        stage.getKey() + " produced no genuinely evaluated redeemer");
+            }
+            Assertions.assertTrue(stageTx.serialize().length < 16384,
+                    stage.getKey() + " exceeds 16384 bytes");
+            chain.submit(stageTx);
+        }
+
+        return new SecurityTokenChain(chain, boot, handler, registrations, built,
+                utxoProvider, registrationRepository);
+    }
+
+    /** A security-token mint request against the offline fixture's admin/recipient pair. */
+    private static org.cardanofoundation.cip113.model.MintTokenRequest mintTokenRequest(
+            String policyId, String assetName, String quantity, Cip68Metadata metadata) {
+        return new org.cardanofoundation.cip113.model.MintTokenRequest(
+                BootstrapFixture.ADMIN.baseAddress(),
+                policyId,
+                assetName,
+                quantity,
+                BootstrapFixture.ALICE.baseAddress(),
+                null,
+                metadata);
+    }
+
     private static String stakeCredHex(String baseAddress) {
         return new Address(baseAddress).getDelegationCredentialHash()
                 .map(HexUtil::encodeHexString)
@@ -1047,15 +1339,31 @@ public class OfflineCip68EvalTest {
         private final BootstrapFixture.Bootstrapped boot;
         private final DummySubstandardHandler handler;
         private final String policyId;
+        private final java.util.Map<String, ProgrammableTokenRegistryEntity> rows;
         private String registeredAssetName;
 
         DummyMintFixture(OfflineChain chain, BootstrapFixture.Bootstrapped boot,
-                         DummySubstandardHandler handler, String policyId, String registeredAssetName) {
+                         DummySubstandardHandler handler, String policyId, String registeredAssetName,
+                         java.util.Map<String, ProgrammableTokenRegistryEntity> rows) {
             this.chain = chain;
             this.boot = boot;
             this.handler = handler;
             this.policyId = policyId;
             this.registeredAssetName = registeredAssetName;
+            this.rows = rows;
+        }
+
+        /**
+         * Add a registry row for some OTHER policy id, as a database that has seen more than one
+         * token would have. Used by the H5 case, where the request names one registered policy
+         * while the transaction derives a different one.
+         */
+        void addRegistryRow(String otherPolicyId, String assetName) {
+            rows.put(otherPolicyId, ProgrammableTokenRegistryEntity.builder()
+                    .policyId(otherPolicyId)
+                    .substandardId("dummy")
+                    .assetName(assetName)
+                    .build());
         }
 
         DummySubstandardHandler handler() {
@@ -1120,7 +1428,7 @@ public class OfflineCip68EvalTest {
         Assertions.assertNotNull(row, "registration must have written a registry row");
 
         // The fixture's mutable name is what the guard reads, so a test can rewrite it.
-        var fixture = new DummyMintFixture(chain, boot, handler, policyId, row.getAssetName());
+        var fixture = new DummyMintFixture(chain, boot, handler, policyId, row.getAssetName(), rows);
         Mockito.when(registry.findByPolicyId(Mockito.eq(policyId)))
                 .thenAnswer(inv -> java.util.Optional.of(ProgrammableTokenRegistryEntity.builder()
                         .policyId(policyId)
