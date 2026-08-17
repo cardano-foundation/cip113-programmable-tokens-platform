@@ -5,6 +5,7 @@ import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.transaction.spec.Transaction;
 import com.bloxbean.cardano.client.util.HexUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.entity.ProgrammableTokenRegistryEntity;
 import org.cardanofoundation.cip113.model.Cip68Metadata;
 import org.cardanofoundation.cip113.model.DummyRegisterRequest;
 import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
@@ -152,11 +153,24 @@ public class OfflineCip68EvalTest {
         Assertions.assertTrue(size < 16384, "tx exceeds 16384 bytes: " + size);
     }
 
+    /**
+     * The {@code (222)} decision, pinned where it is actually made.
+     *
+     * <p>Registering exactly one unit under {@code dummy} does <em>not</em> yield a {@code (222)}
+     * token, and that is deliberate. {@code (222)} asserts non-fungibility — one unit, forever —
+     * and nothing in {@code validators/transfer.ak} caps lifetime supply: {@code issue} is
+     * {@code redeemer == 100} and {@code buildMintTransaction} will mint more of the same name
+     * tomorrow. A {@code (222)} here would be a promise the substandard cannot keep, and no
+     * off-chain guard can keep it either, since whoever holds the minting authority can build the
+     * transaction without this backend. So {@code dummy} and {@code freeze-and-seize} are always
+     * {@code (333)}; {@code security-token} is the only one that may claim {@code (222)}, because
+     * its GlobalState {@code mintable_amount} is a real on-chain ceiling.
+     */
     @Test
-    public void dummyRegistrationWithSingleUnitTakesTheNftLabel() throws Exception {
+    public void dummyRegistrationAtQuantityOneIsStillFungibleBecauseSupplyIsUncapped() throws Exception {
         var result = runDummyRegistration(METADATA, "1");
         var tx = result.transaction();
-        var label = "dummy/cip68-nft";
+        var label = "dummy/cip68-qty1";
 
         int evaluated = chainOf(result).reportAndCheckRedeemers(label, tx);
         Assertions.assertTrue(evaluated > 0, "no redeemer was evaluated");
@@ -168,10 +182,142 @@ public class OfflineCip68EvalTest {
         log.info("[{}] user token name={} label={} qty={}",
                 label, userToken.assetNameHex(), userToken.label(), userToken.quantity());
 
-        // This is the 222-vs-333 boundary: quantity exactly 1 is non-fungible.
-        Assertions.assertEquals(Cip68.LABEL_NFT, userToken.label().intValue(),
-                "a supply of exactly 1 is non-fungible and must take the (222) label");
+        Assertions.assertEquals(Cip68.LABEL_FT, userToken.label().intValue(),
+                "dummy cannot cap lifetime supply, so even a one-unit registration must take (333)");
+        Assertions.assertNotEquals(Cip68.LABEL_NFT, userToken.label().intValue(),
+                "a (222) here would be a non-fungibility claim the substandard cannot enforce");
         Assertions.assertEquals(BigInteger.ONE, userToken.quantity());
+    }
+
+    /**
+     * H5: the later mint must be bound to the asset the registry recorded.
+     *
+     * <p>{@code issue} constrains no asset name whatsoever, so without this binding a caller who
+     * registered {@code (333)Foo} could mint bare {@code Foo}, a differently-labelled sibling, or
+     * a {@code (100)Foo} carrying a datum of their choosing — all under the registered policy id,
+     * and all indistinguishable from the real token to any wallet that trusts the policy.
+     */
+    @Test
+    public void dummyMintIsBoundToTheRegisteredAssetName() throws Exception {
+        var fixture = dummyMintFixture(METADATA, "1000000");
+        var registeredName = fixture.registeredAssetName();
+        Assertions.assertTrue(Cip68.hasLabel(registeredName),
+                "precondition: a CIP-68 registration must have recorded a LABELLED name");
+
+        // (a) the bare, unlabelled base name — the wizard's input, and the obvious wrong guess
+        assertMintRefused(fixture, BASE_ASSET_NAME_HEX, "does not match the registered");
+
+        // (b) a different labelled sibling under the same policy
+        assertMintRefused(fixture, Cip68.labeledAssetName(444, BASE_ASSET_NAME_HEX),
+                "does not match the registered");
+
+        // (c) an entirely unrelated name
+        assertMintRefused(fixture, HexUtil.encodeHexString("Impostor".getBytes(StandardCharsets.UTF_8)),
+                "does not match the registered");
+
+        // (d) the (100) reference token itself — the one that breaks the pair irrecoverably
+        assertMintRefused(fixture, Cip68.referenceNameFor(registeredName), "");
+
+        // The control: the registered name is accepted, so the guard is a binding and not a wall.
+        var ok = fixture.handler().buildMintTransaction(
+                mintRequest(fixture.policyId(), registeredName), fixture.bootParams());
+        Assertions.assertTrue(ok.isSuccessful(),
+                "the REGISTERED name must still mint: " + ok.error());
+    }
+
+    /** A (100) name must be refused by the ordinary mint endpoint whatever else is true. */
+    @Test
+    public void dummyMintRefusesTheReferenceTokenName() throws Exception {
+        var fixture = dummyMintFixture(METADATA, "1000000");
+        var referenceName = Cip68.referenceNameFor(fixture.registeredAssetName());
+
+        // Pretend the registry itself named the (100) — i.e. defeat guard (a) entirely — so this
+        // asserts the dedicated (100) guard rather than the name-equality one.
+        fixture.setRegisteredAssetName(referenceName);
+
+        var result = fixture.handler().buildMintTransaction(
+                mintRequest(fixture.policyId(), referenceName), fixture.bootParams());
+        Assertions.assertFalse(result.isSuccessful(),
+                "minting a second (100) must be refused even if the registry names it");
+        Assertions.assertNull(result.unsignedCborTx(), "a refusal must not return a transaction");
+        Assertions.assertTrue(String.valueOf(result.error()).contains("(100)"),
+                "the error must name the reference token, got: " + result.error());
+    }
+
+    /** M6: transferring a (100) would rebuild it with Constr(0) and erase the metadata. */
+    @Test
+    public void dummyTransferRefusesTheReferenceToken() throws Exception {
+        var fixture = dummyMintFixture(METADATA, "1000000");
+        var referenceName = Cip68.referenceNameFor(fixture.registeredAssetName());
+
+        var request = new org.cardanofoundation.cip113.model.TransferTokenRequest(
+                BootstrapFixture.ALICE.baseAddress(),
+                fixture.policyId() + referenceName,
+                "1",
+                BootstrapFixture.ADMIN.baseAddress(),
+                null, null, null, null, null, null, null);
+
+        var result = fixture.handler().buildTransferTransaction(request, fixture.bootParams());
+        Assertions.assertFalse(result.isSuccessful(),
+                "transferring the (100) reference token must be refused");
+        String error = String.valueOf(result.error());
+        Assertions.assertTrue(error.contains("(100)"),
+                "the error must name the reference token, got: " + error);
+        Assertions.assertTrue(error.contains("datum"),
+                "the error must explain that the datum would be erased, got: " + error);
+    }
+
+    /** M9: oversized metadata is refused at the handler, not truncated and not silently shipped. */
+    @Test
+    public void dummyRegistrationRefusesOversizedMetadata() throws Exception {
+        // ~2 KB of description against ~1.4 KB of headroom on the tightest measured path.
+        var huge = new Cip68Metadata("Offline Token", "d".repeat(2048), "OFFTK", 6, null, null);
+        var chain = new OfflineChain();
+        var boot = BootstrapFixture.bootstrap(chain);
+        var handler = dummyHandler(chain, boot, Mockito.mock(ProgrammableTokenRegistryRepository.class));
+
+        var result = handler.buildRegistrationTransaction(
+                DummyRegisterRequest.builder()
+                        .substandardId("dummy")
+                        .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
+                        .recipientAddress(BootstrapFixture.ALICE.baseAddress())
+                        .assetName(BASE_ASSET_NAME_HEX)
+                        .quantity("1000000")
+                        .cip68Metadata(huge)
+                        .build(),
+                boot.params());
+
+        Assertions.assertFalse(result.isSuccessful(), "oversized metadata must be refused");
+        Assertions.assertNull(result.unsignedCborTx(),
+                "a refusal must not hand back a transaction the ledger would reject");
+        String error = String.valueOf(result.error());
+        log.info("[dummy/oversized] refused with: {}", error);
+        Assertions.assertTrue(error.contains("description") || error.contains("too large"),
+                "the error must name the metadata as the cause, got: " + error);
+        // The refusal must NOT be a quiet truncation dressed up as success.
+        Assertions.assertFalse(error.isBlank(), "a refusal must carry an explanation");
+    }
+
+    /** L11: a blank base name yields a label-only asset name that no CIP-68 reader accepts. */
+    @Test
+    public void dummyRegistrationRefusesABlankAssetName() throws Exception {
+        var chain = new OfflineChain();
+        var boot = BootstrapFixture.bootstrap(chain);
+        var handler = dummyHandler(chain, boot, Mockito.mock(ProgrammableTokenRegistryRepository.class));
+
+        var result = handler.buildRegistrationTransaction(
+                DummyRegisterRequest.builder()
+                        .substandardId("dummy")
+                        .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
+                        .recipientAddress(BootstrapFixture.ALICE.baseAddress())
+                        .assetName("")
+                        .quantity("1000000")
+                        .cip68Metadata(METADATA)
+                        .build(),
+                boot.params());
+
+        Assertions.assertFalse(result.isSuccessful(), "a blank base asset name must be refused");
+        Assertions.assertNull(result.unsignedCborTx(), "a refusal must not return a transaction");
     }
 
     @Test
@@ -483,6 +629,234 @@ public class OfflineCip68EvalTest {
         int size = mintTx.serialize().length;
         log.info("[{}/mint] transaction.serialize().length = {} bytes", label, size);
         Assertions.assertTrue(size < 16384, "mint tx exceeds 16384 bytes: " + size);
+
+        // ── H3: the reference-token lifecycle, exercised on the real chain ────────────────
+        //
+        // Submit the mint, so the (100) is genuinely on chain, and then drive the two follow-up
+        // cases that were previously broken. Both are about the SAME distinction: "this token has
+        // metadata stored" is not "this token still needs a reference token minted".
+        chain.submit(mintTx);
+        Assertions.assertTrue(chain.findUtxoByUnit(policyId + refToken.assetNameHex()).isPresent(),
+                "precondition: the (100) must be on chain after submitting the first mint");
+
+        // (1) A SECOND ORDINARY MINT. The caller sends no cip68Metadata — they are just minting
+        //     more of the user token. The handler reloads the metadata from the registration row
+        //     (it is stored forever), sees the (100) already exists, and must now simply mint the
+        //     user token. Previously it rejected, advising the caller to "omit cip68Metadata" —
+        //     a field they had never supplied and could not omit, so the token was unmintable.
+        var secondMint = new org.cardanofoundation.cip113.model.MintTokenRequest(
+                BootstrapFixture.ADMIN.baseAddress(),
+                built.programmableTokenPolicyId(),
+                registrations.get(built.programmableTokenPolicyId()).getSecurityAssetNameHex(),
+                "500",
+                BootstrapFixture.ALICE.baseAddress(),
+                null);
+        var secondResult = handler.buildMintTransaction(secondMint, boot.params());
+        Assertions.assertTrue(secondResult.isSuccessful(),
+                "a second ORDINARY mint on a CIP-68 token must succeed: " + secondResult.error());
+
+        var secondTx = Transaction.deserialize(HexUtil.decodeHexString(secondResult.unsignedCborTx()));
+        int secondEvaluated = chain.reportAndCheckRedeemers(label + "/mint2", secondTx);
+        Assertions.assertTrue(secondEvaluated > 0, "no redeemer was evaluated on the second mint");
+
+        var secondTokens = Cip68Evidence.tokensOfPolicy(secondTx, policyId);
+        for (var t : secondTokens) {
+            log.info("[{}/mint2]   out[{}] name={} label={} qty={}",
+                    label, t.outputIndex(), t.assetNameHex(), t.label(), t.quantity());
+        }
+        Assertions.assertEquals(1, secondTokens.size(),
+                "the second mint must mint ONLY the user token — a second (100) would break the pair");
+        Assertions.assertFalse(
+                secondTokens.stream().anyMatch(t -> Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label())),
+                "duplicate (100) prevention: no reference token may be minted a second time");
+        Assertions.assertEquals(new BigInteger("500"), secondTokens.getFirst().quantity());
+        Assertions.assertTrue(secondTx.serialize().length < 16384,
+                "second mint exceeds 16384 bytes: " + secondTx.serialize().length);
+
+        // (2) AN EXPLICIT cip68Metadata REQUEST once the reference exists. This one IS a metadata
+        //     update, which this endpoint cannot serve, so it must be refused — and the advice to
+        //     drop the field is actionable here, because the caller did supply it.
+        var updateAttempt = new org.cardanofoundation.cip113.model.MintTokenRequest(
+                BootstrapFixture.ADMIN.baseAddress(),
+                built.programmableTokenPolicyId(),
+                registrations.get(built.programmableTokenPolicyId()).getSecurityAssetNameHex(),
+                "500",
+                BootstrapFixture.ALICE.baseAddress(),
+                null,
+                new Cip68Metadata("Renamed", "an attempted metadata rewrite", "NEW", 6, null, null));
+        var updateResult = handler.buildMintTransaction(updateAttempt, boot.params());
+        Assertions.assertFalse(updateResult.isSuccessful(),
+                "minting a SECOND (100) must be refused");
+        Assertions.assertNull(updateResult.unsignedCborTx(), "a refusal must not return a transaction");
+        String updateError = String.valueOf(updateResult.error());
+        log.info("[{}/mint-update] refused with: {}", label, updateError);
+        Assertions.assertTrue(updateError.contains("already exists"),
+                "the error must say the reference token already exists, got: " + updateError);
+        // The advice must be possible to follow — the caller supplied the field, so "drop" is real.
+        Assertions.assertTrue(updateError.contains("Drop cip68Metadata"),
+                "the error must give actionable advice, got: " + updateError);
+
+        // (3) The confirmed-issuance flag is one-time state: seeing it on chain sets it, and
+        //     nothing clears it automatically.
+        Assertions.assertTrue(registrations.get(built.programmableTokenPolicyId()).isCip68ReferenceMinted(),
+                "observing the reference token on chain must mark cip68ReferenceMinted permanently");
+    }
+
+    // ------------------------------------------------------ freeze-and-seize regressions
+
+    /**
+     * M7: the transfer input selector must accept a UTxO holding exactly one unit.
+     *
+     * <p>The selector asked {@code quantity > 1}, which is not the question. The question is
+     * "does this UTxO carry any of the token being moved", and a UTxO holding one unit does. With
+     * {@code > 1} a freshly registered one-unit token — or the last unit of any holding — was
+     * invisible, so the builder collected no inputs and reported {@code "Not enough funds"} for a
+     * balance the wallet could plainly see.
+     *
+     * <p>The assertion is deliberately about <em>which</em> error appears. This offline fixture
+     * has no initialised blacklist, so the transfer cannot complete either way; what changed is
+     * that it now gets <em>past</em> the selector and fails at the blacklist proof instead. That
+     * is a precise discriminator between the two behaviours, and it does not require standing up
+     * a blacklist linked list to observe.
+     */
+    @Test
+    public void freezeAndSeizeTransferSelectsAQuantityOneHolding() throws Exception {
+        var fes = runFreezeAndSeizeRegistration(METADATA, "1");
+        fes.chain().submit(fes.transaction());
+
+        var tokens = Cip68Evidence.tokensOfPolicy(fes.transaction(), fes.issuancePolicyId());
+        var userToken = tokens.stream()
+                .filter(t -> !Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label()))
+                .findFirst().orElseThrow();
+        Assertions.assertEquals(BigInteger.ONE, userToken.quantity(),
+                "precondition: the holding under test must be exactly one unit");
+
+        fes.handler().setContext(
+                org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext.builder()
+                        .blacklistNodePolicyId(BLACKLIST_NODE_POLICY_ID)
+                        .assetName(userToken.assetNameHex())
+                        .build());
+
+        var result = fes.handler().buildTransferTransaction(
+                new org.cardanofoundation.cip113.model.TransferTokenRequest(
+                        BootstrapFixture.ALICE.baseAddress(),
+                        fes.issuancePolicyId() + userToken.assetNameHex(),
+                        "1",
+                        BootstrapFixture.ADMIN.baseAddress(),
+                        null, null, null, null, null, null, null),
+                fes.bootParams());
+
+        String error = String.valueOf(result.error());
+        log.info("[freeze-and-seize/transfer-qty1] successful={} error={}", result.isSuccessful(), error);
+        Assertions.assertFalse(error.contains("Not enough funds"),
+                "a one-unit holding must be visible to the input selector; got: " + error);
+    }
+
+    /** M6: transferring the (100) would rebuild it with Constr(0) and erase the metadata. */
+    @Test
+    public void freezeAndSeizeTransferRefusesTheReferenceToken() throws Exception {
+        var fes = runFreezeAndSeizeRegistration(METADATA, "1000000");
+        var tokens = Cip68Evidence.tokensOfPolicy(fes.transaction(), fes.issuancePolicyId());
+        var refToken = tokens.stream()
+                .filter(t -> Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label()))
+                .findFirst().orElseThrow();
+
+        fes.handler().setContext(
+                org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext.builder()
+                        .blacklistNodePolicyId(BLACKLIST_NODE_POLICY_ID)
+                        .build());
+
+        var result = fes.handler().buildTransferTransaction(
+                new org.cardanofoundation.cip113.model.TransferTokenRequest(
+                        BootstrapFixture.ADMIN.baseAddress(),
+                        fes.issuancePolicyId() + refToken.assetNameHex(),
+                        "1",
+                        BootstrapFixture.ALICE.baseAddress(),
+                        null, null, null, null, null, null, null),
+                fes.bootParams());
+
+        Assertions.assertFalse(result.isSuccessful(), "transferring the (100) must be refused");
+        String error = String.valueOf(result.error());
+        Assertions.assertTrue(error.contains("(100)"),
+                "the error must name the reference token, got: " + error);
+        Assertions.assertTrue(error.contains("metadata"),
+                "the error must explain the metadata would be erased, got: " + error);
+    }
+
+    /**
+     * M8: seizing a (100) can never validate, so it must be refused rather than built.
+     *
+     * <p>{@code issuer_admin} is parameterised by the asset name. Registration parameterised it by
+     * the USER-token name; a seizure keyed on the {@code (100)} name derives a different script, a
+     * different reward credential, and a withdraw-0 from an account that was never registered.
+     */
+    @Test
+    public void freezeAndSeizeSeizureRefusesTheReferenceToken() throws Exception {
+        var fes = runFreezeAndSeizeRegistration(METADATA, "1000000");
+        fes.chain().submit(fes.transaction());
+
+        var tokens = Cip68Evidence.tokensOfPolicy(fes.transaction(), fes.issuancePolicyId());
+        var refToken = tokens.stream()
+                .filter(t -> Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label()))
+                .findFirst().orElseThrow();
+
+        var adminPkh = new Address(BootstrapFixture.ADMIN.baseAddress())
+                .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
+        fes.handler().setContext(
+                org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext.builder()
+                        .blacklistNodePolicyId(BLACKLIST_NODE_POLICY_ID)
+                        .issuerAdminPkh(adminPkh)
+                        .build());
+
+        var result = fes.handler().buildSeizeTransaction(
+                new org.cardanofoundation.cip113.service.substandard.capabilities.Seizeable.SeizeRequest(
+                        BootstrapFixture.ADMIN.baseAddress(),
+                        fes.issuancePolicyId() + refToken.assetNameHex(),
+                        fes.transaction().getBody().getInputs().getFirst().getTransactionId(),
+                        0,
+                        BootstrapFixture.ADMIN.baseAddress()),
+                fes.bootParams());
+
+        Assertions.assertFalse(result.isSuccessful(), "seizing the (100) must be refused");
+        String error = String.valueOf(result.error());
+        Assertions.assertTrue(error.contains("(100)"),
+                "the error must name the reference token, got: " + error);
+        Assertions.assertTrue(error.contains("issuer_admin"),
+                "the error must explain the reward-credential mismatch, got: " + error);
+    }
+
+    /**
+     * M10: the blacklist init and the registration must agree about CIP-68, and disagreeing must
+     * be caught <em>before</em> the transaction is built.
+     *
+     * <p>The init is the only place {@code issuer_admin}'s reward account is registered, and this
+     * registration withdraws-0 from it. {@code issuer_admin} is parameterized by the asset name,
+     * so the labelled and unlabelled forms are different credentials at different reward
+     * addresses. A mismatch is rejected on chain with {@code WithdrawalsNotInRewardsCERTS} —
+     * after the user has signed and paid for the init, whose deposit is then gone.
+     */
+    @Test
+    public void freezeAndSeizeRegistrationRefusesACip68MismatchWithTheBlacklistInit() throws Exception {
+        // Registration WITH CIP-68, init recorded WITHOUT.
+        var a = attemptFreezeAndSeizeRegistration(METADATA, "1000000", Boolean.FALSE);
+        Assertions.assertFalse(a.context().isSuccessful(), "a CIP-68 mismatch must be refused");
+        Assertions.assertNull(a.context().unsignedCborTx(),
+                "the refusal must come BEFORE building — no CBOR may be returned");
+        Assertions.assertTrue(String.valueOf(a.context().error()).contains("CIP-68 mismatch"),
+                "error must name the mismatch, got: " + a.context().error());
+
+        // ...and the reverse: registration WITHOUT, init recorded WITH.
+        var b = attemptFreezeAndSeizeRegistration(null, "1000000", Boolean.TRUE);
+        Assertions.assertFalse(b.context().isSuccessful(), "the reverse mismatch must also be refused");
+        Assertions.assertNull(b.context().unsignedCborTx(), "no CBOR on a refusal");
+        Assertions.assertTrue(String.valueOf(b.context().error()).contains("CIP-68 mismatch"),
+                "error must name the mismatch, got: " + b.context().error());
+
+        // A row predating the column has no evidence either way, so the check must stay SILENT
+        // rather than block a registration that is very likely fine.
+        var legacy = attemptFreezeAndSeizeRegistration(METADATA, "1000000", null);
+        Assertions.assertTrue(legacy.context().isSuccessful(),
+                "a null flag means 'no evidence' and must not block: " + legacy.context().error());
     }
 
     // ------------------------------------------------------------------ plumbing
@@ -505,6 +879,41 @@ public class OfflineCip68EvalTest {
      * yaci-store repository, so that is the seam the offline chain is spliced into.
      */
     private FesResult runFreezeAndSeizeRegistration(Cip68Metadata metadata, String quantity) throws Exception {
+        // The blacklist init that preceded this registration was, by construction, built with the
+        // same CIP-68 setting — that is the only combination that can ever validate on chain.
+        var attempt = attemptFreezeAndSeizeRegistration(metadata, quantity, metadata != null);
+        Assertions.assertTrue(attempt.context().isSuccessful(),
+                "freeze-and-seize registration build failed: " + attempt.context().error());
+        Assertions.assertNotNull(attempt.context().unsignedCborTx(), "no cbor returned");
+
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(attempt.context().unsignedCborTx()));
+        var policyId = attempt.context().metadata().policyId();
+        log.info("freeze-and-seize registration built: policy={} cip68={} quantity={}",
+                policyId, metadata != null, quantity);
+
+        return new FesResult(attempt.chain(), tx, policyId,
+                attempt.boot().params().programmableLogicBaseParams().scriptHash(),
+                attempt.handler(), attempt.boot().params());
+    }
+
+    private record FesAttempt(
+            OfflineChain chain,
+            BootstrapFixture.Bootstrapped boot,
+            org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler handler,
+            org.cardanofoundation.cip113.model.TransactionContext<
+                    org.cardanofoundation.cip113.model.TransactionContext.RegistrationResult> context) {
+    }
+
+    /**
+     * Build one freeze-and-seize registration and hand back the raw result, asserting nothing.
+     *
+     * @param initCip68Enabled what the blacklist-init row records — deliberately separable from
+     *                         {@code metadata}, because the whole point of the cross-check under
+     *                         test is that these two can disagree
+     */
+    private FesAttempt attemptFreezeAndSeizeRegistration(Cip68Metadata metadata,
+                                                         String quantity,
+                                                         Boolean initCip68Enabled) throws Exception {
         var chain = new OfflineChain();
         var boot = BootstrapFixture.bootstrap(chain);
 
@@ -532,7 +941,7 @@ public class OfflineCip68EvalTest {
                 new org.cardanofoundation.cip113.service.HybridUtxoSupplier(
                         Mockito.mock(com.bloxbean.cardano.client.backend.api.UtxoService.class)),
                 Mockito.mock(org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository.class),
-                blacklistInitRepository(),
+                blacklistInitRepository(initCip68Enabled),
                 Mockito.mock(ProgrammableTokenRegistryRepository.class),
                 Mockito.mock(CustomStakeRegistrationRepository.class),
                 utxoProvider,
@@ -552,38 +961,42 @@ public class OfflineCip68EvalTest {
                 .blacklistNodePolicyId(BLACKLIST_NODE_POLICY_ID)
                 .build();
 
-        var context = handler.buildRegistrationTransaction(request, boot.params());
-
-        Assertions.assertTrue(context.isSuccessful(),
-                "freeze-and-seize registration build failed: " + context.error());
-        Assertions.assertNotNull(context.unsignedCborTx(), "no cbor returned");
-
-        var tx = Transaction.deserialize(HexUtil.decodeHexString(context.unsignedCborTx()));
-        var policyId = context.metadata().policyId();
-        log.info("freeze-and-seize registration built: policy={} cip68={} quantity={}",
-                policyId, metadata != null, quantity);
-
-        return new FesResult(chain, tx, policyId,
-                boot.params().programmableLogicBaseParams().scriptHash());
+        return new FesAttempt(chain, boot, handler,
+                handler.buildRegistrationTransaction(request, boot.params()));
     }
 
     private record FesResult(OfflineChain chain,
                              Transaction transaction,
                              String issuancePolicyId,
-                             String plbScriptHash) {
+                             String plbScriptHash,
+                             org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler handler,
+                             org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams bootParams) {
     }
 
     /**
-     * The handler looks the blacklist-init row up AFTER the transaction is fully built and
-     * balanced, and bails out if it is missing — so a present row is required to get the CBOR
-     * back at all, even though nothing in the transaction depends on its contents.
+     * The blacklist-init row the registration reads.
+     *
+     * <p>A <em>real</em> {@link org.cardanofoundation.cip113.entity.BlacklistInitEntity}, not a
+     * mock. That matters: a Mockito mock returns {@code false} — not {@code null} — from a
+     * {@code Boolean} getter, so a mocked row silently claims "this init was built WITHOUT
+     * CIP-68" and would make the cross-check under test fire on every CIP-68 registration. A row
+     * that lies about its own contents is not a useful fixture.
+     *
+     * @param cip68Enabled the recorded flag; {@code null} models a row written before the column
+     *                     existed, where the cross-check must stay silent for want of evidence
      */
-    @SuppressWarnings("unchecked")
-    private static org.cardanofoundation.cip113.repository.BlacklistInitRepository blacklistInitRepository() {
+    private static org.cardanofoundation.cip113.repository.BlacklistInitRepository blacklistInitRepository(
+            Boolean cip68Enabled) {
         var repo = Mockito.mock(org.cardanofoundation.cip113.repository.BlacklistInitRepository.class);
+        var row = org.cardanofoundation.cip113.entity.BlacklistInitEntity.builder()
+                .blacklistNodePolicyId(BLACKLIST_NODE_POLICY_ID)
+                .adminPkh("00".repeat(28))
+                .txHash("00".repeat(32))
+                .outputIndex(0)
+                .cip68Enabled(cip68Enabled)
+                .build();
         Mockito.when(repo.findByBlacklistNodePolicyId(Mockito.anyString()))
-                .thenReturn(java.util.Optional.of(
-                        Mockito.mock(org.cardanofoundation.cip113.entity.BlacklistInitEntity.class)));
+                .thenReturn(java.util.Optional.of(row));
         return repo;
     }
 
@@ -601,14 +1014,14 @@ public class OfflineCip68EvalTest {
      * depend on the asset name, so two registrations on one chain would collide on the handler's
      * "already registered" guard.
      */
-    private DummyResult runDummyRegistration(Cip68Metadata metadata, String quantity) throws Exception {
-        var chain = new OfflineChain();
-        var boot = BootstrapFixture.bootstrap(chain);
-
+    /** The real {@link DummySubstandardHandler}, spliced onto an offline chain. */
+    private static DummySubstandardHandler dummyHandler(OfflineChain chain,
+                                                        BootstrapFixture.Bootstrapped boot,
+                                                        ProgrammableTokenRegistryRepository registry)
+            throws Exception {
         var registrySpendHash = HexUtil.encodeHexString(boot.registrySpend().getScriptHash());
         var registryAddress = boot.registryOriginUtxo().getAddress();
-
-        var handler = new DummySubstandardHandler(
+        return new DummySubstandardHandler(
                 HandlerFixtures.OBJECT_MAPPER,
                 HandlerFixtures.NETWORK,
                 HandlerFixtures.utxoRepository(chain, registryAddress, registrySpendHash),
@@ -618,8 +1031,135 @@ public class OfflineCip68EvalTest {
                 HandlerFixtures.protocolScriptBuilderService(),
                 chain.quickTxBuilder(),
                 chain.protocolParamsSupplier(),
-                Mockito.mock(ProgrammableTokenRegistryRepository.class),
+                registry,
                 Mockito.mock(CustomStakeRegistrationRepository.class));
+    }
+
+    /**
+     * A dummy registration that has been <em>virtually submitted</em>, so the registry node and
+     * the minted tokens are on chain and a follow-up mint can actually be built.
+     *
+     * <p>Backed by a real in-memory registry row rather than a bare mock, because the mint guard
+     * under test reads exactly that row.
+     */
+    private static final class DummyMintFixture {
+        private final OfflineChain chain;
+        private final BootstrapFixture.Bootstrapped boot;
+        private final DummySubstandardHandler handler;
+        private final String policyId;
+        private String registeredAssetName;
+
+        DummyMintFixture(OfflineChain chain, BootstrapFixture.Bootstrapped boot,
+                         DummySubstandardHandler handler, String policyId, String registeredAssetName) {
+            this.chain = chain;
+            this.boot = boot;
+            this.handler = handler;
+            this.policyId = policyId;
+            this.registeredAssetName = registeredAssetName;
+        }
+
+        DummySubstandardHandler handler() {
+            return handler;
+        }
+
+        String policyId() {
+            return policyId;
+        }
+
+        String registeredAssetName() {
+            return registeredAssetName;
+        }
+
+        void setRegisteredAssetName(String name) {
+            this.registeredAssetName = name;
+        }
+
+        org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams bootParams() {
+            return boot.params();
+        }
+
+        OfflineChain chain() {
+            return chain;
+        }
+    }
+
+    private DummyMintFixture dummyMintFixture(Cip68Metadata metadata, String quantity) throws Exception {
+        var chain = new OfflineChain();
+        var boot = BootstrapFixture.bootstrap(chain);
+
+        var rows = new java.util.HashMap<String, ProgrammableTokenRegistryEntity>();
+        var registry = Mockito.mock(ProgrammableTokenRegistryRepository.class);
+        Mockito.when(registry.save(Mockito.any())).thenAnswer(inv -> {
+            var entity = (ProgrammableTokenRegistryEntity) inv.getArgument(0);
+            rows.put(entity.getPolicyId(), entity);
+            return entity;
+        });
+        Mockito.when(registry.findByPolicyId(Mockito.anyString()))
+                .thenAnswer(inv -> java.util.Optional.ofNullable(rows.get((String) inv.getArgument(0))));
+
+        var handler = dummyHandler(chain, boot, registry);
+
+        var context = handler.buildRegistrationTransaction(
+                DummyRegisterRequest.builder()
+                        .substandardId("dummy")
+                        .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
+                        .recipientAddress(BootstrapFixture.ALICE.baseAddress())
+                        .assetName(BASE_ASSET_NAME_HEX)
+                        .quantity(quantity)
+                        .cip68Metadata(metadata)
+                        .build(),
+                boot.params());
+        Assertions.assertTrue(context.isSuccessful(),
+                "fixture registration failed: " + context.error());
+
+        // Virtually submit, so the registry node and the tokens are visible to the mint.
+        chain.submit(Transaction.deserialize(HexUtil.decodeHexString(context.unsignedCborTx())));
+
+        var policyId = context.metadata().policyId();
+        var row = rows.get(policyId);
+        Assertions.assertNotNull(row, "registration must have written a registry row");
+
+        // The fixture's mutable name is what the guard reads, so a test can rewrite it.
+        var fixture = new DummyMintFixture(chain, boot, handler, policyId, row.getAssetName());
+        Mockito.when(registry.findByPolicyId(Mockito.eq(policyId)))
+                .thenAnswer(inv -> java.util.Optional.of(ProgrammableTokenRegistryEntity.builder()
+                        .policyId(policyId)
+                        .substandardId("dummy")
+                        .assetName(fixture.registeredAssetName())
+                        .build()));
+        return fixture;
+    }
+
+    private static org.cardanofoundation.cip113.model.MintTokenRequest mintRequest(String policyId,
+                                                                                   String assetName) {
+        return new org.cardanofoundation.cip113.model.MintTokenRequest(
+                BootstrapFixture.ADMIN.baseAddress(),
+                policyId,
+                assetName,
+                "500",
+                BootstrapFixture.ALICE.baseAddress(),
+                null);
+    }
+
+    private static void assertMintRefused(DummyMintFixture fixture, String assetName, String expectedFragment) {
+        var result = fixture.handler().buildMintTransaction(
+                mintRequest(fixture.policyId(), assetName), fixture.bootParams());
+        Assertions.assertFalse(result.isSuccessful(),
+                "minting '" + assetName + "' must be refused — it is not the registered asset");
+        Assertions.assertNull(result.unsignedCborTx(),
+                "a refusal must not return a transaction for '" + assetName + "'");
+        if (!expectedFragment.isEmpty()) {
+            Assertions.assertTrue(String.valueOf(result.error()).contains(expectedFragment),
+                    "error for '" + assetName + "' must contain '" + expectedFragment
+                    + "', got: " + result.error());
+        }
+    }
+
+    private DummyResult runDummyRegistration(Cip68Metadata metadata, String quantity) throws Exception {
+        var chain = new OfflineChain();
+        var boot = BootstrapFixture.bootstrap(chain);
+
+        var handler = dummyHandler(chain, boot, Mockito.mock(ProgrammableTokenRegistryRepository.class));
 
         var request = DummyRegisterRequest.builder()
                 .substandardId("dummy")

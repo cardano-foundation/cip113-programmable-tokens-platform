@@ -11,6 +11,7 @@ import com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.PlutusData;
 import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.quicktx.Tx;
 import com.bloxbean.cardano.client.transaction.spec.*;
@@ -210,14 +211,58 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             // The TypeScript SDK path does the same (`labeledAssetName(333, …)` feeding
             // `deployment.assetName`); if this used the bare name the two paths would register
             // different policies for the same wizard input.
+            //
+            // The label is ALWAYS (333). example_transfer_logic.ak's issuer_admin_contract checks
+            // only that the permitted credential signed or withdrew — it ignores its
+            // `_asset_name` parameter and caps nothing — and buildMintTransaction below can mint
+            // more of the same name at any time. A (222) would therefore be a non-fungibility
+            // claim this substandard cannot enforce. Making the label independent of `quantity`
+            // also removes a whole failure mode: buildBlacklistInitTransaction registers the
+            // issuer_admin reward account that this registration withdraws-0 from, and if the two
+            // derived different labels from different quantities they would derive different
+            // reward addresses. They no longer can.
             var cip68Metadata = request.getCip68Metadata();
+            if (cip68Metadata != null
+                && (request.getQuantity() == null || request.getQuantity().isBlank())) {
+                return TransactionContext.typedError(
+                        "quantity is required when cip68Metadata is present — the reference token "
+                        + "is minted against a stated supply.");
+            }
             var mintQuantity = new BigInteger(request.getQuantity());
+            if (cip68Metadata != null && mintQuantity.signum() <= 0) {
+                return TransactionContext.typedError(
+                        "quantity must be > 0 when cip68Metadata is present, got: " + mintQuantity);
+            }
             var userAssetNameHex = cip68Metadata == null
                     ? request.getAssetName()
-                    : Cip68.labeledAssetName(Cip68.userTokenLabel(mintQuantity), request.getAssetName());
+                    : Cip68.labeledAssetName(Cip68.uncappedUserTokenLabel(), request.getAssetName());
             var referenceAssetNameHex = cip68Metadata == null
                     ? null
                     : Cip68.labeledAssetName(Cip68.LABEL_REFERENCE, request.getAssetName());
+
+            // Cross-check against the blacklist init, BEFORE building anything. That transaction
+            // registered the issuer_admin reward account this registration is about to withdraw-0
+            // from, and issuer_admin is parameterized by the asset name — so if the init was built
+            // without CIP-68 and this registration is built with it (or the reverse), the two
+            // resolve DIFFERENT reward addresses and this transaction is rejected on chain with
+            // WithdrawalsNotInRewardsCERTS, after the user has signed and paid for both. Refusing
+            // here costs nothing; discovering it on chain costs the init deposit.
+            //
+            // A null flag means the row pre-dates the column, so there is no evidence either way
+            // and the check stays silent rather than blocking a registration that may be fine.
+            var initRowOpt = blacklistInitRepository.findByBlacklistNodePolicyId(blacklistNodePolicyId);
+            if (initRowOpt.isPresent() && initRowOpt.get().getCip68Enabled() != null
+                && initRowOpt.get().getCip68Enabled() != (cip68Metadata != null)) {
+                return TransactionContext.typedError(
+                        "CIP-68 mismatch: the blacklist init for policy " + blacklistNodePolicyId
+                        + " was built " + (initRowOpt.get().getCip68Enabled() ? "WITH" : "WITHOUT")
+                        + " CIP-68 metadata, but this registration is "
+                        + (cip68Metadata != null ? "WITH" : "WITHOUT")
+                        + " it. The init registered the issuer_admin reward account this "
+                        + "registration withdraws-0 from, and issuer_admin is parameterized by the "
+                        + "asset name — so the labelled and unlabelled forms are different "
+                        + "credentials. Re-run the blacklist init with the same CIP-68 setting.");
+            }
 
             /// Getting Substandard Contracts and parameterize
             // Issuer to be used for minting/burning/sieze
@@ -483,6 +528,14 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
 
             log.info("tx: {}", transaction.serializeToHex());
             log.info("tx: {}", objectMapper.writeValueAsString(transaction));
+
+            // Measure the finished CBOR before returning it, so user-supplied metadata that
+            // overflows the ledger limit fails here rather than at submission. CIP-68 branch only;
+            // the non-CIP-68 path is untouched.
+            if (cip68Metadata != null) {
+                Cip68.preflightTxSize("freeze-and-seize registration", transaction.serialize(),
+                        protocolParamsSupplier.getProtocolParams());
+            }
 
             var blacklistInitOpt = blacklistInitRepository.findByBlacklistNodePolicyId(blacklistNodePolicyId);
 
@@ -847,6 +900,16 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var progToken = AssetType.fromUnit(request.unit());
             log.info("policy id: {}, asset name: {}", progToken.policyId(), progToken.unsafeHumanAssetName());
 
+            // Same reason as the dummy transfer path: every output below is rebuilt with the plain
+            // `ConstrPlutusData.of(0)` programmable-token datum, which would erase the CIP-68
+            // metadata the (100) token exists to carry and break the pair.
+            if (Integer.valueOf(Cip68.LABEL_REFERENCE).equals(Cip68.readLabel(progToken.assetName()))) {
+                return TransactionContext.typedError(
+                        "refusing to transfer the CIP-68 (100) reference token: this path rebuilds "
+                        + "outputs with the plain programmable-token datum, which would erase the "
+                        + "metadata and break the pair. Reference-token custody is not supported.");
+            }
+
             var amountToTransfer = new BigInteger(request.quantity());
 
             // Directory SPEND parameterization
@@ -922,7 +985,13 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                                 if (listValuePair.second().subtract(valueToSend).isPositive()) {
                                     return listValuePair;
                                 } else {
-                                    if (utxo.toValue().amountOf(progToken.policyId(), "0x" + progToken.assetName()).compareTo(BigInteger.ONE) > 0) {
+                                    // `> 0`, not `> 1`. This predicate answers "does this UTxO
+                                    // carry any of the token we are moving?", and a UTxO holding
+                                    // exactly one unit does. With `> 1` a freshly registered NFT —
+                                    // or the last unit of any holding — was invisible to the
+                                    // selector, so the transfer collected no inputs and reported
+                                    // "Not enough funds" for a balance it could plainly see.
+                                    if (utxo.toValue().amountOf(progToken.policyId(), "0x" + progToken.assetName()).compareTo(BigInteger.ZERO) > 0) {
                                         var newUtxos = Stream.concat(Stream.of(utxo), listValuePair.first().stream());
                                         return new Pair<>(newUtxos.toList(), listValuePair.second().add(utxo.toValue()));
                                     } else {
@@ -1149,9 +1218,22 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             // withdrawal pointing at an unregistered account, and the registration would be
             // rejected with WithdrawalsNotInRewardsCERTS after the user had already signed and
             // paid for this transaction. So apply exactly the same label rule as registration.
+            //
+            // That rule is now quantity-INDEPENDENT — always (333) — which is what makes the two
+            // sites impossible to desynchronise. Previously the label came from `quantity`, and
+            // `quantity` is optional on this request: a null one became 0, which chose (333),
+            // while a registration asking for 1 chose (222). The already-paid init had then
+            // registered a reward account the registration would never withdraw from. Only the
+            // PRESENCE of cip68Metadata can differ now, and that is cross-checked below.
             var initAssetNameHex = request.cip68Metadata() == null
                     ? request.assetName()
-                    : Cip68.labeledAssetName(Cip68.userTokenLabel(request.quantity()), request.assetName());
+                    : Cip68.labeledAssetName(Cip68.uncappedUserTokenLabel(), request.assetName());
+            if (request.cip68Metadata() != null
+                && (request.quantity() == null || request.quantity().isBlank())) {
+                return TransactionContext.typedError(
+                        "quantity is required when cip68Metadata is present, and must match the "
+                        + "registration that follows this blacklist init.");
+            }
             var substandardIssueContract = fesScriptBuilder.buildIssuerAdminScript(Credential.fromKey(adminPkh), initAssetNameHex);
             var substandardIssueAddress = AddressProvider.getRewardAddress(substandardIssueContract, network.getCardanoNetwork());
             log.info("substandardIssueAddress: {}", substandardIssueAddress.getAddress());
@@ -1211,6 +1293,11 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .adminPkh(adminPkh)
                     .txHash(bootstrapUtxo.getTxHash())
                     .outputIndex(bootstrapUtxo.getOutputIndex())
+                    // Which issuer_admin credential this init registered — labelled or not. The
+                    // registration that follows withdraws-0 from that credential, so the two must
+                    // agree; recording it lets registration refuse BEFORE building rather than
+                    // fail on chain after the user has paid for both transactions.
+                    .cip68Enabled(request.cip68Metadata() != null)
                     .build());
 
             return TransactionContext.ok(transaction.serializeToHex(), new MintingResult(parameterisedBlacklistMintingScript.getPolicyId(), ""));
@@ -1499,6 +1586,21 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var progToken = AssetType.fromUnit(request.unit());
             log.info("policy id: {}, asset name: {}", progToken.policyId(), progToken.unsafeHumanAssetName());
 
+            // A (100) reference token cannot be seized, and the reason is structural rather than a
+            // policy choice. `substandardIssueAdminContract` below is parameterized by the asset
+            // name of the SELECTED unit, but registration parameterized issuer_admin by the
+            // USER-token name — so seizing the (100) derives a different script, a different reward
+            // credential, and a withdraw-0 from an account that was never registered. The
+            // transaction cannot validate. (Even if it could, the continuing output is rebuilt
+            // below and ThirdPartyAct requires address, datum and reference script unchanged.)
+            if (Integer.valueOf(Cip68.LABEL_REFERENCE).equals(Cip68.readLabel(progToken.assetName()))) {
+                return TransactionContext.typedError(
+                        "refusing to seize the CIP-68 (100) reference token: issuer_admin is "
+                        + "parameterized by the USER token's name, so a seizure keyed on the (100) "
+                        + "name resolves a different reward credential and can never validate. "
+                        + "Seize the (222)/(333) user token instead.");
+            }
+
             // Directory SPEND parameterization
             var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
             log.info("registrySpendContract: {}", HexUtil.encodeHexString(registrySpendContract.getScriptHash()));
@@ -1583,6 +1685,32 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             }
 
 
+            // ThirdPartyAct requires the CONTINUING output to carry the same address, datum and
+            // reference script as the input it continues — only the seized value may move. So the
+            // datum has to be the input's own bytes, not a freshly minted ConstrPlutusData.of(0):
+            // those coincide for an ordinary programmable-token UTxO and diverge for anything
+            // else, and "coincides today" is not a property worth relying on.
+            if (utxoToSeize.getReferenceScriptHash() != null && !utxoToSeize.getReferenceScriptHash().isBlank()) {
+                return TransactionContext.typedError(
+                        "refusing to seize a UTxO carrying a reference script: ThirdPartyAct "
+                        + "requires the continuing output to preserve it, and this builder cannot "
+                        + "re-attach it. utxo=" + utxoToSeize.getTxHash() + "#" + utxoToSeize.getOutputIndex());
+            }
+            if (utxoToSeize.getInlineDatum() == null || utxoToSeize.getInlineDatum().isBlank()) {
+                return TransactionContext.typedError(
+                        "refusing to seize a UTxO with no inline datum: ThirdPartyAct requires the "
+                        + "continuing output's datum to match the input's, and there is nothing to "
+                        + "carry forward. utxo=" + utxoToSeize.getTxHash() + "#" + utxoToSeize.getOutputIndex());
+            }
+            PlutusData continuingDatum;
+            try {
+                continuingDatum = PlutusData.deserialize(HexUtil.decodeHexString(utxoToSeize.getInlineDatum()));
+            } catch (Exception e) {
+                return TransactionContext.typedError(
+                        "could not decode the seized UTxO's inline datum, so it cannot be preserved "
+                        + "on the continuing output: " + e.getMessage());
+            }
+
             var valueToSeize = utxoToSeize.toValue().amountOf(progToken.policyId(), "0x" + progToken.assetName());
             log.info("amount to seize: {}", valueToSeize);
 
@@ -1620,7 +1748,8 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .withdraw(substandardIssueAdminAddress.getAddress(), BigInteger.ZERO, ConstrPlutusData.of(0))
                     .withdraw(programmableLogicGlobalAddress.getAddress(), BigInteger.ZERO, programmableGlobalRedeemer)
                     .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenAssetToSeize), ConstrPlutusData.of(0))
-                    .payToContract(utxoToSeize.getAddress(), ValueUtil.toAmountList(utxoToSeize.toValue().subtract(tokenAssetToSeize)), ConstrPlutusData.of(0))
+                    // The CONTINUING output: same address, same datum as the input it continues.
+                    .payToContract(utxoToSeize.getAddress(), ValueUtil.toAmountList(utxoToSeize.toValue().subtract(tokenAssetToSeize)), continuingDatum)
                     .readFrom(sortedReferenceInputs.toArray(new TransactionInput[0]))
                     .attachRewardValidator(programmableLogicGlobal) // global
                     .attachRewardValidator(substandardIssueAdminContract)

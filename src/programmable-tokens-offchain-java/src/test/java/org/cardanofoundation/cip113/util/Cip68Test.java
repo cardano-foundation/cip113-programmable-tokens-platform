@@ -98,16 +98,29 @@ class Cip68Test {
     }
 
     @Test
-    void userTokenLabelIsNftOnlyForSupplyOfExactlyOne() {
-        assertEquals(Cip68.LABEL_NFT, Cip68.userTokenLabel(BigInteger.ONE));
-        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(BigInteger.ZERO));
-        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(BigInteger.TWO));
-        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(new BigInteger("1000000")));
-        // String overload, including the blank/null case used by security-token registration.
-        assertEquals(Cip68.LABEL_NFT, Cip68.userTokenLabel("1"));
-        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel("21000000"));
-        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel((String) null));
-        assertThrows(IllegalArgumentException.class, () -> Cip68.userTokenLabel(BigInteger.valueOf(-1)));
+    void userTokenLabelIsNftOnlyForACappedSupplyOfExactlyOne() {
+        // Capped: `quantity` is a ceiling a validator enforces, so 1 really is non-fungible.
+        assertEquals(Cip68.LABEL_NFT, Cip68.userTokenLabel(BigInteger.ONE, true));
+        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(BigInteger.ZERO, true));
+        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(BigInteger.TWO, true));
+        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(new BigInteger("1000000"), true));
+        assertThrows(IllegalArgumentException.class,
+                () -> Cip68.userTokenLabel(BigInteger.valueOf(-1), true));
+    }
+
+    @Test
+    void anUncappedSupplyIsAlwaysFungibleEvenAtOne() {
+        // The whole point of the flag. dummy and freeze-and-seize expose an unconstrained later
+        // mint under the same policy and name, so registering ONE unit does not make the token
+        // non-fungible — a second unit can be minted tomorrow. Labelling it (222) would be a
+        // promise the substandard cannot keep, and no off-chain check can keep it either: whoever
+        // holds the minting authority can build the transaction without this backend.
+        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(BigInteger.ONE, false));
+        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(BigInteger.ZERO, false));
+        assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(new BigInteger("1000000"), false));
+        assertEquals(Cip68.LABEL_FT, Cip68.uncappedUserTokenLabel());
+        assertThrows(IllegalArgumentException.class,
+                () -> Cip68.userTokenLabel(BigInteger.valueOf(-1), false));
     }
 
     @Test
@@ -162,6 +175,80 @@ class Cip68Test {
                 () -> Cip68.buildDatum(new Cip68Metadata(null, null, null, null, null, null)));
         assertThrows(IllegalArgumentException.class,
                 () -> Cip68.buildDatum(new Cip68Metadata("   ", null, null, null, null, null)));
+    }
+
+    @Test
+    void aBlankBaseNameIsRefused() {
+        // labeledAssetName used to accept a blank base and return an 8-hex, label-ONLY name. Both
+        // readers in this platform reject `length <= 8` (readLabel here, readLabel in the
+        // TypeScript SDK), so the resulting (100) and (222)/(333) would each decode as
+        // "unlabelled" and neither could derive the other — a permanently unresolvable pair.
+        for (String blank : new String[]{null, "", "   "}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> Cip68.labeledAssetName(Cip68.LABEL_FT, blank),
+                    "blank base name must be refused, got accepted for: '" + blank + "'");
+            assertThrows(IllegalArgumentException.class,
+                    () -> Cip68.labeledAssetName(Cip68.LABEL_REFERENCE, blank));
+        }
+        // The would-be output, had it been allowed, is exactly what the readers reject.
+        assertNull(Cip68.readLabel("0014df10"), "a label-only name is not readable as labelled");
+    }
+
+    @Test
+    void oversizedMetadataIsRefusedNotTruncated() {
+        // ~2 KB of description against ~1.4 KB of headroom on the tightest measured path. The
+        // requirement is a REFUSAL: truncating would silently ship a half-sentence as the token's
+        // permanent on-chain description.
+        String huge = "x".repeat(2048);
+        var meta = new Cip68Metadata("Token", huge, "TK", 6, null, null);
+        var thrown = assertThrows(IllegalArgumentException.class, () -> Cip68.buildDatum(meta));
+        assertTrue(thrown.getMessage().contains("description"),
+                "the error must name the offending field, got: " + thrown.getMessage());
+
+        // Every free-text field is bounded, not just description.
+        assertThrows(IllegalArgumentException.class, () -> Cip68.buildDatum(
+                new Cip68Metadata("n".repeat(200), null, null, null, null, null)));
+        assertThrows(IllegalArgumentException.class, () -> Cip68.buildDatum(
+                new Cip68Metadata("Token", null, "T".repeat(64), null, null, null)));
+        assertThrows(IllegalArgumentException.class, () -> Cip68.buildDatum(
+                new Cip68Metadata("Token", null, null, null, "https://" + "u".repeat(300), null)));
+        assertThrows(IllegalArgumentException.class, () -> Cip68.buildDatum(
+                new Cip68Metadata("Token", null, null, null, null, "ipfs://" + "l".repeat(300))));
+    }
+
+    @Test
+    void aFullyPopulatedRealisticDatumFitsTheBudget() throws Exception {
+        // The counterpart assertion: the budget must not be so tight that ordinary metadata
+        // fails. This is the fixture the offline evaluator harness uses, at its measured size.
+        var meta = new Cip68Metadata(
+                "Offline Token",
+                "A token registered and evaluated entirely offline",
+                "OFFTK", 6,
+                "https://example.invalid/offline-token",
+                "ipfs://bafkreialsoinvalidbutwellformedlookinglogohash");
+        int bytes = Cip68.buildDatum(meta).serializeToBytes().length;
+        assertTrue(bytes <= Cip68.MAX_DATUM_BYTES,
+                "the realistic fixture must fit the budget, was " + bytes);
+        assertTrue(bytes > 0);
+    }
+
+    @Test
+    void txSizePreflightRefusesAnOversizedTransaction() {
+        var params = new com.bloxbean.cardano.client.api.model.ProtocolParams();
+        params.setMaxTxSize(16384);
+
+        // Under the limit: silent.
+        Cip68.preflightTxSize("test", new byte[16384], params);
+        // Over it: refused, and the message points at the metadata as the thing to shorten.
+        var thrown = assertThrows(IllegalArgumentException.class,
+                () -> Cip68.preflightTxSize("test", new byte[16385], params));
+        assertTrue(thrown.getMessage().contains("16385"), thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("maxTxSize"), thrown.getMessage());
+
+        // No live parameter: say nothing rather than invent a ceiling. Fabricating a limit is the
+        // same class of mistake as ceilingCostFallback fabricating ex-units.
+        Cip68.preflightTxSize("test", new byte[99999], new com.bloxbean.cardano.client.api.model.ProtocolParams());
+        Cip68.preflightTxSize("test", null, params);
     }
 
     private static String textAt(MapPlutusData map, String key) {

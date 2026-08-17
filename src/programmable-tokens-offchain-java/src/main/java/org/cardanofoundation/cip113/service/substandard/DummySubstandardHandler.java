@@ -374,10 +374,24 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 // user token — it goes to the ISSUER's, so the issuer can spend it later to
                 // update the metadata.
                 var cip68Metadata = registerTokenRequest.getCip68Metadata();
+                if (cip68Metadata != null
+                    && (registerTokenRequest.getQuantity() == null || registerTokenRequest.getQuantity().isBlank())) {
+                    return TransactionContext.typedError(
+                            "quantity is required when cip68Metadata is present — the reference "
+                            + "token is minted against a stated supply.");
+                }
                 var mintQuantity = new BigInteger(registerTokenRequest.getQuantity());
+                if (cip68Metadata != null && mintQuantity.signum() <= 0) {
+                    return TransactionContext.typedError(
+                            "quantity must be > 0 when cip68Metadata is present, got: " + mintQuantity);
+                }
+                // ALWAYS (333) for dummy. Nothing in validators/transfer.ak caps lifetime supply —
+                // `issue` is `redeemer == 100` and buildMintTransaction below will happily mint
+                // more of the same name later — so a (222) here would be a non-fungibility claim
+                // this substandard cannot keep. See Cip68.userTokenLabel for the full argument.
                 var userAssetNameHex = cip68Metadata == null
                         ? registerTokenRequest.getAssetName()
-                        : Cip68.labeledAssetName(Cip68.userTokenLabel(mintQuantity), registerTokenRequest.getAssetName());
+                        : Cip68.labeledAssetName(Cip68.uncappedUserTokenLabel(), registerTokenRequest.getAssetName());
                 var referenceAssetNameHex = cip68Metadata == null
                         ? null
                         : Cip68.labeledAssetName(Cip68.LABEL_REFERENCE, registerTokenRequest.getAssetName());
@@ -514,6 +528,16 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 log.info("tx: {}", transaction.serializeToHex());
                 log.info("tx: {}", objectMapper.writeValueAsString(transaction));
 
+                // The metadata is user-supplied text and the reference output is real bytes on a
+                // transaction that was already sized for the registry nodes. Measure the finished
+                // CBOR before handing it back, so an oversized metadata fails HERE rather than at
+                // submission after the user has signed. Only on the CIP-68 branch — the
+                // non-CIP-68 path is byte-for-byte what it was.
+                if (cip68Metadata != null) {
+                    Cip68.preflightTxSize("dummy registration", transaction.serialize(),
+                            protocolParamsSupplier.getProtocolParams());
+                }
+
                 // Save to unified programmable token registry (policyId -> substandardId binding)
                 programmableTokenRegistryRepository.save(ProgrammableTokenRegistryEntity.builder()
                         .policyId(progTokenPolicyId)
@@ -551,6 +575,38 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                         "cip68Metadata is not accepted on a dummy mint — the (100) reference token "
                         + "is minted at registration. To change the metadata, spend the existing "
                         + "reference-token UTxO and rewrite its datum (not supported here).");
+            }
+
+            // The asset this mint emits comes straight off the request, and `issue` in
+            // validators/transfer.ak is `redeemer == 100` — it constrains no asset name at all.
+            // So without this check a caller who registered `(333)Foo` can mint bare `Foo`, or
+            // `(444)Foo`, or `(100)Foo` with a datum of their choosing, all under the registered
+            // policy id. Every one of those is indistinguishable from the real token to a wallet
+            // that trusts the policy. Bind the mint to the name the registry recorded.
+            var registryRowOpt = programmableTokenRegistryRepository.findByPolicyId(mintTokenRequest.tokenPolicyId());
+            if (registryRowOpt.isEmpty()) {
+                return TransactionContext.typedError(
+                        "no registry row for policy " + mintTokenRequest.tokenPolicyId()
+                        + " — register the token before minting.");
+            }
+            var registeredAssetName = registryRowOpt.get().getAssetName();
+            if (registeredAssetName == null || !registeredAssetName.equalsIgnoreCase(mintTokenRequest.assetName())) {
+                return TransactionContext.typedError(
+                        "assetName '" + mintTokenRequest.assetName() + "' does not match the registered "
+                        + "asset name '" + registeredAssetName + "' for policy "
+                        + mintTokenRequest.tokenPolicyId()
+                        + (Cip68.hasLabel(registeredAssetName)
+                           ? " — this is a CIP-68 token, so the on-chain name carries a CIP-67 label; "
+                             + "send the labelled name."
+                           : "."));
+            }
+            // Belt and braces: even if a (100) name were somehow the registered one, this endpoint
+            // must never mint it. A second reference token breaks the CIP-68 pair irrecoverably —
+            // two (100)s of quantity 1 under one policy leave every consumer picking one at random.
+            if (Integer.valueOf(Cip68.LABEL_REFERENCE).equals(Cip68.readLabel(mintTokenRequest.assetName()))) {
+                return TransactionContext.typedError(
+                        "refusing to mint a (100) reference token from the ordinary mint endpoint. "
+                        + "CIP-68 allows exactly one per token and it is created at registration.");
             }
 
             var feePayerUtxosOpt = utxoRepository.findUnspentByOwnerAddr(mintTokenRequest.feePayerAddress(), Pageable.unpaged());
@@ -689,6 +745,20 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
 
             var progToken = AssetType.fromUnit(transferTokenRequest.unit());
             log.info("policy id: {}, asset name: {}", progToken.policyId(), progToken.unsafeHumanAssetName());
+
+            // A (100) reference token cannot go through this path. Every output below is rebuilt
+            // with `ConstrPlutusData.of(0)` as its datum — the ordinary programmable-token datum —
+            // which would DESTROY the metadata the reference token exists to carry. The token
+            // would survive; the CIP-68 pair would not, and the (222)/(333) user token would be
+            // left advertising metadata that no longer resolves. Preserving the datum instead is
+            // a metadata-custody feature (who may move it, and does moving it imply a rewrite),
+            // not a transfer detail, so it is refused here rather than half-implemented.
+            if (Integer.valueOf(Cip68.LABEL_REFERENCE).equals(Cip68.readLabel(progToken.assetName()))) {
+                return TransactionContext.typedError(
+                        "refusing to transfer the CIP-68 (100) reference token: this path rebuilds "
+                        + "outputs with the plain programmable-token datum, which would erase the "
+                        + "metadata and break the pair. Reference-token custody is not supported.");
+            }
 
             // Directory SPEND parameterization
             var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);

@@ -96,6 +96,16 @@ public final class Cip68 {
      */
     public static String labeledAssetName(int label, String assetNameHex) {
         String base = assetNameHex == null ? "" : assetNameHex;
+        // A blank base yields a name that is nothing but the 4-byte label. Both readers in this
+        // platform — readLabel here and the TypeScript `readLabel` — reject `length <= 8`, so such
+        // a token would be permanently unresolvable as a CIP-68 pair: the (100) and the (222)/(333)
+        // would each decode as "unlabelled" and neither could derive the other. Refuse at the
+        // source rather than mint an asset no CIP-68 consumer can interpret.
+        if (base.isBlank()) {
+            throw new IllegalArgumentException(
+                    "CIP-68 needs a non-empty base asset name: a label-only name is not resolvable "
+                    + "as a CIP-68 pair by any consumer, including this platform's own readers.");
+        }
         String labeled = labelPrefixHex(label) + base;
         // The ledger caps asset names at 32 bytes. The 4-byte label eats into that budget, so a
         // base name of 29-32 bytes is registrable WITHOUT CIP-68 and not with it. Failing here
@@ -167,29 +177,83 @@ public final class Cip68 {
     }
 
     /**
-     * Choose the user-token label from the requested supply.
+     * Choose the user-token label from the supply.
      *
-     * <p>A supply of exactly one is a non-fungible token and takes {@code (222)}; anything else
-     * is fungible and takes {@code (333)}. A supply of zero — a security-token registration,
-     * which is structurally mint-free — is fungible, because the tokens that will eventually be
-     * minted against the cap are.
+     * <h3>Why the second parameter exists</h3>
+     * The naive rule — "a supply of exactly 1 is {@code (222)}" — is wrong for this platform,
+     * because the quantity minted <em>now</em> is not the same thing as the supply that will ever
+     * exist. {@code (222)} asserts non-fungibility: exactly one unit, forever. Nothing in the
+     * {@code dummy} or {@code freeze-and-seize} contracts caps lifetime supply — both expose an
+     * unconstrained later mint under the same policy and asset name — so registering one unit and
+     * labelling it {@code (222)} would let a second {@code (222)} unit be minted the next day,
+     * leaving a "non-fungible" token with a supply of two. Off-chain refusal cannot fix that: an
+     * operator holding the minting authority can build the transaction without this backend.
      *
-     * @param quantity the supply the caller asked for; must not be negative
+     * <p>So the label follows the <em>on-chain</em> cap, not the requested amount:
+     * <ul>
+     *   <li>{@code lifetimeSupplyCapped == false} — later mints are possible and unbounded, so the
+     *       token is fungible whatever it starts at: always {@code (333)}. This is
+     *       {@code dummy} and {@code freeze-and-seize}.</li>
+     *   <li>{@code lifetimeSupplyCapped == true} — {@code quantity} is a ceiling a validator
+     *       enforces, so a ceiling of exactly 1 genuinely is non-fungible: {@code (222)}, else
+     *       {@code (333)}. This is {@code security-token}, whose GlobalState
+     *       {@code mintable_amount} only ever decreases (see {@code global_state.ak}'s
+     *       {@code MintSecurity} branch).</li>
+     * </ul>
+     *
+     * @param quantity            the supply; a lifetime ceiling when {@code lifetimeSupplyCapped},
+     *                            otherwise merely the first mint. Must not be negative.
+     * @param lifetimeSupplyCapped whether a validator bounds total supply at {@code quantity}
      */
-    public static int userTokenLabel(BigInteger quantity) {
+    public static int userTokenLabel(BigInteger quantity, boolean lifetimeSupplyCapped) {
         if (quantity == null) {
             throw new IllegalArgumentException("quantity must not be null when choosing a CIP-67 label");
         }
         if (quantity.signum() < 0) {
             throw new IllegalArgumentException("quantity must not be negative, got: " + quantity);
         }
+        if (!lifetimeSupplyCapped) {
+            return LABEL_FT;
+        }
         return BigInteger.ONE.equals(quantity) ? LABEL_NFT : LABEL_FT;
     }
 
-    /** {@link #userTokenLabel(BigInteger)} over a decimal string. */
-    public static int userTokenLabel(String quantity) {
-        return userTokenLabel(new BigInteger(quantity == null || quantity.isBlank() ? "0" : quantity.trim()));
+    /**
+     * The label for a token whose supply is <em>not</em> bounded on chain — always {@code (333)}.
+     *
+     * <p>Shorthand for {@code userTokenLabel(quantity, false)}, kept as a named method so the call
+     * sites in {@code dummy} and {@code freeze-and-seize} read as a decision rather than a
+     * magic boolean.
+     */
+    public static int uncappedUserTokenLabel() {
+        return LABEL_FT;
     }
+
+    /**
+     * The largest serialized {@code (100)} datum this platform will build.
+     *
+     * <h3>Where the number comes from</h3>
+     * The datum is entirely user-supplied text and rides inside a transaction that is already
+     * close to the ledger's 16 384-byte limit. The tightest measured path is the security-token
+     * mint at <strong>14 923 bytes</strong>, whose datum (the six-field reference fixture)
+     * serializes to roughly 220 bytes — leaving 1 461 bytes of headroom. A 512-byte ceiling can
+     * therefore grow that transaction by at most ~292 bytes, to ~15 215, keeping well over a
+     * kilobyte of slack for fee/change/collateral variation.
+     *
+     * <p>This is a <em>budget</em>, not the real limit: {@link #preflightTxSize} measures the
+     * finished CBOR against the live {@code maxTxSize} and is what actually guarantees
+     * submittability. The budget exists so the failure names the metadata — the field the user
+     * typed — instead of surfacing as an opaque oversized-transaction error after they have
+     * already paid for a blacklist init or a genesis.
+     */
+    public static final int MAX_DATUM_BYTES = 512;
+
+    /** Per-field ceilings, so an over-budget datum can name the offending field. */
+    private static final int MAX_NAME_CHARS = 64;
+    private static final int MAX_TICKER_CHARS = 16;
+    private static final int MAX_URL_CHARS = 128;
+    private static final int MAX_LOGO_CHARS = 128;
+    private static final int MAX_DESCRIPTION_CHARS = 256;
 
     /**
      * Build the inline datum for the {@code (100)} reference token.
@@ -197,7 +261,15 @@ public final class Cip68 {
      * <p>Optional fields are omitted from the map entirely when null or blank, so a token
      * registered with only a name yields a single-entry map rather than five empty strings.
      *
-     * @throws IllegalArgumentException if {@code metadata} is null or its name is blank
+     * <p>Every field is length-checked and the finished datum is measured against
+     * {@link #MAX_DATUM_BYTES}. Oversized metadata is <strong>refused, never truncated</strong>:
+     * the datum is the permanent, on-chain statement of what this token is, and silently shipping
+     * a half-sentence description would be a worse outcome than an error the user can act on.
+     * The check lives here rather than in a DTO annotation because this method is the single
+     * choke point every substandard's CIP-68 path passes through.
+     *
+     * @throws IllegalArgumentException if {@code metadata} is null, its name is blank, any field
+     *                                  exceeds its ceiling, or the datum exceeds the budget
      */
     public static PlutusData buildDatum(Cip68Metadata metadata) {
         if (metadata == null) {
@@ -206,6 +278,11 @@ public final class Cip68 {
         if (metadata.name() == null || metadata.name().isBlank()) {
             throw new IllegalArgumentException("CIP-68 metadata requires a non-blank name");
         }
+        checkFieldLength("name", metadata.name(), MAX_NAME_CHARS);
+        checkFieldLength("description", metadata.description(), MAX_DESCRIPTION_CHARS);
+        checkFieldLength("ticker", metadata.ticker(), MAX_TICKER_CHARS);
+        checkFieldLength("url", metadata.url(), MAX_URL_CHARS);
+        checkFieldLength("logo", metadata.logo(), MAX_LOGO_CHARS);
 
         var map = new MapPlutusData();
         putText(map, "name", metadata.name());
@@ -217,13 +294,82 @@ public final class Cip68 {
         putText(map, "url", metadata.url());
         putText(map, "logo", metadata.logo());
 
-        return ConstrPlutusData.builder()
+        var datum = ConstrPlutusData.builder()
                 .alternative(0)
                 .data(ListPlutusData.of(
                         map,
                         BigIntPlutusData.of(1),  // CIP-68 version
                         BigIntPlutusData.of(1))) // extra_plutus_data
                 .build();
+
+        int datumBytes = serializedSize(datum);
+        if (datumBytes > MAX_DATUM_BYTES) {
+            throw new IllegalArgumentException(
+                    "CIP-68 metadata is too large: the reference-token datum serializes to "
+                    + datumBytes + " bytes, over the " + MAX_DATUM_BYTES + "-byte budget. The "
+                    + "datum travels inside a transaction that is already close to the ledger's "
+                    + "16384-byte limit. Shorten the metadata — nothing is truncated for you, "
+                    + "because the datum is this token's permanent on-chain description.");
+        }
+        return datum;
+    }
+
+    /** The CBOR length of {@code datum}, or a hard failure if it cannot be serialized at all. */
+    private static int serializedSize(PlutusData datum) {
+        try {
+            return datum.serializeToBytes().length;
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                    "CIP-68 metadata could not be serialized to a Plutus datum: " + e.getMessage(), e);
+        }
+    }
+
+    private static void checkFieldLength(String field, String value, int maxChars) {
+        if (value != null && value.length() > maxChars) {
+            throw new IllegalArgumentException(
+                    "CIP-68 metadata field '" + field + "' is " + value.length()
+                    + " characters, over the " + maxChars + "-character limit. The metadata rides "
+                    + "on chain inside a transaction bounded at 16384 bytes; shorten it rather "
+                    + "than have it silently cut.");
+        }
+    }
+
+    /**
+     * Refuse a finished transaction that the ledger would reject as oversized.
+     *
+     * <p>{@link #MAX_DATUM_BYTES} bounds the metadata, but the metadata is not the only thing that
+     * grew: the CIP-68 branch adds a whole output, its value and its datum, on top of a chain that
+     * was already measured at 14 923 bytes on its tightest path. Only the finished CBOR knows the
+     * real number, so it is measured here — against the <em>live</em> {@code maxTxSize} rather than
+     * a compiled-in 16384, because that parameter is governance-settable and a future increase
+     * should relax this check automatically.
+     *
+     * <p>Called only on the CIP-68 branches, so a transaction that carries no reference token
+     * behaves exactly as it did before this check existed.
+     *
+     * @param context short label naming the path, for the error message
+     * @param txCborBytes the serialized transaction
+     * @param params live protocol parameters
+     * @throws IllegalArgumentException if the transaction is over the limit
+     */
+    public static void preflightTxSize(String context, byte[] txCborBytes, ProtocolParams params) {
+        if (txCborBytes == null) {
+            return;
+        }
+        Long maxTxSize = params == null || params.getMaxTxSize() == null
+                ? null : params.getMaxTxSize().longValue();
+        if (maxTxSize == null || maxTxSize <= 0) {
+            // No live parameter to check against. Saying nothing is better than inventing a limit:
+            // a fabricated ceiling is the same class of mistake as a fabricated cost model.
+            return;
+        }
+        if (txCborBytes.length > maxTxSize) {
+            throw new IllegalArgumentException(
+                    context + ": the transaction is " + txCborBytes.length + " bytes, over the "
+                    + "protocol's maxTxSize of " + maxTxSize + ". The CIP-68 reference token adds "
+                    + "an output and its metadata datum; shorten the metadata (name, description, "
+                    + "ticker, url, logo) and retry. Nothing was truncated.");
+        }
     }
 
     /**

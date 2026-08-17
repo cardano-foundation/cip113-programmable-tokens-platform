@@ -444,6 +444,17 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             ProtocolBootstrapParams protocolParams) {
 
         try {
+            // Same refusal as buildRegistrationTransaction, and it has to be here too. Registration
+            // refusing alone left this endpoint silently DISCARDING request.cip68Metadata(): a
+            // direct API call minted a user token with no (100) reference token behind it — a
+            // label advertising metadata that was never written, which is precisely the bug this
+            // whole feature exists to eliminate.
+            if (request.cip68Metadata() != null) {
+                return TransactionContext.typedError(
+                        "CIP-68 is not supported for the 'kyc' substandard. Supported: dummy, "
+                        + "freeze-and-seize, security-token. Mint without CIP-68 metadata.");
+            }
+
             var adminUtxos = accountService.findAdaOnlyUtxo(request.feePayerAddress(), 10_000_000L);
 
             var issuanceUtxoOpt = utxoProvider.findUtxo(protocolParams.txHash(), 2);
