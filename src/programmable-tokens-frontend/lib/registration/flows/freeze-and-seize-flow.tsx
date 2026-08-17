@@ -74,7 +74,10 @@ const freezeAndSeizeFlow: RegistrationFlow = {
   ],
   getInitialData: () => ({}),
   getRegistrationCallbackData: (state: WizardState): TokenRegistrationCallbackData | null => {
-    const tokenDetails = state.stepStates['token-details']?.data as { assetName?: string } | undefined;
+    const tokenDetails = state.stepStates['token-details']?.data as {
+      assetName?: string;
+      cip68Metadata?: { enabled?: boolean };
+    } | undefined;
     const combinedResult = state.stepStates['combined-build-sign']?.result?.data as {
       tokenPolicyId?: string;
       blacklistNodePolicyId?: string;
@@ -93,6 +96,10 @@ const freezeAndSeizeFlow: RegistrationFlow = {
       blacklistAdminPkh: combinedResult.adminPkh,
       blacklistInitTxHash: combinedResult.blacklistInitTxInput?.txHash,
       blacklistInitOutputIndex: combinedResult.blacklistInitTxInput?.outputIndex,
+      // What the init actually registered. The backend cross-checks this at registration time,
+      // and a row that does not carry it disables that check — so state it explicitly rather
+      // than letting it default to "unknown".
+      cip68Enabled: !!tokenDetails?.cip68Metadata?.enabled,
     };
   },
   buildRegistrationRequest: (state: WizardState): FreezeAndSeizeRegistrationData => {

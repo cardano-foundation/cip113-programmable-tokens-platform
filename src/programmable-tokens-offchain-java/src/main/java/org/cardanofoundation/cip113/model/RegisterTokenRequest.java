@@ -70,8 +70,11 @@ public abstract class RegisterTokenRequest {
      * Optional CIP-68 metadata. When present, registration mints a CIP-68 <em>pair</em> under one
      * policy instead of a single bare asset:
      * <ul>
-     *   <li>the user token, its name prefixed with the CIP-67 {@code (222)} or {@code (333)} label
-     *       (see {@link org.cardanofoundation.cip113.util.Cip68#userTokenLabel}),</li>
+     *   <li>the user token, its name prefixed with the CIP-67 {@code (333)} label — always
+     *       {@code (333)}, whatever the quantity, because none of the pinned substandard
+     *       contracts caps <em>lifetime</em> supply and only such a cap entitles a token to the
+     *       {@code (222)} non-fungibility claim (see
+     *       {@link org.cardanofoundation.cip113.util.Cip68#userTokenLabel}),</li>
      *   <li>a {@code (100)} reference token of quantity 1 whose inline datum carries this
      *       metadata, sent to the <em>admin's</em> programmable-logic-base address so the issuer
      *       can spend it later to update the metadata.</li>

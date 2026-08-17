@@ -94,12 +94,23 @@ public class AdminDbTransferController {
                             continue;
                         }
 
-                        // Create new entity
+                        // Create new entity.
+                        //
+                        // cip68Enabled is carried through EXPLICITLY, and its three states are all
+                        // distinct: true, false and null ("this row pre-dates the column"). Import
+                        // used to omit it, so every imported row landed as NULL — which is the one
+                        // value that makes the registration-time cross-check stay silent. Copying
+                        // a database therefore disabled the guard that stops a CIP-68 registration
+                        // withdrawing from an issuer_admin credential the init never registered,
+                        // and the failure only surfaces on chain, after the init is paid for.
+                        Boolean cip68Enabled = asBoolean(data.get("cip68Enabled"));
+
                         BlacklistInitEntity entity = BlacklistInitEntity.builder()
                                 .blacklistNodePolicyId(blacklistNodePolicyId)
                                 .adminPkh((String) data.get("adminPkh"))
                                 .txHash(txHash)
                                 .outputIndex(outputIndex)
+                                .cip68Enabled(cip68Enabled)
                                 .build();
 
                         blacklistInitRepository.save(entity);
@@ -192,5 +203,34 @@ public class AdminDbTransferController {
                     "error", e.getMessage()
             ));
         }
+    }
+
+    /**
+     * Read a tri-state boolean out of the untyped import payload.
+     *
+     * <p>The export is JSON, so the value arrives as a {@link Boolean} from Jackson — but an
+     * export hand-edited or round-tripped through another tool can present {@code "true"} as a
+     * string. Anything that is neither a recognisable boolean nor absent is treated as
+     * <em>unknown</em> ({@code null}) rather than guessed at: {@code false} is a positive claim
+     * that the init was built without CIP-68, and inventing it would make the registration-time
+     * cross-check reject correct registrations.
+     */
+    private static Boolean asBoolean(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Boolean b) {
+            return b;
+        }
+        String s = String.valueOf(value).trim();
+        if ("true".equalsIgnoreCase(s)) {
+            return Boolean.TRUE;
+        }
+        if ("false".equalsIgnoreCase(s)) {
+            return Boolean.FALSE;
+        }
+        log.warn("Unrecognised cip68Enabled value '{}' in import payload — importing as NULL "
+                 + "(unknown) rather than guessing", value);
+        return null;
     }
 }

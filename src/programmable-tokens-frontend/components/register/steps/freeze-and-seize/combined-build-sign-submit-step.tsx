@@ -592,7 +592,7 @@ export function CombinedBuildSignSubmitStep({
             </div>
             <p className="text-xs text-dark-500">
               {cip68Enabled
-                ? 'CIP-68 is enabled, so transactions are built server-side: the SDK labels a supply of 1 as (333) while this platform labels it (222), and that difference would change the token policy id.'
+                ? 'CIP-68 is enabled, so transactions are built server-side. Both builders label the user token (333), but whether they produce byte-identical datums, min-UTxO sizing and output ordering is unverified — and freeze-and-seize bakes the asset name into issuer_admin, so any divergence would yield a different token policy id.'
                 : effectiveUseSDK
                 ? 'Building transactions client-side with CIP-113 SDK + Evolution SDK'
                 : 'Building transactions server-side with Java backend'}

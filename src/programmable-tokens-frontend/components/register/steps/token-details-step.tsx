@@ -5,7 +5,7 @@ import { useWallet } from '@/hooks/use-wallet';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
-import { supportsCIP68, CIP68_FIELD_MAX_LENGTHS } from '@/lib/utils/cip68';
+import { supportsCIP68, CIP68_FIELD_MAX_LENGTHS, validateCip68Metadata } from '@/lib/utils/cip68';
 
 interface TokenDetailsStepProps extends StepComponentProps<TokenDetailsData, TokenDetailsData> {}
 
@@ -90,15 +90,31 @@ export function TokenDetailsStep({
     }
 
     if (cip68Enabled && cip68Supported) {
-      if (!cip68Name.trim()) {
-        newErrors.cip68Name = 'Display name is required for CIP-68 metadata';
-      }
-      if (cip68Decimals) {
-        const dec = parseInt(cip68Decimals);
-        if (isNaN(dec) || dec < 0 || dec > 19) {
-          newErrors.cip68Decimals = 'Decimals must be 0-19';
-        }
-      }
+      // The `maxLength` attributes on the inputs below are a typing convenience, not an
+      // enforcement point: they do not apply to state restored from a persisted wizard, nor to a
+      // value set programmatically. The ceilings are re-checked here, against the same shared
+      // table the Java backend mirrors, so an over-long field is caught before the user pays for
+      // anything rather than surfacing as a build failure afterwards.
+      const metadataErrors = validateCip68Metadata({
+        name: cip68Name,
+        description: cip68Description,
+        ticker: cip68Ticker,
+        decimals: cip68Decimals,
+        url: cip68Url,
+        logo: cip68Logo,
+      });
+      // Map the shared field names onto this form's error keys.
+      const keyFor: Record<string, string> = {
+        name: 'cip68Name',
+        description: 'cip68Description',
+        ticker: 'cip68Ticker',
+        decimals: 'cip68Decimals',
+        url: 'cip68Url',
+        logo: 'cip68Logo',
+      };
+      Object.entries(metadataErrors).forEach(([field, message]) => {
+        newErrors[keyFor[field] ?? field] = message;
+      });
     }
 
     setErrors(newErrors);
@@ -250,6 +266,7 @@ export function TokenDetailsStep({
             placeholder="A brief description of your token"
             disabled={isProcessing}
             maxLength={CIP68_FIELD_MAX_LENGTHS.description}
+            error={errors.cip68Description}
             helperText={`Brief description (optional, max ${CIP68_FIELD_MAX_LENGTHS.description} chars)`}
           />
 
@@ -261,6 +278,7 @@ export function TokenDetailsStep({
               placeholder="e.g., MYTKN"
               disabled={isProcessing}
               maxLength={CIP68_FIELD_MAX_LENGTHS.ticker}
+              error={errors.cip68Ticker}
               helperText={`Short symbol (max ${CIP68_FIELD_MAX_LENGTHS.ticker} chars)`}
             />
             <Input
@@ -281,6 +299,7 @@ export function TokenDetailsStep({
             placeholder="https://..."
             disabled={isProcessing}
             maxLength={CIP68_FIELD_MAX_LENGTHS.url}
+            error={errors.cip68Url}
             helperText={`Project website (optional, max ${CIP68_FIELD_MAX_LENGTHS.url} chars)`}
           />
 
@@ -291,6 +310,7 @@ export function TokenDetailsStep({
             placeholder="https://..."
             disabled={isProcessing}
             maxLength={CIP68_FIELD_MAX_LENGTHS.logo}
+            error={errors.cip68Logo}
             helperText={`Token logo image URL (optional, max ${CIP68_FIELD_MAX_LENGTHS.logo} chars)`}
           />
         </div>

@@ -635,6 +635,24 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             final var progTokenPolicyId = issuanceContract.getPolicyId();
             log.info("issuanceContract: {}", progTokenPolicyId);
 
+            // The registry row above was found by the policy id the REQUEST claimed. This policy
+            // id is the one the transaction will actually mint under, and it is derived from
+            // `protocolBootstrapParams` — which the caller chooses, via `protocolTxHash`
+            // (TokenOperationsService.resolveProtocolParams). Those are two different things.
+            //
+            // Without this check, naming policy A / asset A while selecting bootstrap B passes the
+            // canonical-name check against A's registry row and then mints asset A under policy B:
+            // a token that is registered nowhere, wearing a registered token's name, under a
+            // policy the caller picked. Bind the check to what will actually be minted.
+            if (!progTokenPolicyId.equalsIgnoreCase(mintTokenRequest.tokenPolicyId())) {
+                return TransactionContext.typedError(
+                        "the selected protocol deployment derives issuance policy " + progTokenPolicyId
+                        + ", but this request names policy " + mintTokenRequest.tokenPolicyId()
+                        + ". Minting would put the registered asset name under a DIFFERENT policy "
+                        + "than the one it is registered against. Use the protocol deployment this "
+                        + "token was registered on, or omit protocolTxHash to use the default.");
+            }
+
             // Find the registry node for this token (must exist for subsequent mint)
             var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
             var registryEntries = utxoRepository.findUnspentByOwnerPaymentCredential(directorySpendContract.getPolicyId(), Pageable.unpaged());

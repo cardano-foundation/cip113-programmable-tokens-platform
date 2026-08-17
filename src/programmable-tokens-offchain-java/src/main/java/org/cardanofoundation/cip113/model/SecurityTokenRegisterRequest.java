@@ -53,7 +53,16 @@ public class SecurityTokenRegisterRequest extends RegisterTokenRequest {
 
     /** Initial mintable cap for the security-token policy. Decremented on every
      *  {@code MintSecurity} spend action; once it hits zero, no more tokens can
-     *  be issued. Defaults to 0 (no minting until admin updates) if not provided. */
+     *  be issued <em>until some are burned</em>. Defaults to 0 (no minting until
+     *  admin updates) if not provided.
+     *
+     *  <p>This is a cap on the amount OUTSTANDING, not on lifetime issuance.
+     *  {@code global_state.ak:229-245} computes
+     *  {@code remaining = mintable_amount - minted_amount} with a signed
+     *  {@code minted_amount}, so a burn passes a negative and restores the allowance.
+     *  Consequently a cap of 1 does <strong>not</strong> make the token non-fungible
+     *  and never selects a CIP-67 {@code (222)} label — see
+     *  {@link org.cardanofoundation.cip113.util.Cip68#userTokenLabel}. */
     private Long initialMintableAmount;
 
     /** Optional: bootstrap power user inserted into the off-chain DB at registration.

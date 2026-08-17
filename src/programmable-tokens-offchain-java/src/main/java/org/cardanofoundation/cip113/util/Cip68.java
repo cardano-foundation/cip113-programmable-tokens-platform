@@ -182,28 +182,46 @@ public final class Cip68 {
      * <h3>Why the second parameter exists</h3>
      * The naive rule — "a supply of exactly 1 is {@code (222)}" — is wrong for this platform,
      * because the quantity minted <em>now</em> is not the same thing as the supply that will ever
-     * exist. {@code (222)} asserts non-fungibility: exactly one unit, forever. Nothing in the
-     * {@code dummy} or {@code freeze-and-seize} contracts caps lifetime supply — both expose an
-     * unconstrained later mint under the same policy and asset name — so registering one unit and
-     * labelling it {@code (222)} would let a second {@code (222)} unit be minted the next day,
-     * leaving a "non-fungible" token with a supply of two. Off-chain refusal cannot fix that: an
-     * operator holding the minting authority can build the transaction without this backend.
+     * exist. {@code (222)} asserts non-fungibility: exactly one unit, forever. A label is only
+     * entitled to make that claim if a validator bounds <em>lifetime</em> issuance; off-chain
+     * refusal cannot substitute, because an operator holding the minting authority can build the
+     * transaction without this backend.
      *
      * <p>So the label follows the <em>on-chain</em> cap, not the requested amount:
      * <ul>
      *   <li>{@code lifetimeSupplyCapped == false} — later mints are possible and unbounded, so the
-     *       token is fungible whatever it starts at: always {@code (333)}. This is
-     *       {@code dummy} and {@code freeze-and-seize}.</li>
+     *       token is fungible whatever it starts at: always {@code (333)}.</li>
      *   <li>{@code lifetimeSupplyCapped == true} — {@code quantity} is a ceiling a validator
      *       enforces, so a ceiling of exactly 1 genuinely is non-fungible: {@code (222)}, else
-     *       {@code (333)}. This is {@code security-token}, whose GlobalState
-     *       {@code mintable_amount} only ever decreases (see {@code global_state.ak}'s
-     *       {@code MintSecurity} branch).</li>
+     *       {@code (333)}.</li>
      * </ul>
+     *
+     * <h3>No substandard on this platform passes {@code true}</h3>
+     * All three CIP-68 substandards — {@code dummy}, {@code freeze-and-seize} and
+     * {@code security-token} — use {@link #uncappedUserTokenLabel()}. None of the pinned contracts
+     * caps lifetime supply:
+     * <ul>
+     *   <li>{@code dummy}'s {@code validators/transfer.ak} {@code issue} is {@code redeemer == 100}
+     *       and constrains no asset name or amount; {@code freeze-and-seize}'s
+     *       {@code issuer_admin_contract} ignores its {@code _asset_name} parameter. Both expose an
+     *       unconstrained later mint under the same policy and name.</li>
+     *   <li>{@code security-token} <em>looks</em> capped — GlobalState carries a
+     *       {@code mintable_amount} — but it is not. {@code global_state.ak:229-245} computes
+     *       {@code remaining = mintable_amount - minted_amount} with a <em>signed</em>
+     *       {@code minted_amount}, so a burn passes a negative and <strong>restores</strong> the
+     *       allowance (this platform mirrors that arithmetic in
+     *       {@code SecurityTokenSubstandardHandler.buildBurnTransaction}). {@code mint 1 → burn 1
+     *       → mint 1} is therefore accepted and lifetime issuance exceeds one. A cap of 1 bounds
+     *       the amount outstanding at any instant, which is not what {@code (222)} claims.</li>
+     * </ul>
+     * The parameter is kept because the <em>rule</em> is sound and a future substandard may
+     * genuinely cap lifetime supply; it must not be passed {@code true} on the strength of a cap
+     * that a burn can refill.
      *
      * @param quantity            the supply; a lifetime ceiling when {@code lifetimeSupplyCapped},
      *                            otherwise merely the first mint. Must not be negative.
-     * @param lifetimeSupplyCapped whether a validator bounds total supply at {@code quantity}
+     * @param lifetimeSupplyCapped whether a validator bounds total <em>lifetime</em> issuance at
+     *                             {@code quantity} — not merely the amount outstanding at once
      */
     public static int userTokenLabel(BigInteger quantity, boolean lifetimeSupplyCapped) {
         if (quantity == null) {
@@ -219,11 +237,14 @@ public final class Cip68 {
     }
 
     /**
-     * The label for a token whose supply is <em>not</em> bounded on chain — always {@code (333)}.
+     * The label for a token whose lifetime supply is <em>not</em> bounded on chain — always
+     * {@code (333)}.
      *
      * <p>Shorthand for {@code userTokenLabel(quantity, false)}, kept as a named method so the call
-     * sites in {@code dummy} and {@code freeze-and-seize} read as a decision rather than a
-     * magic boolean.
+     * sites read as a decision rather than a magic boolean. Every CIP-68 substandard on this
+     * platform — {@code dummy}, {@code freeze-and-seize} and {@code security-token} — uses this;
+     * see {@link #userTokenLabel} for why {@code security-token}'s {@code mintable_amount} is not
+     * a lifetime cap.
      */
     public static int uncappedUserTokenLabel() {
         return LABEL_FT;
@@ -347,10 +368,18 @@ public final class Cip68 {
      * <p>Called only on the CIP-68 branches, so a transaction that carries no reference token
      * behaves exactly as it did before this check existed.
      *
+     * <p><strong>Fails closed.</strong> A missing or nonsensical {@code maxTxSize} used to skip
+     * the check, on the reasoning that inventing a ceiling is worse than not having one. That is
+     * backwards for a guard: "we could not read the parameter" then produced exactly the same
+     * outcome as "the transaction fits", so the one configuration where the check was most needed
+     * — a misconfigured or unreachable parameter source — was the one where it did nothing. A
+     * transaction is only released when a live parameter has positively cleared it.
+     *
      * @param context short label naming the path, for the error message
      * @param txCborBytes the serialized transaction
      * @param params live protocol parameters
-     * @throws IllegalArgumentException if the transaction is over the limit
+     * @throws IllegalArgumentException if the transaction is over the limit, or if the limit
+     *                                  cannot be established
      */
     public static void preflightTxSize(String context, byte[] txCborBytes, ProtocolParams params) {
         if (txCborBytes == null) {
@@ -359,9 +388,12 @@ public final class Cip68 {
         Long maxTxSize = params == null || params.getMaxTxSize() == null
                 ? null : params.getMaxTxSize().longValue();
         if (maxTxSize == null || maxTxSize <= 0) {
-            // No live parameter to check against. Saying nothing is better than inventing a limit:
-            // a fabricated ceiling is the same class of mistake as a fabricated cost model.
-            return;
+            throw new IllegalArgumentException(
+                    context + ": cannot verify the transaction size — the live protocol parameters "
+                    + "carry no usable maxTxSize (got " + (params == null ? "no params" : maxTxSize)
+                    + "). The CIP-68 branch adds an output and a user-supplied metadata datum to a "
+                    + "transaction that is already close to the ledger limit, so it is not released "
+                    + "unchecked. Restore the protocol-parameter source and retry.");
         }
         if (txCborBytes.length > maxTxSize) {
             throw new IllegalArgumentException(

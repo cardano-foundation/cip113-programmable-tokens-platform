@@ -130,7 +130,28 @@ export function isReferenceToken(assetNameHex: string): boolean {
 export function labelAssetNameHex(label: 100 | 222 | 333, assetNameHex: string): string {
   const prefix = Object.entries(LABEL_MAP).find(([, v]) => v.label === label)?.[0];
   if (!prefix) throw new Error(`unsupported CIP-67 label: ${label}`);
-  return prefix + assetNameHex;
+  // A blank base yields a name that is nothing but the 4-byte label — and `parseCIP68AssetName`
+  // above rejects any name of 8 hex chars or fewer as unlabelled, so such a token would be
+  // permanently unresolvable as a CIP-68 pair: the (100) and the (333) would each read as
+  // "unlabelled" and neither could derive the other. `Cip68.labeledAssetName` in the Java backend
+  // refuses this; the mirror has to agree, or the wizard builds a name the backend will reject
+  // (or worse, an SDK-built transaction mints one nothing can read).
+  if (!assetNameHex || !assetNameHex.trim()) {
+    throw new Error(
+      "CIP-68 needs a non-empty base asset name: a label-only name is not resolvable as a " +
+        "CIP-68 pair by any consumer, including this platform's own readers."
+    );
+  }
+  // The ledger caps asset names at 32 bytes and the label eats 4 of them.
+  const labeled = prefix + assetNameHex;
+  if (labeled.length > 64) {
+    throw new Error(
+      `asset name is too long for CIP-68: the 4-byte (${label}) label plus a ` +
+        `${assetNameHex.length / 2}-byte name exceeds the ledger's 32-byte limit. ` +
+        "Use a name of at most 28 bytes."
+    );
+  }
+  return labeled;
 }
 
 /**
@@ -140,14 +161,13 @@ export function labelAssetNameHex(label: 100 | 222 | 333, assetNameHex: string):
  * actually goes on chain, and the frontend only re-derives it to record the right asset name
  * locally. If the two ever disagree the recorded name stops resolving.
  *
- * The rule is NOT "one unit means 222". `(222)` asserts non-fungibility — one unit, forever —
- * and only `security-token` can keep that promise, because its GlobalState `mintable_amount` is
- * an on-chain ceiling that only ever decreases. `dummy` and `freeze-and-seize` cap nothing and
- * expose an unconstrained later mint under the same policy and name, so a one-unit registration
- * there can become a two-unit supply tomorrow; they are always `(333)`.
+ * The rule is NOT "one unit means 222". `(222)` asserts non-fungibility — one unit, forever — and
+ * only a validator that bounds LIFETIME issuance can keep that promise. None of the three
+ * substandards does, so in practice every user token this platform mints is `(333)`; see
+ * `userTokenLabelForSubstandard`.
  *
  * @param quantity the supply — a lifetime ceiling only when `lifetimeSupplyCapped`
- * @param lifetimeSupplyCapped whether a validator bounds total supply at `quantity`
+ * @param lifetimeSupplyCapped whether a validator bounds total lifetime issuance at `quantity`
  */
 export function userTokenLabelFor(
   quantity: string | number | bigint,
@@ -162,14 +182,23 @@ export function userTokenLabelFor(
 }
 
 /**
- * The label a given substandard will apply. Keeps the capped/uncapped decision in one place
- * rather than at each call site.
+ * The label a given substandard will apply — always `(333)`, for every substandard and every
+ * quantity. Keeps the capped/uncapped decision in one place rather than at each call site.
+ *
+ * `security-token` used to be treated as capped, on the grounds that its GlobalState
+ * `mintable_amount` only ever decreases. It does not: `global_state.ak` computes
+ * `remaining = mintable_amount - minted_amount` with a signed `minted_amount`, so a burn passes a
+ * negative and restores the allowance. `mint 1 → burn 1 → mint 1` is accepted, which is exactly
+ * the lifetime supply of two that `(222)` promises cannot happen. `dummy` and `freeze-and-seize`
+ * cap nothing at all. MUST match `Cip68.userTokenLabel` and the security-token genesis path in
+ * the Java backend — the backend picks the label that actually goes on chain, and it participates
+ * in the policy id, so a disagreement means the recorded asset name stops resolving.
  */
 export function userTokenLabelForSubstandard(
-  substandardId: string | null | undefined,
+  _substandardId: string | null | undefined,
   quantity: string | number | bigint
 ): 222 | 333 {
-  return userTokenLabelFor(quantity, substandardId === "security-token");
+  return userTokenLabelFor(quantity, /* lifetimeSupplyCapped */ false);
 }
 
 /**
@@ -189,6 +218,86 @@ export const CIP68_FIELD_MAX_LENGTHS = {
   url: 128,
   logo: 128,
 } as const;
+
+/** The CIP-68 metadata fields the wizard and the SDK route both collect. */
+export interface Cip68MetadataInput {
+  name?: string;
+  description?: string;
+  ticker?: string;
+  decimals?: number | string;
+  url?: string;
+  logo?: string;
+}
+
+/** Human-readable field labels, so an error names what the user typed. */
+const FIELD_LABELS: Record<keyof typeof CIP68_FIELD_MAX_LENGTHS, string> = {
+  name: "Display name",
+  description: "Description",
+  ticker: "Ticker",
+  url: "URL",
+  logo: "Logo URI",
+};
+
+/**
+ * Validate CIP-68 metadata against the same ceilings the Java backend enforces.
+ *
+ * An input `maxLength` attribute is a UI convenience, not an enforcement point: it does not apply
+ * to state restored from a persisted wizard, to a value set programmatically, or to the SDK route
+ * in `cip113-context`, which never renders these inputs at all. Both call sites run this instead,
+ * so an over-long field is caught before a transaction is built rather than after the user has
+ * paid for a blacklist init.
+ *
+ * Nothing is truncated, here or on the server: the datum is the token's permanent on-chain
+ * description.
+ *
+ * @returns a map of field name to error message; empty when the metadata is acceptable
+ */
+export function validateCip68Metadata(
+  metadata: Cip68MetadataInput | null | undefined
+): Record<string, string> {
+  const errors: Record<string, string> = {};
+  if (!metadata) return errors;
+
+  if (!metadata.name || !metadata.name.trim()) {
+    errors.name = "Display name is required for CIP-68 metadata";
+  }
+
+  (Object.keys(CIP68_FIELD_MAX_LENGTHS) as (keyof typeof CIP68_FIELD_MAX_LENGTHS)[]).forEach(
+    (field) => {
+      const value = metadata[field];
+      const max = CIP68_FIELD_MAX_LENGTHS[field];
+      if (typeof value === "string" && value.length > max) {
+        errors[field] =
+          `${FIELD_LABELS[field]} is ${value.length} characters, over the ${max}-character ` +
+          "limit. The metadata rides on chain inside a transaction bounded at 16384 bytes; " +
+          "shorten it — nothing is truncated for you.";
+      }
+    }
+  );
+
+  if (metadata.decimals !== undefined && metadata.decimals !== null && metadata.decimals !== "") {
+    const dec = typeof metadata.decimals === "number"
+      ? metadata.decimals
+      : parseInt(metadata.decimals, 10);
+    if (isNaN(dec) || dec < 0 || dec > 19) {
+      errors.decimals = "Decimals must be 0-19";
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Throwing form of {@link validateCip68Metadata}, for non-form call sites (the SDK route) that
+ * have no error map to render into.
+ */
+export function assertValidCip68Metadata(metadata: Cip68MetadataInput | null | undefined): void {
+  const errors = validateCip68Metadata(metadata);
+  const messages = Object.values(errors);
+  if (messages.length > 0) {
+    throw new Error(`CIP-68 metadata is not acceptable: ${messages.join(" ")}`);
+  }
+}
 
 /** Check if asset name hex has CIP-67 label 333 (FT user token). */
 export function isCIP68FT(assetNameHex: string): boolean {

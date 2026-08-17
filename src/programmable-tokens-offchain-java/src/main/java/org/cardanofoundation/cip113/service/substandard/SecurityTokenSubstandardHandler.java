@@ -864,54 +864,74 @@ public class SecurityTokenSubstandardHandler
                 String referenceAssetNameHex = Cip68.referenceNameFor(reg.getSecurityAssetNameHex());
                 String issuancePolicyId = s.issuanceContract().getPolicyId();
 
-                // Search by POLICY + NAME, chain-wide. The previous lookup scanned only the
-                // CURRENT fee payer's PLB address, so it missed the reference token whenever it
-                // had been paid to a different admin's stake credential, moved since, or minted by
-                // a colleague — and each of those misses mints a SECOND (100), which CIP-68
-                // forbids and which no consumer can recover from (two quantity-1 reference tokens
-                // under one policy leave every wallet picking one arbitrarily).
-                boolean onChain = utxoProvider
-                        .findUtxoByAsset(issuancePolicyId, referenceAssetNameHex)
-                        .isPresent();
-
-                if (onChain) {
-                    // CONFIRMED issuance is one-time state: once the chain has shown us the
-                    // reference token, that fact never expires, so record it permanently.
-                    if (!reg.isCip68ReferenceMinted()) {
-                        reg.setCip68ReferenceMinted(true);
-                        registrationRepository.save(reg);
-                        log.info("security-token mint: policy={} reference token observed on chain; "
-                                 + "marking cip68ReferenceMinted", request.tokenPolicyId());
-                    }
+                // ── Is the reference token already issued? Two sources, in this order. ──
+                //
+                // (1) The PERSISTED FLAG IS AUTHORITATIVE ONCE SET. It is written by the
+                //     compare-and-set below, at the moment a transaction that mints the (100) is
+                //     handed to a caller, so `true` means "a signable reference-token mint exists
+                //     in someone's hands or on chain". Nothing may override that — in particular
+                //     not a chain lookup, whose "no" can mean "the indexer has not caught up
+                //     yet". Explicit cip68Metadata used to force a retry here; that is exactly
+                //     the hole this closes, because a stale index plus an explicit resend minted
+                //     a second (100), which CIP-68 forbids and no consumer can recover from
+                //     (two quantity-1 reference tokens under one policy leave every wallet
+                //     picking one arbitrarily). Recovery from a build that was genuinely never
+                //     submitted is a deliberate, auditable operator action against the database,
+                //     not something a repeated API call can trigger by accident.
+                //
+                // (2) Otherwise ask the chain, by POLICY + NAME, chain-wide — the reference token
+                //     may have been minted by a colleague, or paid to a different admin's stake
+                //     credential, and either way a second mint must not follow. The answer is
+                //     TRI-STATE: a lookup that could not be completed is NOT an absence, and
+                //     minting on that guess is precisely the duplicate this guards against.
+                if (reg.isCip68ReferenceMinted()) {
                     if (callerSuppliedMetadata) {
-                        // The caller explicitly asked for a reference token that already exists.
-                        // This one IS actionable advice — they supplied the field, so they can drop it.
                         throw new BuildPreconditionException(
                                 "the CIP-68 reference token for policy " + request.tokenPolicyId()
-                                + " already exists; updating its metadata means spending that UTxO to "
-                                + "rewrite its datum, which this endpoint does not do. Drop "
-                                + "cip68Metadata from the request to mint more of the user token.");
+                                + " has already been issued; updating its metadata means spending "
+                                + "that UTxO to rewrite its datum, which this endpoint does not do. "
+                                + "Drop cip68Metadata from the request to mint more of the user "
+                                + "token. (If the earlier build was never submitted, the "
+                                + "cip68ReferenceMinted flag on this registration has to be cleared "
+                                + "by an operator — this endpoint will not mint a second (100) on "
+                                + "the strength of a retry.)");
                     }
-                    // An ORDINARY mint on a CIP-68 token. The pair is already complete; just mint
-                    // the user token. This is the path that used to be impossible.
+                    // An ORDINARY mint on a token whose pair is already complete: mint only the
+                    // user token.
                     cip68Metadata = null;
-                } else if (reg.isCip68ReferenceMinted()) {
-                    // Flagged locally but not visible on chain: either a previous build was never
-                    // submitted, or the indexer is behind. Minting on a guess risks a duplicate
-                    // (100), which is unrecoverable, whereas skipping it is recoverable. So the
-                    // default is to skip, and recovery is an EXPLICIT, auditable request rather
-                    // than an automatic flag reset.
-                    if (callerSuppliedMetadata) {
-                        log.warn("security-token mint: policy={} is flagged cip68ReferenceMinted but the "
-                                 + "reference token is not visible on chain, and cip68Metadata was supplied "
-                                 + "explicitly — treating this as a deliberate retry of a build that was "
-                                 + "never submitted, and completing the pair", request.tokenPolicyId());
-                    } else {
-                        log.warn("security-token mint: policy={} is flagged cip68ReferenceMinted but the "
-                                 + "reference token is not visible on chain. Minting the user token only. "
-                                 + "If the earlier build was never submitted, resend this mint WITH an "
-                                 + "explicit cip68Metadata to complete the pair.", request.tokenPolicyId());
-                        cip68Metadata = null;
+                } else {
+                    var presence = utxoProvider.assetPresence(issuancePolicyId, referenceAssetNameHex);
+                    switch (presence) {
+                        case PRESENT -> {
+                            // CONFIRMED issuance is one-time state: once the chain has shown us
+                            // the reference token, that fact never expires, so record it.
+                            registrationRepository.claimCip68ReferenceMint(request.tokenPolicyId());
+                            reg.setCip68ReferenceMinted(true);
+                            log.info("security-token mint: policy={} reference token observed on chain; "
+                                     + "marking cip68ReferenceMinted", request.tokenPolicyId());
+                            if (callerSuppliedMetadata) {
+                                // The caller explicitly asked for a reference token that already
+                                // exists. This advice IS actionable — they supplied the field.
+                                throw new BuildPreconditionException(
+                                        "the CIP-68 reference token for policy " + request.tokenPolicyId()
+                                        + " already exists; updating its metadata means spending that "
+                                        + "UTxO to rewrite its datum, which this endpoint does not do. "
+                                        + "Drop cip68Metadata from the request to mint more of the "
+                                        + "user token.");
+                            }
+                            cip68Metadata = null;
+                        }
+                        case UNKNOWN -> throw new BuildPreconditionException(
+                                "cannot determine whether the CIP-68 reference token for policy "
+                                + request.tokenPolicyId() + " already exists — the chain lookup for "
+                                + issuancePolicyId + referenceAssetNameHex + " could not be completed. "
+                                + "Refusing to mint a (100) on a guess: CIP-68 allows exactly one per "
+                                + "policy and a duplicate cannot be undone. Retry once the chain "
+                                + "backend is reachable, or drop cip68Metadata to mint only the user "
+                                + "token.");
+                        // ABSENT is the only answer that authorises minting the pair, and it is a
+                        // positive statement from the backend, not the absence of an answer.
+                        case ABSENT -> { }
                     }
                 }
             }
@@ -1019,13 +1039,27 @@ public class SecurityTokenSubstandardHandler
                 Cip68.preflightTxSize("security-token mint", transaction.serialize(),
                         protocolParamsSupplier.getProtocolParams());
 
-                // Recorded at BUILD time: this build, if submitted, creates the reference token,
-                // and a concurrent second build must not create another. Unlike before, this flag
-                // is no longer cleared automatically when the chain does not show the token —
-                // silently retrying risks a duplicate (100), which is unrecoverable, so recovery
-                // is an explicit resend carrying cip68Metadata (handled above).
+                // COMPARE-AND-SET, not a read-then-write. Everything above ran against a snapshot
+                // of `reg` read at the start of this build; a concurrent request holding its own
+                // snapshot has by now built the same reference-token mint. A plain
+                // `setCip68ReferenceMinted(true); save(reg)` would let both hand out a signable
+                // transaction and both claim they were first. The conditional UPDATE resolves it:
+                // exactly one caller sees a row count of 1 and gets the CBOR, and the loser is
+                // refused here — before receiving anything it could submit.
+                //
+                // It is issued AFTER the build, deliberately: a build that fails for any other
+                // reason (size preflight, evaluation, funding) must leave the flag alone, or a
+                // transient failure would permanently strand the token's CIP-68 pair.
+                int claimed = registrationRepository.claimCip68ReferenceMint(request.tokenPolicyId());
+                if (claimed != 1) {
+                    throw new BuildPreconditionException(
+                            "another build already claimed the CIP-68 reference-token mint for policy "
+                            + request.tokenPolicyId() + " while this one was being assembled. Exactly "
+                            + "one (100) may ever exist for a policy, so this transaction is "
+                            + "discarded. Submit the other build, then mint again without "
+                            + "cip68Metadata.");
+                }
                 reg.setCip68ReferenceMinted(true);
-                registrationRepository.save(reg);
                 log.info("security-token mint: policy={} also mints the CIP-68 (100) reference token to {}",
                         request.tokenPolicyId(), referenceTokenAddress.getAddress());
             }
@@ -1604,25 +1638,27 @@ public class SecurityTokenSubstandardHandler
             // are both parameterized by it (and issuance_mint by minting_logic in turn), so the
             // label participates in the token policy id.
             //
-            // The label is chosen from `initialMintableAmount` rather than `quantity`, because a
-            // security-token registration is structurally mint-free — `quantity` is forced to 0 by
-            // buildFullRegistrationChain — so the cap is the only statement of intended supply
-            // available at this point.
+            // ALWAYS (333), even at a cap of one.
             //
-            // security-token is the ONE substandard here that can honestly claim (222). Its cap
-            // lives in GlobalState's `mintable_amount`, which the validator only ever DECREASES
-            // (global_state.ak's MintSecurity branch; there is no SetMintableAmount — see
-            // docs/UPSTREAM-BAFIN-DEFECTS.md Defect D). So a cap of exactly 1 really does bound
-            // lifetime supply at one unit, and `lifetimeSupplyCapped = true` is the truth. dummy
-            // and freeze-and-seize pass false, because nothing bounds theirs.
+            // This used to read `initialMintableAmount` and emit (222) for a cap of 1, on the
+            // grounds that GlobalState's `mintable_amount` only ever decreases. It does not.
+            // global_state.ak:229-245 computes `remaining = mintable_amount - minted_amount`, and
+            // `minted_amount` is signed: a BURN passes a negative and RESTORES the allowance. This
+            // handler mirrors that arithmetic in buildBurnTransaction ("Burn INCREMENTS
+            // mintable_amount (the cap returns)"). So `mint 1 → burn 1 → mint 1` is accepted, and
+            // lifetime issuance under a (222) label exceeds one — the exact non-fungibility claim
+            // (222) makes and this contract set cannot keep.
+            //
+            // Nothing in the pinned contracts caps LIFETIME supply for any of the three CIP-68
+            // substandards, so none of them may claim (222). See Cip68.userTokenLabel.
             if (request.getCip68Metadata() != null) {
-                Long cap = request.getInitialMintableAmount();
                 securityAssetNameHex = Cip68.labeledAssetName(
-                        Cip68.userTokenLabel(cap == null ? BigInteger.ZERO : BigInteger.valueOf(cap),
-                                /* lifetimeSupplyCapped = */ true),
-                        securityAssetNameHex);
-                log.info("security-token genesis: CIP-68 enabled, security asset name {} -> {} (cap {})",
-                        request.getAssetName(), securityAssetNameHex, cap);
+                        Cip68.uncappedUserTokenLabel(), securityAssetNameHex);
+                log.info("security-token genesis: CIP-68 enabled, security asset name {} -> {} "
+                         + "(cap {}, label (333): mintable_amount is restored by burns, so no cap "
+                         + "here bounds lifetime supply)",
+                        request.getAssetName(), securityAssetNameHex,
+                        request.getInitialMintableAmount());
             }
 
             // 1. Select a pure-ADA bootstrap UTxO from the admin's wallet. Its
