@@ -3,6 +3,8 @@
  * Types for blacklist management and token seizure operations
  */
 
+import type { Cip68MetadataRequest } from './api';
+
 // ============================================================================
 // Blacklist Initialization
 // ============================================================================
@@ -11,7 +13,19 @@ export interface BlacklistInitRequest {
   substandardId: string;         // Substandard ID (e.g., 'freeze-and-seize')
   adminAddress: string;          // Admin address that will manage this blacklist
   feePayerAddress: string;       // Address that pays for the transaction
-  assetName: string;             // Hex-encoded asset name of the programmable token
+  assetName: string;             // Hex-encoded asset name, WITHOUT any CIP-67 label
+  /** The supply the matching registration will request. Only used to pick the CIP-67 label. */
+  quantity?: string;
+  /**
+   * MUST match the `cip68Metadata` sent to the matching registration.
+   *
+   * This transaction registers the `issuer_admin` reward account that the registration then
+   * withdraws-0 from, and `issuer_admin` is parameterized by the asset name — so a CIP-68
+   * registration withdraws from a different reward address. Omitting this while the
+   * registration enables CIP-68 registers the wrong credential, and the registration is then
+   * rejected outright.
+   */
+  cip68Metadata?: Cip68MetadataRequest;
 }
 
 export interface BlacklistInitResponse {

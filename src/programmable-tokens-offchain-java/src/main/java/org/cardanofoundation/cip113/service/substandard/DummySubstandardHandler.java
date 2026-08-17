@@ -43,6 +43,8 @@ import org.cardanofoundation.cip113.service.AccountService;
 import org.cardanofoundation.cip113.service.ProtocolScriptBuilderService;
 import org.cardanofoundation.cip113.service.SubstandardService;
 import org.cardanofoundation.cip113.service.substandard.capabilities.BasicOperations;
+import org.cardanofoundation.cip113.util.Cip68;
+import com.bloxbean.cardano.client.api.ProtocolParamsSupplier;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
@@ -83,6 +85,9 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
     private final ProtocolScriptBuilderService protocolScriptBuilderService;
 
     private final QuickTxBuilder quickTxBuilder;
+
+    /** Sizes the CIP-68 reference-token output against the live min-UTxO parameters. */
+    private final ProtocolParamsSupplier protocolParamsSupplier;
 
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
@@ -362,12 +367,32 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 // is gone (the credential is now the validator's compile-time parameter).
                 // Registry node output is at index 2 in outputs:
                 // [0] PLB output (programmable token), [1] updated covering node, [2] new registry node
-                var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2)); // OutputIndex { index: 2 }
+                // CIP-68 mints a PAIR under this one policy: the labelled user token, plus a
+                // (100) reference token of quantity 1 whose inline datum carries the metadata.
+                // The reference token is itself a programmable token, so core's `no_escape`
+                // forces it to a PLB base address with an inline stake credential just like the
+                // user token — it goes to the ISSUER's, so the issuer can spend it later to
+                // update the metadata.
+                var cip68Metadata = registerTokenRequest.getCip68Metadata();
+                var mintQuantity = new BigInteger(registerTokenRequest.getQuantity());
+                var userAssetNameHex = cip68Metadata == null
+                        ? registerTokenRequest.getAssetName()
+                        : Cip68.labeledAssetName(Cip68.userTokenLabel(mintQuantity), registerTokenRequest.getAssetName());
+                var referenceAssetNameHex = cip68Metadata == null
+                        ? null
+                        : Cip68.labeledAssetName(Cip68.LABEL_REFERENCE, registerTokenRequest.getAssetName());
+
+                // The registry node is the LAST output, and CIP-68 inserts the reference-token
+                // output ahead of the two node outputs — so the index issuance_mint is told to
+                // look at shifts from 2 to 3. Getting this wrong makes issuance_mint read the
+                // wrong output and trap, which is why it is derived rather than written twice.
+                var registryNodeOutputIndex = cip68Metadata == null ? 2 : 3;
+                var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(registryNodeOutputIndex)); // OutputIndex { index }
 
                 // Programmable Token Mint
                 var programmableToken = Asset.builder()
-                        .name("0x" + registerTokenRequest.getAssetName())
-                        .value(new BigInteger(registerTokenRequest.getQuantity()))
+                        .name("0x" + userAssetNameHex)
+                        .value(mintQuantity)
                         .build();
 
                 Value programmableTokenValue = Value.builder()
@@ -389,16 +414,60 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                         payeeAddress.getDelegationCredential().get(),
                         network.getCardanoNetwork());
 
+                Asset referenceToken = null;
+                Value referenceTokenValue = null;
+                Address referenceTokenAddress = null;
+                var referenceTokenDatum = cip68Metadata == null ? null : Cip68.buildDatum(cip68Metadata);
+                if (cip68Metadata != null) {
+                    referenceToken = Asset.builder()
+                            .name("0x" + referenceAssetNameHex)
+                            .value(ONE)
+                            .build();
+                    var issuerAddress = new Address(registerTokenRequest.getFeePayerAddress());
+                    referenceTokenAddress = AddressProvider.getBaseAddress(
+                            Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+                            issuerAddress.getDelegationCredential().orElseThrow(() -> new IllegalArgumentException(
+                                    "CIP-68 needs the issuer's stake credential to place the reference token — "
+                                    + "feePayerAddress must be a base address")),
+                            network.getCardanoNetwork());
+                    var sizingValue = Value.builder()
+                            .coin(Amount.ada(1).getQuantity())
+                            .multiAssets(List.of(MultiAsset.builder()
+                                    .policyId(issuanceContract.getPolicyId())
+                                    .assets(List.of(referenceToken))
+                                    .build()))
+                            .build();
+                    referenceTokenValue = sizingValue.toBuilder()
+                            .coin(Cip68.referenceOutputCoin(protocolParamsSupplier.getProtocolParams(),
+                                    referenceTokenAddress.getAddress(), sizingValue, referenceTokenDatum))
+                            .build();
+                }
+
+                // Both assets mint under the one issuance policy with the ONE issuance redeemer —
+                // issuance_mint constrains no asset names, it only checks the registry proof and
+                // that nothing escapes the PLB.
+                var mintedAssets = cip68Metadata == null
+                        ? List.of(programmableToken)
+                        : List.of(programmableToken, referenceToken);
 
                 var tx = new Tx()
                         .collectFrom(registrarUtxos)
                         .collectFrom(directoryUtxo, ConstrPlutusData.of(0))
                         .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(100))
                         // Mint Token
-                        .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
+                        .mintAsset(issuanceContract, mintedAssets, issuanceRedeemer)
                         // Redeemer is DirectoryInit (constr(0))
                         .mintAsset(directoryMintContract, directoryMintNft, directoryMintRedeemer)
-                        .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue), ConstrPlutusData.of(0))
+                        .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue), ConstrPlutusData.of(0));
+
+                // Output 1, CIP-68 only. Must sit between the user token and the two node
+                // outputs so `registryNodeOutputIndex` above stays correct.
+                if (cip68Metadata != null) {
+                    tx = tx.payToContract(referenceTokenAddress.getAddress(),
+                            ValueUtil.toAmountList(referenceTokenValue), referenceTokenDatum);
+                }
+
+                tx = tx
                         // Directory Params
                         .payToContract(directorySpendContractAddress.getAddress(), ValueUtil.toAmountList(directorySpendValue), directorySpendDatum.toPlutusData())
                         // Directory Params
@@ -449,7 +518,9 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 programmableTokenRegistryRepository.save(ProgrammableTokenRegistryEntity.builder()
                         .policyId(progTokenPolicyId)
                         .substandardId(SUBSTANDARD_ID)
-                        .assetName(registerTokenRequest.getAssetName())
+                        // The LABELLED name, so a later mint/transfer resolves the asset that is
+                        // actually on chain rather than the unlabelled base the wizard collected.
+                        .assetName(userAssetNameHex)
                         .build());
 
                 return TransactionContext.ok(transaction.serializeToHex(), new RegistrationResult(progTokenPolicyId));
@@ -471,6 +542,16 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
 
 
         try {
+
+            // dummy mints its CIP-68 pair at REGISTRATION, so metadata on a later mint has
+            // nowhere to go. Refuse instead of ignoring it: silently accepting would leave the
+            // caller believing the reference token had been created or updated.
+            if (mintTokenRequest.cip68Metadata() != null) {
+                return TransactionContext.typedError(
+                        "cip68Metadata is not accepted on a dummy mint — the (100) reference token "
+                        + "is minted at registration. To change the metadata, spend the existing "
+                        + "reference-token UTxO and rewrite its datum (not supported here).");
+            }
 
             var feePayerUtxosOpt = utxoRepository.findUnspentByOwnerAddr(mintTokenRequest.feePayerAddress(), Pageable.unpaged());
             if (feePayerUtxosOpt.isEmpty()) {

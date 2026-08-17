@@ -21,8 +21,28 @@ public interface BlacklistManageable {
             String adminAddress,
             /** The address that pays for the tx */
             String feePayerAddress,
-            /** Hex-encoded asset name of the programmable token */
-            String assetName
+            /** Hex-encoded asset name of the programmable token, WITHOUT any CIP-67 label */
+            String assetName,
+            /**
+             * The supply the matching registration will request. Needed here only to pick the
+             * CIP-67 label — see {@link #cip68Metadata}.
+             */
+            String quantity,
+            /**
+             * Must match the {@code cip68Metadata} of the registration this blacklist belongs to.
+             *
+             * <p>This transaction registers the {@code issuer_admin} reward account that the
+             * registration later withdraws-0 from, and {@code issuer_admin} is parameterized by
+             * the asset name — so a CIP-68 registration withdraws from a <em>different</em> reward
+             * address than an unlabelled one. If this request did not know about the label, it
+             * would register the wrong credential and the registration would be rejected with
+             * {@code WithdrawalsNotInRewardsCERTS}, after the user had already signed and paid
+             * for this transaction.
+             *
+             * <p>Only its presence and the {@code quantity} matter here; the metadata itself is
+             * written by the registration, not by this transaction.
+             */
+            org.cardanofoundation.cip113.model.Cip68Metadata cip68Metadata
     ) {
     }
 

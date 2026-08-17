@@ -15,7 +15,8 @@ import {
 } from '@/lib/api/security-token';
 import { useProtocolVersion } from '@/contexts/protocol-version-context';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
-import type { StepComponentProps } from '@/types/registration';
+import { toCip68Wire } from '@/lib/utils/cip68-wire';
+import type { StepComponentProps, CIP68MetadataFormData } from '@/types/registration';
 
 interface KycConfigData {
   globalStatePolicyId: string;
@@ -241,6 +242,7 @@ export function KycConfigStep({
         const tokenDetails = wizardState.stepStates['token-details']?.data as {
           assetName?: string;
           quantity?: string;
+          cip68Metadata?: CIP68MetadataFormData;
         } | undefined;
         const allCaps =
           PowerUserCapability.ADMIN |
@@ -277,6 +279,11 @@ export function KycConfigStep({
           bootstrapPowerUserCapabilities: allCaps,
           bootstrapPowerUserLabel: 'Bootstrap admin',
           initialTrustedEntityVkeys,
+          // Genesis labels the security asset name and bakes it into the scripts. The (100)
+          // reference token cannot be minted here — the registration path rejects a second
+          // asset name under the policy — so the pair is completed by the first mint from the
+          // admin page, which reads this same metadata back off the registration.
+          cip68Metadata: toCip68Wire(tokenDetails?.cip68Metadata),
           // Initial supply minted at registration (directory-mint validator requires
           // a non-zero prog-token mint). The BaFin mintingLogic.withdraw runs in
           // its registration-mode rubber-stamp branch — no GS spend / supply-cap

@@ -1,6 +1,7 @@
 /** API client for the security-token substandard. */
 
 import { apiGet, apiPost, apiDelete } from './client';
+import type { Cip68MetadataRequest } from '@/types/api';
 
 export interface SecurityTokenInclusionProof {
   memberPkh: string;
@@ -89,6 +90,15 @@ export interface SecurityTokenInitRequest {
    *  so KYC proofs issued here verify on chain without a separate
    *  AddTrustedEntity update tx beforehand. */
   initialTrustedEntityVkeys?: string[];
+  /** When set, genesis bakes the CIP-67 (222)/(333) label into the security asset name — and
+   *  therefore into minting_logic_script, transfer_logic_script and the token policy id.
+   *  The label is chosen from `initialMintableAmount`, not `quantity`, because a
+   *  security-token registration is structurally mint-free.
+   *
+   *  The (100) reference token is NOT minted here: the registration path rejects a second
+   *  asset name under the policy (minting_logic_script.ak:198-204). Pass the same metadata to
+   *  the FIRST mint (`/issue-token/mint`) to complete the pair. */
+  cip68Metadata?: Cip68MetadataRequest;
   // Fields below are required by the discriminated request shape on the backend
   // but ignored by the init endpoint:
   substandardId?: 'security-token';

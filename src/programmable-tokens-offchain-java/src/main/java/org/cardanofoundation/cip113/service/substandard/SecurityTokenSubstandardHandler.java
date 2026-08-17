@@ -66,6 +66,10 @@ import com.bloxbean.cardano.client.api.model.Utxo;
 import org.cardanofoundation.cip113.model.LinkedListNode;
 import org.cardanofoundation.cip113.service.substandard.capabilities.BasicOperations;
 import org.cardanofoundation.cip113.service.substandard.context.SecurityTokenContext;
+import org.cardanofoundation.cip113.util.Cip68;
+import com.bloxbean.cardano.client.api.ProtocolParamsSupplier;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.cardanofoundation.cip113.model.Cip68Metadata;
 import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Component;
 
@@ -143,6 +147,13 @@ public class SecurityTokenSubstandardHandler
     private final UtxoProvider utxoProvider;
     private final AccountService accountService;
     private final QuickTxBuilder quickTxBuilder;
+
+    /** Sizes the CIP-68 reference-token output against the live min-UTxO parameters. */
+    private final ProtocolParamsSupplier protocolParamsSupplier;
+
+    /** Serialises CIP-68 metadata onto the registration row at genesis and reads it back at
+     *  the first mint, which is where this substandard's reference token is created. */
+    private final ObjectMapper objectMapper;
     private final AppConfig.Network network;
     private final RegistryNodeParser registryNodeParser;
     private final LinkedListService linkedListService;
@@ -606,7 +617,14 @@ public class SecurityTokenSubstandardHandler
             programmableTokenRegistryRepository.save(ProgrammableTokenRegistryEntity.builder()
                     .policyId(progTokenPolicyId)
                     .substandardId(SUBSTANDARD_ID)
-                    .assetName(request.getAssetName())
+                    // securityAssetNameHex, NOT request.getAssetName(): genesis may have added a
+                    // CIP-67 label, and it labels a local variable rather than writing back to the
+                    // request. This row is what /admin/tokens serves and what the mint page sends
+                    // straight back as MintTokenRequest.assetName, so the unlabelled name here
+                    // would make every subsequent mint and burn mint the WRONG asset — one the
+                    // minting logic does not measure, leaving minted_amount at 0 against a
+                    // non-zero redeemer claim.
+                    .assetName(securityAssetNameHex)
                     .build());
             hybridUtxoSupplier.clear();
 
@@ -674,6 +692,24 @@ public class SecurityTokenSubstandardHandler
             if (mintQuantity.signum() <= 0) {
                 throw new BuildPreconditionException(
                         "quantity must be > 0 (use buildBurnTransaction for negative mints)");
+            }
+
+            // The asset minted below comes from the REQUEST, but every script in this transaction
+            // is parameterized by the REGISTERED name. If they disagree, the mint still builds —
+            // it just mints some other asset under the policy, while `minted_amount` (which
+            // measures only `security_asset_name`) reads 0 and the validator takes the can_burn
+            // branch instead of can_mint. That has always been possible; CIP-68 makes it likely,
+            // because the registered name now carries a (222)/(333) label that a caller sending
+            // the bare wizard name would omit. Fail where the cause is nameable.
+            if (!request.assetName().equalsIgnoreCase(reg.getSecurityAssetNameHex())) {
+                throw new BuildPreconditionException(
+                        "assetName '" + request.assetName() + "' does not match the registered "
+                        + "security asset name '" + reg.getSecurityAssetNameHex() + "' for policy "
+                        + request.tokenPolicyId()
+                        + (Cip68.hasLabel(reg.getSecurityAssetNameHex())
+                           ? " — this is a CIP-68 token, so the on-chain name carries a CIP-67 label; "
+                             + "send the labelled name."
+                           : "."));
             }
 
             // ── 2. Resolve scripts + on-chain inputs via shared helpers ────
@@ -777,20 +813,122 @@ public class SecurityTokenSubstandardHandler
                             .assets(List.of(programmableToken)).build()))
                     .build();
 
+            // ── 6b. CIP-68 reference token ─────────────────────────────────
+            // security-token is the one substandard whose reference token CANNOT be folded into
+            // registration: verify_token_registration enumerates every asset name minted under
+            // the issuance policy and rejects more than one
+            // (minting_logic_script.ak:198-204). The MintBurn path has no such check — it only
+            // MEASURES `security_asset_name`, and verify_mint_destinations filters outputs to
+            // those carrying that name, so an output holding only the (100) token is skipped
+            // entirely. Hence the pair is completed here, in the first MintBurn.
+            //
+            // It must ride along with a real user-token mint: `minted_amount` counts only
+            // `security_asset_name`, so minting the reference token alone would give
+            // minted_amount == 0 and fall through to the can_burn capability branch. The
+            // mintQuantity > 0 guard at the top of this method already ensures that.
+            //
+            // The metadata normally comes off the registration row — genesis recorded it, and the
+            // admin should not have to retype it byte-identically on a different page days later.
+            // An explicit value on the request overrides it, which is what a caller completing a
+            // pair for a token registered before this column existed would use.
+            Cip68Metadata cip68Metadata = request.cip68Metadata();
+            if (cip68Metadata == null && reg.getCip68MetadataJson() != null) {
+                cip68Metadata = objectMapper.readValue(reg.getCip68MetadataJson(), Cip68Metadata.class);
+            }
+
+            Asset referenceToken = null;
+            Value referenceTokenValue = null;
+            Address referenceTokenAddress = null;
+            PlutusData referenceTokenDatum = null;
+            if (cip68Metadata != null) {
+                String referenceAssetNameHex = Cip68.referenceNameFor(reg.getSecurityAssetNameHex());
+
+                // The reference token goes to the ADMIN's PLB base address, so the issuer keeps
+                // the ability to spend it and rewrite the metadata later.
+                Address adminAddress = new Address(request.feePayerAddress());
+                referenceTokenAddress = AddressProvider.getBaseAddress(
+                        Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                        adminAddress.getDelegationCredential().orElseThrow(() ->
+                                new BuildPreconditionException(
+                                        "CIP-68 needs the admin's stake credential to place the reference "
+                                        + "token — feePayerAddress must be a base address")),
+                        network.getCardanoNetwork());
+
+                // CIP-68 allows exactly one reference token per user token, so a second must be
+                // refused. THE CHAIN IS THE AUTHORITY, not the local flag: the flag is set when a
+                // mint is BUILT, and a build the admin then declines to sign never reaches the
+                // chain. Trusting the flag alone would make one cancelled wallet popup permanently
+                // prevent the pair from ever being completed — the token would keep its (333)
+                // label advertising metadata that does not exist, which is the exact failure this
+                // feature exists to prevent, recoverable only by hand-editing the database.
+                //
+                // So: if the reference token is genuinely absent from the admin's PLB address, go
+                // ahead and clear the stale flag. The flag survives only as a fast path for the
+                // case where the indexer has not caught up yet.
+                String referenceUnit = s.issuanceContract().getPolicyId() + referenceAssetNameHex;
+                boolean onChain = utxoProvider.findUtxos(referenceTokenAddress.getAddress())
+                        .stream()
+                        .flatMap(u -> u.getAmount().stream())
+                        .anyMatch(a -> referenceUnit.equalsIgnoreCase(a.getUnit()));
+                if (onChain) {
+                    throw new BuildPreconditionException(
+                            "the CIP-68 reference token for policy " + request.tokenPolicyId()
+                            + " already exists; updating its metadata means spending that UTxO to "
+                            + "rewrite its datum, which this endpoint does not do. Omit "
+                            + "cip68Metadata to mint more of the user token.");
+                }
+                if (reg.isCip68ReferenceMinted()) {
+                    log.warn("security-token mint: policy={} was flagged cip68ReferenceMinted but no "
+                             + "reference token is on chain at {} — a previous build was evidently never "
+                             + "submitted; clearing the flag and completing the pair",
+                            request.tokenPolicyId(), referenceTokenAddress.getAddress());
+                }
+
+                referenceTokenDatum = Cip68.buildDatum(cip68Metadata);
+                referenceToken = Asset.builder()
+                        .name("0x" + referenceAssetNameHex)
+                        .value(BigInteger.ONE).build();
+                Value sizingValue = Value.builder()
+                        .coin(Amount.ada(1).getQuantity())
+                        .multiAssets(List.of(MultiAsset.builder()
+                                .policyId(s.issuanceContract().getPolicyId())
+                                .assets(List.of(referenceToken)).build()))
+                        .build();
+                referenceTokenValue = sizingValue.toBuilder()
+                        .coin(Cip68.referenceOutputCoin(protocolParamsSupplier.getProtocolParams(),
+                                referenceTokenAddress.getAddress(), sizingValue, referenceTokenDatum))
+                        .build();
+            }
+
             // Recipient/targetAddress were resolved in step 3b (the denylist covering
             // node lookup needs the stake hash before the redeemer indices are computed).
             Value gsValue = buildPreservedGsValue(gsUtxo, reg.getGlobalStatePolicyId());
 
             // ── 7. Compose tx ──────────────────────────────────────────────
+            // Both assets mint under the one issuance policy with the ONE issuance redeemer.
+            List<Asset> mintedAssets = referenceToken == null
+                    ? List.of(programmableToken)
+                    : List.of(programmableToken, referenceToken);
+
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
                     .collectFrom(gsUtxo, gsSpendRedeemer)
                     .withdraw(s.mintingLogicRewardAddress().getAddress(), BigInteger.ZERO, withdrawRedeemer)
-                    .mintAsset(s.issuanceContract(), programmableToken, issuanceRedeemer)
+                    .mintAsset(s.issuanceContract(), mintedAssets, issuanceRedeemer)
                     .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue),
                             ConstrPlutusData.of(0))                                                 // output 0
                     .payToContract(s.gsSpendAddress().getAddress(), ValueUtil.toAmountList(gsValue),
-                            newGsDatum)                                                              // output 1
+                            newGsDatum);                                                             // output 1
+
+            // The reference token is APPENDED, at output 2, deliberately: the GS spend redeemer
+            // above hardcodes gs_output_index = 1, so inserting ahead of the GS output would
+            // silently point global_state.ak at the wrong output.
+            if (referenceToken != null) {
+                tx = tx.payToContract(referenceTokenAddress.getAddress(),
+                        ValueUtil.toAmountList(referenceTokenValue), referenceTokenDatum);           // output 2
+            }
+
+            tx = tx
                     .readFrom(
                             txInputOf(directoryEntry),
                             txInputOf(puNode),
@@ -812,6 +950,17 @@ public class SecurityTokenSubstandardHandler
                     .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
                     .ignoreScriptCostEvaluationError(false)
                     .build();
+
+            if (referenceToken != null) {
+                // Recorded at BUILD time, because nothing here observes the submission. It is only
+                // a fast path for the window before the indexer catches up — the on-chain check
+                // above is the authority and will clear this again if the build is never
+                // submitted, so a stale `true` cannot strand the token without its metadata.
+                reg.setCip68ReferenceMinted(true);
+                registrationRepository.save(reg);
+                log.info("security-token mint: policy={} also mints the CIP-68 (100) reference token to {}",
+                        request.tokenPolicyId(), referenceTokenAddress.getAddress());
+            }
 
             log.info("security-token mint: policy={} qty={} (mintable_amount {} → {})",
                     request.tokenPolicyId(), mintQuantity, currentMintable, newMintable);
@@ -1382,6 +1531,24 @@ public class SecurityTokenSubstandardHandler
                 return TransactionContext.typedError("assetName (hex) is required");
             }
 
+            // CIP-68: the security asset name becomes the LABELLED user-token name, and it has to
+            // be settled here at genesis because minting_logic_script and transfer_logic_script
+            // are both parameterized by it (and issuance_mint by minting_logic in turn), so the
+            // label participates in the token policy id.
+            //
+            // The label is chosen from `initialMintableAmount` rather than `quantity`, because a
+            // security-token registration is structurally mint-free — `quantity` is forced to 0 by
+            // buildFullRegistrationChain — so the cap is the only statement of intended supply
+            // available at this point.
+            if (request.getCip68Metadata() != null) {
+                Long cap = request.getInitialMintableAmount();
+                securityAssetNameHex = Cip68.labeledAssetName(
+                        Cip68.userTokenLabel(cap == null ? BigInteger.ZERO : BigInteger.valueOf(cap)),
+                        securityAssetNameHex);
+                log.info("security-token genesis: CIP-68 enabled, security asset name {} -> {}",
+                        request.getAssetName(), securityAssetNameHex);
+            }
+
             // 1. Select a pure-ADA bootstrap UTxO from the admin's wallet. Its
             // OutputReference is the one-shot nonce for the GS mint + both LL mints.
             List<Utxo> utilityUtxos = accountService.findAdaOnlyUtxo(adminAddress, 10_000_000L);
@@ -1541,6 +1708,11 @@ public class SecurityTokenSubstandardHandler
                     // publishes of 0x0000…0000 into the GS datum.
                     .memberRootHashOnchain("")
                     .memberRootHashLocal("")
+                    // Carried across the gap between registration and the first mint, which is
+                    // where this token's (100) reference token has to be created.
+                    .cip68MetadataJson(request.getCip68Metadata() == null
+                            ? null
+                            : objectMapper.writeValueAsString(request.getCip68Metadata()))
                     .build());
 
             // 8. Auto-seed the bootstrap power-user DB row so the admin sees themselves

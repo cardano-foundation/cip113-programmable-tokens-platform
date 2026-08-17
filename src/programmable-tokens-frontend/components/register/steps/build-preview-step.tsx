@@ -9,6 +9,7 @@ import { useToast } from '@/components/ui/use-toast';
 import { useProtocolVersion } from '@/contexts/protocol-version-context';
 import { registerToken, stringToHex } from '@/lib/api';
 import { getPaymentKeyHash } from '@/lib/utils/address';
+import { toCip68Wire } from '@/lib/utils/cip68-wire';
 import type { DummyRegisterRequest, FreezeAndSeizeRegisterRequest } from '@/types/api';
 import type {
   StepComponentProps,
@@ -114,6 +115,10 @@ export function BuildPreviewStep({
       // Build request based on flow type
       let request: DummyRegisterRequest | FreezeAndSeizeRegisterRequest;
 
+      // The backend applies the CIP-67 label itself and mints the (100) reference token, so the
+      // asset name stays UNLABELLED on the wire for both flows.
+      const cip68Metadata = toCip68Wire(tokenDetails.cip68Metadata);
+
       if (isFreezeAndSeize) {
         const adminPubKeyHash = getPaymentKeyHash(feePayerAddress);
         request = {
@@ -124,6 +129,7 @@ export function BuildPreviewStep({
           recipientAddress: tokenDetails.recipientAddress || '',
           adminPubKeyHash,
           blacklistNodePolicyId: blacklistInitResult!.blacklistNodePolicyId,
+          cip68Metadata,
         };
       } else {
         request = {
@@ -132,6 +138,7 @@ export function BuildPreviewStep({
           assetName: stringToHex(tokenDetails.assetName),
           quantity: tokenDetails.quantity,
           recipientAddress: tokenDetails.recipientAddress || '',
+          cip68Metadata,
         };
       }
 

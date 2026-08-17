@@ -23,14 +23,37 @@ export type SubstandardsResponse = Substandard[];
 // Token Registration
 // ============================================================================
 
+/**
+ * CIP-68 metadata as the backend expects it.
+ *
+ * Distinct from the wizard's `CIP68MetadataFormData` (types/registration.ts), which is all
+ * strings plus an `enabled` flag: this is the wire shape, with `decimals` as a number and
+ * empty optionals dropped. `toCip68Wire()` in lib/utils/cip68-wire.ts does the conversion.
+ *
+ * Only `dummy`, `freeze-and-seize` and `security-token` accept this. The other handlers
+ * reject a non-null value rather than silently dropping it.
+ */
+export interface Cip68MetadataRequest {
+  name: string;
+  description?: string;
+  ticker?: string;
+  decimals?: number;
+  url?: string;
+  logo?: string;
+}
+
 /** Base type for all registration requests */
 export interface BaseRegisterTokenRequest {
   substandardId: string;       // Discriminator - backend knows which contracts to use
   feePayerAddress: string;     // User's wallet address (renamed from registrarAddress)
-  assetName: string;           // HEX ENCODED token name
+  assetName: string;           // HEX ENCODED token name, WITHOUT any CIP-67 label
   quantity: string;            // Amount to register/mint
   recipientAddress: string;    // Recipient address (can be empty string)
   chainingTransactionCborHex?: string;  // Full CBOR hex of a preceding tx (for mempool chaining)
+  /** When set, registration mints the CIP-68 pair: labelled user token + (100) reference token.
+   *  Note this changes the on-chain asset name, and for freeze-and-seize / security-token
+   *  (which bake the name into a script parameter) it changes the token policy id too. */
+  cip68Metadata?: Cip68MetadataRequest;
 }
 
 /** Dummy substandard - no extra fields needed */
@@ -99,10 +122,14 @@ export interface Cip170AttestationData {
 export interface MintTokenRequest {
   feePayerAddress: string;      // Issuer admin's wallet address
   tokenPolicyId: string;        // Policy ID of registered token
-  assetName: string;            // HEX ENCODED token name
+  assetName: string;            // HEX ENCODED token name, INCLUDING its CIP-67 label if any
   quantity: string;             // Amount as string to handle large numbers
   recipientAddress: string;     // Recipient address
   attestation?: Cip170AttestationData;  // Optional CIP-170 attestation
+  /** security-token only: mints the (100) reference token alongside this user-token mint.
+   *  Its registration cannot carry it — the registration path rejects a second asset name
+   *  under the policy — so the CIP-68 pair is completed on the first mint instead. */
+  cip68Metadata?: Cip68MetadataRequest;
 }
 
 // Backend returns plain text CBOR hex string (not JSON)

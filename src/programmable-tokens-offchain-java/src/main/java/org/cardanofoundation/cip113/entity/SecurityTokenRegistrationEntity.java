@@ -62,4 +62,17 @@ public class SecurityTokenRegistrationEntity {
 
     @Column(name = "last_root_update_at")
     private Instant lastRootUpdateAt;
+
+    /** CIP-68 metadata captured at genesis, as JSON, or null when this token is not CIP-68.
+     *  Replayed into the {@code (100)} reference token's datum by the first mint — the
+     *  registration path cannot carry that token, so the metadata has to survive the gap
+     *  between the wizard and the mint page. */
+    @Column(name = "cip68_metadata_json", columnDefinition = "TEXT")
+    private String cip68MetadataJson;
+
+    /** True once the {@code (100)} reference token has been minted. CIP-68 allows exactly one,
+     *  so this blocks a second. */
+    @Column(name = "cip68_reference_minted", nullable = false)
+    @Builder.Default
+    private boolean cip68ReferenceMinted = false;
 }

@@ -11,6 +11,30 @@ const CIP67_LABEL_100 = "000643b0"; // Reference token (holds metadata)
 const CIP67_LABEL_222 = "000de140"; // NFT token
 const CIP67_PREFIX_LENGTH = 8;
 
+/**
+ * Substandards whose registration actually mints the CIP-68 pair.
+ *
+ * Single source of truth for the wizard: `token-details-step` hides the CIP-68 form for
+ * anything not listed here, so the fields can never be collected and then dropped. The Java
+ * backend enforces the same list — `KycSubstandardHandler` and `KycExtendedSubstandardHandler`
+ * reject a non-null `cip68Metadata` outright rather than ignoring it — so a hand-rolled API
+ * call gets a clear error instead of a token whose label promises metadata that was never
+ * written.
+ */
+export const CIP68_SUPPORTED_SUBSTANDARDS = [
+  "dummy",
+  "freeze-and-seize",
+  "security-token",
+] as const;
+
+/** Whether the given substandard/flow id supports CIP-68 registration. */
+export function supportsCIP68(substandardId: string | null | undefined): boolean {
+  return (
+    !!substandardId &&
+    (CIP68_SUPPORTED_SUBSTANDARDS as readonly string[]).includes(substandardId)
+  );
+}
+
 const LABEL_MAP: Record<string, { label: number; name: string }> = {
   [CIP67_LABEL_333]: { label: 333, name: "FT" },
   [CIP67_LABEL_100]: { label: 100, name: "Reference" },
@@ -95,6 +119,34 @@ export function decodeAssetNameDisplay(assetNameHex: string): string {
 export function isReferenceToken(assetNameHex: string): boolean {
   if (!assetNameHex || assetNameHex.length <= CIP67_PREFIX_LENGTH) return false;
   return assetNameHex.substring(0, CIP67_PREFIX_LENGTH).toLowerCase() === CIP67_LABEL_100;
+}
+
+/**
+ * Prefix an asset name hex with a CIP-67 label.
+ *
+ * Mirrors the Java backend's `Cip68.labeledAssetName` and the SDK's `labeledAssetName`; the
+ * three agree on 100/222/333, which is all this platform mints.
+ */
+export function labelAssetNameHex(label: 100 | 222 | 333, assetNameHex: string): string {
+  const prefix = Object.entries(LABEL_MAP).find(([, v]) => v.label === label)?.[0];
+  if (!prefix) throw new Error(`unsupported CIP-67 label: ${label}`);
+  return prefix + assetNameHex;
+}
+
+/**
+ * The user-token label implied by a requested supply: exactly one is an NFT (222), anything
+ * else is fungible (333).
+ *
+ * MUST match `Cip68.userTokenLabel` in the Java backend — the backend picks the label that
+ * actually goes on chain, and the frontend only re-derives it to record the right asset name
+ * locally. If the two ever disagree the recorded name stops resolving.
+ */
+export function userTokenLabelFor(quantity: string | number | bigint): 222 | 333 {
+  // Compared as a normalised decimal string rather than via BigInt: supplies can exceed
+  // Number.MAX_SAFE_INTEGER, and this module is compiled below the ES2020 target that BigInt
+  // needs. Only "is it exactly one" matters, so digits alone answer it.
+  const digits = String(quantity).trim().replace(/^\+/, "").replace(/^0+(?=\d)/, "");
+  return digits === "1" ? 222 : 333;
 }
 
 /** Check if asset name hex has CIP-67 label 333 (FT user token). */

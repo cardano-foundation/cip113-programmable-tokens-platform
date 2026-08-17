@@ -5,6 +5,7 @@ import { useWallet } from '@/hooks/use-wallet';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
+import { supportsCIP68 } from '@/lib/utils/cip68';
 
 interface TokenDetailsStepProps extends StepComponentProps<TokenDetailsData, TokenDetailsData> {}
 
@@ -14,8 +15,13 @@ export function TokenDetailsStep({
   onComplete,
   onBack,
   isProcessing,
+  wizardState,
 }: TokenDetailsStepProps) {
   const { connected, wallet } = useWallet();
+  // This step is shared by all five flows, but only three of them mint the CIP-68 pair. For the
+  // rest the form is not rendered at all — collecting metadata that goes nowhere is exactly the
+  // bug this gate exists to prevent.
+  const cip68Supported = supportsCIP68(wizardState?.flowId);
   const [assetName, setAssetName] = useState(stepData.assetName || '');
   const [quantity, setQuantity] = useState(stepData.quantity || '');
   const [recipientAddress, setRecipientAddress] = useState(stepData.recipientAddress || '');
@@ -64,6 +70,11 @@ export function TokenDetailsStep({
       newErrors.assetName = 'Token name is required';
     } else if (assetName.length > 32) {
       newErrors.assetName = 'Token name must be 32 characters or less';
+    } else if (cip68Enabled && cip68Supported && assetName.length > 28) {
+      // The CIP-67 label costs 4 of the ledger's 32 bytes. Caught here rather than at the
+      // backend, which would only reject after the user had walked the rest of the wizard.
+      newErrors.assetName =
+        'With CIP-68 enabled the name must be 28 characters or less — the CIP-67 label takes 4 of the 32 bytes';
     }
 
     if (!quantity.trim()) {
@@ -78,7 +89,7 @@ export function TokenDetailsStep({
       newErrors.recipientAddress = 'Invalid Cardano address format';
     }
 
-    if (cip68Enabled) {
+    if (cip68Enabled && cip68Supported) {
       if (!cip68Name.trim()) {
         newErrors.cip68Name = 'Display name is required for CIP-68 metadata';
       }
@@ -113,7 +124,9 @@ export function TokenDetailsStep({
     }
   };
 
-  const buildCip68Data = () => cip68Enabled ? {
+  // Belt and braces: even if `cip68Enabled` were somehow restored from persisted wizard state
+  // for an unsupported flow, nothing is emitted for it.
+  const buildCip68Data = () => cip68Enabled && cip68Supported ? {
     enabled: true,
     name: cip68Name.trim(),
     description: cip68Description.trim(),
@@ -193,26 +206,28 @@ export function TokenDetailsStep({
         />
       </div>
 
-      {/* CIP-68 Metadata Section */}
-      <div className="border-t border-dark-700 pt-4">
-        <label className="flex items-center gap-3 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={cip68Enabled}
-            onChange={(e) => handleCip68Toggle(e.target.checked)}
-            disabled={isProcessing}
-            className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500"
-          />
-          <div>
-            <span className="text-sm font-medium text-white">Enable CIP-68 Metadata</span>
-            <p className="text-xs text-dark-400">
-              Attach on-chain metadata (name, ticker, decimals, etc.) via a CIP-68 reference token
-            </p>
-          </div>
-        </label>
-      </div>
+      {/* CIP-68 Metadata Section — only for substandards that actually mint the pair */}
+      {cip68Supported && (
+        <div className="border-t border-dark-700 pt-4">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={cip68Enabled}
+              onChange={(e) => handleCip68Toggle(e.target.checked)}
+              disabled={isProcessing}
+              className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500"
+            />
+            <div>
+              <span className="text-sm font-medium text-white">Enable CIP-68 Metadata</span>
+              <p className="text-xs text-dark-400">
+                Attach on-chain metadata (name, ticker, decimals, etc.) via a CIP-68 reference token
+              </p>
+            </div>
+          </label>
+        </div>
+      )}
 
-      {cip68Enabled && (
+      {cip68Supported && cip68Enabled && (
         <div className="space-y-4 p-4 bg-dark-800/50 rounded-lg border border-dark-700">
           <Input
             label="Display Name"
