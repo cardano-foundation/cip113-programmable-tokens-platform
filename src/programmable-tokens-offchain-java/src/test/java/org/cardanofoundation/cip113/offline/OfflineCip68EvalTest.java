@@ -1119,7 +1119,10 @@ public class OfflineCip68EvalTest {
                         // burn's real evaluator whenever this class ran as a whole.
                         null,
                         Mockito.mock(AccountService.class),
-                        Mockito.mock(CustomStakeRegistrationRepository.class)),
+                        Mockito.mock(CustomStakeRegistrationRepository.class),
+                        // Nothing pre-recorded: these tests exercise the ledger and
+                        // indexed-certificate sources, not the learned one.
+                        Mockito.mock(org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class)),
                 utxoProvider,
                 Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class));
 
@@ -1458,7 +1461,10 @@ public class OfflineCip68EvalTest {
                         Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
                         null,
                         Mockito.mock(AccountService.class),
-                        Mockito.mock(CustomStakeRegistrationRepository.class)));
+                        Mockito.mock(CustomStakeRegistrationRepository.class),
+                        // Nothing pre-recorded: these tests exercise the ledger and
+                        // indexed-certificate sources, not the learned one.
+                        Mockito.mock(org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class)));
     }
 
     /**

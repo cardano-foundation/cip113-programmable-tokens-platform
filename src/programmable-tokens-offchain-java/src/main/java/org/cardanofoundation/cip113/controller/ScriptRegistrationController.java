@@ -1,12 +1,17 @@
 package org.cardanofoundation.cip113.controller;
 
+import com.bloxbean.cardano.client.address.AddressProvider;
+import com.bloxbean.cardano.client.address.Credential;
+import com.bloxbean.cardano.client.util.HexUtil;
 import lombok.RequiredArgsConstructor;
+import org.cardanofoundation.cip113.config.AppConfig;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.service.ScriptRegistrationService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * REST controller for script stake address registration operations.
@@ -27,6 +32,7 @@ import java.util.List;
 public class ScriptRegistrationController {
 
     private final ScriptRegistrationService scriptRegistrationService;
+    private final AppConfig.Network network;
 
     /**
      * Response for stake address registration check.
@@ -45,6 +51,53 @@ public class ScriptRegistrationController {
      * Response for stake address registration transaction.
      */
     public record RegisterStakeAddressResponse(String unsignedTx) {}
+
+    /** Record that a script stake credential is ALREADY registered, so no later build tries to
+     *  register it again.
+     *
+     *  <p>This exists because the question has no reliable oracle here. The account endpoint is
+     *  absent on some backends (a devkit devnet 404s even on {@code /blocks/latest}), and our
+     *  indexed certificates only cover history back to {@code sync-start-slot} — measured on one
+     *  devnet, back to slot 119969749 against a tip of 120386215. The protocol-global validators
+     *  are registered ONCE per network, on the first registration anyone performed, which is
+     *  normally older than that window. So the platform can be permanently unable to see a
+     *  credential that plainly exists, and every attempt dies with:
+     *
+     *  <pre>3145 — Trying to re-register some already known credentials.</pre>
+     *
+     *  <p>That error names the credential, which is what makes this recoverable: post it here and
+     *  retry. Accepts either {@code stakeAddress} (a reward address) or {@code knownCredential}
+     *  (the script hash exactly as the ledger reports it).
+     *  Body: {@code { stakeAddress? , knownCredential? }} */
+    @PostMapping("/known")
+    public ResponseEntity<?> noteKnownRegistration(@RequestBody Map<String, Object> body) {
+        try {
+            String stakeAddress = (String) body.get("stakeAddress");
+            String credential = (String) body.get("knownCredential");
+
+            if ((stakeAddress == null || stakeAddress.isBlank())
+                    && (credential == null || credential.isBlank())) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "one of stakeAddress or knownCredential is required"));
+            }
+
+            if (stakeAddress == null || stakeAddress.isBlank()) {
+                // The ledger reports a bare script hash; turn it into the reward address every
+                // caller actually looks up. Script credential, hence getRewardAddress over a
+                // script Credential rather than a key one — the two produce different addresses
+                // for the same hash, and only one of them is ever queried.
+                stakeAddress = AddressProvider.getRewardAddress(
+                        Credential.fromScript(HexUtil.decodeHexString(credential)),
+                        network.getCardanoNetwork()).getAddress();
+            }
+
+            scriptRegistrationService.noteRegistered(stakeAddress, credential, "LEDGER_REJECT");
+            return ResponseEntity.ok(Map.of("stakeAddress", stakeAddress, "registered", true));
+        } catch (Exception e) {
+            log.error("Error recording known registration", e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
 
     /**
      * Check if a stake address is registered on-chain.

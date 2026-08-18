@@ -60,3 +60,14 @@ export async function registerToken(
     { timeout: 60000 } // 60 seconds for registration transaction
   );
 }
+
+/** Tell the backend that a script stake credential is already registered on chain.
+ *
+ *  Called after a submit fails with ledger error 3145, whose payload names the credential. The
+ *  backend cannot determine this itself: its account endpoint may be absent, and its indexed
+ *  certificates only reach back to sync-start-slot, while the protocol-global validators are
+ *  registered once per network — usually long before that. Recording it here is what lets the
+ *  next attempt leave the credential out instead of failing identically. */
+export async function noteKnownRegistration(knownCredential: string): Promise<void> {
+  await apiPost('/script-registration/known', { knownCredential });
+}

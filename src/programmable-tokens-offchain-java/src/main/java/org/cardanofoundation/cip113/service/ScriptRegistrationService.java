@@ -7,7 +7,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import com.bloxbean.cardano.yaci.core.model.certs.CertificateType;
 import org.cardanofoundation.cip113.model.TransactionContext;
+import org.cardanofoundation.cip113.entity.KnownScriptRegistrationEntity;
 import org.cardanofoundation.cip113.repository.CustomStakeRegistrationRepository;
+import org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -26,6 +28,7 @@ public class ScriptRegistrationService {
     private final QuickTxBuilder quickTxBuilder;
     private final AccountService accountService;
     private final CustomStakeRegistrationRepository stakeRegistrationRepository;
+    private final KnownScriptRegistrationRepository knownScriptRegistrationRepository;
 
     /**
      * Check if a stake address is registered on-chain.
@@ -58,6 +61,18 @@ public class ScriptRegistrationService {
         // Blockfrost's `active` IS the account's registration state, not its delegation state, and
         // a never-registered account 404s rather than reporting false — so a successful response is
         // authoritative in both directions and is taken as final.
+        // Anything we have been told, first. This is the only source that can answer for a
+        // credential registered before the indexed window and on a backend without an account
+        // endpoint — which together is the normal situation for the protocol-global validators.
+        try {
+            if (knownScriptRegistrationRepository.existsById(stakeAddress)) {
+                log.info("Stake address {} registered=true (known registrations)", stakeAddress);
+                return true;
+            }
+        } catch (Exception e) {
+            log.warn("Known-registration lookup failed for {}: {}", stakeAddress, e.getMessage());
+        }
+
         try {
             var accountInfo = bfBackendService.getAccountService().getAccountInformation(stakeAddress);
             if (accountInfo.isSuccessful() && accountInfo.getValue() != null
@@ -84,6 +99,27 @@ public class ScriptRegistrationService {
         } catch (Exception e) {
             log.error("Error checking stake address registration for {}: {}", stakeAddress, e.getMessage());
             return false;
+        }
+    }
+
+    /** Record that {@code stakeAddress} is registered, so no later build tries to register it
+     *  again. Idempotent.
+     *
+     *  <p>{@code source} says how we learned it — {@code BUILT} when this platform built the
+     *  registration, {@code LEDGER_REJECT} when a submit came back naming the credential as
+     *  already known. The second case is what makes a 3145 self-correcting: the error carries the
+     *  credential, so the next attempt can skip it instead of failing identically forever. */
+    public void noteRegistered(String stakeAddress, String credential, String source) {
+        try {
+            knownScriptRegistrationRepository.save(KnownScriptRegistrationEntity.builder()
+                    .stakeAddress(stakeAddress)
+                    .credential(credential)
+                    .source(source)
+                    .notedAt(java.time.Instant.now())
+                    .build());
+            log.info("Noted stake address {} as registered (source={})", stakeAddress, source);
+        } catch (Exception e) {
+            log.error("Could not record {} as registered: {}", stakeAddress, e.getMessage());
         }
     }
 
