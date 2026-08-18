@@ -5,7 +5,9 @@ import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.quicktx.Tx;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import com.bloxbean.cardano.yaci.core.model.certs.CertificateType;
 import org.cardanofoundation.cip113.model.TransactionContext;
+import org.cardanofoundation.cip113.repository.CustomStakeRegistrationRepository;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -23,6 +25,7 @@ public class ScriptRegistrationService {
     private final BFBackendService bfBackendService;
     private final QuickTxBuilder quickTxBuilder;
     private final AccountService accountService;
+    private final CustomStakeRegistrationRepository stakeRegistrationRepository;
 
     /**
      * Check if a stake address is registered on-chain.
@@ -31,18 +34,30 @@ public class ScriptRegistrationService {
      * @return true if registered (active), false otherwise
      */
     public boolean isStakeAddressRegistered(String stakeAddress) {
+        // Read the indexed certificate history, not Blockfrost's account endpoint.
+        //
+        // This used to ask `getAccountInformation(stakeAddress).getActive()`. That is the wrong
+        // question for a SCRIPT stake credential: these accounts are registered solely so a
+        // validator can be invoked by withdrawing 0, they never delegate to a pool, and they never
+        // accrue rewards — so the account endpoint answers `active: false`, or 404s outright on
+        // backends that only materialise accounts once they delegate. Every failure mode landed on
+        // `return false`, i.e. "not registered".
+        //
+        // That is the dangerous direction to be wrong in. The SDK's freeze-and-seize path asks this
+        // question and emits a registration certificate whenever the answer is false, so a
+        // permanently-false answer meant every retry re-registered credentials that already
+        // existed and was rejected with StakeKeyAlreadyRegisteredDELEG.
+        //
+        // The indexer already records every certificate. Take the most recent one for the address
+        // (the query orders by slot then cert index) and treat the address as registered only if
+        // that latest certificate is a registration — so a later deregistration correctly flips the
+        // answer back, which the `active` flag could not express either.
         try {
-            var accountInfo = bfBackendService.getAccountService().getAccountInformation(stakeAddress);
-
-            if (!accountInfo.isSuccessful()) {
-                log.warn("Failed to get account info for {}: {}", stakeAddress, accountInfo.getResponse());
-                return false;
-            }
-
-            boolean isActive = accountInfo.getValue().getActive();
-            log.info("Stake address {} is registered: {}", stakeAddress, isActive);
-            return isActive;
-
+            boolean isRegistered = stakeRegistrationRepository.findRegistrationsByStakeAddress(stakeAddress)
+                    .map(r -> r.getType().equals(CertificateType.STAKE_REGISTRATION))
+                    .orElse(false);
+            log.info("Stake address {} is registered: {}", stakeAddress, isRegistered);
+            return isRegistered;
         } catch (Exception e) {
             log.error("Error checking stake address registration for {}: {}", stakeAddress, e.getMessage());
             return false;

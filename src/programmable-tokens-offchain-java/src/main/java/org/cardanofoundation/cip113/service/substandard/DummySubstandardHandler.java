@@ -137,9 +137,21 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                             .map(stakeRegistration -> stakeRegistration.getType().equals(CertificateType.STAKE_REGISTRATION)).orElse(false))
                     .toList();
 
-            var stakeAddressesToRegister = registeredStakeAddresses.stream()
-                    .filter(stakeAddress -> !requiredStakeAddresses.contains(stakeAddress))
+            // Everything REQUIRED that is not yet REGISTERED.
+            //
+            // This used to start from `registeredStakeAddresses` and keep the entries not in
+            // `requiredStakeAddresses` — but the registered list is by construction a subset of
+            // the required one, so that predicate was never true and this list was ALWAYS empty.
+            // The method therefore always returned a null CBOR, the wizard reported "all
+            // required stake addresses are already registered", and no certificate was ever
+            // built. On a protocol deployment where they genuinely were not registered, the
+            // registration that followed withdrew-0 from reward accounts that did not exist and
+            // was rejected with WithdrawalsNotInRewardsCERTS.
+            var stakeAddressesToRegister = requiredStakeAddresses.stream()
+                    .filter(stakeAddress -> !registeredStakeAddresses.contains(stakeAddress))
                     .toList();
+            log.info("dummy pre-registration: required={} registered={} toRegister={}",
+                    requiredStakeAddresses, registeredStakeAddresses, stakeAddressesToRegister);
 
             if (stakeAddressesToRegister.isEmpty()) {
                 return TransactionContext.ok(null, registeredStakeAddresses);

@@ -135,7 +135,90 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
     public TransactionContext<List<String>> buildPreRegistrationTransaction(
             FreezeAndSeizeRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
-        return TransactionContext.typedError("Unexpected call. Use DenyList Init instead");
+        try {
+            // This used to hard-error with "Use DenyList Init instead", on the assumption that the
+            // blacklist init is the only transaction that ever needs to register these two reward
+            // accounts. That holds only when a token's init and its registration are built
+            // back-to-back from the same inputs. They are not always:
+            //
+            //   - issuer_admin is parameterized by (admin, ASSET NAME), so registering a SECOND
+            //     token against an EXISTING blacklist resolves a reward account no init ever saw;
+            //   - the transfer script is parameterized by (PLB hash, blacklist policy), so it is
+            //     shared by every token on that blacklist and is already registered by then.
+            //
+            // Either way the registration withdraws-0 from both, and a withdrawal from an
+            // unregistered reward account is rejected phase-1 at submit with
+            // WithdrawalsNotInRewardsCERTS — after the user has signed. Script evaluation cannot
+            // catch it, because reward-account existence is a ledger rule, not a Plutus one.
+            //
+            // So: register whichever of the two is actually missing, and return a null CBOR when
+            // both already exist. Same contract as the dummy handler's, which is what the wizard's
+            // pre-registration step already knows how to consume.
+            if (request.getAdminPubKeyHash() == null || request.getAdminPubKeyHash().isBlank()) {
+                return TransactionContext.typedError("adminPubKeyHash is required");
+            }
+            if (request.getBlacklistNodePolicyId() == null || request.getBlacklistNodePolicyId().isBlank()) {
+                return TransactionContext.typedError(
+                        "blacklistNodePolicyId is required — initialise the blacklist first");
+            }
+
+            // The SAME label rule as registration and as the init. issuer_admin is parameterized
+            // by this name, so an unlabelled name here would register a DIFFERENT credential than
+            // the one the registration withdraws from — the exact failure V14's cross-check
+            // exists to prevent.
+            var userAssetNameHex = request.getCip68Metadata() == null
+                    ? request.getAssetName()
+                    : Cip68.labeledAssetName(Cip68.uncappedUserTokenLabel(), request.getAssetName());
+
+            var substandardIssueContract = fesScriptBuilder.buildIssuerAdminScript(
+                    Credential.fromKey(request.getAdminPubKeyHash()),
+                    userAssetNameHex);
+            var substandardIssueAddress = AddressProvider.getRewardAddress(
+                    substandardIssueContract, network.getCardanoNetwork());
+
+            var substandardTransferContract = fesScriptBuilder.buildTransferScript(
+                    protocolParams.programmableLogicBaseParams().scriptHash(),
+                    request.getBlacklistNodePolicyId());
+            var substandardTransferAddress = AddressProvider.getRewardAddress(
+                    substandardTransferContract, network.getCardanoNetwork());
+
+            var requiredStakeAddresses = Stream.of(substandardIssueAddress, substandardTransferAddress)
+                    .map(Address::getAddress)
+                    .toList();
+
+            var registeredStakeAddresses = requiredStakeAddresses.stream()
+                    .filter(stakeAddress -> stakeRegistrationRepository.findRegistrationsByStakeAddress(stakeAddress)
+                            .map(r -> r.getType().equals(CertificateType.STAKE_REGISTRATION))
+                            .orElse(false))
+                    .toList();
+
+            var stakeAddressesToRegister = requiredStakeAddresses.stream()
+                    .filter(stakeAddress -> !registeredStakeAddresses.contains(stakeAddress))
+                    .toList();
+            log.info("freeze-and-seize pre-registration: required={} registered={} toRegister={}",
+                    requiredStakeAddresses, registeredStakeAddresses, stakeAddressesToRegister);
+
+            if (stakeAddressesToRegister.isEmpty()) {
+                return TransactionContext.ok(null, registeredStakeAddresses);
+            }
+
+            var registerAddressTx = new Tx()
+                    .from(request.getFeePayerAddress())
+                    .withChangeAddress(request.getFeePayerAddress());
+            stakeAddressesToRegister.forEach(registerAddressTx::registerStakeAddress);
+
+            // A bare legacy StakeRegistration, deliberately: it is still valid in Conway and
+            // requires NO witness, so a script stake credential registers without attaching its
+            // validator. Rewriting it to RegCert is what makes a witness mandatory.
+            var transaction = quickTxBuilder.compose(registerAddressTx)
+                    .feePayer(request.getFeePayerAddress())
+                    .build();
+
+            return TransactionContext.ok(transaction.serializeToHex(), registeredStakeAddresses);
+        } catch (Exception e) {
+            log.error("freeze-and-seize pre-registration failed", e);
+            return TransactionContext.typedError("pre-registration failed: " + e.getMessage());
+        }
     }
 
     @Override
