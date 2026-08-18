@@ -1,6 +1,7 @@
 /** API client for the security-token substandard. */
 
 import { apiGet, apiPost, apiDelete } from './client';
+import type { Cip68MetadataRequest } from '@/types/api';
 
 export interface SecurityTokenInclusionProof {
   memberPkh: string;
@@ -55,6 +56,14 @@ export interface SecurityTokenGlobalState {
    *  UpdateMemberRootHash tx to bring the chain in sync. */
   memberRootHashLocal: string;
   requiresReceiverKyc: boolean;
+  /** Written by SetRequiresSenderKyc and ENFORCED on chain: transfer_logic_script.ak:123
+   *  gates the per-sender KYC loop on this flag, independently of {@link requiresReceiverKyc}
+   *  which gates the per-destination loop at :157. */
+  requiresSenderKyc: boolean;
+  /** Terminal decommissioning flag. Once true the on-chain global_state
+   *  validator rejects EVERY spend of the global-state UTxO, so no admin
+   *  action, mint or burn can ever run against this token again. */
+  deactivated: boolean;
   adminCredentialHash: string;
 }
 
@@ -81,6 +90,18 @@ export interface SecurityTokenInitRequest {
   adminPubKeyHash: string;          // 28-byte hex
   requiresReceiverKyc: boolean;
   initialMintableAmount?: number;
+  /** Initial supply minted BY the registration transaction itself (decimal string).
+   *  Omit or '0' for a structural registration that mints nothing — the default,
+   *  and the path with the most on-chain mileage. When set, the registration tx
+   *  additionally spends GlobalState under MintSecurity (decrementing
+   *  initialMintableAmount by this quantity), references the power-user node the
+   *  chain's AddPowerUser tx creates, and pays the tokens to recipientAddress (or
+   *  the fee payer). Must not exceed initialMintableAmount — the cap is enforced
+   *  on chain. Only honoured by {@link buildSecurityTokenChain}. */
+  initialMintQuantity?: string;
+  /** Where a non-zero initialMintQuantity is paid. Defaults to feePayerAddress.
+   *  Must be a base address: the minting logic vets the STAKE credential. */
+  recipientAddress?: string;
   bootstrapPowerUserPkh?: string;
   bootstrapPowerUserCapabilities?: number;
   bootstrapPowerUserLabel?: string;
@@ -89,9 +110,40 @@ export interface SecurityTokenInitRequest {
    *  so KYC proofs issued here verify on chain without a separate
    *  AddTrustedEntity update tx beforehand. */
   initialTrustedEntityVkeys?: string[];
+  /** When set, genesis bakes the CIP-67 (222)/(333) label into the security asset name — and
+   *  therefore into minting_logic_script, transfer_logic_script and the token policy id.
+   *  The label is chosen from `initialMintableAmount`, not `quantity`, because a
+   *  security-token registration is structurally mint-free.
+   *
+   *  The (100) reference token is NOT minted here: the registration path rejects a second
+   *  asset name under the policy (minting_logic_script.ak:198-204). Pass the same metadata to
+   *  the FIRST mint (`/issue-token/mint`) to complete the pair. */
+  cip68Metadata?: Cip68MetadataRequest;
+  /** OPT-IN. Seed the compliance allowlist at genesis with the recipient's stake
+   *  credential and write the resulting MPF root into the GlobalState datum's
+   *  member_root_hash.
+   *
+   *  Without it, `requiresReceiverKyc: true` and a non-zero initialMintQuantity are
+   *  mutually exclusive for any ordinary recipient: the minting logic wants a
+   *  membership proof, genesis writes the root empty, and no root can be published
+   *  beforehand (publishing one is a GlobalState spend, and GlobalState is created by
+   *  genesis). The contract's self-mint exemption does not rescue it either — it
+   *  compares the recipient's STAKE credential against the power-user node key, which
+   *  the wizard sets from the wallet's PAYMENT key hash.
+   *
+   *  COMPLIANCE: this asserts on chain that the recipient is a verified allowlist
+   *  member with no KYC process behind it, and that assertion is what every later
+   *  transfer proves membership against — not just this first mint. Off by default,
+   *  and ignored by the backend unless `requiresReceiverKyc` is on AND
+   *  `initialMintQuantity` is above zero. */
+  seedRecipientInAllowlistAtGenesis?: boolean;
   // Fields below are required by the discriminated request shape on the backend
-  // but ignored by the init endpoint:
+  // but carry no meaning here:
   substandardId?: 'security-token';
+  /** IGNORED. buildFullRegistrationChain overwrites it with
+   *  {@link initialMintQuantity} before delegating to the registration builder,
+   *  and /init mints nothing at all. Both helpers below default it to '0' purely
+   *  to satisfy the request shape — set the supply via initialMintQuantity. */
   quantity?: string;
 }
 
@@ -114,6 +166,13 @@ export const initSecurityTokenGlobalState = (body: SecurityTokenInitRequest) =>
 export interface SecurityTokenChainBuildResponse {
   genesisCborHex: string;
   addPowerUserCborHex: string;
+  /** Publishes minting_logic (~7.3 KB) and the global_state spend validator (~4.3 KB)
+   *  as REFERENCE SCRIPTS. Present iff the registration carries a first mint, which is
+   *  the only case whose validator set does not fit inline: attached inline the five
+   *  validators a registration-with-mint needs come to 16 584 bytes against the
+   *  ledger's 16 384-byte maximum. Must be signed and submitted BEFORE the
+   *  registration tx, which reads both scripts from it. */
+  publishScriptsCborHex?: string;
   registrationCborHex: string;
   /** Conway RegCert for the BaFin transfer_logic_script stake credential.
    *  Included in the same CIP-103 signing batch so Eternl signs it cleanly
@@ -121,21 +180,35 @@ export interface SecurityTokenChainBuildResponse {
    *  fit it (the optional 4th tx); when absent, the wallet's first transfer
    *  will trigger the runtime fallback to register the cred. */
   registerTransferLogicCborHex?: string;
+  /** RegCert for third_party_transfer_logic. The burn withdraws 0 from that reward
+   *  account, so without it the first burn is rejected at submit. */
+  registerThirdPartyTransferLogicCborHex?: string;
   globalStatePolicyId: string;
   programmableTokenPolicyId: string;
   denylistPolicyId: string;
   powerUsersPolicyId: string;
   genesisTxHash: string;
   addPowerUserTxHash: string;
+  publishScriptsTxHash?: string;
   registrationTxHash: string;
   registerTransferLogicTxHash?: string;
 }
 
-/** Build all three security-token registration txs at once: genesis (mints GS +
- *  denylist root + PU root), AddPowerUser (insert admin into PU list), registration
- *  (CIP-113 directory insert + stake-cred registration, NO initial mint).
- *  The frontend signs all three in a single CIP-30 signTxs popup and posts the
- *  signed CBORs (in order) to {@link submitTokenChain}. */
+/** Build the whole security-token registration chain at once, in submission order:
+ *
+ *    1. genesis            mints GS + denylist root + PU root
+ *    2. addPowerUser       inserts the admin into the power-user linked list
+ *    3. publishScripts     mint path only — publishes minting_logic + global_state
+ *                          spend as reference scripts, without which the registration
+ *                          tx exceeds max-tx-size
+ *    4. registration       CIP-113 directory insert + stake-cred registration, plus —
+ *                          when {@link SecurityTokenInitRequest.initialMintQuantity}
+ *                          is set — the token's first mint in that same transaction
+ *    5. registerTransferLogic  optional Conway RegCert for the transfer-logic cred
+ *
+ *  The frontend signs them all in a single CIP-30 signTxs popup and posts the signed
+ *  CBORs, IN THIS ORDER, to {@link submitTokenChain}. Steps 3 and 5 are optional; the
+ *  order of the rest is load-bearing, because each spends the previous one's change. */
 export const buildSecurityTokenChain = (body: SecurityTokenInitRequest) =>
   apiPost<SecurityTokenInitRequest, SecurityTokenChainBuildResponse>(
     `/security-token/build-chain`,
@@ -158,6 +231,52 @@ export const submitTokenChain = (signedCborHexes: string[]) =>
     { signedCborHexes },
   );
 
+/** A partial-failure result from {@link submitTokenChain}.
+ *
+ *  The backend submits sequentially and stops at the first rejection, returning
+ *  HTTP 400 with the hashes that DID land plus the failing index. Because that
+ *  is a non-2xx status, {@link apiPost} throws before the caller can inspect the
+ *  body — so `if (result.error)` on the resolved value is dead code and the
+ *  successful hashes were being discarded (D9). That matters: the chain is
+ *  mempool-chained, so a failure at index i leaves changes 0..i-1 applied on
+ *  chain and the operator needs their hashes to work out the real state.
+ *
+ *  Call this in the catch block to recover the structured body. */
+export interface SubmitChainPartialFailure {
+  /** Hashes of the transactions that were accepted before the failure. */
+  txHashes: string[];
+  /** Index of the change whose transaction was rejected. */
+  failedIndex?: number;
+  /** Hash of the rejected transaction, when the backend could derive it. */
+  failedTxHash?: string;
+  /** Backend's reason string. */
+  error: string;
+}
+
+/** Parse a thrown {@link submitTokenChain} error into its structured body.
+ *
+ *  {@link ApiException.message} carries the raw response text, which for this
+ *  endpoint is the JSON `{ txHashes, failedIndex, failedTxHash, error }`.
+ *  Falls back to a bare message when the body isn't that shape (network error,
+ *  proxy HTML page, timeout, …) so callers always get something renderable. */
+export function parseSubmitChainFailure(err: unknown): SubmitChainPartialFailure {
+  const raw = err instanceof Error ? err.message : String(err);
+  try {
+    const body = JSON.parse(raw) as Partial<SubmitChainPartialFailure>;
+    if (body && typeof body === 'object') {
+      return {
+        txHashes: Array.isArray(body.txHashes) ? body.txHashes : [],
+        failedIndex: typeof body.failedIndex === 'number' ? body.failedIndex : undefined,
+        failedTxHash: typeof body.failedTxHash === 'string' ? body.failedTxHash : undefined,
+        error: typeof body.error === 'string' ? body.error : raw,
+      };
+    }
+  } catch {
+    // Not JSON — fall through to the raw message.
+  }
+  return { txHashes: [], error: raw };
+}
+
 /** A single GS field change to be applied as one transaction in the chain.
  *  Only the fields relevant to the chosen action should be populated. */
 export interface GsChangeSpec {
@@ -167,9 +286,13 @@ export interface GsChangeSpec {
     | "AddTrustedEntity"
     | "RemoveTrustedEntity"
     | "UpdateTrustedEntity"
+    | "SetRequiresSenderKyc"
     | "SetRequiresReceiverKyc"
     | "UpdateMemberRootHash"
-    | "RotateAdmin";
+    | "RotateAdmin"
+    /** Irreversible. Requires transfers to already be paused; afterwards the
+     *  on-chain validator rejects every further spend of the global state. */
+    | "DeactivateContract";
   transfersPaused?: boolean;
   newSecurityInfoHex?: string;
   trustedVkeyHex?: string;
@@ -177,6 +300,10 @@ export interface GsChangeSpec {
   trustedOldVkeyHex?: string;
   trustedNewVkeyHex?: string;
   trustedNewMetadataHex?: string;
+  /** SetRequiresSenderKyc. The backend has always read this key
+   *  (SecurityTokenController: `change.get("requiresSenderKycEnabled")`); it was
+   *  missing from this type, which made the action unreachable from the UI (D4). */
+  requiresSenderKycEnabled?: boolean;
   requiresReceiverKycEnabled?: boolean;
   newMemberRootHashHex?: string;
   newAdminCredentialHashHex?: string;

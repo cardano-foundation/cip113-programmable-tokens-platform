@@ -5,17 +5,28 @@ import { useWallet } from '@/hooks/use-wallet';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
+import { supportsCIP68, CIP68_FIELD_MAX_LENGTHS, validateCip68Metadata } from '@/lib/utils/cip68';
 
 interface TokenDetailsStepProps extends StepComponentProps<TokenDetailsData, TokenDetailsData> {}
 
 export function TokenDetailsStep({
   stepData,
+  wizardState,
   onDataChange,
   onComplete,
   onBack,
   isProcessing,
 }: TokenDetailsStepProps) {
+  // For the RWA/security-token flow this figure IS `initialMintQuantity` — the
+  // supply the registration transaction itself mints. Zero is meaningful there: it
+  // registers the policy structurally and leaves the first mint as a separate admin
+  // action. Every other flow mints unconditionally, so zero stays an error.
+  const allowsZeroSupply = wizardState?.flowId === 'security-token';
   const { connected, wallet } = useWallet();
+  // This step is shared by all five flows, but only three of them mint the CIP-68 pair. For the
+  // rest the form is not rendered at all — collecting metadata that goes nowhere is exactly the
+  // bug this gate exists to prevent.
+  const cip68Supported = supportsCIP68(wizardState?.flowId);
   const [assetName, setAssetName] = useState(stepData.assetName || '');
   const [quantity, setQuantity] = useState(stepData.quantity || '');
   const [recipientAddress, setRecipientAddress] = useState(stepData.recipientAddress || '');
@@ -64,13 +75,18 @@ export function TokenDetailsStep({
       newErrors.assetName = 'Token name is required';
     } else if (assetName.length > 32) {
       newErrors.assetName = 'Token name must be 32 characters or less';
+    } else if (cip68Enabled && cip68Supported && assetName.length > 28) {
+      // The CIP-67 label costs 4 of the ledger's 32 bytes. Caught here rather than at the
+      // backend, which would only reject after the user had walked the rest of the wizard.
+      newErrors.assetName =
+        'With CIP-68 enabled the name must be 28 characters or less — the CIP-67 label takes 4 of the 32 bytes';
     }
 
     if (!quantity.trim()) {
       newErrors.quantity = 'Quantity is required';
     } else if (!/^\d+$/.test(quantity)) {
-      newErrors.quantity = 'Quantity must be a positive number';
-    } else if (BigInt(quantity) <= 0) {
+      newErrors.quantity = 'Quantity must be a whole, non-negative number';
+    } else if (!allowsZeroSupply && BigInt(quantity) <= 0) {
       newErrors.quantity = 'Quantity must be greater than 0';
     }
 
@@ -78,16 +94,32 @@ export function TokenDetailsStep({
       newErrors.recipientAddress = 'Invalid Cardano address format';
     }
 
-    if (cip68Enabled) {
-      if (!cip68Name.trim()) {
-        newErrors.cip68Name = 'Display name is required for CIP-68 metadata';
-      }
-      if (cip68Decimals) {
-        const dec = parseInt(cip68Decimals);
-        if (isNaN(dec) || dec < 0 || dec > 19) {
-          newErrors.cip68Decimals = 'Decimals must be 0-19';
-        }
-      }
+    if (cip68Enabled && cip68Supported) {
+      // The `maxLength` attributes on the inputs below are a typing convenience, not an
+      // enforcement point: they do not apply to state restored from a persisted wizard, nor to a
+      // value set programmatically. The ceilings are re-checked here, against the same shared
+      // table the Java backend mirrors, so an over-long field is caught before the user pays for
+      // anything rather than surfacing as a build failure afterwards.
+      const metadataErrors = validateCip68Metadata({
+        name: cip68Name,
+        description: cip68Description,
+        ticker: cip68Ticker,
+        decimals: cip68Decimals,
+        url: cip68Url,
+        logo: cip68Logo,
+      });
+      // Map the shared field names onto this form's error keys.
+      const keyFor: Record<string, string> = {
+        name: 'cip68Name',
+        description: 'cip68Description',
+        ticker: 'cip68Ticker',
+        decimals: 'cip68Decimals',
+        url: 'cip68Url',
+        logo: 'cip68Logo',
+      };
+      Object.entries(metadataErrors).forEach(([field, message]) => {
+        newErrors[keyFor[field] ?? field] = message;
+      });
     }
 
     setErrors(newErrors);
@@ -113,7 +145,9 @@ export function TokenDetailsStep({
     }
   };
 
-  const buildCip68Data = () => cip68Enabled ? {
+  // Belt and braces: even if `cip68Enabled` were somehow restored from persisted wizard state
+  // for an unsupported flow, nothing is emitted for it.
+  const buildCip68Data = () => cip68Enabled && cip68Supported ? {
     enabled: true,
     name: cip68Name.trim(),
     description: cip68Description.trim(),
@@ -179,7 +213,9 @@ export function TokenDetailsStep({
           placeholder="e.g., 1000000"
           disabled={isProcessing}
           error={errors.quantity}
-          helperText="Number of tokens to mint during registration"
+          helperText={allowsZeroSupply
+            ? 'Minted by the registration transaction itself. Enter 0 to register the policy only and mint later from the admin page.'
+            : 'Number of tokens to mint during registration'}
         />
 
         <Input
@@ -193,26 +229,28 @@ export function TokenDetailsStep({
         />
       </div>
 
-      {/* CIP-68 Metadata Section */}
-      <div className="border-t border-dark-700 pt-4">
-        <label className="flex items-center gap-3 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={cip68Enabled}
-            onChange={(e) => handleCip68Toggle(e.target.checked)}
-            disabled={isProcessing}
-            className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500"
-          />
-          <div>
-            <span className="text-sm font-medium text-white">Enable CIP-68 Metadata</span>
-            <p className="text-xs text-dark-400">
-              Attach on-chain metadata (name, ticker, decimals, etc.) via a CIP-68 reference token
-            </p>
-          </div>
-        </label>
-      </div>
+      {/* CIP-68 Metadata Section — only for substandards that actually mint the pair */}
+      {cip68Supported && (
+        <div className="border-t border-dark-700 pt-4">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={cip68Enabled}
+              onChange={(e) => handleCip68Toggle(e.target.checked)}
+              disabled={isProcessing}
+              className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500"
+            />
+            <div>
+              <span className="text-sm font-medium text-white">Enable CIP-68 Metadata</span>
+              <p className="text-xs text-dark-400">
+                Attach on-chain metadata (name, ticker, decimals, etc.) via a CIP-68 reference token
+              </p>
+            </div>
+          </label>
+        </div>
+      )}
 
-      {cip68Enabled && (
+      {cip68Supported && cip68Enabled && (
         <div className="space-y-4 p-4 bg-dark-800/50 rounded-lg border border-dark-700">
           <Input
             label="Display Name"
@@ -223,8 +261,9 @@ export function TokenDetailsStep({
             }}
             placeholder="e.g., My Token"
             disabled={isProcessing}
+            maxLength={CIP68_FIELD_MAX_LENGTHS.name}
             error={errors.cip68Name}
-            helperText="Token display name stored on-chain (required)"
+            helperText={`Token display name stored on-chain (required, max ${CIP68_FIELD_MAX_LENGTHS.name} chars)`}
           />
 
           <Input
@@ -233,7 +272,9 @@ export function TokenDetailsStep({
             onChange={(e) => setCip68Description(e.target.value)}
             placeholder="A brief description of your token"
             disabled={isProcessing}
-            helperText="Brief description of your token (optional)"
+            maxLength={CIP68_FIELD_MAX_LENGTHS.description}
+            error={errors.cip68Description}
+            helperText={`Brief description (optional, max ${CIP68_FIELD_MAX_LENGTHS.description} chars)`}
           />
 
           <div className="grid grid-cols-2 gap-4">
@@ -243,7 +284,9 @@ export function TokenDetailsStep({
               onChange={(e) => setCip68Ticker(e.target.value)}
               placeholder="e.g., MYTKN"
               disabled={isProcessing}
-              helperText="Short symbol"
+              maxLength={CIP68_FIELD_MAX_LENGTHS.ticker}
+              error={errors.cip68Ticker}
+              helperText={`Short symbol (max ${CIP68_FIELD_MAX_LENGTHS.ticker} chars)`}
             />
             <Input
               label="Decimals"
@@ -262,7 +305,9 @@ export function TokenDetailsStep({
             onChange={(e) => setCip68Url(e.target.value)}
             placeholder="https://..."
             disabled={isProcessing}
-            helperText="Project website (optional)"
+            maxLength={CIP68_FIELD_MAX_LENGTHS.url}
+            error={errors.cip68Url}
+            helperText={`Project website (optional, max ${CIP68_FIELD_MAX_LENGTHS.url} chars)`}
           />
 
           <Input
@@ -271,7 +316,9 @@ export function TokenDetailsStep({
             onChange={(e) => setCip68Logo(e.target.value)}
             placeholder="https://..."
             disabled={isProcessing}
-            helperText="Token logo image URL (optional)"
+            maxLength={CIP68_FIELD_MAX_LENGTHS.logo}
+            error={errors.cip68Logo}
+            helperText={`Token logo image URL (optional, max ${CIP68_FIELD_MAX_LENGTHS.logo} chars)`}
           />
         </div>
       )}

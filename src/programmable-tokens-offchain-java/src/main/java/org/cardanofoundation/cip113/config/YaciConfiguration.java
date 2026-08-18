@@ -15,6 +15,7 @@ import com.bloxbean.cardano.client.backend.koios.KoiosBackendService;
 import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.service.CostModelOverlayProtocolParamsSupplier;
+import org.cardanofoundation.cip113.service.HybridScriptSupplier;
 import org.cardanofoundation.cip113.service.HybridUtxoSupplier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -32,6 +33,19 @@ public class YaciConfiguration {
         return new HybridUtxoSupplier(bfBackendService.getUtxoService());
     }
 
+    /** Reference-script resolver for the whole app. Wrapping {@link DefaultScriptSupplier}
+     *  is what makes a mempool-chained reference script usable: a reference script lives in
+     *  a transaction OUTPUT, and every consumer of one (the Aiken evaluator, the fee
+     *  calculator, {@code ReferenceScriptResolver}) resolves it by asking a
+     *  {@code ScriptSupplier} for the hash recorded on the UTxO. The backend cannot answer
+     *  for an unsubmitted output, so without this the local evaluator errors on any
+     *  chain-published reference script and {@link #ceilingCostFallback} silently fabricates
+     *  its costs. */
+    @Bean
+    public HybridScriptSupplier hybridScriptSupplier(BFBackendService bfBackendService) {
+        return new HybridScriptSupplier(new DefaultScriptSupplier(bfBackendService.getScriptService()));
+    }
+
     @Bean
     public ProtocolParamsSupplier protocolParamsSupplier(BFBackendService bfBackendService,
                                                          KoiosBackendService koiosBackendService) {
@@ -43,11 +57,11 @@ public class YaciConfiguration {
 
     @Bean
     public TransactionEvaluator aikenTransactionEvaluator(HybridUtxoSupplier hybridUtxoSupplier,
+                                                          HybridScriptSupplier hybridScriptSupplier,
                                                           ProtocolParamsSupplier protocolParamsSupplier,
                                                           BFBackendService bfBackendService) {
 
-        var scriptSupplier = new DefaultScriptSupplier(bfBackendService.getScriptService());
-        var aikenEvaluator = new AikenTransactionEvaluator(hybridUtxoSupplier, protocolParamsSupplier, scriptSupplier);
+        var aikenEvaluator = new AikenTransactionEvaluator(hybridUtxoSupplier, protocolParamsSupplier, hybridScriptSupplier);
 
         // Three-tier evaluator: aiken-java-binding → Blockfrost → ceiling-cost fallback.
         // aiken-java-binding 0.1.0 doesn't yet handle Aiken MPF v2.1.0 proofs that pass
@@ -116,6 +130,7 @@ public class YaciConfiguration {
 
     @Bean
     public QuickTxBuilder quickTxBuilder(HybridUtxoSupplier hybridUtxoSupplier,
+                                         HybridScriptSupplier hybridScriptSupplier,
                                          ProtocolParamsSupplier protocolParamsSupplier,
                                          TransactionEvaluator transactionEvaluator,
                                          BFBackendService bfBackendService) {
@@ -132,11 +147,12 @@ public class YaciConfiguration {
                 return transactionEvaluator.evaluateTx(cbor, inputUtxos);
             }
         };
-        var scriptSupplier = new DefaultScriptSupplier(bfBackendService.getScriptService());
-
+        // The hybrid supplier, not a bare DefaultScriptSupplier: this is what
+        // ReferenceScriptResolver and the Conway ref-script fee calculation consult, and
+        // both run on transactions whose reference scripts may still be unsubmitted.
         return new QuickTxBuilder(hybridUtxoSupplier,
                 protocolParamsSupplier,
-                scriptSupplier,
+                hybridScriptSupplier,
                 transactionProcessor);
 
     }

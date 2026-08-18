@@ -126,6 +126,43 @@ public class SecurityTokenAllowlistService {
         persistLocalRootInTx(policyId);
     }
 
+    /** MPF root of a trie holding exactly one member, computed WITHOUT touching the
+     *  database.
+     *
+     *  <p>Needed only by the genesis path: {@code member_root_hash} has to be baked
+     *  into the GlobalState datum while the transaction is being built, and the
+     *  registration row keyed on the programmable-token policy id does not exist yet
+     *  at that point (genesis is what creates it). Every other caller should go
+     *  through {@link #currentRoot(String)}.
+     *
+     *  <p>Uses the same {@link #buildTrieFromLeaves} encoding as the persisted trie —
+     *  key = member pkh, value = 8-byte big-endian valid-until — so
+     *  {@link #seedPublishedMember} reproduces this exact root once the row exists. */
+    public byte[] rootForSingleMember(byte[] memberPkh, long validUntilMs) {
+        MpfTrie trie = new MpfTrie(new TestNodeStore());
+        trie.put(memberPkh, encodeValidUntil(validUntilMs));
+        return rootBytes(trie);
+    }
+
+    /** Enroll a member AND mark them published in one step, for the case where the
+     *  publishing transaction is the genesis transaction itself.
+     *
+     *  <p>{@link #inclusionProof} deliberately proves against the trie of PUBLISHED
+     *  leaves only, because that is the trie whose root matches the chain. Normally a
+     *  leaf becomes published when an {@code UpdateMemberRootHash} transaction
+     *  confirms. A genesis-seeded member has no such transaction — the root is in the
+     *  datum from block one — so the leaf has to be marked published here or no proof
+     *  would ever be produced for it. */
+    @Transactional
+    public void seedPublishedMember(String policyId, byte[] memberPkh, long validUntilMs) {
+        putMember(policyId, memberPkh, validUntilMs, null, null);
+        TrieSnapshot snapshot = snapshotForPublish(policyId);
+        markLeavesPublishedById(snapshot.leafIds());
+        log.info("seeded genesis allowlist member {} for {} (root {}, valid until {})",
+                HexUtil.encodeHexString(memberPkh), policyId,
+                HexUtil.encodeHexString(snapshot.root()), Instant.ofEpochMilli(validUntilMs));
+    }
+
     @Transactional
     public void removeMember(String policyId, byte[] memberPkh) {
         String memberPkhHex = HexUtil.encodeHexString(memberPkh);

@@ -5,7 +5,11 @@ import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.quicktx.Tx;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import com.bloxbean.cardano.yaci.core.model.certs.CertificateType;
 import org.cardanofoundation.cip113.model.TransactionContext;
+import org.cardanofoundation.cip113.entity.KnownScriptRegistrationEntity;
+import org.cardanofoundation.cip113.repository.CustomStakeRegistrationRepository;
+import org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -23,6 +27,8 @@ public class ScriptRegistrationService {
     private final BFBackendService bfBackendService;
     private final QuickTxBuilder quickTxBuilder;
     private final AccountService accountService;
+    private final CustomStakeRegistrationRepository stakeRegistrationRepository;
+    private final KnownScriptRegistrationRepository knownScriptRegistrationRepository;
 
     /**
      * Check if a stake address is registered on-chain.
@@ -31,21 +37,128 @@ public class ScriptRegistrationService {
      * @return true if registered (active), false otherwise
      */
     public boolean isStakeAddressRegistered(String stakeAddress) {
+        // Ask the LEDGER first, and only fall back to our own index.
+        //
+        // Neither source is sufficient alone, and each fails in the dangerous direction on its own:
+        //
+        //   - The index can simply not contain the certificate. It is populated from
+        //     `sync-start-slot`, which is deliberately not genesis on every profile (mainnet starts
+        //     at the block that minted the contract ref input), and it restarts empty whenever a
+        //     devnet is reset or the database recreated. The dummy substandard's issue/transfer
+        //     validators are protocol-GLOBAL and unparameterized, so they are registered exactly
+        //     once per network — most likely long before whatever slot this deployment syncs from.
+        //     Absence from the index therefore does not mean absence from the chain.
+        //
+        //   - The account endpoint is unreachable or errors transiently, and every such failure
+        //     used to be flattened to `false`.
+        //
+        // "false" is the expensive answer to get wrong: every caller registers the credential when
+        // it hears it, and re-registering an existing one is rejected outright with
+        // StakeKeyAlreadyRegisteredDELEG ("Trying to re-register some already known credentials").
+        // A wrong "true" merely surfaces as a withdrawal failure on a credential that was never
+        // there, which the pre-registration step exists to prevent in the first place.
+        //
+        // Blockfrost's `active` IS the account's registration state, not its delegation state, and
+        // a never-registered account 404s rather than reporting false — so a successful response is
+        // authoritative in both directions and is taken as final.
+        // Anything we have been told, first. This is the only source that can answer for a
+        // credential registered before the indexed window and on a backend without an account
+        // endpoint — which together is the normal situation for the protocol-global validators.
+        try {
+            var known = knownScriptRegistrationRepository.findById(stakeAddress).orElse(null);
+            if (known != null && known.isRegistered()) {
+                log.info("Stake address {} registered=true (known registrations)", stakeAddress);
+                return true;
+            }
+        } catch (Exception e) {
+            log.warn("Known-registration lookup failed for {}: {}", stakeAddress, e.getMessage());
+        }
+
         try {
             var accountInfo = bfBackendService.getAccountService().getAccountInformation(stakeAddress);
-
-            if (!accountInfo.isSuccessful()) {
-                log.warn("Failed to get account info for {}: {}", stakeAddress, accountInfo.getResponse());
-                return false;
+            if (accountInfo.isSuccessful() && accountInfo.getValue() != null
+                    && accountInfo.getValue().getActive() != null) {
+                boolean active = accountInfo.getValue().getActive();
+                log.info("Stake address {} registered={} (ledger)", stakeAddress, active);
+                return active;
             }
+            log.debug("Ledger could not answer for {} ({}), falling back to the indexed certificates",
+                    stakeAddress, accountInfo.isSuccessful() ? "no account" : accountInfo.getResponse());
+        } catch (Exception e) {
+            log.warn("Ledger lookup failed for {} ({}), falling back to the indexed certificates",
+                    stakeAddress, e.getMessage());
+        }
 
-            boolean isActive = accountInfo.getValue().getActive();
-            log.info("Stake address {} is registered: {}", stakeAddress, isActive);
-            return isActive;
-
+        // Fallback: the most recent certificate for this address wins, so a later deregistration
+        // correctly flips the answer back — something the account flag alone could not express.
+        try {
+            boolean isRegistered = stakeRegistrationRepository.findRegistrationsByStakeAddress(stakeAddress)
+                    .map(r -> r.getType().equals(CertificateType.STAKE_REGISTRATION))
+                    .orElse(false);
+            log.info("Stake address {} registered={} (indexed certificates)", stakeAddress, isRegistered);
+            return isRegistered;
         } catch (Exception e) {
             log.error("Error checking stake address registration for {}: {}", stakeAddress, e.getMessage());
             return false;
+        }
+    }
+
+    /** Record that {@code stakeAddress} is registered, so no later build tries to register it
+     *  again. Idempotent.
+     *
+     *  <p>{@code source} says how we learned it — {@code BUILT} when this platform built the
+     *  registration, {@code LEDGER_REJECT} when a submit came back naming the credential as
+     *  already known. The second case is what makes a 3145 self-correcting: the error carries the
+     *  credential, so the next attempt can skip it instead of failing identically forever. */
+    public boolean noteRegistered(String stakeAddress, String credential, String source) {
+        try {
+            var existing = knownScriptRegistrationRepository.findById(stakeAddress).orElse(null);
+            if (existing == null) {
+                // Refuse. Nothing here authenticates the caller, and this is the one write that
+                // changes later behaviour on its own — every other endpoint hands back unsigned
+                // CBOR that still needs a wallet signature. Marking an arbitrary credential
+                // registered makes the pre-registration step SKIP it, and the registration that
+                // follows is then rejected with WithdrawalsNotInRewardsCERTS: a durable denial of
+                // service against that token, invisible both on chain and in these logs.
+                //
+                // A row only exists because THIS platform built a certificate for the credential,
+                // so requiring one confines callers to confirming what we were already attempting
+                // — which is the whole recovery case — without letting them name a credential of
+                // their own choosing.
+                log.warn("Refusing to mark {} as registered: this platform never built a "
+                        + "registration for it, so there is nothing to confirm", stakeAddress);
+                return false;
+            }
+            existing.setRegistered(true);
+            existing.setSource(source);
+            existing.setNotedAt(java.time.Instant.now());
+            knownScriptRegistrationRepository.save(existing);
+            log.info("Noted stake address {} as registered (source={})", stakeAddress, source);
+            return true;
+        } catch (Exception e) {
+            log.error("Could not record {} as registered: {}", stakeAddress, e.getMessage());
+            return false;
+        }
+    }
+
+    /** Record that this platform is about to ask the user to sign a registration for
+     *  {@code stakeAddress}. Creates the evidence {@link #noteRegistered} requires, and nothing
+     *  else — the row does not claim the credential is registered. Idempotent, and never
+     *  downgrades a row that already says it is. */
+    public void noteRegistrationAttempted(String stakeAddress, String credential) {
+        try {
+            if (knownScriptRegistrationRepository.existsById(stakeAddress)) {
+                return;
+            }
+            knownScriptRegistrationRepository.save(KnownScriptRegistrationEntity.builder()
+                    .stakeAddress(stakeAddress)
+                    .credential(credential)
+                    .source("BUILT")
+                    .registered(false)
+                    .notedAt(java.time.Instant.now())
+                    .build());
+        } catch (Exception e) {
+            log.warn("Could not record the registration attempt for {}: {}", stakeAddress, e.getMessage());
         }
     }
 

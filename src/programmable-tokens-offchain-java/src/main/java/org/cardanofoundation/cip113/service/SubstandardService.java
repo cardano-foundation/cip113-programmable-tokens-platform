@@ -9,6 +9,7 @@ import org.cardanofoundation.cip113.model.Substandard;
 import org.cardanofoundation.cip113.model.SubstandardValidator;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -16,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Service
@@ -24,6 +26,23 @@ import java.util.concurrent.ConcurrentHashMap;
 public class SubstandardService {
 
     private final ObjectMapper objectMapper;
+
+    /**
+     * Substandards to hide from {@link #getAllSubstandards()} — the list the issuance
+     * wizard offers. Listed by folder id.
+     *
+     * <p>Disabled substandards are still LOADED and still resolvable by
+     * {@link #getSubstandardById(String)} and {@link #getSubstandardValidator(String, String)}.
+     * That is deliberate: those lookups are the runtime path for tokens that were already
+     * issued, used by the script builders and by scheduled jobs such as MpfRootSyncJob.
+     * Dropping them from the cache made those fail with
+     * "kyc-extended contract not found: global_state.global_state.mint".
+     *
+     * <p>To stop a substandard's background jobs as well, use its own switch (e.g.
+     * KYC_EXTENDED_ENABLED=false) — this property governs issuance choices only.
+     */
+    @Value("${substandards.disabled:}")
+    private List<String> disabledSubstandards = new ArrayList<>();
 
     // Thread-safe in-memory cache of all substandards
     private final Map<String, Substandard> substandardsCache = new ConcurrentHashMap<>();
@@ -74,8 +93,24 @@ public class SubstandardService {
                         validators.add(new SubstandardValidator(title, compiledCode, hash));
                     }
 
+                    // Optional display metadata; absent for substandards that have not
+                    // supplied one, in which case the id is capitalised as before.
+                    String name = defaultName(folderName);
+                    String description = "";
+                    var metaResource = new PathMatchingResourcePatternResolver()
+                            .getResource("classpath:substandards/" + folderName + "/metadata.json");
+                    if (metaResource.exists()) {
+                        JsonNode meta = objectMapper.readTree(metaResource.getInputStream());
+                        if (meta.hasNonNull("name")) {
+                            name = meta.get("name").asText();
+                        }
+                        if (meta.hasNonNull("description")) {
+                            description = meta.get("description").asText();
+                        }
+                    }
+
                     // Create and cache the substandard
-                    Substandard substandard = new Substandard(folderName, validators);
+                    Substandard substandard = new Substandard(folderName, name, description, validators);
                     substandardsCache.put(folderName, substandard);
 
                     log.info("Loaded substandard '{}' with {} validators", folderName, validators.size());
@@ -92,13 +127,22 @@ public class SubstandardService {
         }
     }
 
+    /** Capitalised folder id — the label the UI used before metadata.json existed. */
+    private static String defaultName(String folderName) {
+        return folderName.isEmpty()
+                ? folderName
+                : folderName.substring(0, 1).toUpperCase() + folderName.substring(1);
+    }
+
     /**
      * Get all substandards
      *
      * @return list of all substandards
      */
     public List<Substandard> getAllSubstandards() {
-        return new ArrayList<>(substandardsCache.values());
+        return substandardsCache.values().stream()
+                .filter(s -> !disabledSubstandards.contains(s.id()))
+                .collect(Collectors.toCollection(ArrayList::new));
     }
 
     /**

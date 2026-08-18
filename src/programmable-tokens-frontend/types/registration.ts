@@ -84,6 +84,17 @@ export interface TokenRegistrationCallbackData {
   blacklistInitTxHash?: string;
   /** Bootstrap UTxO output index (FES only) */
   blacklistInitOutputIndex?: number;
+  /**
+   * Whether the blacklist init was built for a CIP-68 (CIP-67-labelled) asset name (FES only).
+   *
+   * The init is the only transaction that registers `issuer_admin`'s reward account, and
+   * `issuer_admin` is parameterized by the asset name — so an init and a registration that
+   * disagree about CIP-68 resolve different reward addresses, and the registration is rejected on
+   * chain after the init has already been paid for. Recording it lets the backend refuse before
+   * building. Omitted means "not stated", which the backend treats as no evidence rather than
+   * as `false`.
+   */
+  cip68Enabled?: boolean;
 }
 
 /**

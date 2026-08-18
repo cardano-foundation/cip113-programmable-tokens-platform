@@ -44,6 +44,7 @@ import {
   getTokenContext,
 } from "@/lib/api/protocol";
 import { apiGet, apiPost } from "@/lib/api/client";
+import { assertValidCip68Metadata } from "@/lib/utils/cip68";
 import type { ProtocolBootstrapParams } from "@/types/protocol";
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,8 @@ interface CIP113ContextValue {
     blacklistAdminPkh?: string;
     blacklistInitTxHash?: string;
     blacklistInitOutputIndex?: number;
+    /** Whether the blacklist init registered `issuer_admin` for a CIP-67-labelled name. */
+    cip68Enabled?: boolean;
   }): Promise<void>;
   buildFESRegistration(params: {
     adminAddress: string;
@@ -287,6 +290,7 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
     blacklistAdminPkh?: string;
     blacklistInitTxHash?: string;
     blacklistInitOutputIndex?: number;
+    cip68Enabled?: boolean;
   }) => {
     await apiPost("/token-context/register", params);
     console.log(`[CIP-113] Token ${params.policyId} registered in backend DB`);
@@ -308,6 +312,16 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
     };
   }) => {
     const protocol = await getProtocol();
+
+    // The wizard's `maxLength` attributes never ran for this route — it is reachable
+    // programmatically and its metadata may come from anywhere — so apply the same budget the
+    // form and the Java backend apply. Without it an over-long field is only caught after the
+    // blacklist init has been signed and paid for, since init and registration are separate
+    // transactions here.
+    if (params.cip68Metadata) {
+      assertValidCip68Metadata(params.cip68Metadata);
+    }
+
     const baseAssetNameHex = stringToHex(params.assetName);
     // For CIP-68 tokens, the raw on-chain asset name includes the CIP-67 label prefix.
     // This prefixed name is what gets baked into buildIssuerAdmin (and thus the policyId).

@@ -215,4 +215,55 @@ public class UtxoProvider {
             return Optional.empty();
         }
     }
+
+    /**
+     * Tri-state answer to "does this asset exist on chain right now".
+     *
+     * <p>{@link #findUtxoByAsset} collapses every failure into {@link Optional#empty()}, which is
+     * indistinguishable from a confirmed absence. That is fine for a lookup whose caller only
+     * wants to spend the UTxO if it happens to be there, and wrong for a caller deciding whether
+     * to <em>mint</em> something that must exist at most once: a throttled or unreachable
+     * Blockfrost would read as "not minted yet" and authorise a duplicate.
+     */
+    public enum AssetPresence {
+        /** The chain has this asset. */
+        PRESENT,
+        /** The chain positively does not have this asset. */
+        ABSENT,
+        /** The lookup could not be completed — this is NOT evidence of absence. */
+        UNKNOWN
+    }
+
+    /**
+     * Whether {@code (policyId, assetNameHex)} exists on chain, distinguishing a confirmed
+     * absence from a lookup that could not be completed.
+     *
+     * <p>Existence is answered from the asset's address records rather than from a UTxO scan:
+     * an asset Blockfrost knows the holders of exists, whether or not a subsequent UTxO query
+     * agrees. A 404 is Blockfrost's positive statement that it has never indexed the asset and
+     * is the only failure mapped to {@link AssetPresence#ABSENT}; every other non-2xx, and every
+     * transport failure, is {@link AssetPresence#UNKNOWN}.
+     */
+    public AssetPresence assetPresence(String policyId, String assetNameHex) {
+        String unit = policyId + assetNameHex.toLowerCase();
+        try {
+            var addressesResult = bfBackendService.getAssetService().getAssetAddresses(unit, 1, 1);
+            if (addressesResult.isSuccessful()) {
+                var holders = addressesResult.getValue();
+                return holders == null || holders.isEmpty()
+                        ? AssetPresence.ABSENT : AssetPresence.PRESENT;
+            }
+            if (addressesResult.code() == 404) {
+                log.debug("assetPresence({}): 404, asset has never been indexed", unit);
+                return AssetPresence.ABSENT;
+            }
+            log.warn("assetPresence({}): lookup failed with HTTP {} ({}) — reporting UNKNOWN, "
+                     + "NOT absence", unit, addressesResult.code(), addressesResult.getResponse());
+            return AssetPresence.UNKNOWN;
+        } catch (Exception e) {
+            log.warn("assetPresence({}) threw {} — reporting UNKNOWN, NOT absence",
+                    unit, e.toString());
+            return AssetPresence.UNKNOWN;
+        }
+    }
 }

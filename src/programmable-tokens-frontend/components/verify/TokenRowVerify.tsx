@@ -50,7 +50,7 @@ export function TokenRowVerify({ token, walletAddress }: Props) {
     }
   }
   const substandardBadge = token.kind === "security-token"
-    ? <Badge variant="default" size="sm">Security Token</Badge>
+    ? <Badge variant="default" size="sm">RWA Token</Badge>
     : null;
 
   const href = token.kind === "security-token"

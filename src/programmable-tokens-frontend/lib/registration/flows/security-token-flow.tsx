@@ -21,28 +21,39 @@ import { SuccessStep } from '@/components/register/steps/success-step';
 
 function SecurityTokenSuccessStep(props: StepComponentProps) {
   // The chained kyc-config step does everything (genesis + AddPowerUser +
-  // registration) and writes the chain's metadata to its own result.data.
+  // [publishScripts] + registration + [transferLogic cert]) and writes the chain's
+  // metadata to its own result.data.
   const chainResult = props.wizardState.stepStates['kyc-config']?.result?.data as {
     globalStatePolicyId?: string;
     programmableTokenPolicyId?: string;
     denylistPolicyId?: string;
     powerUsersPolicyId?: string;
     chainTxHashes?: string[];
+    chainTxHashesByName?: Record<string, string | undefined>;
+    initialMintQuantity?: string;
   } | undefined;
+
+  // Read the hashes BY NAME. They used to be indexed positionally
+  // (chainTxHashes[0|1|2]), which quietly mislabelled every one of them as soon as
+  // an optional transaction was inserted before the registration — which is exactly
+  // what publishScripts does on the mint path.
+  const byName = chainResult?.chainTxHashesByName;
 
   const enhancedResult = props.wizardState.finalResult || {
     policyId: chainResult?.programmableTokenPolicyId || '',
-    txHash: chainResult?.chainTxHashes?.[2] || '',  // registration tx hash
+    txHash: byName?.registration || '',
     substandardId: 'security-token',
     assetName: '',
-    quantity: '',
+    quantity: chainResult?.initialMintQuantity || '',
     metadata: {
       globalStatePolicyId: chainResult?.globalStatePolicyId,
       denylistPolicyId: chainResult?.denylistPolicyId,
       powerUsersPolicyId: chainResult?.powerUsersPolicyId,
-      genesisTxHash: chainResult?.chainTxHashes?.[0],
-      addPowerUserTxHash: chainResult?.chainTxHashes?.[1],
-      registrationTxHash: chainResult?.chainTxHashes?.[2],
+      genesisTxHash: byName?.genesis,
+      addPowerUserTxHash: byName?.addPowerUser,
+      publishScriptsTxHash: byName?.publishScripts,
+      registrationTxHash: byName?.registration,
+      registerTransferLogicTxHash: byName?.registerTransferLogic,
     },
   };
 
@@ -51,12 +62,15 @@ function SecurityTokenSuccessStep(props: StepComponentProps) {
 
 const securityTokenFlow: RegistrationFlow = {
   id: 'security-token',
-  name: 'Security Token (BaFin)',
+  name: 'RWA Token (German & Swiss profiles)',
   description:
-    'Regulated-securities substandard with role-gated power users (Admin / Minter / Burner / ' +
-    'Pauser / Blacklister / Verifier), an on-chain denylist, and a togglable receiver-KYC ' +
-    'requirement. Choose this for tokenised assets that need to meet jurisdictional rules ' +
-    '(e.g. BaFin under German eWpG, Swiss CO Art. 973e). Ported from easy1staking-com/fn-bafin-cardano-sc.',
+    'Programmable real-world-asset tokens designed as reference profiles supporting the ' +
+    'implementation of German (eWpG) and Swiss (OR, ledger-based securities) requirements. ' +
+    'Provides KYC-gated transfers, denylisting, global pause, forced transfers and seizures, ' +
+    'supply caps, role-based permissions and an irreversible decommission mechanism, plus a ' +
+    'metadata schema covering ISIN, terms of issue, issuer details, nominal amount and ' +
+    'register/custodian references. Technical functionality only \u2014 it does not imply or ' +
+    'ensure legal or regulatory compliance in any jurisdiction.',
   enabled: isFlowEnabled('security-token', true),
   steps: [
     {
@@ -76,7 +90,7 @@ const securityTokenFlow: RegistrationFlow = {
     {
       id: 'kyc-config',
       title: 'Configure & Register',
-      description: 'Configure the Trusted Entity List, then build + sign + submit the full registration chain (genesis + AddPowerUser + registration) in one wallet popup',
+      description: 'Configure the Trusted Entity List, then build + sign + submit the full registration chain (genesis + AddPowerUser + publish reference scripts + registration + transfer-logic cert) in one wallet popup',
       requiresWalletSign: true,
       component: KycConfigStep as React.ComponentType<StepComponentProps<unknown, unknown>>,
     },

@@ -58,6 +58,7 @@ public class TokenContextController {
         String blacklistInitTxHash = null;
         Integer blacklistInitOutputIndex = null;
         Boolean requiresReceiverKyc = null;
+        Boolean requiresSenderKyc = null;
         Boolean transfersPaused = null;
 
         if ("freeze-and-seize".equals(substandardId)) {
@@ -92,6 +93,7 @@ public class TokenContextController {
                         var live = handler.readGlobalState(policyId);
                         if (live.isPresent()) {
                             requiresReceiverKyc = live.get().requiresReceiverKyc();
+                            requiresSenderKyc = live.get().requiresSenderKyc();
                             transfersPaused = live.get().transfersPaused();
                         }
                     }
@@ -108,6 +110,7 @@ public class TokenContextController {
                 blacklistInitTxHash,
                 blacklistInitOutputIndex,
                 requiresReceiverKyc,
+                requiresSenderKyc,
                 transfersPaused
         ));
     }
@@ -148,6 +151,11 @@ public class TokenContextController {
                         .adminPkh(request.blacklistAdminPkh() != null ? request.blacklistAdminPkh() : "")
                         .txHash(request.blacklistInitTxHash())
                         .outputIndex(request.blacklistInitOutputIndex() != null ? request.blacklistInitOutputIndex() : 0)
+                        // Passed straight through, null included: null means "the caller did not
+                        // say", which the registration cross-check treats as "no evidence, stay
+                        // silent". Defaulting it to false here would invent a claim the SDK never
+                        // made and reject correct CIP-68 registrations.
+                        .cip68Enabled(request.cip68Enabled())
                         .build();
                 blacklistInitRepository.save(newBlacklistInit);
                 blacklistInitOpt = java.util.Optional.of(newBlacklistInit);

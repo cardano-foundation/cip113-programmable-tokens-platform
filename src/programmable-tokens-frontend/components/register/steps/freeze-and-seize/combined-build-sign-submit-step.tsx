@@ -12,6 +12,10 @@ import { useCIP113 } from '@/contexts/cip113-context';
 import { initBlacklist } from '@/lib/api/compliance';
 import { registerToken, stringToHex } from '@/lib/api';
 import { getPaymentKeyHash } from '@/lib/utils/address';
+import { toCip68Wire } from '@/lib/utils/cip68-wire';
+import { extractKnownCredential } from '@/lib/utils/known-credential';
+import { noteKnownRegistration } from '@/lib/api';
+import { labelAssetNameHex, userTokenLabelForSubstandard } from '@/lib/utils/cip68';
 import { getExplorerTxUrl } from '@/lib/utils/format';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import type { FreezeAndSeizeRegisterRequest } from '@/types/api';
@@ -59,6 +63,8 @@ export function CombinedBuildSignSubmitStep({
 
   const [status, setStatus] = useState<CombinedStatus>('idle');
   const [errorMessage, setErrorMessage] = useState('');
+  /** Credentials already reported as known, so a persistent failure cannot loop. */
+  const recoveredCredentialsRef = useRef<Set<string>>(new Set());
   const [pollAttempt, setPollAttempt] = useState(0);
 
   // Transaction state
@@ -102,6 +108,18 @@ export function CombinedBuildSignSubmitStep({
     return (detailsState?.data || {}) as Partial<TokenDetailsData>;
   }, [wizardState.stepStates]);
 
+  // CIP-68 forces the backend builder.
+  //
+  // The LABEL itself no longer diverges: freeze-and-seize caps no lifetime supply, so the backend
+  // now applies (333) unconditionally — exactly what cip113-sdk-ts@0.3.1 hardcodes. What is still
+  // unverified is whether the two produce byte-identical reference-token datums, min-UTxO sizing
+  // and output ordering. The labelled name is a script parameter of `issuer_admin` and
+  // `issuance_mint` is parameterized by that script, so ANY divergence yields two different token
+  // policy ids for one wizard input — a silent, unrecoverable split. Until the two builders are
+  // compared directly, the toggle stays disabled while CIP-68 is on rather than left as a trap.
+  const cip68Enabled = !!tokenDetails.cip68Metadata?.enabled;
+  const effectiveUseSDK = useSDK && !cip68Enabled;
+
   // ---- BUILD BOTH TRANSACTIONS ----
   const handleBuild = useCallback(async () => {
     if (!connected || !wallet) {
@@ -122,7 +140,14 @@ export function CombinedBuildSignSubmitStep({
       if (!addresses?.[0]) throw new Error('No wallet address found');
       const adminAddress = addresses[0];
 
-      if (useSDK) {
+      // One conversion for BOTH toggle positions. These two paths used to disagree: the SDK
+      // branch labelled the asset name and minted the (100) reference token, the backend branch
+      // silently sent the bare name — so the same wizard input produced two different token
+      // policies depending on a UI switch. The backend now applies the label itself, so both
+      // branches take the same unlabelled name plus this metadata.
+      const cip68Wire = toCip68Wire(tokenDetails.cip68Metadata);
+
+      if (effectiveUseSDK) {
         // ===== SDK PATH: Build both txs client-side =====
         setStatus('building-init');
         showToastRef.current({
@@ -131,24 +156,13 @@ export function CombinedBuildSignSubmitStep({
           variant: 'default',
         });
 
-        // Build CIP-68 metadata for SDK (convert form strings to SDK types)
-        const cip68Form = tokenDetails.cip68Metadata;
-        const cip68ForSdk = cip68Form?.enabled ? {
-          name: cip68Form.name,
-          description: cip68Form.description || undefined,
-          ticker: cip68Form.ticker || undefined,
-          decimals: cip68Form.decimals ? parseInt(cip68Form.decimals) : undefined,
-          url: cip68Form.url || undefined,
-          logo: cip68Form.logo || undefined,
-        } : undefined;
-
         const sdkResult = await buildFESRegistration({
           adminAddress,
           assetName: tokenDetails.assetName,
           quantity: tokenDetails.quantity,
           recipientAddress: tokenDetails.recipientAddress,
           rawWalletApi: rawApi,
-          cip68Metadata: cip68ForSdk,
+          cip68Metadata: cip68Wire,
         });
 
         setBlacklistNodePolicyId(sdkResult.blacklistNodePolicyId);
@@ -179,6 +193,11 @@ export function CombinedBuildSignSubmitStep({
             adminAddress,
             feePayerAddress: adminAddress,
             assetName: stringToHex(tokenDetails.assetName),
+            // Both are needed so this tx registers the SAME issuer_admin reward account the
+            // registration below withdraws-0 from — that script is parameterized by the asset
+            // name, so the CIP-67 label changes its reward address.
+            quantity: tokenDetails.quantity,
+            cip68Metadata: cip68Wire,
           },
           selectedVersion?.txHash
         );
@@ -204,9 +223,25 @@ export function CombinedBuildSignSubmitStep({
           adminPubKeyHash,
           blacklistNodePolicyId: initResponse.policyId,
           chainingTransactionCborHex: initResponse.unsignedCborTx,
+          cip68Metadata: cip68Wire,
         };
 
         const regResponse = await registerToken(regRequest, selectedVersion?.txHash);
+        // Record the LABELLED name the backend actually minted, so the token-context DB write
+        // downstream matches what is on chain. Re-derived rather than returned, using the same
+        // supply rule the backend applies.
+        if (cip68Wire) {
+          setUserAssetNameHex(
+            labelAssetNameHex(
+              // freeze-and-seize caps no lifetime supply — issuer_admin ignores its asset-name
+              // parameter and the mint endpoint stays open — so the label is (333) whatever the
+              // registered quantity is. Passed explicitly rather than left to the default,
+              // because this must not silently drift from Cip68.userTokenLabel on the backend.
+              userTokenLabelForSubstandard('freeze-and-seize', tokenDetails.quantity ?? '0'),
+              stringToHex(tokenDetails.assetName)
+            )
+          );
+        }
         setTokenPolicyId(regResponse.policyId);
         setRegUnsignedCbor(regResponse.unsignedCborTx);
         setDerivedRegTxHash(await resolveTxHash(regResponse.unsignedCborTx));
@@ -232,7 +267,7 @@ export function CombinedBuildSignSubmitStep({
     } finally {
       setProcessing(false);
     }
-  }, [connected, wallet, tokenDetails, selectedVersion, onError, setProcessing, useSDK, buildFESRegistration]);
+  }, [connected, wallet, tokenDetails, selectedVersion, onError, setProcessing, effectiveUseSDK, buildFESRegistration]);
 
   // ---- SIGN BOTH & SUBMIT SEQUENTIALLY ----
   const handleSignAndSubmit = useCallback(async () => {
@@ -341,6 +376,35 @@ export function CombinedBuildSignSubmitStep({
     } catch (error) {
       if (error instanceof Error && error.message === 'Aborted') return;
 
+      // Ledger error 3145: the init transaction registers a credential that already exists.
+      //
+      // Neither builder can know that. The SDK path asks /script-registration/check, and the
+      // backend answers from an account endpoint that some deployments do not implement and from
+      // indexed certificates that only reach back to sync-start-slot — while these validators are
+      // registered once per network, usually earlier. Both answer "not registered" and a
+      // certificate goes out, forever.
+      //
+      // The error names the credential, so record it and rebuild. The next build asks the same
+      // question, is told it IS registered, and leaves the certificate out. Rebuilding rather than
+      // re-submitting is required: the certificates are baked into the init transaction.
+      const knownCredential = extractKnownCredential(error);
+      if (knownCredential && !recoveredCredentialsRef.current.has(knownCredential)) {
+        recoveredCredentialsRef.current.add(knownCredential);
+        try {
+          await noteKnownRegistration(knownCredential);
+          showToastRef.current({
+            title: 'Already Registered On-Chain',
+            description: 'One credential was already registered. Rebuilding without it — please sign again.',
+            variant: 'default',
+          });
+          setProcessing(false);
+          await handleBuild();
+          return;
+        } catch (noteError) {
+          console.error('[CIP-113] could not record the known credential', noteError);
+        }
+      }
+
       setStatus('error');
       const message = error instanceof Error ? error.message : 'Failed to sign or submit';
       setErrorMessage(message);
@@ -366,7 +430,9 @@ export function CombinedBuildSignSubmitStep({
   }, [
     connected, wallet, initUnsignedCbor, regUnsignedCbor,
     blacklistNodePolicyId, tokenPolicyId,
-    onComplete, onError, setProcessing,
+    // handleBuild: the 3145 recovery rebuilds through it, so a stale closure here would
+    // rebuild with the previous render's inputs.
+    onComplete, onError, setProcessing, handleBuild,
   ]);
 
   // ---- RETRY: If init was submitted but reg failed, try submitting reg again ----
@@ -543,24 +609,26 @@ export function CombinedBuildSignSubmitStep({
                 <button
                   onClick={() => setUseSDK(false)}
                   className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                    !useSDK ? 'bg-primary-500 text-white' : 'bg-dark-700 text-dark-400 hover:text-white'
+                    !effectiveUseSDK ? 'bg-primary-500 text-white' : 'bg-dark-700 text-dark-400 hover:text-white'
                   }`}
                 >
                   Backend (Java)
                 </button>
                 <button
                   onClick={() => setUseSDK(true)}
-                  disabled={!sdkAvailable}
+                  disabled={!sdkAvailable || cip68Enabled}
                   className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-                    useSDK ? 'bg-primary-500 text-white' : 'bg-dark-700 text-dark-400 hover:text-white'
-                  } ${!sdkAvailable ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    effectiveUseSDK ? 'bg-primary-500 text-white' : 'bg-dark-700 text-dark-400 hover:text-white'
+                  } ${!sdkAvailable || cip68Enabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
                   SDK (Evolution)
                 </button>
               </div>
             </div>
             <p className="text-xs text-dark-500">
-              {useSDK
+              {cip68Enabled
+                ? 'CIP-68 is enabled, so transactions are built server-side. Both builders label the user token (333), but whether they produce byte-identical datums, min-UTxO sizing and output ordering is unverified — and freeze-and-seize bakes the asset name into issuer_admin, so any divergence would yield a different token policy id.'
+                : effectiveUseSDK
                 ? 'Building transactions client-side with CIP-113 SDK + Evolution SDK'
                 : 'Building transactions server-side with Java backend'}
             </p>
@@ -649,7 +717,7 @@ export function CombinedBuildSignSubmitStep({
           {initUnsignedCbor && (
             <Card className="p-4 space-y-2">
               <div className="flex items-center justify-between">
-                <h4 className="font-medium text-white text-sm">Init Tx CBOR ({useSDK ? 'SDK' : 'Backend'})</h4>
+                <h4 className="font-medium text-white text-sm">Init Tx CBOR ({effectiveUseSDK ? 'SDK' : 'Backend'})</h4>
                 <CopyButton value={initUnsignedCbor} />
               </div>
               <p className="text-xs text-dark-500 font-mono break-all max-h-24 overflow-y-auto">
@@ -662,7 +730,7 @@ export function CombinedBuildSignSubmitStep({
           {regUnsignedCbor && (
             <Card className="p-4 space-y-2">
               <div className="flex items-center justify-between">
-                <h4 className="font-medium text-white text-sm">Reg Tx CBOR ({useSDK ? 'SDK' : 'Backend'})</h4>
+                <h4 className="font-medium text-white text-sm">Reg Tx CBOR ({effectiveUseSDK ? 'SDK' : 'Backend'})</h4>
                 <CopyButton value={regUnsignedCbor} />
               </div>
               <p className="text-xs text-dark-500 font-mono break-all max-h-24 overflow-y-auto">

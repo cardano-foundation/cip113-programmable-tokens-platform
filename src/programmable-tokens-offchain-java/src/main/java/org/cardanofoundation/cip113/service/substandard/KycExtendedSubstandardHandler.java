@@ -124,6 +124,15 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
             ProtocolBootstrapParams protocolParams) {
 
         try {
+            // CIP-68 is not implemented for this substandard. Refuse rather than drop it: the
+            // wizard's shared token-details step collects the metadata for every flow, and
+            // accepting it here would mint a token whose (222)/(333) label advertises metadata
+            // that was never written — the exact failure this refusal exists to prevent.
+            if (request.getCip68Metadata() != null) {
+                return TransactionContext.typedError(
+                        "CIP-68 is not supported for the 'kyc-extended' substandard. Supported: "
+                        + "dummy, freeze-and-seize, security-token. Register without CIP-68 metadata.");
+            }
             var adminPkh = Credential.fromKey(request.getAdminPubKeyHash());
             var globalStatePolicyId = request.getGlobalStatePolicyId();
 
@@ -417,6 +426,17 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
             ProtocolBootstrapParams protocolParams) {
 
         try {
+            // Same refusal as buildRegistrationTransaction, and it has to be here too. Registration
+            // refusing alone left this endpoint silently DISCARDING request.cip68Metadata(): a
+            // direct API call minted a user token with no (100) reference token behind it — a
+            // label advertising metadata that was never written, which is precisely the bug this
+            // whole feature exists to eliminate.
+            if (request.cip68Metadata() != null) {
+                return TransactionContext.typedError(
+                        "CIP-68 is not supported for the 'kyc-extended' substandard. Supported: "
+                        + "dummy, freeze-and-seize, security-token. Mint without CIP-68 metadata.");
+            }
+
             var adminUtxos = accountService.findAdaOnlyUtxo(request.feePayerAddress(), 10_000_000L);
 
             var issuanceUtxoOpt = utxoProvider.findUtxo(protocolParams.txHash(), 2);

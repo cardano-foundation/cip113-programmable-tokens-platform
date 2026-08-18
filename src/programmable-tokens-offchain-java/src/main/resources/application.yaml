@@ -35,6 +35,12 @@ store:
     sync-start-slot: 154984561
     keep-alive-interval: 1000
 
+# Substandards hidden from the API and the issuance wizard. The contracts stay
+# vendored and already-issued tokens keep working; this only removes them as
+# choices for NEW tokens.
+substandards:
+  disabled: ${SUBSTANDARDS_DISABLED:kyc,kyc-extended}
+
 apiPrefix: /api/v1
 
 keri:

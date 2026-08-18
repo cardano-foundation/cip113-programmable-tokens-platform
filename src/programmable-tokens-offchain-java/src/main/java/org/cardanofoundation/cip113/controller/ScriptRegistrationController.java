@@ -1,12 +1,17 @@
 package org.cardanofoundation.cip113.controller;
 
+import com.bloxbean.cardano.client.address.AddressProvider;
+import com.bloxbean.cardano.client.address.Credential;
+import com.bloxbean.cardano.client.util.HexUtil;
 import lombok.RequiredArgsConstructor;
+import org.cardanofoundation.cip113.config.AppConfig;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.service.ScriptRegistrationService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * REST controller for script stake address registration operations.
@@ -27,6 +32,7 @@ import java.util.List;
 public class ScriptRegistrationController {
 
     private final ScriptRegistrationService scriptRegistrationService;
+    private final AppConfig.Network network;
 
     /**
      * Response for stake address registration check.
@@ -46,6 +52,77 @@ public class ScriptRegistrationController {
      */
     public record RegisterStakeAddressResponse(String unsignedTx) {}
 
+    /** Record that a script stake credential is ALREADY registered, so no later build tries to
+     *  register it again.
+     *
+     *  <p>This exists because the question has no reliable oracle here. The account endpoint is
+     *  absent on some backends (a devkit devnet 404s even on {@code /blocks/latest}), and our
+     *  indexed certificates only cover history back to {@code sync-start-slot} — measured on one
+     *  devnet, back to slot 119969749 against a tip of 120386215. The protocol-global validators
+     *  are registered ONCE per network, on the first registration anyone performed, which is
+     *  normally older than that window. So the platform can be permanently unable to see a
+     *  credential that plainly exists, and every attempt dies with:
+     *
+     *  <pre>3145 — Trying to re-register some already known credentials.</pre>
+     *
+     *  <p>That error names the credential, which is what makes this recoverable: post it here and
+     *  retry. Accepts either {@code stakeAddress} (a reward address) or {@code knownCredential}
+     *  (the script hash exactly as the ledger reports it).
+     *  Body: {@code { stakeAddress? , knownCredential? }} */
+    @PostMapping("/known")
+    public ResponseEntity<?> noteKnownRegistration(@RequestBody Map<String, Object> body) {
+        try {
+            String stakeAddress = (String) body.get("stakeAddress");
+            String credential = (String) body.get("knownCredential");
+
+            if ((stakeAddress == null || stakeAddress.isBlank())
+                    && (credential == null || credential.isBlank())) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "one of stakeAddress or knownCredential is required"));
+            }
+
+            // Validate before touching the database. A credential is a blake2b-224 script hash;
+            // anything else is a caller mistake or an attempt to write junk into a table that is
+            // consulted before every later build.
+            if (credential != null && !credential.isBlank()
+                    && !credential.matches("^[0-9a-fA-F]{56}$")) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "knownCredential must be 56 hex characters (a script hash)"));
+            }
+            if (stakeAddress != null && !stakeAddress.isBlank()
+                    && !stakeAddress.startsWith("stake")) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "stakeAddress must be a bech32 reward address"));
+            }
+
+            if (stakeAddress == null || stakeAddress.isBlank()) {
+                // The ledger reports a bare script hash; turn it into the reward address every
+                // caller actually looks up. Script credential, hence getRewardAddress over a
+                // script Credential rather than a key one — the two produce different addresses
+                // for the same hash, and only one of them is ever queried.
+                stakeAddress = AddressProvider.getRewardAddress(
+                        Credential.fromScript(HexUtil.decodeHexString(credential)),
+                        network.getCardanoNetwork()).getAddress();
+            }
+
+            // Only confirms a credential this deployment itself built a registration for. See V17:
+            // nothing here authenticates the caller, and an unconstrained write would let anyone
+            // make the platform skip a registration that is genuinely required.
+            boolean noted = scriptRegistrationService.noteRegistered(
+                    stakeAddress, credential, "LEDGER_REJECT");
+            if (!noted) {
+                return ResponseEntity.status(409).body(Map.of(
+                        "error", "this deployment never built a registration for " + stakeAddress
+                                 + ", so there is nothing to confirm",
+                        "stakeAddress", stakeAddress));
+            }
+            return ResponseEntity.ok(Map.of("stakeAddress", stakeAddress, "registered", true));
+        } catch (Exception e) {
+            log.error("Error recording known registration", e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
     /**
      * Check if a stake address is registered on-chain.
      *
@@ -60,6 +137,21 @@ public class ScriptRegistrationController {
 
         try {
             boolean isRegistered = scriptRegistrationService.isStakeAddressRegistered(stakeAddress);
+
+            // Answering "no" is this deployment telling the caller to register the credential —
+            // the SDK's freeze-and-seize path emits a certificate on exactly this answer, builds
+            // the transaction client-side, and submits it without the backend ever seeing it. So
+            // this is the only moment we are involved, and without recording it a later 3145 for
+            // that credential could not be confirmed (the evidence rule in V17 would 409 it) and
+            // the flow would be stuck exactly as it was before.
+            //
+            // This is defence in depth, not authorization: no endpoint here authenticates anyone,
+            // so a determined caller can always call /check first. It raises the cost of poisoning
+            // from one unconstrained write to a credential the platform actually advised
+            // registering, and the real fix remains authenticating the API.
+            if (!isRegistered) {
+                scriptRegistrationService.noteRegistrationAttempted(stakeAddress, null);
+            }
             return ResponseEntity.ok(new CheckRegistrationResponse(stakeAddress, isRegistered));
 
         } catch (Exception e) {

@@ -38,6 +38,19 @@ export function SuccessStep({
   const signSubmitResult = wizardState.stepStates['sign-submit']?.result as { txHash?: string; data?: { policyId?: string; txHash?: string } } | undefined;
   const initBlacklistResult = wizardState.stepStates['init-blacklist']?.result?.data as { blacklistNodePolicyId?: string; txHash?: string } | undefined;
 
+  // security-token registers the policy and mints the FIRST SUPPLY in the same
+  // transaction, but the amount minted is the one chosen on the kyc-config step —
+  // not necessarily the "quantity" typed on token-details, which for a structural
+  // registration (initial supply 0) is minted by nothing at all. Prefer what was
+  // actually sent to the chain builder, so this screen cannot report a number that
+  // was never minted.
+  const kycConfigResult = wizardState.stepStates['kyc-config']?.result?.data as {
+    initialMintQuantity?: string;
+  } | undefined;
+  const mintedQuantity: string = typeof kycConfigResult?.initialMintQuantity === 'string'
+    ? kycConfigResult.initialMintQuantity
+    : '';
+
   const registrationResult = result ?? wizardState.finalResult;
   // Try multiple sources for policyId and txHash
   const policyId: string = registrationResult?.policyId
@@ -61,10 +74,9 @@ export function SuccessStep({
   // Computed display values
   const displayTokenName: string = tokenName || resultAssetName || '-';
   const displaySubstandard: string = flowId || substandardId || '-';
-  const displayQuantity: string = tokenQuantity
-    ? BigInt(tokenQuantity).toLocaleString()
-    : resultQuantity
-    ? BigInt(resultQuantity).toLocaleString()
+  const effectiveQuantity: string = mintedQuantity || tokenQuantity || resultQuantity;
+  const displayQuantity: string = effectiveQuantity
+    ? BigInt(effectiveQuantity).toLocaleString()
     : '-';
 
   const getExplorerUrl = (hash: string): string => {

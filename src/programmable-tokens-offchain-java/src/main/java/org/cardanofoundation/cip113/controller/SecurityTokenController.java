@@ -309,16 +309,64 @@ public class SecurityTokenController {
         }
     }
 
-    /** Build the full security-token registration chain (genesis → AddPowerUser →
-     *  registration -> transfer registration) as four unsigned CBORs. The frontend signs all four in one
-     *  CIP-30 {@code signTxs} call, then POSTs the signed CBORs (in order) to
-     *  {@code /issue-token/submit-chain} which submits them sequentially via the
-     *  backend's submission service — bypassing the wallet's submission backend so
-     *  mempool-chained txs aren't rejected.
+    /** One-shot admin tx that registers the substandard's THIRD-PARTY transfer-logic
+     *  stake credential. Required before the first burn: {@code ThirdPartyAct} demands a
+     *  withdrawal keyed on registry-node slot 4, which now names this validator, and a
+     *  withdrawal from an unregistered reward account is rejected at submit — after the
+     *  user has signed. Script evaluation does not catch it, so the burn builder refuses
+     *  up front and points here.
      *
-     *  <p>Returns {@code { genesisCborHex, addPowerUserCborHex, registrationCborHex,
-     *  globalStatePolicyId, programmableTokenPolicyId, denylistPolicyId,
-     *  powerUsersPolicyId, genesisTxHash, addPowerUserTxHash, registrationTxHash } }. */
+     *  <p>Distinct from {@code /register-transfer-logic}: that one registers
+     *  {@code transfer_logic}, a different script with a different reward address, used by
+     *  the TransferAct path. Both are needed, for different operations.
+     *  Body: {@code { feePayerAddress }}. */
+    @PostMapping("/{policyId}/register-third-party-transfer-logic")
+    public ResponseEntity<?> registerThirdPartyTransferLogic(@PathVariable String policyId,
+                                                             @RequestBody Map<String, Object> body) {
+        try {
+            String feePayerAddress = (String) body.get("feePayerAddress");
+            if (feePayerAddress == null || feePayerAddress.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "feePayerAddress is required"));
+            }
+            ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
+            if (protocolParams == null) {
+                return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
+            }
+            SecurityTokenSubstandardHandler handler = (SecurityTokenSubstandardHandler) handlerFactory
+                    .getHandler("security-token", SecurityTokenContext.emptyContext());
+            TransactionContext<Void> result = handler.buildRegisterThirdPartyTransferLogicTransaction(
+                    policyId, feePayerAddress, protocolParams);
+            if (!result.isSuccessful()) {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                        result.error() != null ? result.error() : "build failed"));
+            }
+            return ResponseEntity.ok(Map.of("unsignedCborTx", result.unsignedCborTx()));
+        } catch (Exception e) {
+            log.error("security-token register-third-party-transfer-logic failed for policy={}",
+                    policyId, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** Build the full security-token registration chain (genesis → AddPowerUser →
+     *  publishScripts → registration → transfer-logic cert) as up to five unsigned
+     *  CBORs. The frontend signs them all in one CIP-30 {@code signTxs} call, then
+     *  POSTs the signed CBORs (in order) to {@code /issue-token/submit-chain} which
+     *  submits them sequentially via the backend's submission service — bypassing the
+     *  wallet's submission backend so mempool-chained txs aren't rejected.
+     *
+     *  <p>{@code publishScriptsCborHex} publishes {@code minting_logic} and the
+     *  {@code global_state} spend validator as reference scripts. It is not optional:
+     *  attached inline those two are 11 394 of the ledger's 16 384-byte budget and the
+     *  registration tx's full validator set is 16 584, so the registration cannot exist
+     *  without them being referenced.
+     *
+     *  <p>Returns {@code { genesisCborHex, addPowerUserCborHex, publishScriptsCborHex,
+     *  registrationCborHex, registerTransferLogicCborHex?,
+     *  registerThirdPartyTransferLogicCborHex?, globalStatePolicyId,
+     *  programmableTokenPolicyId, denylistPolicyId, powerUsersPolicyId, genesisTxHash,
+     *  addPowerUserTxHash, publishScriptsTxHash, registrationTxHash,
+     *  registerTransferLogicTxHash?, registerThirdPartyTransferLogicTxHash? } }. */
     @PostMapping("/build-chain")
     public ResponseEntity<?> buildChain(@RequestBody SecurityTokenRegisterRequest request) {
         try {
@@ -340,7 +388,20 @@ public class SecurityTokenController {
             Map<String, Object> resp = new java.util.HashMap<>();
             resp.put("genesisCborHex", meta.genesisCborHex());
             resp.put("addPowerUserCborHex", meta.addPowerUserCborHex());
+            // Present only when the registration carries a first mint — that is the only
+            // case whose validator set does not fit inline. Omitted (not null) otherwise,
+            // matching the optional 4th tx and keeping the wire shape forward-compatible.
+            if (meta.publishScriptsCborHex() != null) {
+                resp.put("publishScriptsCborHex", meta.publishScriptsCborHex());
+                resp.put("publishScriptsTxHash", meta.publishScriptsTxHash());
+            }
             resp.put("registrationCborHex", meta.registrationCborHex());
+            if (meta.registerThirdPartyTransferLogicCborHex() != null) {
+                resp.put("registerThirdPartyTransferLogicCborHex",
+                        meta.registerThirdPartyTransferLogicCborHex());
+                resp.put("registerThirdPartyTransferLogicTxHash",
+                        meta.registerThirdPartyTransferLogicTxHash());
+            }
             if (meta.registerTransferLogicCborHex() != null) {
                 resp.put("registerTransferLogicCborHex", meta.registerTransferLogicCborHex());
                 resp.put("registerTransferLogicTxHash", meta.registerTransferLogicTxHash());
@@ -420,7 +481,19 @@ public class SecurityTokenController {
                         resp.put("memberRootHash", gs.memberRootHash() != null ? gs.memberRootHash() : "");
                         resp.put("memberRootHashLocal", localRootHex);
                         resp.put("requiresReceiverKyc", gs.requiresReceiverKyc());
+                        // D4: the UI cannot offer SetRequiresSenderKyc without knowing
+                        // the current value to diff against.
+                        resp.put("requiresSenderKyc", gs.requiresSenderKyc());
+                        // D3: terminal decommissioning flag. The admin panel needs it to
+                        // render the "already decommissioned" state instead of offering
+                        // actions that can no longer be applied.
+                        resp.put("deactivated", gs.deactivated());
                         resp.put("adminCredentialHash", gs.adminCredentialHash());
+                        // Both KYC gates are independent on chain (transfer_logic_script.ak:123
+                        // reads requires_sender_kyc, :157 reads requires_receiver_kyc), so the UI
+                        // needs both to decide which proofs to collect.
+                        resp.put("requiresSenderKyc", gs.requiresSenderKyc());
+                        resp.put("deactivated", gs.deactivated());
                         return ResponseEntity.ok(resp);
                     })
                     .orElse(ResponseEntity.status(404).body(Map.of(
