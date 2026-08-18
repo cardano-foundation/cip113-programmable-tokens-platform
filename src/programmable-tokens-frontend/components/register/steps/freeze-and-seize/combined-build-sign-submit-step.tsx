@@ -13,6 +13,8 @@ import { initBlacklist } from '@/lib/api/compliance';
 import { registerToken, stringToHex } from '@/lib/api';
 import { getPaymentKeyHash } from '@/lib/utils/address';
 import { toCip68Wire } from '@/lib/utils/cip68-wire';
+import { extractKnownCredential } from '@/lib/utils/known-credential';
+import { noteKnownRegistration } from '@/lib/api';
 import { labelAssetNameHex, userTokenLabelForSubstandard } from '@/lib/utils/cip68';
 import { getExplorerTxUrl } from '@/lib/utils/format';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
@@ -61,6 +63,8 @@ export function CombinedBuildSignSubmitStep({
 
   const [status, setStatus] = useState<CombinedStatus>('idle');
   const [errorMessage, setErrorMessage] = useState('');
+  /** Credentials already reported as known, so a persistent failure cannot loop. */
+  const recoveredCredentialsRef = useRef<Set<string>>(new Set());
   const [pollAttempt, setPollAttempt] = useState(0);
 
   // Transaction state
@@ -372,6 +376,35 @@ export function CombinedBuildSignSubmitStep({
     } catch (error) {
       if (error instanceof Error && error.message === 'Aborted') return;
 
+      // Ledger error 3145: the init transaction registers a credential that already exists.
+      //
+      // Neither builder can know that. The SDK path asks /script-registration/check, and the
+      // backend answers from an account endpoint that some deployments do not implement and from
+      // indexed certificates that only reach back to sync-start-slot — while these validators are
+      // registered once per network, usually earlier. Both answer "not registered" and a
+      // certificate goes out, forever.
+      //
+      // The error names the credential, so record it and rebuild. The next build asks the same
+      // question, is told it IS registered, and leaves the certificate out. Rebuilding rather than
+      // re-submitting is required: the certificates are baked into the init transaction.
+      const knownCredential = extractKnownCredential(error);
+      if (knownCredential && !recoveredCredentialsRef.current.has(knownCredential)) {
+        recoveredCredentialsRef.current.add(knownCredential);
+        try {
+          await noteKnownRegistration(knownCredential);
+          showToastRef.current({
+            title: 'Already Registered On-Chain',
+            description: 'One credential was already registered. Rebuilding without it — please sign again.',
+            variant: 'default',
+          });
+          setProcessing(false);
+          await handleBuild();
+          return;
+        } catch (noteError) {
+          console.error('[CIP-113] could not record the known credential', noteError);
+        }
+      }
+
       setStatus('error');
       const message = error instanceof Error ? error.message : 'Failed to sign or submit';
       setErrorMessage(message);
@@ -397,7 +430,9 @@ export function CombinedBuildSignSubmitStep({
   }, [
     connected, wallet, initUnsignedCbor, regUnsignedCbor,
     blacklistNodePolicyId, tokenPolicyId,
-    onComplete, onError, setProcessing,
+    // handleBuild: the 3145 recovery rebuilds through it, so a stale closure here would
+    // rebuild with the previous render's inputs.
+    onComplete, onError, setProcessing, handleBuild,
   ]);
 
   // ---- RETRY: If init was submitted but reg failed, try submitting reg again ----

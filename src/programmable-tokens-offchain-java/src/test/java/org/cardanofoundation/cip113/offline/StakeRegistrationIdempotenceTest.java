@@ -436,6 +436,39 @@ public class StakeRegistrationIdempotenceTest {
         Mockito.verify(known, Mockito.never()).save(Mockito.any());
     }
 
+    /**
+     * The other half of the evidence rule: once a row exists, confirming it must succeed.
+     *
+     * <p>This is the freeze-and-seize recovery path. There the SDK builds and submits the
+     * certificate client-side, so the backend never sees the transaction — its only involvement is
+     * answering /script-registration/check with "not registered", which is what creates the row.
+     * Without that, a 3145 from the SDK path could never be confirmed and the flow would stay
+     * stuck exactly as it was.
+     */
+    @Test
+    public void confirmingACredentialWeAdvisedRegisteringSucceeds() {
+        var addr = "stake_test17qlj7k8pcdlfqwd2mkzawx5xwvtlqzl3w8sxptg8pg24mlq7k9g8t";
+        var row = org.cardanofoundation.cip113.entity.KnownScriptRegistrationEntity.builder()
+                .stakeAddress(addr).source("BUILT").registered(false).build();
+
+        var known = Mockito.mock(
+                org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class);
+        Mockito.when(known.findById(addr)).thenReturn(Optional.of(row));
+
+        var service = new org.cardanofoundation.cip113.service.ScriptRegistrationService(
+                Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
+                null,
+                Mockito.mock(AccountService.class),
+                stakeRepo(Set.of()),
+                known);
+
+        Assertions.assertTrue(service.noteRegistered(addr, null, "LEDGER_REJECT"),
+                "this deployment advised registering the credential, so the 3145 that came back is "
+                + "exactly the confirmation the row was waiting for");
+        Assertions.assertTrue(row.isRegistered(), "the row must be promoted, not merely touched");
+        Mockito.verify(known).save(row);
+    }
+
     /** An attempt row is evidence, not a claim: it must not suppress the registration by itself. */
     @Test
     public void anUnconfirmedAttemptRowDoesNotSuppressRegistration() throws Exception {

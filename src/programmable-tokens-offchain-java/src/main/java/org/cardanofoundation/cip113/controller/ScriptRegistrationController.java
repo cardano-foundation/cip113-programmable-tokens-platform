@@ -137,6 +137,21 @@ public class ScriptRegistrationController {
 
         try {
             boolean isRegistered = scriptRegistrationService.isStakeAddressRegistered(stakeAddress);
+
+            // Answering "no" is this deployment telling the caller to register the credential —
+            // the SDK's freeze-and-seize path emits a certificate on exactly this answer, builds
+            // the transaction client-side, and submits it without the backend ever seeing it. So
+            // this is the only moment we are involved, and without recording it a later 3145 for
+            // that credential could not be confirmed (the evidence rule in V17 would 409 it) and
+            // the flow would be stuck exactly as it was before.
+            //
+            // This is defence in depth, not authorization: no endpoint here authenticates anyone,
+            // so a determined caller can always call /check first. It raises the cost of poisoning
+            // from one unconstrained write to a credential the platform actually advised
+            // registering, and the real fix remains authenticating the API.
+            if (!isRegistered) {
+                scriptRegistrationService.noteRegistrationAttempted(stakeAddress, null);
+            }
             return ResponseEntity.ok(new CheckRegistrationResponse(stakeAddress, isRegistered));
 
         } catch (Exception e) {

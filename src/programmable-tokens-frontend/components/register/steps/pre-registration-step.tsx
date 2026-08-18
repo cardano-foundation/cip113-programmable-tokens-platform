@@ -10,6 +10,7 @@ import { useProtocolVersion } from '@/contexts/protocol-version-context';
 import { preRegisterToken, stringToHex, noteKnownRegistration } from '@/lib/api';
 import { getPaymentKeyHash } from '@/lib/utils/address';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
+import { extractKnownCredential } from '@/lib/utils/known-credential';
 import type { DummyRegisterRequest, FreezeAndSeizeRegisterRequest } from '@/types/api';
 import type {
   StepComponentProps,
@@ -42,23 +43,6 @@ type StepPhase =
 const BACKEND_COOLDOWN_SECONDS = 10;
 const TX_POLL_INTERVAL = 10000; // 10 seconds
 const TX_POLL_TIMEOUT = 300000; // 5 minutes
-
-/** The credential named by ledger error 3145, if this error is one.
- *
- *  Wallets surface submit failures inconsistently — a string, an Error whose message is JSON, or a
- *  nested object — so this searches the stringified error rather than trusting a shape. The match
- *  is deliberately narrow: the literal key followed by exactly 56 hex characters, which is a
- *  blake2b-224 script hash and cannot collide with prose. */
-function extractKnownCredential(error: unknown): string | null {
-  let text: string;
-  try {
-    text = error instanceof Error ? `${error.message}` : JSON.stringify(error) ?? String(error);
-  } catch {
-    text = String(error);
-  }
-  const match = /knownCredential\W{1,4}([0-9a-fA-F]{56})/.exec(text);
-  return match ? match[1].toLowerCase() : null;
-}
 
 export function PreRegistrationStep({
   onComplete,
