@@ -309,6 +309,45 @@ public class SecurityTokenController {
         }
     }
 
+    /** One-shot admin tx that registers the substandard's THIRD-PARTY transfer-logic
+     *  stake credential. Required before the first burn: {@code ThirdPartyAct} demands a
+     *  withdrawal keyed on registry-node slot 4, which now names this validator, and a
+     *  withdrawal from an unregistered reward account is rejected at submit — after the
+     *  user has signed. Script evaluation does not catch it, so the burn builder refuses
+     *  up front and points here.
+     *
+     *  <p>Distinct from {@code /register-transfer-logic}: that one registers
+     *  {@code transfer_logic}, a different script with a different reward address, used by
+     *  the TransferAct path. Both are needed, for different operations.
+     *  Body: {@code { feePayerAddress }}. */
+    @PostMapping("/{policyId}/register-third-party-transfer-logic")
+    public ResponseEntity<?> registerThirdPartyTransferLogic(@PathVariable String policyId,
+                                                             @RequestBody Map<String, Object> body) {
+        try {
+            String feePayerAddress = (String) body.get("feePayerAddress");
+            if (feePayerAddress == null || feePayerAddress.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "feePayerAddress is required"));
+            }
+            ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
+            if (protocolParams == null) {
+                return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
+            }
+            SecurityTokenSubstandardHandler handler = (SecurityTokenSubstandardHandler) handlerFactory
+                    .getHandler("security-token", SecurityTokenContext.emptyContext());
+            TransactionContext<Void> result = handler.buildRegisterThirdPartyTransferLogicTransaction(
+                    policyId, feePayerAddress, protocolParams);
+            if (!result.isSuccessful()) {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                        result.error() != null ? result.error() : "build failed"));
+            }
+            return ResponseEntity.ok(Map.of("unsignedCborTx", result.unsignedCborTx()));
+        } catch (Exception e) {
+            log.error("security-token register-third-party-transfer-logic failed for policy={}",
+                    policyId, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
     /** Build the full security-token registration chain (genesis → AddPowerUser →
      *  publishScripts → registration → transfer-logic cert) as up to five unsigned
      *  CBORs. The frontend signs them all in one CIP-30 {@code signTxs} call, then
@@ -323,10 +362,11 @@ public class SecurityTokenController {
      *  without them being referenced.
      *
      *  <p>Returns {@code { genesisCborHex, addPowerUserCborHex, publishScriptsCborHex,
-     *  registrationCborHex, registerTransferLogicCborHex?, globalStatePolicyId,
+     *  registrationCborHex, registerTransferLogicCborHex?,
+     *  registerThirdPartyTransferLogicCborHex?, globalStatePolicyId,
      *  programmableTokenPolicyId, denylistPolicyId, powerUsersPolicyId, genesisTxHash,
      *  addPowerUserTxHash, publishScriptsTxHash, registrationTxHash,
-     *  registerTransferLogicTxHash? } }. */
+     *  registerTransferLogicTxHash?, registerThirdPartyTransferLogicTxHash? } }. */
     @PostMapping("/build-chain")
     public ResponseEntity<?> buildChain(@RequestBody SecurityTokenRegisterRequest request) {
         try {
@@ -356,6 +396,12 @@ public class SecurityTokenController {
                 resp.put("publishScriptsTxHash", meta.publishScriptsTxHash());
             }
             resp.put("registrationCborHex", meta.registrationCborHex());
+            if (meta.registerThirdPartyTransferLogicCborHex() != null) {
+                resp.put("registerThirdPartyTransferLogicCborHex",
+                        meta.registerThirdPartyTransferLogicCborHex());
+                resp.put("registerThirdPartyTransferLogicTxHash",
+                        meta.registerThirdPartyTransferLogicTxHash());
+            }
             if (meta.registerTransferLogicCborHex() != null) {
                 resp.put("registerTransferLogicCborHex", meta.registerTransferLogicCborHex());
                 resp.put("registerTransferLogicTxHash", meta.registerTransferLogicTxHash());

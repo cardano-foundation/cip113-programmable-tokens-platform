@@ -443,6 +443,86 @@ public class OfflineCip68EvalTest {
     // ------------------------------------------------------------------ security-token
 
     /**
+     * The burn transaction has to fit under the ledger's 16 384-byte limit.
+     *
+     * <p>It needs four validators. Inline they are 19 385 bytes — 7211 minting_logic + 6269
+     * third_party_transfer_logic + 4183 global_state spend + 1722 issuance_mint — and the
+     * first burn ever attempted was rejected at 21 480. None of the four is droppable:
+     * {@code ThirdPartyAct} requires the withdrawal keyed on registry-node slot 4,
+     * minting_logic gates {@code can_burn}, GlobalState must be spent to decrement the
+     * supply, and issuance_mint is what actually burns. So three of them are read from the
+     * reference scripts the registration published, leaving only issuance_mint inline.
+     *
+     * <p>This test exists because that claim is arithmetic until something measures it. It
+     * drives a real registration-with-first-mint chain (the only path that publishes the
+     * reference scripts), then builds a real burn against the resulting token UTxO and
+     * measures the serialized transaction.
+     */
+    @Test
+    public void securityTokenBurnFitsUnderMaxTxSize() throws Exception {
+        // Mint to the ADMIN, not Alice: the burner must be a power user holding both
+        // can_burn (minting_logic) and can_force_transfer (third_party_transfer_logic),
+        // and the bootstrap power user is the admin.
+        var st = securityTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var chain = st.chain();
+        var boot = st.boot();
+        var handler = st.handler();
+        var built = st.built();
+        var reg = st.registrations().get(built.programmableTokenPolicyId());
+        var label = "security-token";
+
+        // The publish step is what makes the burn buildable at all — assert it ran and was
+        // recorded, otherwise the burn's own precondition would be what fails and this test
+        // would prove nothing about size.
+        Assertions.assertNotNull(built.publishScriptsCborHex(),
+                "a registration carrying a first mint must publish reference scripts");
+        Assertions.assertNotNull(reg.getRefScriptsTxHash(),
+                "the published reference scripts must be recorded on the registration row");
+        Assertions.assertNotNull(reg.getThirdPartyTransferLogicRefIndex(),
+                "third_party_transfer_logic must be among the published reference scripts");
+
+        // Locate the token UTxO the registration's first mint produced.
+        var policyId = built.programmableTokenPolicyId();
+        var regTx = Transaction.deserialize(HexUtil.decodeHexString(built.registrationCborHex()));
+        var regTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil
+                .getTxHash(regTx.serialize());
+        var userToken = Cip68Evidence.tokensOfPolicy(regTx, policyId).stream()
+                .filter(t -> !Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("the registration minted no user token"));
+        log.info("[{}/burn] burning from {}:{} (asset {} qty {})",
+                label, regTxHash, userToken.outputIndex(), userToken.assetNameHex(),
+                userToken.quantity());
+
+        var burnRequest = new org.cardanofoundation.cip113.model.BurnTokenRequest(
+                BootstrapFixture.ADMIN.baseAddress(),
+                policyId,
+                reg.getSecurityAssetNameHex(),
+                "400",                                  // partial: exercises the continuation output
+                regTxHash,
+                userToken.outputIndex());
+
+        var burnResult = handler.buildBurnTransaction(burnRequest, boot.params());
+        Assertions.assertTrue(burnResult.isSuccessful(),
+                "burn build failed: " + burnResult.error());
+
+        var burnTx = Transaction.deserialize(HexUtil.decodeHexString(burnResult.unsignedCborTx()));
+        int size = burnTx.serialize().length;
+        log.info("[{}/burn] serialized size = {} bytes (limit 16384; was 21480 with all four "
+                + "validators inline)", label, size);
+
+        int evaluated = chain.reportAndCheckRedeemers(label + "/burn", burnTx);
+        Assertions.assertTrue(evaluated > 0,
+                "no redeemer was genuinely evaluated on the burn — the scripts did not run, so "
+                + "the size figure would not mean anything");
+
+        Assertions.assertTrue(size < 16384,
+                "burn exceeds the 16384-byte ledger limit at " + size + " bytes");
+    }
+
+
+    /**
      * security-token is the one substandard whose CIP-68 pair cannot be completed at
      * registration: {@code verify_token_registration} rejects more than one asset name minted
      * under the issuance policy, so the {@code (100)} token has to ride along with the first
@@ -1181,6 +1261,22 @@ public class OfflineCip68EvalTest {
      */
     private SecurityTokenChain securityTokenChain(Cip68Metadata metadata, long initialMintableAmount)
             throws Exception {
+        return securityTokenChain(metadata, initialMintableAmount, "0",
+                BootstrapFixture.ALICE.baseAddress());
+    }
+
+    /**
+     * @param initialMintQuantity supply minted BY the registration transaction. Anything above
+     *        zero switches the chain onto its mint path, which is what causes the publish
+     *        transaction to run — and therefore the only way to get reference scripts recorded
+     *        against the registration row. A burn cannot be built without them.
+     * @param recipientAddress    who receives that first mint. The burner has to be a power
+     *        user holding both can_burn and can_force_transfer, so a burn test must send the
+     *        supply to the admin rather than to Alice.
+     */
+    private SecurityTokenChain securityTokenChain(Cip68Metadata metadata, long initialMintableAmount,
+                                                  String initialMintQuantity, String recipientAddress)
+            throws Exception {
         var chain = new OfflineChain();
         var boot = BootstrapFixture.bootstrap(chain);
         var label = "security-token";
@@ -1237,9 +1333,10 @@ public class OfflineCip68EvalTest {
         var registerRequest = org.cardanofoundation.cip113.model.SecurityTokenRegisterRequest.builder()
                 .substandardId("security-token")
                 .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
-                .recipientAddress(BootstrapFixture.ALICE.baseAddress())
+                .recipientAddress(recipientAddress)
                 .assetName(BASE_ASSET_NAME_HEX)
-                .quantity("0")                     // registration is structurally mint-free
+                .quantity("0")                     // overwritten by initialMintQuantity below
+                .initialMintQuantity(initialMintQuantity)
                 .cip68Metadata(metadata)
                 .adminPubKeyHash(adminPkh)
                 .initialMintableAmount(initialMintableAmount)
@@ -1263,9 +1360,18 @@ public class OfflineCip68EvalTest {
         var stages = new java.util.LinkedHashMap<String, String>();
         stages.put("genesis", built.genesisCborHex());
         stages.put("addPowerUser", built.addPowerUserCborHex());
+        // Present only on the mint path, and it must be submitted BEFORE the registration —
+        // the registration reads its outputs as reference inputs.
+        if (built.publishScriptsCborHex() != null) {
+            stages.put("publishScripts", built.publishScriptsCborHex());
+        }
         stages.put("registration", built.registrationCborHex());
         if (built.registerTransferLogicCborHex() != null) {
             stages.put("registerTransferLogic", built.registerTransferLogicCborHex());
+        }
+        if (built.registerThirdPartyTransferLogicCborHex() != null) {
+            stages.put("registerThirdPartyTransferLogic",
+                    built.registerThirdPartyTransferLogicCborHex());
         }
 
         for (var stage : stages.entrySet()) {
@@ -1278,7 +1384,9 @@ public class OfflineCip68EvalTest {
             // registerTransferLogic's ONLY redeemer is the Cert one injected in postBalanceTx
             // with hand-picked ex-units, so it legitimately has nothing the evaluator could
             // measure. Every other stage must have really run its scripts.
-            if (!"registerTransferLogic".equals(stage.getKey())) {
+            if (!"registerTransferLogic".equals(stage.getKey())
+                    && !"registerThirdPartyTransferLogic".equals(stage.getKey())
+                    && !"publishScripts".equals(stage.getKey())) {
                 Assertions.assertTrue(evaluated > 0,
                         stage.getKey() + " produced no genuinely evaluated redeemer");
             }

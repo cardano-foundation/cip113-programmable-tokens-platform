@@ -180,6 +180,9 @@ export interface SecurityTokenChainBuildResponse {
    *  fit it (the optional 4th tx); when absent, the wallet's first transfer
    *  will trigger the runtime fallback to register the cred. */
   registerTransferLogicCborHex?: string;
+  /** RegCert for third_party_transfer_logic. The burn withdraws 0 from that reward
+   *  account, so without it the first burn is rejected at submit. */
+  registerThirdPartyTransferLogicCborHex?: string;
   globalStatePolicyId: string;
   programmableTokenPolicyId: string;
   denylistPolicyId: string;

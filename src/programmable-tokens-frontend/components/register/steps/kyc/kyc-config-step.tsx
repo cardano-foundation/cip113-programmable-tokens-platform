@@ -392,6 +392,15 @@ export function KycConfigStep({
           ...(chain.registerTransferLogicCborHex
             ? [{ name: 'registerTransferLogic', cbor: chain.registerTransferLogicCborHex }]
             : []),
+          // Registers the third-party transfer-logic reward account, which the BURN
+          // withdraws 0 from. A different script from the one above, needed by a
+          // different operation — without it the first burn is rejected at submit.
+          ...(chain.registerThirdPartyTransferLogicCborHex
+            ? [{
+                name: 'registerThirdPartyTransferLogic',
+                cbor: chain.registerThirdPartyTransferLogicCborHex,
+              }]
+            : []),
         ];
         const unsignedCbors = chainTxs.map(t => t.cbor);
         const totalTxs = unsignedCbors.length;

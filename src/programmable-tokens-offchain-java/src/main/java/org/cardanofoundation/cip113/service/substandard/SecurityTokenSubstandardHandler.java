@@ -519,10 +519,13 @@ public class SecurityTokenSubstandardHandler
             // equal its `security_asset_name` parameter — a raw `expect`, so a mismatch
             // is an untyped script trap with nothing for the operator to act on.
             //
-            // On the chained path both values come from one request and cannot differ.
-            // The public two-arg overload (dispatched from TokenOperationsService) is
-            // the exposure: a client-supplied asset name meets a DB-loaded context, and
-            // that path can now mint. Refuse off chain instead.
+            // On the chained path they are made to agree explicitly: buildFullRegistrationChain
+            // overwrites the request's asset name with the persisted one before delegating,
+            // because a CIP-68 registration labels the name at genesis and the two would
+            // otherwise always differ. The public two-arg overload (dispatched from
+            // TokenOperationsService) is the real exposure: a client-supplied asset name
+            // meets a DB-loaded context, and that path can now mint. Refuse off chain
+            // instead of trapping on chain.
             if (willMint) {
                 String requestedAssetNameHex = request.getAssetName() == null
                         ? "" : request.getAssetName().trim();
@@ -3227,6 +3230,10 @@ public class SecurityTokenSubstandardHandler
             var protocolParams = protocolParamsSupplier.getProtocolParams();
             MinAdaCalculator minAda = new MinAdaCalculator(protocolParams);
 
+            // Two, not three. third_party_transfer_logic is published by the cert tx that
+            // registers its reward account instead: a publish transaction has to carry the
+            // scripts in its own outputs, so all three together measured 18 273 bytes —
+            // over the same limit this mechanism exists to get under.
             List<PlutusScript> toPublish = List.of(mintingLogicScript, globalStateSpendScript);
             List<BigInteger> coins = new ArrayList<>();
             for (PlutusScript script : toPublish) {
@@ -3307,8 +3314,8 @@ public class SecurityTokenSubstandardHandler
                         + ", globalStateSpend=" + (gsSpendRef != null) + ")");
             }
 
-            log.info("publishScripts: tx {} publishes minting_logic at {}:{} and global_state spend at {}:{}",
-                    txHash, txHash, mintingLogicRef.getOutputIndex(), txHash, gsSpendRef.getOutputIndex());
+            log.info("publishScripts: tx {} publishes minting_logic at :{}, global_state spend at :{}",
+                    txHash, mintingLogicRef.getOutputIndex(), gsSpendRef.getOutputIndex());
 
             return TransactionContext.ok(transaction.serializeToHex(), new PublishedRefScripts(
                     transaction.serializeToHex(), txHash,
@@ -3393,6 +3400,12 @@ public class SecurityTokenSubstandardHandler
              *  Null when the chain orchestrator couldn't fit it (e.g. no admin
              *  change in the registration tx). */
             String registerTransferLogicCborHex,
+            /** RegCert for the third_party_transfer_logic stake credential. The BURN
+             *  withdraws 0 from it, so without this the first burn is rejected at submit
+             *  with WithdrawalsNotInRewardsCERTS. Null when the chain couldn't fit it, in
+             *  which case POST /{policyId}/register-third-party-transfer-logic does it
+             *  as a standalone admin tx. */
+            String registerThirdPartyTransferLogicCborHex,
             String globalStatePolicyId,
             String programmableTokenPolicyId,
             String denylistPolicyId,
@@ -3401,7 +3414,8 @@ public class SecurityTokenSubstandardHandler
             String addPowerUserTxHash,
             String publishScriptsTxHash,
             String registrationTxHash,
-            String registerTransferLogicTxHash) {}
+            String registerTransferLogicTxHash,
+            String registerThirdPartyTransferLogicTxHash) {}
 
     /** Build the full security-token registration chain in one call.
      *
@@ -3755,6 +3769,19 @@ public class SecurityTokenSubstandardHandler
                 published.refUtxos().forEach(hybridUtxoSupplier::add);
                 published.scripts().forEach(hybridScriptSupplier::add);
 
+                // Record where they landed. This is the ONLY moment the location is known:
+                // the outputs sit at the admin's enterprise address, where nothing
+                // distinguishes them from ordinary change, and their scripts are
+                // parameterized per token so a later scan would have to re-derive every
+                // candidate hash to recognise them. Written before the chain is submitted
+                // on purpose — the hash of an unsubmitted transaction is already final, and
+                // if the operator abandons the chain here the row simply points at a
+                // transaction that never landed, which the burn's own resolution catches.
+                reg.setRefScriptsTxHash(publishTxHash);
+                reg.setMintingLogicRefIndex(published.mintingLogicRefUtxo().getOutputIndex());
+                reg.setGsSpendRefIndex(published.globalStateSpendRefUtxo().getOutputIndex());
+                reg = registrationRepository.save(reg);
+
                 publishChange = findOutputAtAddress(publishTx, publishTxHash, adminAddress,
                         BigInteger.valueOf(5_000_000L));
                 if (publishChange == null) {
@@ -3788,6 +3815,14 @@ public class SecurityTokenSubstandardHandler
             // input and destroy the reference script.
             request.setChainingTransactionCborHex(chainWillMint ? publishCbor : addPuCbor);
             request.setQuantity(firstMintQuantity);
+            // Align the asset name with what genesis actually persisted. For a CIP-68
+            // registration these two DIVERGE: the request carries the base name the user
+            // typed, while genesis labelled it (333) and parameterised minting_logic with
+            // the labelled form. verify_token_registration hard-expects the minted name to
+            // equal that parameter, so the builder's own guard refused every CIP-68
+            // registration that carried a first mint — the combination this chain exists to
+            // support. The persisted name is the authority; the request's is user input.
+            request.setAssetName(reg.getSecurityAssetNameHex());
             request.setGlobalStatePolicyId(reg.getGlobalStatePolicyId());
 
             // The registration's mint half needs two more UTxOs that are not on chain
@@ -3870,11 +3905,53 @@ public class SecurityTokenSubstandardHandler
                 log.warn("chain[registerTransferLogic] skipped: no admin change output >= 5.5 ADA in registration tx (chain will return 3 txs)");
             }
 
+            // ── PHASE 6 ─ Third-party transfer-logic cert ──────────────────
+            // A DIFFERENT script from phase 5's, with a different reward address, needed by
+            // a different operation: the burn withdraws 0 from this one because ThirdPartyAct
+            // keys on registry-node slot 4. Chained off phase 5's change so the admin signs
+            // it in the same batch instead of discovering the requirement at their first burn.
+            //
+            // Best-effort, exactly like phase 5: if the change doesn't stretch this far the
+            // chain is still valid and the standalone endpoint covers it. Only skipped
+            // entirely when phase 5 itself was skipped, since there is no change to chain from.
+            String thirdPartyCertCbor = null;
+            String thirdPartyCertTxHash = null;
+            if (certCbor != null) {
+                Transaction certTxForChaining = Transaction.deserialize(HexUtil.decodeHexString(certCbor));
+                // 40 ADA, not 5.5: this cert tx also publishes a ~6.3 KB reference script,
+                // whose min-UTxO alone is about 28 ADA.
+                Utxo certAdminChange = findOutputAtAddress(certTxForChaining, certTxHash, adminAddress,
+                        BigInteger.valueOf(40_000_000L));
+                if (certAdminChange != null) {
+                    hybridUtxoSupplier.add(certAdminChange);
+                    TransactionContext<Void> tpResult = buildRegisterThirdPartyTransferLogicTransaction(
+                            progTokenPolicyId, adminAddress, protocolParams,
+                            certAdminChange, /*skipAlreadyRegisteredCheck=*/ true);
+                    if (tpResult.isSuccessful()) {
+                        thirdPartyCertCbor = tpResult.unsignedCborTx();
+                        Transaction tpTx = Transaction.deserialize(
+                                HexUtil.decodeHexString(thirdPartyCertCbor));
+                        thirdPartyCertTxHash = TransactionUtil.getTxHash(tpTx.serialize());
+                        checkedTxSize("registerThirdPartyTransferLogic", tpTx);
+                        log.info("chain[registerThirdPartyTransferLogic] built cert tx {}",
+                                thirdPartyCertTxHash);
+                    } else {
+                        log.warn("chain[registerThirdPartyTransferLogic] failed (burn will need the "
+                                + "standalone cert tx first): {}", tpResult.error());
+                    }
+                } else {
+                    log.warn("chain[registerThirdPartyTransferLogic] skipped: no admin change output "
+                            + ">= 40 ADA in the transfer-logic cert tx (burn will need the "
+                            + "standalone cert tx first)");
+                }
+            }
+
             return TransactionContext.ok(null, new ChainBuildResult(
-                    genesisCbor, addPuCbor, publishCbor, regCbor, certCbor,
+                    genesisCbor, addPuCbor, publishCbor, regCbor, certCbor, thirdPartyCertCbor,
                     reg.getGlobalStatePolicyId(), progTokenPolicyId,
                     reg.getDenylistPolicyId(), reg.getPowerUsersPolicyId(),
-                    genesisTxHash, addPuTxHash, publishTxHash, regTxHash, certTxHash));
+                    genesisTxHash, addPuTxHash, publishTxHash, regTxHash, certTxHash,
+                    thirdPartyCertTxHash));
         } catch (Exception e) {
             log.error("security-token chain build failed", e);
             return TransactionContext.typedError("chain build failed: " + e.getMessage());
@@ -4187,6 +4264,42 @@ public class SecurityTokenSubstandardHandler
                     .transactionId(protocolParams.programmableGlobalRefInput().txHash())
                     .index(protocolParams.programmableGlobalRefInput().outputIndex())
                     .build();
+            // ── Reference scripts ──────────────────────────────────────────
+            // The four validators this transaction needs come to 19 385 bytes inline:
+            //   7211 minting_logic + 6269 third_party_transfer_logic
+            // + 4183 global_state spend + 1722 issuance_mint
+            // against a 16 384-byte limit. The first burn ever attempted was rejected at
+            // 21 480. None of the four is droppable — ThirdPartyAct requires the withdrawal
+            // keyed on registry-node slot 4, minting_logic gates can_burn, GS must be spent
+            // to decrement the supply, and issuance_mint is what actually burns — so the
+            // three big ones are read from the reference scripts the registration published.
+            // That leaves issuance_mint (1722) as the only inline validator.
+            if (reg.getRefScriptsTxHash() == null
+                    || reg.getMintingLogicRefIndex() == null
+                    || reg.getGsSpendRefIndex() == null
+                    || reg.getThirdPartyRefTxHash() == null
+                    || reg.getThirdPartyTransferLogicRefIndex() == null) {
+                return TransactionContext.typedError(
+                        "burn: this token's validators were never published as reference scripts, "
+                        + "so the burn transaction cannot be built — inline they are 19 385 bytes "
+                        + "against a 16 384-byte limit. Registrations that carry a first mint "
+                        + "publish them automatically, and the third-party validator is published "
+                        + "by the cert tx that registers its reward account; this one (policy "
+                        + reg.getProgrammableTokenPolicyId() + ") is missing at least one of "
+                        + "those. Re-publish them before burning.");
+            }
+            TransactionInput mintingLogicRefInput = TransactionInput.builder()
+                    .transactionId(reg.getRefScriptsTxHash())
+                    .index(reg.getMintingLogicRefIndex()).build();
+            TransactionInput gsSpendRefInput = TransactionInput.builder()
+                    .transactionId(reg.getRefScriptsTxHash())
+                    .index(reg.getGsSpendRefIndex()).build();
+            // A DIFFERENT transaction: this one is published by the cert tx that registers
+            // the third-party reward account, because the publish tx had no room for it.
+            TransactionInput thirdPartyRefInput = TransactionInput.builder()
+                    .transactionId(reg.getThirdPartyRefTxHash())
+                    .index(reg.getThirdPartyTransferLogicRefIndex()).build();
+
             // GlobalState is ALSO a reference input here, not only a spent input.
             // The third-party validator (which slot 4 now names — see below) reads GS
             // from self.reference_inputs, while minting_logic's burn path reads it from
@@ -4195,11 +4308,17 @@ public class SecurityTokenSubstandardHandler
             // transaction is ever rejected with a non-disjoint-reference-inputs ledger
             // error, THAT is the reason, and the two requirements are then genuinely
             // irreconcilable in a single transaction.
+            // The three reference-SCRIPT inputs belong in this list too. The validators read
+            // reference inputs by index against the lex-sorted FULL set, so an input that is
+            // present in the transaction but missing from this computation silently shifts
+            // every index below it — the same trap the progBase/progGlobal note above
+            // describes. indexOf() re-derives them, so nothing here needs hand-adjusting.
             List<TransactionInput> refInputsSorted = java.util.stream.Stream.of(
                     txInputOf(directoryEntry), txInputOf(puNode),
                     txInputOf(protocolParamsUtxo), txInputOf(issuanceUtxo),
                     txInputOf(gsUtxo), txInputOf(denylistCoveringNodeForBurn),
-                    progBaseRefInput, progGlobalRefInput
+                    progBaseRefInput, progGlobalRefInput,
+                    mintingLogicRefInput, gsSpendRefInput, thirdPartyRefInput
             ).sorted(new TransactionInputComparator()).toList();
             int directoryRefIdx = refInputsSorted.indexOf(txInputOf(directoryEntry));
             int puNodeRefIdx = refInputsSorted.indexOf(txInputOf(puNode));
@@ -4276,18 +4395,28 @@ public class SecurityTokenSubstandardHandler
                     reg.getGlobalStatePolicyId(), protocolParams.directoryMintParams().scriptHash());
             Address thirdPartyRewardAddress = AddressProvider.getRewardAddress(
                     thirdPartyTransferLogicScript, network.getCardanoNetwork());
-            // KNOWN BLOCKER — this reward account is never registered by any code path.
-            // The withdrawal below requires it to exist on chain, but the only stake
-            // registrations in this substandard are mintingLogic (genesis, ~line 1679)
-            // and transferLogic (buildRegisterTransferLogicTransaction) — a DIFFERENT
-            // script. There is no counterpart for this one, so a burn builds and
-            // evaluates fine (script evaluation does not check reward-account
-            // existence) and is then rejected phase-1 at submit with
-            // WithdrawalsNotInRewardsCERTS. Fixing it means a
-            // buildRegisterThirdPartyTransferLogicTransaction mirroring
-            // buildRegisterTransferLogicTransaction, wired into
-            // buildFullRegistrationChain and the admin UI. Not yet done — no burn has
-            // ever been submitted, so this has never been observed, only derived.
+            // The withdrawal below requires this reward account to exist on chain.
+            // buildRegisterThirdPartyTransferLogicTransaction is what creates it; refuse
+            // here rather than hand back a transaction that evaluates perfectly and is then
+            // rejected phase-1 at submit with WithdrawalsNotInRewardsCERTS, after the user
+            // has signed. Script evaluation cannot catch this — reward-account existence is
+            // a ledger rule, not a Plutus one, so the validator runs and succeeds either way.
+            //
+            // Two sources, either sufficient: the on-chain stake-registration index is
+            // authoritative but lags, and the local flag covers the window where the cert tx
+            // was signed in the same batch as the registration and has not been indexed yet.
+            boolean thirdPartyRegisteredOnChain = stakeRegistrationRepository
+                    .findRegistrationsByStakeAddress(thirdPartyRewardAddress.getAddress())
+                    .map(r -> r.getType().equals(CertificateType.STAKE_REGISTRATION))
+                    .orElse(false);
+            if (!thirdPartyRegisteredOnChain && !reg.isThirdPartyRewardRegistered()) {
+                return TransactionContext.typedError(
+                        "burn: the third_party_transfer_logic reward account ("
+                        + thirdPartyRewardAddress.getAddress() + ") is not registered. The burn "
+                        + "withdraws 0 from it because ThirdPartyAct requires a withdrawal keyed "
+                        + "on registry-node slot 4, and an unregistered reward account is "
+                        + "rejected at submit. Register it first, then retry the burn.");
+            }
             // ThirdPartyTransferLogicScriptWithdrawRedeemer { registry_node_ref_input_index,
             //   global_state_ref_input_index, power_user_node_ref_input_index,
             //   destination_actions }. One action per unique destination stake credential
@@ -4369,15 +4498,12 @@ public class SecurityTokenSubstandardHandler
             // The protocol scripts MUST be referenced (not attached) — attaching
             // both inline pushes the tx over the 16 KB ledger size limit.
             //
-            // SIZE WARNING: this transaction now attaches FOUR validators. The
-            // headroom note below was written when the third-party script was not
-            // among them; a parameterised third-party validator is in the same size
-            // class as transferLogic (~6 KB), so it is spending exactly the headroom
-            // that note says was needed. If a real burn is ever rejected for size,
-            // the fix is to publish thirdPartyTransferLogic as a reference script and
-            // read it in like progBaseRefInput / progGlobalRefInput, rather than
-            // attaching it inline. Unmeasured — no burn has ever been built against a
-            // real token UTxO.
+            // SIZE: three of these four are REFERENCED, not carried. Attaching all four
+            // came to 19 385 bytes and the first real burn was rejected at 21 480 against
+            // the 16 384 limit. minting_logic, global_state spend and
+            // third_party_transfer_logic are read from the reference scripts the
+            // registration published (see the reference-script block above); only
+            // issuance_mint, at 1722 bytes, remains inline.
             //
             // transferLogic is intentionally NOT in the witness set. Registry
             // node field 3 (transfer_logic_script) is only consulted by
@@ -4430,6 +4556,18 @@ public class SecurityTokenSubstandardHandler
             String feePayerAddress = request.feePayerAddress();
             Transaction transaction = quickTxBuilder.compose(tx)
                     .withRequiredSigners(burnerKeyHash, burnerStakeHash)
+                    // The three big validators stay ATTACHED above — attaching is how
+                    // cardano-client binds a redeemer to a script — and this pair then moves
+                    // them out of the witness set into the reference inputs added to
+                    // refInputsSorted. withReferenceScripts declares what those inputs carry,
+                    // so the Conway tiered ref-script fee is charged and the cost-model
+                    // languages are right; removeDuplicateScriptWitnesses drops exactly those
+                    // hashes from the witness set. It defaults to FALSE, and leaving it off
+                    // keeps BOTH copies — over max-tx-size, and rejected as
+                    // ExtraneousScriptWitnessesUTXOW. issuance_mint is deliberately absent:
+                    // it is not published, and at 1722 bytes it fits inline.
+                    .withReferenceScripts(s.mintingLogic(), s.gsSpend(), thirdPartyTransferLogicScript)
+                    .removeDuplicateScriptWitnesses(true)
                     .feePayer(feePayerAddress)
                     .mergeOutputs(false)
                     .withCollateralInputs(TransactionInput.builder()
@@ -4552,17 +4690,146 @@ public class SecurityTokenSubstandardHandler
                 }
             }
 
-            // Need enough ADA in inputs to cover: tx fee (~0.2 ADA) + Conway
-            // RegCert deposit (2 ADA) + min-UTxO for the change output (~1 ADA).
+            TransactionContext<Transaction> result = buildRegisterScriptStakeCredentialTransaction(
+                    transferLogicScript, transferLogicRewardAddrBech32, "transfer-logic",
+                    policyId, feePayerAddress, chainedFunding,
+                    /*alsoPublishAsReferenceScript=*/ false);
+            return result.isSuccessful()
+                    ? TransactionContext.ok(result.unsignedCborTx())
+                    : TransactionContext.typedError(result.error());
+        } catch (Exception e) {
+            log.error("security-token register-transfer-logic failed for policy={}", policyId, e);
+            return TransactionContext.typedError(
+                    "register-transfer-logic failed: " + e.getMessage());
+        }
+    }
+
+    /** Register the {@code third_party_transfer_logic} reward account.
+     *
+     *  <p>The burn withdraws 0 from it, because {@code ThirdPartyAct} requires a withdrawal
+     *  keyed on whatever registry-node slot 4 names. Slot 4 used to hold {@code minting_logic}
+     *  — the burn already withdrew from that, so the requirement was satisfied for free and
+     *  nothing needed registering. Commit {@code 0ec401a} put the substandard's real
+     *  third-party validator there, which is correct, and silently made this a prerequisite
+     *  that no code path provided.
+     *
+     *  <p>Mirrors {@link #buildRegisterTransferLogicTransaction} exactly, including the
+     *  chain-mode funding overload. */
+    public TransactionContext<Void> buildRegisterThirdPartyTransferLogicTransaction(
+            String policyId, String feePayerAddress, ProtocolBootstrapParams protocolParams) {
+        return buildRegisterThirdPartyTransferLogicTransaction(
+                policyId, feePayerAddress, protocolParams, /*chainedFunding=*/ null,
+                /*skipAlreadyRegisteredCheck=*/ false);
+    }
+
+    public TransactionContext<Void> buildRegisterThirdPartyTransferLogicTransaction(
+            String policyId, String feePayerAddress, ProtocolBootstrapParams protocolParams,
+            Utxo chainedFunding, boolean skipAlreadyRegisteredCheck) {
+        try {
+            Optional<SecurityTokenRegistrationEntity> regOpt =
+                    registrationRepository.findByProgrammableTokenPolicyId(policyId);
+            if (regOpt.isEmpty()) {
+                return TransactionContext.typedError(
+                        "security-token registration not found for policy " + policyId);
+            }
+            SecurityTokenRegistrationEntity reg = regOpt.get();
+
+            PlutusScript thirdPartyScript = scriptBuilder.buildThirdPartyTransferLogicScript(
+                    reg.getSecurityAssetNameHex(), reg.getPowerUsersPolicyId(),
+                    reg.getGlobalStatePolicyId(),
+                    protocolParams.directoryMintParams().scriptHash());
+            Address thirdPartyRewardAddress = AddressProvider.getRewardAddress(
+                    thirdPartyScript, network.getCardanoNetwork());
+            String thirdPartyRewardAddrBech32 = thirdPartyRewardAddress.getAddress();
+
+            if (!skipAlreadyRegisteredCheck) {
+                boolean alreadyRegistered = stakeRegistrationRepository
+                        .findRegistrationsByStakeAddress(thirdPartyRewardAddrBech32)
+                        .map(r -> r.getType().equals(CertificateType.STAKE_REGISTRATION))
+                        .orElse(false);
+                if (alreadyRegistered) {
+                    return TransactionContext.typedError(
+                            "thirdPartyTransferLogic stake credential already registered for policy "
+                            + policyId);
+                }
+            }
+
+            TransactionContext<Transaction> result = buildRegisterScriptStakeCredentialTransaction(
+                    thirdPartyScript, thirdPartyRewardAddrBech32, "third-party-transfer-logic",
+                    policyId, feePayerAddress, chainedFunding,
+                    /*alsoPublishAsReferenceScript=*/ true);
+            if (!result.isSuccessful()) {
+                return TransactionContext.typedError(result.error());
+            }
+
+            // Record BOTH facts this transaction establishes: the reward account exists, and
+            // the script is now referenceable. The burn needs both and can derive neither.
+            Transaction certTx = result.metadata();
+            String certTxHash = TransactionUtil.getTxHash(certTx.serialize());
+            Utxo thirdPartyRef = findRefScriptOutput(certTx, certTxHash, thirdPartyScript);
+            if (thirdPartyRef == null) {
+                return TransactionContext.typedError(
+                        "register-third-party-transfer-logic: the reference-script output is "
+                        + "missing from the built transaction, so a burn would still be "
+                        + "unbuildable. Refusing rather than registering the reward account "
+                        + "and leaving the other half undone.");
+            }
+            // Local record, because the cert tx is signed in the same batch as the
+            // registration and is not on chain yet when the admin page next loads —
+            // the stake-registration index cannot answer this for minutes.
+            reg.setThirdPartyRewardRegistered(true);
+            reg.setThirdPartyRefTxHash(certTxHash);
+            reg.setThirdPartyTransferLogicRefIndex(thirdPartyRef.getOutputIndex());
+            registrationRepository.save(reg);
+            return TransactionContext.ok(result.unsignedCborTx());
+        } catch (Exception e) {
+            log.error("security-token register-third-party-transfer-logic failed for policy={}",
+                    policyId, e);
+            return TransactionContext.typedError(
+                    "register-third-party-transfer-logic failed: " + e.getMessage());
+        }
+    }
+
+
+    /** Register a SCRIPT stake credential so a validator's reward account exists on chain.
+     *
+     *  <p>Shared by {@code transfer_logic} and {@code third_party_transfer_logic}. Both are
+     *  parameterized per token, both are withdrawn-from by a later transaction, and a
+     *  withdrawal from an unregistered reward account is rejected phase-1 with
+     *  {@code WithdrawalsNotInRewardsCERTS} — <em>after</em> the user has signed. Script
+     *  evaluation cannot warn about it: reward-account existence is a ledger rule, not a
+     *  Plutus one, so the validator runs and succeeds either way.
+     *
+     *  <p>This takes the RegCert-plus-attached-script route rather than the bare legacy
+     *  {@code StakeRegistration} the genesis transaction uses for {@code minting_logic}.
+     *  Both are valid; the difference is that genesis had no room for another 7 KB of
+     *  inline validator and this transaction contains nothing else, so it can afford the
+     *  witness. The two halves must move together — RegCert IS witness-required for a
+     *  script credential, so rewriting the cert without attaching the script fails with
+     *  {@code MissingScriptWitnessesUTXOW}. */
+    private TransactionContext<Transaction> buildRegisterScriptStakeCredentialTransaction(
+            PlutusScript stakeScript, String rewardAddrBech32, String label,
+            String policyId, String feePayerAddress, Utxo chainedFunding,
+            boolean alsoPublishAsReferenceScript) {
+        try {
+            // Need enough ADA in inputs to cover: tx fee (~0.2 ADA) + Conway RegCert deposit
+            // (2 ADA) + min-UTxO for the change output (~1 ADA) — plus, when this
+            // transaction also publishes the script as a reference script, that output's
+            // own min-UTxO, which for a ~6.3 KB validator is about 28 ADA.
+            long minFunding = alsoPublishAsReferenceScript ? 40_000_000L : 5_000_000L;
             List<Utxo> fundingUtxos;
             if (chainedFunding != null) {
                 fundingUtxos = List.of(chainedFunding);
             } else {
-                fundingUtxos = accountService.findAdaOnlyUtxo(feePayerAddress, 5_000_000L);
+                fundingUtxos = accountService.findAdaOnlyUtxo(feePayerAddress, minFunding);
             }
             if (fundingUtxos.isEmpty()) {
                 return TransactionContext.typedError(
-                        "no funding UTxO at fee-payer address (need at least 5 ADA: 2 for the cert deposit, ~0.2 for fees, the rest for min-UTxO change)");
+                        "no funding UTxO at fee-payer address (need at least " + (minFunding / 1_000_000L)
+                        + " ADA: 2 for the cert deposit, ~0.2 for fees, the rest for min-UTxO change"
+                        + (alsoPublishAsReferenceScript
+                                ? " and the ~28 ADA min-UTxO of the published reference script)"
+                                : ")"));
             }
             Utxo funding = fundingUtxos.getFirst();
 
@@ -4591,9 +4858,38 @@ public class SecurityTokenSubstandardHandler
                     .from(feePayerAddress)
                     .collectFrom(fundingUtxos)
                     .payToAddress(feePayerAddress, java.util.List.of(Amount.ada(3)))
-                    .attachCertificateValidator(transferLogicScript)
-                    .registerStakeAddress(transferLogicRewardAddrBech32)
+                    .attachCertificateValidator(stakeScript)
+                    .registerStakeAddress(rewardAddrBech32)
                     .withChangeAddress(feePayerAddress);
+            // Publish the same script as a reference script while we are here. This
+            // transaction already carries it in full as the RegCert witness and is otherwise
+            // nearly empty, so it is the cheapest place in the whole chain to put a second
+            // copy — and the publish transaction has no room left (all three scripts there
+            // came to 18 273 bytes). To the ENTERPRISE address, for the same reason
+            // buildPublishScriptsTransaction uses it: the base address is what every other
+            // builder scans for funding, and one of them would eventually spend the
+            // reference script and destroy it.
+            if (alsoPublishAsReferenceScript) {
+                String refScriptAddress = AddressProvider.getEntAddress(
+                        new Address(feePayerAddress).getPaymentCredential().orElseThrow(
+                                () -> new BuildPreconditionException(
+                                        "fee payer address has no payment credential: " + feePayerAddress)),
+                        network.getCardanoNetwork()).getAddress();
+                MinAdaCalculator minAda = new MinAdaCalculator(protocolParamsSupplier.getProtocolParams());
+                BigInteger exact = minAda.calculateMinAda(TransactionOutput.builder()
+                        .address(refScriptAddress)
+                        .value(Value.builder().coin(MinAdaCalculator.DUMMY_COIN_VAL).build())
+                        .scriptRef(stakeScript)
+                        .build());
+                BigInteger coin = exact.add(BigInteger.valueOf(1_000_000L));
+                coin = coin.add(BigInteger.valueOf(999_999L))
+                        .divide(BigInteger.valueOf(1_000_000L))
+                        .multiply(BigInteger.valueOf(1_000_000L));
+                log.info("register-{}: publishing the script as a reference script at {} "
+                        + "({} bytes, min-utxo {}, using {})", label, refScriptAddress,
+                        stakeScript.serializeScriptBody().length, exact, coin);
+                tx = tx.payToAddress(refScriptAddress, Amount.lovelace(coin), stakeScript);
+            }
 
             Transaction transaction = quickTxBuilder.compose(tx)
                     .withRequiredSigners(signerKeyHash)
@@ -4726,13 +5022,13 @@ public class SecurityTokenSubstandardHandler
                     .ignoreScriptCostEvaluationError(false)
                     .build();
 
-            log.info("security-token register-transfer-logic: policy={} stake={}",
-                    policyId, transferLogicRewardAddrBech32);
-            return TransactionContext.ok(transaction.serializeToHex());
+            log.info("security-token register-{}: policy={} stake={} size={} bytes",
+                    label, policyId, rewardAddrBech32, transaction.serialize().length);
+            return TransactionContext.ok(transaction.serializeToHex(), transaction);
         } catch (Exception e) {
-            log.error("security-token register-transfer-logic failed for policy={}", policyId, e);
+            log.error("security-token register-{} failed for policy={}", label, policyId, e);
             return TransactionContext.typedError(
-                    "register-transfer-logic failed: " + e.getMessage());
+                    "register-" + label + " failed: " + e.getMessage());
         }
     }
 
