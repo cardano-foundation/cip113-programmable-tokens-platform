@@ -43,6 +43,7 @@ import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
 import org.cardanofoundation.cip113.model.onchain.siezeandfreeze.blacklist.*;
 import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.CustomStakeRegistrationRepository;
+import org.cardanofoundation.cip113.service.ScriptRegistrationService;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.service.*;
@@ -112,6 +113,9 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
     private final CustomStakeRegistrationRepository stakeRegistrationRepository;
+    /** See the note in DummySubstandardHandler: the ledger, not our index, decides whether a
+     *  credential already exists. */
+    private final ScriptRegistrationService scriptRegistrationService;
 
     private final UtxoProvider utxoProvider;
 
@@ -187,9 +191,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .toList();
 
             var registeredStakeAddresses = requiredStakeAddresses.stream()
-                    .filter(stakeAddress -> stakeRegistrationRepository.findRegistrationsByStakeAddress(stakeAddress)
-                            .map(r -> r.getType().equals(CertificateType.STAKE_REGISTRATION))
-                            .orElse(false))
+                    .filter(scriptRegistrationService::isStakeAddressRegistered)
                     .toList();
 
             var stakeAddressesToRegister = requiredStakeAddresses.stream()
@@ -1335,8 +1337,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             log.info("requiredStakeAddresses: {}", String.join(", ", requiredStakeAddresses));
 
             var registeredStakeAddresses = requiredStakeAddresses.stream()
-                    .filter(stakeAddress -> stakeRegistrationRepository.findRegistrationsByStakeAddress(stakeAddress)
-                            .map(stakeRegistration -> stakeRegistration.getType().equals(CertificateType.STAKE_REGISTRATION)).orElse(false))
+                    .filter(scriptRegistrationService::isStakeAddressRegistered)
                     .toList();
             log.info("registeredStakeAddresses: {}", String.join(", ", registeredStakeAddresses));
 

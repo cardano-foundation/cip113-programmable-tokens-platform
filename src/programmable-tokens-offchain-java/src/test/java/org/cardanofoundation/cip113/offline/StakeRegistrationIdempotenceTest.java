@@ -75,7 +75,19 @@ public class StakeRegistrationIdempotenceTest {
                 chain.quickTxBuilder(),
                 chain.protocolParamsSupplier(),
                 Mockito.mock(ProgrammableTokenRegistryRepository.class),
-                stakeRepo);
+                stakeRepo,
+                // A REAL service over the mocked repository. The mocked backend makes the ledger
+                // lookup fail, so these tests exercise the indexed-certificate fallback — which is
+                // the branch whose truth table they exist to pin.
+                new org.cardanofoundation.cip113.service.ScriptRegistrationService(
+                        Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
+                        // Deliberately null, not a mock: isStakeAddressRegistered never touches the
+                        // builder, and mocking QuickTxBuilder instruments it for every test in the
+                        // JVM under the inline mock maker — which silently broke the security-token
+                        // burn's real evaluator whenever this class ran as a whole.
+                        null,
+                        Mockito.mock(AccountService.class),
+                        stakeRepo));
     }
 
     private static DummyRegisterRequest dummyRequest() {
@@ -223,6 +235,11 @@ public class StakeRegistrationIdempotenceTest {
                 Mockito.mock(org.cardanofoundation.cip113.repository.BlacklistInitRepository.class),
                 Mockito.mock(ProgrammableTokenRegistryRepository.class),
                 stakeRepo,
+                new org.cardanofoundation.cip113.service.ScriptRegistrationService(
+                        Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
+                        null,
+                        Mockito.mock(AccountService.class),
+                        stakeRepo),
                 utxoProvider,
                 Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class));
     }
@@ -246,7 +263,7 @@ public class StakeRegistrationIdempotenceTest {
 
         var registered = new org.cardanofoundation.cip113.service.ScriptRegistrationService(
                 Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
-                Mockito.mock(com.bloxbean.cardano.client.quicktx.QuickTxBuilder.class),
+                null,
                 Mockito.mock(AccountService.class),
                 stakeRepo(Set.of(addr)));
         Assertions.assertTrue(registered.isStakeAddressRegistered(addr),
@@ -255,11 +272,85 @@ public class StakeRegistrationIdempotenceTest {
 
         var never = new org.cardanofoundation.cip113.service.ScriptRegistrationService(
                 Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
-                Mockito.mock(com.bloxbean.cardano.client.quicktx.QuickTxBuilder.class),
+                null,
                 Mockito.mock(AccountService.class),
                 stakeRepo(Set.of()));
         Assertions.assertFalse(never.isStakeAddressRegistered(addr),
                 "no certificate at all means not registered");
+    }
+
+    /**
+     * The reported failure, reduced: the credential IS registered on chain, and our index has no
+     * record of it.
+     *
+     * <p>That is not a corner case — it is the normal state for these two validators. They are
+     * protocol-GLOBAL and unparameterized, so they are registered exactly once per network, and
+     * every deployment indexes from its own {@code sync-start-slot} (genesis on a devnet, the
+     * contract's ref-input block on mainnet) with the table starting empty again after any devnet
+     * reset. Consulting the index alone answered "not registered", the handler emitted a
+     * certificate, and the ledger rejected the whole transaction:
+     *
+     * <pre>
+     *   3145 — Trying to re-register some already known credentials.
+     *          knownCredential: 17e9e9e3412e7198877557fab1181f394ed36cf5db27b418d3f68990
+     * </pre>
+     *
+     * <p>That hash is the dummy transfer validator's, and this is exactly the shape that produced
+     * it: the ledger says yes, the index says nothing.
+     */
+    @Test
+    public void ledgerBeatsAnIndexThatNeverSawTheCertificate() throws Exception {
+        var chain = new OfflineChain();
+        var boot = BootstrapFixture.bootstrap(chain);
+
+        // An index with NOTHING in it — the pre-sync-start-slot situation.
+        var emptyIndex = stakeRepo(Set.of());
+
+        var handler = new DummySubstandardHandler(
+                HandlerFixtures.OBJECT_MAPPER,
+                HandlerFixtures.NETWORK,
+                HandlerFixtures.utxoRepository(chain, boot.registryOriginUtxo().getAddress(),
+                        HexUtil.encodeHexString(boot.registrySpend().getScriptHash())),
+                new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
+                Mockito.mock(AccountService.class),
+                HandlerFixtures.substandardService(),
+                HandlerFixtures.protocolScriptBuilderService(),
+                chain.quickTxBuilder(),
+                chain.protocolParamsSupplier(),
+                Mockito.mock(ProgrammableTokenRegistryRepository.class),
+                emptyIndex,
+                new org.cardanofoundation.cip113.service.ScriptRegistrationService(
+                        ledgerSaying(true),
+                        null,
+                        Mockito.mock(AccountService.class),
+                        emptyIndex));
+
+        var result = handler.buildPreRegistrationTransaction(dummyRequest(), boot.params());
+
+        Assertions.assertTrue(result.isSuccessful(), result.error());
+        Assertions.assertNull(result.unsignedCborTx(),
+                "the ledger says both credentials exist, so nothing may be registered — emitting a "
+                + "certificate here is what the chain rejects with StakeKeyAlreadyRegisteredDELEG, "
+                + "and an empty index must not be read as evidence of absence");
+    }
+
+    /** A backend whose account endpoint reports every account with {@code active = registered}. */
+    private static com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService
+            ledgerSaying(boolean registered) throws Exception {
+        var account = Mockito.mock(com.bloxbean.cardano.client.backend.model.AccountInformation.class);
+        Mockito.when(account.getActive()).thenReturn(registered);
+
+        var result = Mockito.mock(com.bloxbean.cardano.client.api.model.Result.class);
+        Mockito.when(result.isSuccessful()).thenReturn(true);
+        Mockito.when(result.getValue()).thenReturn(account);
+
+        var accountService = Mockito.mock(com.bloxbean.cardano.client.backend.api.AccountService.class);
+        Mockito.when(accountService.getAccountInformation(Mockito.anyString())).thenReturn(result);
+
+        var backend = Mockito.mock(
+                com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class);
+        Mockito.when(backend.getAccountService()).thenReturn(accountService);
+        return backend;
     }
 
     /** A later deregistration must flip the answer back — the account flag could not express this. */
@@ -274,7 +365,7 @@ public class StakeRegistrationIdempotenceTest {
 
         var service = new org.cardanofoundation.cip113.service.ScriptRegistrationService(
                 Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
-                Mockito.mock(com.bloxbean.cardano.client.quicktx.QuickTxBuilder.class),
+                null,
                 Mockito.mock(AccountService.class),
                 repo);
 

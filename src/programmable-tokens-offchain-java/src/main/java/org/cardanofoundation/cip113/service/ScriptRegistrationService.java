@@ -34,29 +34,52 @@ public class ScriptRegistrationService {
      * @return true if registered (active), false otherwise
      */
     public boolean isStakeAddressRegistered(String stakeAddress) {
-        // Read the indexed certificate history, not Blockfrost's account endpoint.
+        // Ask the LEDGER first, and only fall back to our own index.
         //
-        // This used to ask `getAccountInformation(stakeAddress).getActive()`. That is the wrong
-        // question for a SCRIPT stake credential: these accounts are registered solely so a
-        // validator can be invoked by withdrawing 0, they never delegate to a pool, and they never
-        // accrue rewards — so the account endpoint answers `active: false`, or 404s outright on
-        // backends that only materialise accounts once they delegate. Every failure mode landed on
-        // `return false`, i.e. "not registered".
+        // Neither source is sufficient alone, and each fails in the dangerous direction on its own:
         //
-        // That is the dangerous direction to be wrong in. The SDK's freeze-and-seize path asks this
-        // question and emits a registration certificate whenever the answer is false, so a
-        // permanently-false answer meant every retry re-registered credentials that already
-        // existed and was rejected with StakeKeyAlreadyRegisteredDELEG.
+        //   - The index can simply not contain the certificate. It is populated from
+        //     `sync-start-slot`, which is deliberately not genesis on every profile (mainnet starts
+        //     at the block that minted the contract ref input), and it restarts empty whenever a
+        //     devnet is reset or the database recreated. The dummy substandard's issue/transfer
+        //     validators are protocol-GLOBAL and unparameterized, so they are registered exactly
+        //     once per network — most likely long before whatever slot this deployment syncs from.
+        //     Absence from the index therefore does not mean absence from the chain.
         //
-        // The indexer already records every certificate. Take the most recent one for the address
-        // (the query orders by slot then cert index) and treat the address as registered only if
-        // that latest certificate is a registration — so a later deregistration correctly flips the
-        // answer back, which the `active` flag could not express either.
+        //   - The account endpoint is unreachable or errors transiently, and every such failure
+        //     used to be flattened to `false`.
+        //
+        // "false" is the expensive answer to get wrong: every caller registers the credential when
+        // it hears it, and re-registering an existing one is rejected outright with
+        // StakeKeyAlreadyRegisteredDELEG ("Trying to re-register some already known credentials").
+        // A wrong "true" merely surfaces as a withdrawal failure on a credential that was never
+        // there, which the pre-registration step exists to prevent in the first place.
+        //
+        // Blockfrost's `active` IS the account's registration state, not its delegation state, and
+        // a never-registered account 404s rather than reporting false — so a successful response is
+        // authoritative in both directions and is taken as final.
+        try {
+            var accountInfo = bfBackendService.getAccountService().getAccountInformation(stakeAddress);
+            if (accountInfo.isSuccessful() && accountInfo.getValue() != null
+                    && accountInfo.getValue().getActive() != null) {
+                boolean active = accountInfo.getValue().getActive();
+                log.info("Stake address {} registered={} (ledger)", stakeAddress, active);
+                return active;
+            }
+            log.debug("Ledger could not answer for {} ({}), falling back to the indexed certificates",
+                    stakeAddress, accountInfo.isSuccessful() ? "no account" : accountInfo.getResponse());
+        } catch (Exception e) {
+            log.warn("Ledger lookup failed for {} ({}), falling back to the indexed certificates",
+                    stakeAddress, e.getMessage());
+        }
+
+        // Fallback: the most recent certificate for this address wins, so a later deregistration
+        // correctly flips the answer back — something the account flag alone could not express.
         try {
             boolean isRegistered = stakeRegistrationRepository.findRegistrationsByStakeAddress(stakeAddress)
                     .map(r -> r.getType().equals(CertificateType.STAKE_REGISTRATION))
                     .orElse(false);
-            log.info("Stake address {} is registered: {}", stakeAddress, isRegistered);
+            log.info("Stake address {} registered={} (indexed certificates)", stakeAddress, isRegistered);
             return isRegistered;
         } catch (Exception e) {
             log.error("Error checking stake address registration for {}: {}", stakeAddress, e.getMessage());

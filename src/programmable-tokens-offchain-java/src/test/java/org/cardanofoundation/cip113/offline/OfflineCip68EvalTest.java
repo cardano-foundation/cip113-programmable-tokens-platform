@@ -1111,6 +1111,15 @@ public class OfflineCip68EvalTest {
                 blacklistInitRepository(initCip68Enabled),
                 Mockito.mock(ProgrammableTokenRegistryRepository.class),
                 Mockito.mock(CustomStakeRegistrationRepository.class),
+                new org.cardanofoundation.cip113.service.ScriptRegistrationService(
+                        Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
+                        // Deliberately null, not a mock: isStakeAddressRegistered never touches the
+                        // builder, and mocking QuickTxBuilder instruments it for every test in the
+                        // JVM under the inline mock maker — which silently broke the security-token
+                        // burn's real evaluator whenever this class ran as a whole.
+                        null,
+                        Mockito.mock(AccountService.class),
+                        Mockito.mock(CustomStakeRegistrationRepository.class)),
                 utxoProvider,
                 Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class));
 
@@ -1444,7 +1453,12 @@ public class OfflineCip68EvalTest {
                 chain.quickTxBuilder(),
                 chain.protocolParamsSupplier(),
                 registry,
-                Mockito.mock(CustomStakeRegistrationRepository.class));
+                Mockito.mock(CustomStakeRegistrationRepository.class),
+                new org.cardanofoundation.cip113.service.ScriptRegistrationService(
+                        Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
+                        null,
+                        Mockito.mock(AccountService.class),
+                        Mockito.mock(CustomStakeRegistrationRepository.class)));
     }
 
     /**

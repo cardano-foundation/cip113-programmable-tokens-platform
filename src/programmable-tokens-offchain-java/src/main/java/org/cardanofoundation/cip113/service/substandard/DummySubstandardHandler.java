@@ -38,6 +38,7 @@ import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.model.onchain.RegistryNode;
 import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
 import org.cardanofoundation.cip113.repository.CustomStakeRegistrationRepository;
+import org.cardanofoundation.cip113.service.ScriptRegistrationService;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.service.AccountService;
 import org.cardanofoundation.cip113.service.ProtocolScriptBuilderService;
@@ -92,6 +93,11 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
     private final CustomStakeRegistrationRepository stakeRegistrationRepository;
+    /** Answers "is this credential already registered?" against the LEDGER, falling back to the
+     *  indexed certificates. Querying the index directly is what produced
+     *  StakeKeyAlreadyRegisteredDELEG here: these validators are protocol-global and registered
+     *  once per network, typically long before this deployment's sync-start slot. */
+    private final ScriptRegistrationService scriptRegistrationService;
 
     @Override
     public String getSubstandardId() {
@@ -133,8 +139,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                     .toList();
 
             var registeredStakeAddresses = requiredStakeAddresses.stream()
-                    .filter(stakeAddress -> stakeRegistrationRepository.findRegistrationsByStakeAddress(stakeAddress)
-                            .map(stakeRegistration -> stakeRegistration.getType().equals(CertificateType.STAKE_REGISTRATION)).orElse(false))
+                    .filter(scriptRegistrationService::isStakeAddressRegistered)
                     .toList();
 
             // Everything REQUIRED that is not yet REGISTERED.
