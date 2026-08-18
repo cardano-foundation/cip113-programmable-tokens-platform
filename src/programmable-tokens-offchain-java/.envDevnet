@@ -1,0 +1,12 @@
+export SPRING_PROFILES_ACTIVE=devnet
+
+export WALLET_MNEMONIC="custom quarter neither roast where middle already outer iron double garlic glad robot alpha fun vacant exact waste slogan tornado wire casual sand genuine"
+
+export STORE_CARDANO_HOST=localhost
+export STORE_CARDANO_PORT=3001
+
+export BLOCKFROST_URL=http://localhost:8081/api/v1/
+export BLOCKFROST_KEY=DUMMY_KEY
+
+export KERI_URL=https://keria.dev.idw-sandboxes.cf-deployments.org
+export KERI_BOOT_URL=https://keria-boot.dev.idw-sandboxes.cf-deployments.org

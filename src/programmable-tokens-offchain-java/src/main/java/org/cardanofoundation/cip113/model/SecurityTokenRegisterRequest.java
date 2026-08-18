@@ -65,6 +65,58 @@ public class SecurityTokenRegisterRequest extends RegisterTokenRequest {
      *  {@link org.cardanofoundation.cip113.util.Cip68#userTokenLabel}. */
     private Long initialMintableAmount;
 
+    /** Optional initial supply minted BY the registration transaction itself, as a
+     *  decimal string. Defaults to {@code "0"} — a structural registration that only
+     *  inserts the CIP-113 directory entry and mints no security tokens.
+     *
+     *  <p>When set above zero, {@code buildFullRegistrationChain}'s registration tx
+     *  additionally SPENDS the GlobalState UTxO under {@code MintSecurity} (so
+     *  {@code initialMintableAmount} is decremented by this quantity), references the
+     *  power-user node created by the preceding {@code AddPowerUser} tx, and carries a
+     *  destination action for the recipient. Must not exceed
+     *  {@link #initialMintableAmount}: the supply cap is enforced on chain by
+     *  {@code global_state.ak}, which rejects a negative remainder.
+     *
+     *  <p>This — not {@code quantity} — is the field the chained registration honours.
+     *  {@code buildFullRegistrationChain} overwrites {@code quantity} with this value
+     *  before delegating, so anything a client sends in {@code quantity} is discarded.
+     *
+     *  <p>Two further preconditions are checked up front, before the chain writes any
+     *  database row: {@link #bootstrapPowerUserPkh} must equal the fee payer's payment
+     *  credential (the registration tx names the power user in {@code required_signers},
+     *  and only the fee payer can witness it), and {@link #requiresReceiverKyc} must be
+     *  off unless the recipient's STAKE credential IS that power user — genesis writes
+     *  {@code member_root_hash} empty and no root can be published beforehand, so any
+     *  other recipient has no provable membership. */
+    private String initialMintQuantity;
+
+    /** OPT-IN: seed the compliance allowlist at genesis with the mint recipient's stake
+     *  credential, and write the resulting MPF root into the GlobalState datum's
+     *  {@code member_root_hash}.
+     *
+     *  <p>Why it exists. {@code requires_receiver_kyc = true} plus an empty
+     *  {@code member_root_hash} makes a registration-with-mint impossible for any
+     *  ordinary recipient: {@code verify_mint_destinations} needs a membership proof and
+     *  there is nothing to prove against, while the contract's self-mint exemption
+     *  compares the recipient's STAKE credential against the power-user node key — which
+     *  this chain sets to the wallet's PAYMENT key hash, so for a normal base address it
+     *  can never fire. No root can be published beforehand either: publishing one is a
+     *  GlobalState spend, and the GlobalState UTxO does not exist until genesis.
+     *
+     *  <p><b>Compliance meaning.</b> Setting this enrolls the recipient in the token's
+     *  KYC allowlist on the issuer's say-so, with no KYC process behind it. The
+     *  resulting on-chain {@code member_root_hash} asserts to every later validator run
+     *  — transfers included, not just this mint — that the recipient is a verified
+     *  member. It is off by default and the UI labels it as such; nothing in the
+     *  platform infers it.
+     *
+     *  <p><b>Ignored unless it is actually needed</b> — i.e. unless
+     *  {@link #requiresReceiverKyc} is on AND {@link #initialMintQuantity} is above
+     *  zero. Honouring it otherwise would write a live compliance assertion into the
+     *  datum for a token that never needed one, and one the UI would not be showing a
+     *  control for. */
+    private boolean seedRecipientInAllowlistAtGenesis;
+
     /** Optional: bootstrap power user inserted into the off-chain DB at registration.
      *  Lets the registering admin see themselves on the admin page immediately.
      *  Defaults to {@code adminPubKeyHash} with all-capabilities if not provided

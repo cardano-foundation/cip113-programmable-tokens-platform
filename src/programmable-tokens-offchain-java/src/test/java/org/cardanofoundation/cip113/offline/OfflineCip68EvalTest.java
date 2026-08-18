@@ -1216,8 +1216,20 @@ public class OfflineCip68EvalTest {
                 new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
                 new org.cardanofoundation.cip113.service.LinkedListService(utxoProvider),
                 hybridUtxoSupplier,
+                // Reference scripts published by the chain's publishScripts phase live only in
+                // an unsubmitted output, so the evaluator resolves them through this rather
+                // than the backend — without it the app falls back to fabricated ex-units.
+                new org.cardanofoundation.cip113.service.HybridScriptSupplier(chain.scriptSupplier()),
                 Mockito.mock(CustomStakeRegistrationRepository.class),
-                Mockito.mock(org.cardanofoundation.conversions.CardanoConverters.class));
+                // A real converter, not a mock. Every mint now clamps its validity upper
+                // bound through cardanoConverters.time().toSlot(); an unstubbed mock returns
+                // null from time() and the whole mint path dies with an NPE that looks
+                // nothing like the CIP-68 behaviour these tests exist to pin down. PREVIEW's
+                // era history is the closest public analogue to the devnet fixture, and the
+                // exact slot is immaterial here — validTo does not affect what the evaluator
+                // scores or what the outputs decode to.
+                org.cardanofoundation.conversions.ClasspathConversionsFactory.createConverters(
+                        org.cardanofoundation.conversions.domain.NetworkType.PREVIEW));
 
         var adminPkh = new Address(BootstrapFixture.ADMIN.baseAddress())
                 .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();

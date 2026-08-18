@@ -40,7 +40,8 @@ const kycFlow: RegistrationFlow = {
   id: 'kyc',
   name: 'KYC Token',
   description: 'Programmable token requiring KYC attestation for transfers. Uses a Global State for verifying transfer authorization.',
-  enabled: isFlowEnabled('kyc', true),
+  // Disabled by default; NEXT_PUBLIC_FLOW_KYC_ENABLED=true re-enables it.
+  enabled: isFlowEnabled('kyc', false),
   steps: [
     {
       id: 'cip170-auth-begin',

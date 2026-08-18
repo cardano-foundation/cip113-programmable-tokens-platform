@@ -14,6 +14,10 @@ export interface SubstandardValidator {
 
 export interface Substandard {
   id: string;
+  /** Display name from the substandard\'s metadata.json; falls back to the capitalised id. */
+  name?: string;
+  /** One-paragraph summary from metadata.json; may be empty. */
+  description?: string;
   validators: SubstandardValidator[];
 }
 

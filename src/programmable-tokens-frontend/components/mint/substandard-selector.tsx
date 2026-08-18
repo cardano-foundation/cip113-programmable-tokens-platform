@@ -60,9 +60,11 @@ export function SubstandardSelector({
     { value: '', label: '-- Select a substandard --' },
     ...substandards.map(s => ({
       value: s.id,
-      label: s.id.charAt(0).toUpperCase() + s.id.slice(1),
+      label: s.name || s.id.charAt(0).toUpperCase() + s.id.slice(1),
     }))
   ];
+
+  const selectedDescription = substandards.find(s => s.id === selectedSubstandard)?.description;
 
   const validatorOptionsWithPlaceholder: SelectOption[] = [
     { value: '', label: '-- Select a validator --' },
@@ -77,8 +79,12 @@ export function SubstandardSelector({
         value={selectedSubstandard}
         onChange={handleSubstandardChange}
         disabled={disabled || substandards.length === 0}
-        helperText="Choose the validation rules for your token (e.g., dummy, regulated, etc.)"
+        helperText="Choose the validation rules for your token"
       />
+
+      {selectedDescription && (
+        <p className="text-sm text-gray-600 -mt-2">{selectedDescription}</p>
+      )}
 
       {selectedSubstandard && validatorOptions.length > 0 && (
         <Select
