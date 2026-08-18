@@ -367,8 +367,16 @@ public class StakeRegistrationIdempotenceTest {
 
         var known = Mockito.mock(
                 org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class);
-        Mockito.when(known.existsById(Mockito.anyString()))
-                .thenAnswer(inv -> required.contains((String) inv.getArgument(0)));
+        Mockito.when(known.findById(Mockito.anyString())).thenAnswer(inv -> {
+            String addr = inv.getArgument(0);
+            if (!required.contains(addr)) {
+                return Optional.empty();
+            }
+            // registered = true: a confirmed row. A row with registered = false is only evidence
+            // that we built a certificate, and must NOT suppress the registration.
+            return Optional.of(org.cardanofoundation.cip113.entity.KnownScriptRegistrationEntity
+                    .builder().stakeAddress(addr).source("LEDGER_REJECT").registered(true).build());
+        });
 
         var handler = new DummySubstandardHandler(
                 HandlerFixtures.OBJECT_MAPPER,
@@ -397,6 +405,61 @@ public class StakeRegistrationIdempotenceTest {
         Assertions.assertNull(result.unsignedCborTx(),
                 "both credentials are on record, so nothing may be registered — this is the retry "
                 + "that has to succeed after a 3145, and it is the only source able to say so here");
+    }
+
+    /**
+     * The confirm endpoint may only confirm what this deployment was already attempting.
+     *
+     * <p>Nothing in this service authenticates anyone, and this is the one write that changes later
+     * behaviour by itself — every other endpoint returns unsigned CBOR that still needs a wallet
+     * signature. An unconstrained write would let any caller mark an arbitrary credential
+     * registered, which makes the pre-registration step SKIP it and the registration that follows
+     * fail with WithdrawalsNotInRewardsCERTS: durable, and invisible both on chain and in the logs.
+     */
+    @Test
+    public void confirmingACredentialWeNeverBuiltIsRefused() {
+        var addr = "stake_test17q8czpaqyn8mclj70p7k0txaemr53n4jsr7vfv2vxp0x5tgnq7hem";
+        var known = Mockito.mock(
+                org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class);
+        Mockito.when(known.findById(Mockito.anyString())).thenReturn(Optional.empty());
+
+        var service = new org.cardanofoundation.cip113.service.ScriptRegistrationService(
+                Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
+                null,
+                Mockito.mock(AccountService.class),
+                stakeRepo(Set.of()),
+                known);
+
+        Assertions.assertFalse(service.noteRegistered(addr, null, "LEDGER_REJECT"),
+                "there is no evidence this deployment ever built a registration for this address, "
+                + "so there is nothing to confirm and the write must be refused");
+        Mockito.verify(known, Mockito.never()).save(Mockito.any());
+    }
+
+    /** An attempt row is evidence, not a claim: it must not suppress the registration by itself. */
+    @Test
+    public void anUnconfirmedAttemptRowDoesNotSuppressRegistration() throws Exception {
+        var chain = new OfflineChain();
+        var boot = BootstrapFixture.bootstrap(chain);
+
+        var known = Mockito.mock(
+                org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class);
+        Mockito.when(known.findById(Mockito.anyString())).thenAnswer(inv -> Optional.of(
+                org.cardanofoundation.cip113.entity.KnownScriptRegistrationEntity.builder()
+                        .stakeAddress(inv.getArgument(0)).source("BUILT").registered(false).build()));
+
+        var service = new org.cardanofoundation.cip113.service.ScriptRegistrationService(
+                Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
+                null,
+                Mockito.mock(AccountService.class),
+                stakeRepo(Set.of()),
+                known);
+
+        Assertions.assertFalse(
+                service.isStakeAddressRegistered(
+                        "stake_test17q8czpaqyn8mclj70p7k0txaemr53n4jsr7vfv2vxp0x5tgnq7hem"),
+                "a BUILT/registered=false row records that we tried, nothing more — treating it as "
+                + "proof of registration would skip a credential that may not exist yet");
     }
 
     /** A backend whose account endpoint reports every account with {@code active = registered}. */

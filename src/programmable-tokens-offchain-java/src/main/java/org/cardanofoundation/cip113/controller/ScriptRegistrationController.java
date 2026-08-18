@@ -81,6 +81,20 @@ public class ScriptRegistrationController {
                         "error", "one of stakeAddress or knownCredential is required"));
             }
 
+            // Validate before touching the database. A credential is a blake2b-224 script hash;
+            // anything else is a caller mistake or an attempt to write junk into a table that is
+            // consulted before every later build.
+            if (credential != null && !credential.isBlank()
+                    && !credential.matches("^[0-9a-fA-F]{56}$")) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "knownCredential must be 56 hex characters (a script hash)"));
+            }
+            if (stakeAddress != null && !stakeAddress.isBlank()
+                    && !stakeAddress.startsWith("stake")) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "error", "stakeAddress must be a bech32 reward address"));
+            }
+
             if (stakeAddress == null || stakeAddress.isBlank()) {
                 // The ledger reports a bare script hash; turn it into the reward address every
                 // caller actually looks up. Script credential, hence getRewardAddress over a
@@ -91,7 +105,17 @@ public class ScriptRegistrationController {
                         network.getCardanoNetwork()).getAddress();
             }
 
-            scriptRegistrationService.noteRegistered(stakeAddress, credential, "LEDGER_REJECT");
+            // Only confirms a credential this deployment itself built a registration for. See V17:
+            // nothing here authenticates the caller, and an unconstrained write would let anyone
+            // make the platform skip a registration that is genuinely required.
+            boolean noted = scriptRegistrationService.noteRegistered(
+                    stakeAddress, credential, "LEDGER_REJECT");
+            if (!noted) {
+                return ResponseEntity.status(409).body(Map.of(
+                        "error", "this deployment never built a registration for " + stakeAddress
+                                 + ", so there is nothing to confirm",
+                        "stakeAddress", stakeAddress));
+            }
             return ResponseEntity.ok(Map.of("stakeAddress", stakeAddress, "registered", true));
         } catch (Exception e) {
             log.error("Error recording known registration", e);

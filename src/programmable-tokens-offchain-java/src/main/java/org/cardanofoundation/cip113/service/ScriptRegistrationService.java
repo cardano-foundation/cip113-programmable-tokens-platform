@@ -65,7 +65,8 @@ public class ScriptRegistrationService {
         // credential registered before the indexed window and on a backend without an account
         // endpoint — which together is the normal situation for the protocol-global validators.
         try {
-            if (knownScriptRegistrationRepository.existsById(stakeAddress)) {
+            var known = knownScriptRegistrationRepository.findById(stakeAddress).orElse(null);
+            if (known != null && known.isRegistered()) {
                 log.info("Stake address {} registered=true (known registrations)", stakeAddress);
                 return true;
             }
@@ -109,17 +110,55 @@ public class ScriptRegistrationService {
      *  registration, {@code LEDGER_REJECT} when a submit came back naming the credential as
      *  already known. The second case is what makes a 3145 self-correcting: the error carries the
      *  credential, so the next attempt can skip it instead of failing identically forever. */
-    public void noteRegistered(String stakeAddress, String credential, String source) {
+    public boolean noteRegistered(String stakeAddress, String credential, String source) {
         try {
+            var existing = knownScriptRegistrationRepository.findById(stakeAddress).orElse(null);
+            if (existing == null) {
+                // Refuse. Nothing here authenticates the caller, and this is the one write that
+                // changes later behaviour on its own — every other endpoint hands back unsigned
+                // CBOR that still needs a wallet signature. Marking an arbitrary credential
+                // registered makes the pre-registration step SKIP it, and the registration that
+                // follows is then rejected with WithdrawalsNotInRewardsCERTS: a durable denial of
+                // service against that token, invisible both on chain and in these logs.
+                //
+                // A row only exists because THIS platform built a certificate for the credential,
+                // so requiring one confines callers to confirming what we were already attempting
+                // — which is the whole recovery case — without letting them name a credential of
+                // their own choosing.
+                log.warn("Refusing to mark {} as registered: this platform never built a "
+                        + "registration for it, so there is nothing to confirm", stakeAddress);
+                return false;
+            }
+            existing.setRegistered(true);
+            existing.setSource(source);
+            existing.setNotedAt(java.time.Instant.now());
+            knownScriptRegistrationRepository.save(existing);
+            log.info("Noted stake address {} as registered (source={})", stakeAddress, source);
+            return true;
+        } catch (Exception e) {
+            log.error("Could not record {} as registered: {}", stakeAddress, e.getMessage());
+            return false;
+        }
+    }
+
+    /** Record that this platform is about to ask the user to sign a registration for
+     *  {@code stakeAddress}. Creates the evidence {@link #noteRegistered} requires, and nothing
+     *  else — the row does not claim the credential is registered. Idempotent, and never
+     *  downgrades a row that already says it is. */
+    public void noteRegistrationAttempted(String stakeAddress, String credential) {
+        try {
+            if (knownScriptRegistrationRepository.existsById(stakeAddress)) {
+                return;
+            }
             knownScriptRegistrationRepository.save(KnownScriptRegistrationEntity.builder()
                     .stakeAddress(stakeAddress)
                     .credential(credential)
-                    .source(source)
+                    .source("BUILT")
+                    .registered(false)
                     .notedAt(java.time.Instant.now())
                     .build());
-            log.info("Noted stake address {} as registered (source={})", stakeAddress, source);
         } catch (Exception e) {
-            log.error("Could not record {} as registered: {}", stakeAddress, e.getMessage());
+            log.warn("Could not record the registration attempt for {}: {}", stakeAddress, e.getMessage());
         }
     }
 

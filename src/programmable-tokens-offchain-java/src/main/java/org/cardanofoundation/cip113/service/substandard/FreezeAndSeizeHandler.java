@@ -207,7 +207,14 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var registerAddressTx = new Tx()
                     .from(request.getFeePayerAddress())
                     .withChangeAddress(request.getFeePayerAddress());
-            stakeAddressesToRegister.forEach(registerAddressTx::registerStakeAddress);
+            // Record the attempt BEFORE handing the transaction over. This row is the evidence
+            // that lets a later /script-registration/known confirm this credential if the submit
+            // comes back saying it already exists; without it that endpoint would be an
+            // unauthenticated write over arbitrary addresses.
+            stakeAddressesToRegister.forEach(addr -> {
+                scriptRegistrationService.noteRegistrationAttempted(addr, null);
+                registerAddressTx.registerStakeAddress(addr);
+            });
 
             // A bare legacy StakeRegistration, deliberately: it is still valid in Conway and
             // requires NO witness, so a script stake credential registers without attaching its
@@ -1354,7 +1361,12 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .payToContract(blacklistSpendAddress.getAddress(), ValueUtil.toAmountList(blacklistValue), blacklistInitDatum.toPlutusData())
                     .withChangeAddress(request.feePayerAddress());
 
-            stakeAddressesToRegister.forEach(tx::registerStakeAddress);
+            // Same evidence rule as the pre-registration path above: the blacklist init is the
+            // other place this platform emits these certificates.
+            stakeAddressesToRegister.forEach(addr -> {
+                scriptRegistrationService.noteRegistrationAttempted(addr, null);
+                tx.registerStakeAddress(addr);
+            });
 
             var transaction = new QuickTxBuilder(bfBackendService).compose(tx)
                     .feePayer(request.feePayerAddress())

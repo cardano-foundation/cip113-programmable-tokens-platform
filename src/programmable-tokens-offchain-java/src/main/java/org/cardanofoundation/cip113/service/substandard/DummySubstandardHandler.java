@@ -166,7 +166,14 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                         .from(registerTokenRequest.getFeePayerAddress())
                         .withChangeAddress(registerTokenRequest.getFeePayerAddress());
 
-                stakeAddressesToRegister.forEach(registerAddressTx::registerStakeAddress);
+                // Record the attempt BEFORE handing the transaction over. This row is the evidence
+            // that lets a later /script-registration/known confirm this credential if the submit
+            // comes back saying it already exists; without it that endpoint would be an
+            // unauthenticated write over arbitrary addresses.
+            stakeAddressesToRegister.forEach(addr -> {
+                scriptRegistrationService.noteRegistrationAttempted(addr, null);
+                registerAddressTx.registerStakeAddress(addr);
+            });
 
                 var transaction = quickTxBuilder.compose(registerAddressTx)
                         .feePayer(registerTokenRequest.getFeePayerAddress())
@@ -567,7 +574,26 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 return TransactionContext.ok(transaction.serializeToHex(), new RegistrationResult(progTokenPolicyId));
             } else {
 
-                return TransactionContext.typedError(String.format("Token policy %s already registered", progTokenPolicyId));
+                // Not a transient condition, and not something a different asset name would fix.
+                //
+                // dummy's issuer and transfer validators take NO per-token parameters, so its
+                // issuance policy is a function of the protocol deployment alone — every dummy
+                // token on this network resolves to the very same policy id. CIP-113 keys registry
+                // nodes by policy id, so the directory has room for exactly one dummy entry, and it
+                // is already taken. (The same property is why dummy's stake credentials are
+                // protocol-global and get registered only once per network.)
+                //
+                // Say so, because "already registered" invites the reasonable-but-wrong conclusion
+                // that picking another token name will help.
+                return TransactionContext.typedError(String.format(
+                        "Token policy %s is already registered in the CIP-113 directory. The dummy "
+                        + "substandard's validators take no per-token parameters, so every dummy "
+                        + "token on this protocol deployment derives the SAME policy id — one dummy "
+                        + "token per deployment is all the directory can hold, and choosing a "
+                        + "different asset name will produce this same policy again. Mint more of "
+                        + "the existing token instead, or use a substandard whose issuance policy is "
+                        + "parameterised per token (freeze-and-seize, security-token).",
+                        progTokenPolicyId));
             }
 
 

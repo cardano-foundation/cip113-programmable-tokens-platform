@@ -36,6 +36,13 @@ public class KnownScriptRegistrationEntity {
     @Column(name = "source", nullable = false, length = 32)
     private String source;
 
+    /** TRUE = known registered, honoured by the registration check. FALSE = this platform built
+     *  a certificate for it and is awaiting the outcome — evidence that the credential is ours to
+     *  confirm, and nothing more. See V17. */
+    @Column(name = "registered", nullable = false)
+    @Builder.Default
+    private boolean registered = true;
+
     @Column(name = "noted_at", nullable = false)
     @Builder.Default
     private Instant notedAt = Instant.now();
