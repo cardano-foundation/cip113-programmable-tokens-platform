@@ -27,6 +27,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -117,6 +118,44 @@ public class SecurityTokenController {
         }
     }
 
+    /**
+     * Re-point this token's CIP-113 registry node at the transfer-logic scripts the
+     * currently-vendored contracts derive.
+     *
+     * <p>The in-place upgrade path for transfer rules: the node's {@code key} and
+     * {@code minting_logic_script} are frozen at insert, so the token's policy id and
+     * identity survive the change. Admin-signed, and refused once {@code LockUpgrades}
+     * has been executed.
+     *
+     * <p>Body: {@code { feePayerAddress }}.
+     */
+    @PostMapping("/{policyId}/registry-node/upgrade")
+    public ResponseEntity<?> upgradeRegistryNode(@PathVariable String policyId,
+                                                 @RequestBody Map<String, Object> body) {
+        try {
+            String feePayerAddress = (String) body.get("feePayerAddress");
+            if (feePayerAddress == null || feePayerAddress.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "feePayerAddress is required"));
+            }
+            ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
+            if (protocolParams == null) {
+                return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
+            }
+            SecurityTokenSubstandardHandler handler = (SecurityTokenSubstandardHandler) handlerFactory
+                    .getHandler("security-token", SecurityTokenContext.emptyContext());
+            TransactionContext<Void> result =
+                    handler.buildUpgradeRegistryNodeTransaction(policyId, feePayerAddress, protocolParams);
+            if (!result.isSuccessful()) {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                        result.error() != null ? result.error() : "build failed"));
+            }
+            return ResponseEntity.ok(Map.of("unsignedCborTx", result.unsignedCborTx()));
+        } catch (Exception e) {
+            log.error("security-token registry-node upgrade failed for policy={}", policyId, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
     /** Build a chain of admin-signed GS update transactions, one per change.
      *  Each {@code GlobalStateSpendAction} is its own redeemer variant and the
      *  on-chain validator forbids batching, so N field changes = N txs. The
@@ -157,7 +196,8 @@ public class SecurityTokenController {
                         (Boolean) change.get("requiresSenderKycEnabled"),
                         (Boolean) change.get("requiresReceiverKycEnabled"),
                         (String) change.get("newMemberRootHashHex"),
-                        (String) change.get("newAdminCredentialHashHex")
+                        (String) change.get("newAdminCredentialHashHex"),
+                        (String) change.get("newMintingScriptCredentialHashHex")
                 ));
             }
 
@@ -494,6 +534,12 @@ public class SecurityTokenController {
                         // needs both to decide which proofs to collect.
                         resp.put("requiresSenderKyc", gs.requiresSenderKyc());
                         resp.put("deactivated", gs.deactivated());
+                        // The minting proxy delegates to whichever authority this names, so
+                        // it is the only on-chain answer to "which mint rules are in force".
+                        // upgradesLocked tells the panel whether rotating is still possible
+                        // at all, rather than offering an action the chain will reject.
+                        resp.put("mintingScriptCredentialHash", gs.mintingScriptCredentialHash());
+                        resp.put("upgradesLocked", gs.upgradesLocked());
                         return ResponseEntity.ok(resp);
                     })
                     .orElse(ResponseEntity.status(404).body(Map.of(
@@ -506,16 +552,43 @@ public class SecurityTokenController {
 
     // ── Allowlist (members) ──────────────────────────────────────────────────
 
+    /**
+     * @param credentialType which credential form the hash belongs to — {@code 0}
+     *   (VerificationKey, the default) or {@code 1} (Script). It is the first byte of the
+     *   MPF leaf key, so it selects WHICH leaf the proof is generated against: a holder at
+     *   a script stake credential needs {@code 1}, or they receive a proof for a leaf the
+     *   validator does not look up. Optional, because one hash almost always has exactly
+     *   one leaf; when it has two, this is how the caller says which one it means.
+     */
     @GetMapping("/{policyId}/proofs/{memberPkh}")
-    public ResponseEntity<?> getMemberProof(@PathVariable String policyId, @PathVariable String memberPkh) {
+    public ResponseEntity<?> getMemberProof(@PathVariable String policyId,
+                                            @PathVariable String memberPkh,
+                                            @RequestParam(required = false) Short credentialType) {
         try {
             byte[] pkhBytes = HexUtil.decodeHexString(memberPkh);
             long now = System.currentTimeMillis();
 
-            // 404 not present, 410 expired, 425 not yet published — frontend hooks switch on these.
-            java.util.Optional<org.cardanofoundation.cip113.entity.SecurityTokenMemberLeafEntity> existing = memberLeafRepo.findByProgrammableTokenPolicyIdAndMemberPkh(policyId, memberPkh);
-            if (existing.isEmpty()) {
+            // A hash can have a leaf under BOTH credential forms — they are different
+            // holders — so this is a list, and a singular query here would 500 as soon as
+            // both exist. With one leaf the form is unambiguous and the caller need not
+            // supply it; with two it must, or we would silently pick one.
+            List<org.cardanofoundation.cip113.entity.SecurityTokenMemberLeafEntity> matches =
+                    memberLeafRepo.findByProgrammableTokenPolicyIdAndMemberPkh(policyId, memberPkh);
+            if (matches.isEmpty()) {
                 return ResponseEntity.status(404).body(Map.of("error", "member not found in allowlist"));
+            }
+            if (credentialType == null && matches.size() > 1) {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                        memberPkh + " is enrolled under more than one credential form for this "
+                        + "policy; pass ?credentialType=0 (VerificationKey) or 1 (Script) to say "
+                        + "which holder you mean"));
+            }
+            short wantType = credentialType != null ? credentialType : matches.getFirst().getCredentialType();
+            java.util.Optional<org.cardanofoundation.cip113.entity.SecurityTokenMemberLeafEntity> existing =
+                    matches.stream().filter(l -> l.getCredentialType() == wantType).findFirst();
+            if (existing.isEmpty()) {
+                return ResponseEntity.status(404).body(Map.of("error",
+                        "member not found in allowlist under credential type " + wantType));
             }
             if (existing.get().getValidUntilMs() < now) {
                 return ResponseEntity.status(410).body(Map.of("error", "member leaf has expired",
@@ -528,7 +601,8 @@ public class SecurityTokenController {
                         "memberPkh", memberPkh));
             }
 
-            java.util.Optional<SecurityTokenAllowlistService.MpfLeafView> view = allowlistService.inclusionProof(policyId, pkhBytes, now);
+            java.util.Optional<SecurityTokenAllowlistService.MpfLeafView> view =
+                    allowlistService.inclusionProof(policyId, pkhBytes, wantType, now);
             if (view.isEmpty()) {
                 return ResponseEntity.status(404).body(Map.of("error", "MPF proof unavailable"));
             }
@@ -573,8 +647,18 @@ public class SecurityTokenController {
             return ResponseEntity.badRequest().body(Map.of("error",
                     "could not derive stake credential hash from boundAddress (base address required)"));
         }
+        // The credential form is the first byte of the MPF leaf key, so it is part of the
+        // member's identity. Refuse rather than assume VerificationKey: a wrong byte
+        // enrolls a leaf the holder can never prove against, and nothing surfaces until a
+        // transfer fails evaluation.
+        Short credentialType = AddressUtil.extractStakeCredentialTypeFromAddress(boundAddress);
+        if (credentialType == null) {
+            return ResponseEntity.badRequest().body(Map.of("error",
+                    "could not determine whether the stake credential of boundAddress is a "
+                    + "verification key or a script"));
+        }
         try {
-            allowlistService.putMember(policyId, pkh, validUntilMs, boundAddress, sessionId);
+            allowlistService.putMember(policyId, pkh, credentialType, validUntilMs, boundAddress, sessionId);
             byte[] localRoot = allowlistService.currentRoot(policyId);
             return ResponseEntity.ok(Map.of(
                     "memberPkh", HexUtil.encodeHexString(pkh),

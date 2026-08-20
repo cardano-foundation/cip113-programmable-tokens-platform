@@ -583,7 +583,7 @@ export function GlobalStateSection({
       {!selectedToken && !isLoadingState && (
         <div className="flex flex-col items-center py-8 text-center">
           <Settings className="h-10 w-10 text-dark-600 mb-3" />
-          <p className="text-sm text-dark-400">Select a KYC token above to view and manage its global state.</p>
+          <p className="text-sm text-dark-400">Select a token above to view and manage its global state.</p>
         </div>
       )}
     </form>
@@ -620,6 +620,10 @@ function SecurityTokenGlobalStatePanel({
     memberRootHashLocal: string | null;
     trustedEntityVkeys: string[];
     adminCredentialHash: string | null;
+    /** Which minting authority the permanent proxy currently delegates to. */
+    mintingScriptCredentialHash: string | null;
+    /** One-way: once locked, neither the authority nor the transfer logic can change. */
+    upgradesLocked: boolean;
   } | null>(null);
 
   // Editable mirror — initialised from on-chain, modified by user
@@ -658,6 +662,8 @@ function SecurityTokenGlobalStatePanel({
         securityInfoHex: gs.securityInfoHex ?? null,
         memberRootHash: gs.memberRootHash ?? null,
         memberRootHashLocal: gs.memberRootHashLocal ?? null,
+        mintingScriptCredentialHash: gs.mintingScriptCredentialHash ?? null,
+        upgradesLocked: gs.upgradesLocked ?? false,
         trustedEntityVkeys: gs.trustedEntityVkeys ?? [],
         adminCredentialHash: gs.adminCredentialHash ?? null,
       };
@@ -678,6 +684,11 @@ function SecurityTokenGlobalStatePanel({
           && next.memberRootHashLocal.toLowerCase() !== next.memberRootHash.toLowerCase()
       );
     } catch (e) {
+      // Drop whatever was on screen. Leaving the previous token's datum in place
+      // would render ITS pause flag, supply and trusted entities under the newly
+      // selected policy id — and every action built from this panel is keyed on
+      // `policyId`, so acting on those stale values would sign the wrong change.
+      setOnchain(null);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
@@ -936,6 +947,58 @@ function SecurityTokenGlobalStatePanel({
     }
   };
 
+  // ── Minting authority: rotate, and lock ───────────────────────────────────
+  // The minting logic is a permanent PROXY plus a swappable AUTHORITY. The proxy's
+  // hash is frozen into the CIP-113 registry node at insert and can never change —
+  // it IS the token's identity — so the only way to change the mint rules is to
+  // point `minting_script_credential_hash` at a different authority. That is what
+  // this control does, and it is why the token's policy id survives an upgrade.
+  //
+  // Single-signature by design, unlike RotateAdmin: the outgoing authority does not
+  // co-sign, because an authority being replaced for being broken or compromised is
+  // exactly the case this has to keep working for.
+  const [showRotateMinting, setShowRotateMinting] = useState(false);
+  const [newMintingScript, setNewMintingScript] = useState("");
+  const MINTING_HASH_RE = /^[0-9a-f]{56}$/;
+  const newMintingScriptValid = MINTING_HASH_RE.test(newMintingScript.trim().toLowerCase());
+
+  const handleRotateMintingScript = async () => {
+    if (!newMintingScriptValid) return;
+    const ok = await runChain(
+      [{
+        spec: {
+          action: "RotateMintingScript",
+          newMintingScriptCredentialHashHex: newMintingScript.trim().toLowerCase(),
+        },
+        label: "Rotate the minting authority",
+      }],
+      "Minting authority rotated",
+    );
+    if (ok) {
+      setShowRotateMinting(false);
+      setNewMintingScript("");
+    }
+  };
+
+  // Irreversible, and broader than it looks: it freezes the minting-authority
+  // rotation AND the CIP-113 registry-node upgrade path (transfer + third-party
+  // logic) in one flag that no branch ever clears. Own control, own confirmation.
+  const [showLockUpgrades, setShowLockUpgrades] = useState(false);
+  const [lockConfirm, setLockConfirm] = useState("");
+  const LOCK_PHRASE = "LOCK UPGRADES";
+
+  const handleLockUpgrades = async () => {
+    if (lockConfirm.trim() !== LOCK_PHRASE) return;
+    const ok = await runChain(
+      [{ spec: { action: "LockUpgrades" }, label: "Lock upgrades permanently (irreversible)" }],
+      "Upgrades locked permanently",
+    );
+    if (ok) {
+      setShowLockUpgrades(false);
+      setLockConfirm("");
+    }
+  };
+
   // ── D2: RotateAdmin (dual-signature, two-step) ────────────────────────────
   // global_state.ak requires BOTH `must_be_signed_by_credential(input_datum
   // .admin_credential_hash)` AND `must_be_signed_by_credential(new_admin_
@@ -1045,6 +1108,48 @@ function SecurityTokenGlobalStatePanel({
       setRotateBusy(false);
     }
   };
+
+  // A failed load has to SAY so. `refresh()` records the reason in `error` but
+  // leaves `onchain` null, and the spinner below keys on `!onchain` — so without
+  // this branch every failure rendered as an endless "Loading on-chain state…"
+  // and the only rendering of `error` sits far below, unreachable. The common
+  // cause is a registration whose global-state UTxO is not on the chain the
+  // backend is pointed at (a token from an earlier devnet, or a genesis that
+  // never landed): the backend answers 404 and the panel simply spun.
+  if (error && !onchain) {
+    const missingOnChain = /not found on chain/i.test(error);
+    return (
+      <div className="space-y-4">
+        <div className="flex items-start gap-3 p-4 rounded-lg border border-red-500/40 bg-red-500/10">
+          <AlertTriangle className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <p className="text-sm font-semibold text-red-300">
+              {missingOnChain
+                ? "No global state on chain for this token"
+                : "Could not read the on-chain global state"}
+            </p>
+            <p className="text-xs text-red-200/80 break-words">{error}</p>
+            {missingOnChain && (
+              <p className="text-xs text-red-200/60">
+                The registration exists in the backend database but its global-state UTxO is not
+                on the network this backend is connected to. Tokens registered against a different
+                network — or a devnet that has since been recreated — look exactly like this.
+                Nothing here can be repaired from this panel; pick a token that was registered on
+                the current network.
+              </p>
+            )}
+            <p className="text-xs font-mono text-red-200/50 break-all pt-1">{policyId}</p>
+          </div>
+        </div>
+        <Button variant="outline" size="sm" onClick={() => refresh()} disabled={loading}>
+          {loading
+            ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            : <RefreshCw className="h-4 w-4 mr-2" />}
+          Retry
+        </Button>
+      </div>
+    );
+  }
 
   if (loading || !onchain) {
     return (
@@ -1638,6 +1743,149 @@ function SecurityTokenGlobalStatePanel({
         )}
         {rotateError && <p className="text-xs text-red-400 break-all">{rotateError}</p>}
       </div>
+
+      {/* ── Minting authority ─────────────────────────────────────────────── */}
+      <div className="pt-4 border-t border-white/10 space-y-3">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-white/80">Minting authority</span>
+        </div>
+        <p className="text-xs text-white/50">
+          The rules that decide whether a mint or burn is allowed live in a swappable
+          authority script. Rotating it changes those rules without touching the CIP-113
+          registry or the token&apos;s policy id.
+        </p>
+        {onchain?.mintingScriptCredentialHash && (
+          <p className="text-xs text-white/40 font-mono break-all">
+            current: {onchain.mintingScriptCredentialHash}
+          </p>
+        )}
+
+        {onchain?.upgradesLocked ? (
+          <p className="text-xs text-amber-300">
+            Upgrades are permanently locked for this token. The minting authority and the
+            transfer-logic scripts can no longer be changed by any action.
+          </p>
+        ) : !showRotateMinting ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setShowRotateMinting(true)}
+            disabled={busy}
+          >
+            Rotate the minting authority…
+          </Button>
+        ) : (
+          <div className="p-4 rounded-lg border border-white/15 bg-white/5 space-y-3">
+            <p className="text-xs text-amber-300">
+              This is not verified on chain. The proxy checks only that the script you name
+              here withdraws — it cannot check that the script actually enforces anything.
+              Pointing it at any other withdraw-capable script in this deployment silently
+              disables every mint control, and the failure is silent and fails OPEN. After
+              rotating, confirm that a mint lacking a power-user signature is REJECTED, for
+              all five power-user roles.
+            </p>
+            <input
+              type="text"
+              value={newMintingScript}
+              onChange={(e) => setNewMintingScript(e.target.value)}
+              placeholder="new minting authority script hash (56 hex chars)"
+              className="w-full px-3 py-2 rounded bg-black/40 border border-white/15 text-sm font-mono"
+            />
+            {newMintingScript.trim() !== "" && !newMintingScriptValid && (
+              <p className="text-xs text-red-400">
+                Must be exactly 56 lower-case hex characters (a 28-byte script hash).
+              </p>
+            )}
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={handleRotateMintingScript}
+                disabled={busy || !newMintingScriptValid}
+              >
+                Rotate
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => { setShowRotateMinting(false); setNewMintingScript(""); }}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Danger zone — lock upgrades ───────────────────────────────────── */}
+      {!onchain?.upgradesLocked && (
+        <div className="pt-4 border-t border-red-900/50 space-y-3">
+          <div className="flex items-center gap-2">
+            <Skull className="h-4 w-4 text-red-400" />
+            <span className="text-sm font-medium text-red-300">Danger zone — lock upgrades</span>
+          </div>
+          {!showLockUpgrades ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setShowLockUpgrades(true)}
+              disabled={busy}
+              className="border-red-500/50 text-red-300 hover:bg-red-500/10"
+            >
+              Lock upgrades permanently…
+            </Button>
+          ) : (
+            <div className="p-4 rounded-lg border border-red-500/50 bg-red-500/10 space-y-3">
+              <p className="text-xs text-red-200">
+                This freezes BOTH the minting authority and the CIP-113 transfer-logic
+                upgrade path. Nothing clears the flag afterwards — that is the point: the
+                token&apos;s rules become final in a way an admin key compromise cannot undo.
+              </p>
+              <p className="text-xs text-red-200">
+                It also gives up the ability to patch a buggy or compromised minting
+                authority. After this, the only remaining lever over the token is
+                decommissioning it. Lock only when the deployment is final.
+              </p>
+              <label className="block text-xs text-white/60">
+                Type <span className="font-mono font-semibold">{LOCK_PHRASE}</span> to confirm:
+              </label>
+              <input
+                type="text"
+                value={lockConfirm}
+                onChange={(e) => setLockConfirm(e.target.value)}
+                placeholder={LOCK_PHRASE}
+                className="w-full px-3 py-2 rounded bg-black/40 border border-red-500/40 text-sm font-mono"
+              />
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="primary"
+                  size="sm"
+                  onClick={handleLockUpgrades}
+                  disabled={busy || lockConfirm.trim() !== LOCK_PHRASE}
+                  className="bg-red-600 hover:bg-red-500"
+                >
+                  Lock upgrades permanently
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => { setShowLockUpgrades(false); setLockConfirm(""); }}
+                  disabled={busy}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── D3: Danger zone — decommission ───────────────────────────────── */}
       <div className="pt-4 border-t border-red-900/50 space-y-3">

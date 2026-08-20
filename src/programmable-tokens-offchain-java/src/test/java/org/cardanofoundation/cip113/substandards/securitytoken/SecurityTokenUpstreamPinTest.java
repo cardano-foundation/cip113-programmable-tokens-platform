@@ -25,15 +25,21 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * Drift guard for the vendored {@code src/substandards/security-token} tree.
  *
- * <p>That directory is a <em>verbatim</em> copy of the upstream repository at the
- * SHA recorded in {@code UPSTREAM_PIN.json} — currently
- * {@code easy1staking-com/fn-bafin-cardano-sc}, the fork whose
- * {@code fix/cmta-requirements-fixes} branch merges {@code FluidTokens:main} and
- * fixes the three defects in {@code docs/UPSTREAM-BAFIN-DEFECTS.md}. It previously
- * held a hand-maintained fork that silently drifted from upstream while carrying a
- * comment asserting it had not — 12 of 20 Aiken files had diverged by the time
- * anyone checked. Neither this test nor {@code verify-upstream-pin.sh} hard-codes
+ * <p>That directory is a <em>verbatim</em> copy of the upstream source recorded in
+ * {@code UPSTREAM_PIN.json} — currently {@code easy1staking-com/fn-bafin-cardano-sc},
+ * the fork that fixes the three defects in {@code docs/UPSTREAM-BAFIN-DEFECTS.md}. It
+ * previously held a hand-maintained fork that silently drifted from upstream while
+ * carrying a comment asserting it had not — 12 of 20 Aiken files had diverged by the
+ * time anyone checked. Neither this test nor {@code verify-upstream-pin.sh} hard-codes
  * the owner: both read it from the manifest, so a re-pin edits only that file.
+ *
+ * <p><strong>The pin has two modes</strong>, declared by {@code source_state}. In
+ * {@code commit} mode the vendored bytes are a published revision and both halves of
+ * the pin apply. In {@code dirty-worktree} mode they are a maintainer's uncommitted
+ * working tree; {@code commit} then names only the BASE it was taken from, no tarball
+ * can reproduce it, and the online half is disabled — leaving this offline test, plus
+ * {@code tree_sha256}, as the whole guard. {@link #pinProvenanceIsComplete()} enforces
+ * what that mode must document so it stays reversible instead of quietly permanent.
  *
  * <p>This test is the offline half of the pin (it needs no network, so it runs
  * on every build):
@@ -61,13 +67,13 @@ import static org.junit.jupiter.api.Assertions.fail;
  *
  * <p>Note also that running {@code aiken build} in the vendored directory rewrites
  * {@code plutus.json}. At the current pin that rewrite happens to be a no-op —
- * upstream's committed blueprint was built with {@code v1.1.23+8949565}, which is
- * also the locally installed compiler, and rebuilding reproduces byte-identical
- * {@code compiledCode} for all 21 validators (that is how the pin's
- * {@code blueprint_reproduced} flag was established). Do not rely on it: under the
- * previous pin the compilers differed ({@code v1.1.21+42babe5}) and a stray build
+ * upstream's blueprint was built with {@code v1.1.23+8949565}, which is also the
+ * locally installed compiler, and rebuilding reproduces byte-identical
+ * {@code compiledCode} for all 24 validators (that is how the pin's
+ * {@code blueprint_reproduced} flag was established). Do not rely on it: under an
+ * earlier pin the compilers differed ({@code v1.1.21+42babe5}) and a stray build
  * silently changed every validator hash. This test fails loudly either way, which
- * is the intent — the committed blueprint is the audited artifact, not a local
+ * is the intent — the vendored blueprint is the audited artifact, not a local
  * rebuild of it.
  */
 class SecurityTokenUpstreamPinTest {
@@ -79,11 +85,15 @@ class SecurityTokenUpstreamPinTest {
     private static final Set<String> NON_UPSTREAM_FILES =
             Set.of("UPSTREAM_PIN.json", "verify-upstream-pin.sh");
 
-    /** Local aiken working directory; upstream does not ship it and it is gitignored.
-     *  Pruned at ANY depth, matching {@code verify-upstream-pin.sh}'s
-     *  {@code dirs[:] = [d for d in dirs if d != "build"]} — the two must agree or
-     *  the manifest the script writes cannot be the manifest this test verifies. */
-    private static final String BUILD_DIR = "build";
+    /** Directories excluded from the pin, pruned at ANY depth. Must stay identical to
+     *  {@code verify-upstream-pin.sh}'s {@code prune} set — the two must agree or the
+     *  manifest the script writes cannot be the manifest this test verifies.
+     *
+     *  <p>{@code build} is the local aiken working directory (gitignored, not shipped
+     *  upstream). {@code .git} and {@code .claude} only appear when the tree is
+     *  vendored from a maintainer's working checkout rather than a release tarball;
+     *  they are machine-specific state and must never become pinned inputs. */
+    private static final Set<String> PRUNED_DIRS = Set.of("build", ".git", ".claude");
 
     @Test
     @DisplayName("vendored security-token tree matches its pinned upstream manifest")
@@ -127,6 +137,46 @@ class SecurityTokenUpstreamPinTest {
                     + "with " + VENDORED_DIR + "/verify-upstream-pin.sh --regenerate.\n\n"
                     + String.join("\n", problems));
         }
+
+        // The per-file loop above proves each listed file is intact, but it reads its
+        // expectations FROM `files` — so `files` itself is unauthenticated, and a
+        // regeneration over a tree nobody reviewed looks identical to a clean pin.
+        // `tree_sha256` is one value a human can eyeball in a diff and carry between
+        // machines; checking it here is what makes recording it more than decoration.
+        JsonNode recordedTree = pin.get("tree_sha256");
+        if (recordedTree != null && !recordedTree.isNull()) {
+            assertEquals(recordedTree.asText(), treeSha256(expected),
+                    "tree_sha256 does not match the per-file manifest. Every individual "
+                            + "hash matched, so `files` was edited without refreshing "
+                            + "tree_sha256 (or vice versa) — re-run "
+                            + VENDORED_DIR + "/verify-upstream-pin.sh --regenerate.");
+        }
+    }
+
+    /**
+     * Pin mode guard. When {@code source_state} is {@code dirty-worktree} the vendored
+     * bytes are a maintainer's uncommitted working tree, so {@code commit} names only
+     * the base it was taken from and the ONLINE half of the pin cannot run at all
+     * (there is no fetchable revision whose tarball would match). That is a deliberate,
+     * temporary state — this test pins down what it must carry so it stays legible and
+     * reversible rather than quietly becoming permanent.
+     */
+    @Test
+    @DisplayName("pin records enough provenance for the mode it declares")
+    void pinProvenanceIsComplete() throws Exception {
+        JsonNode pin = new ObjectMapper().readTree(repoRoot().resolve(PIN_FILE).toFile());
+        String state = pin.hasNonNull("source_state") ? pin.get("source_state").asText() : "commit";
+
+        assertTrue(Set.of("commit", "dirty-worktree").contains(state),
+                "unknown source_state: " + state);
+
+        if ("dirty-worktree".equals(state)) {
+            for (String field : List.of("source_path", "uncommitted_changes_summary", "tree_sha256")) {
+                assertTrue(pin.hasNonNull(field),
+                        "a dirty-worktree pin must record " + field + ": without it nobody can "
+                                + "tell what these bytes are, and the online check is disabled.");
+            }
+        }
     }
 
     @Test
@@ -166,7 +216,7 @@ class SecurityTokenUpstreamPinTest {
         try (Stream<Path> walk = Files.walk(root)) {
             for (Path p : walk.filter(Files::isRegularFile).toList()) {
                 String rel = root.relativize(p).toString().replace('\\', '/');
-                if (isUnderBuildDir(rel)) continue;
+                if (isUnderPrunedDir(rel)) continue;
                 if (NON_UPSTREAM_FILES.contains(rel)) continue;
                 out.put(rel, sha256(p));
             }
@@ -174,12 +224,33 @@ class SecurityTokenUpstreamPinTest {
         return out;
     }
 
-    /** True when any path segment of {@code rel} is the aiken {@code build} directory. */
-    private static boolean isUnderBuildDir(String rel) {
+    /** True when any path segment of {@code rel} names a pruned directory. */
+    private static boolean isUnderPrunedDir(String rel) {
         for (String segment : rel.split("/")) {
-            if (BUILD_DIR.equals(segment)) return true;
+            if (PRUNED_DIRS.contains(segment)) return true;
         }
         return false;
+    }
+
+    /**
+     * One identity for the whole manifest: sha256 over the sorted {@code path\0sha\n}
+     * lines. Mirrors the same computation in {@code verify-upstream-pin.sh}; the two
+     * must agree byte for byte or a regeneration by one tool fails verification by the
+     * other. Takes the sorted map rather than walking the filesystem, so the result
+     * cannot depend on directory iteration order.
+     */
+    private static String treeSha256(Map<String, String> files) {
+        StringBuilder sb = new StringBuilder();
+        new TreeMap<>(files).forEach((path, hash) -> sb.append(path).append('\0').append(hash).append('\n'));
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(digest.length * 2);
+            for (byte b : digest) out.append(String.format("%02x", b));
+            return out.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static String sha256(Path p) throws IOException {

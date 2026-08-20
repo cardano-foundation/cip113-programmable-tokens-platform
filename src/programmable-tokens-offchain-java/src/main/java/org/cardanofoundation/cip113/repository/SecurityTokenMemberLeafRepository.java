@@ -23,8 +23,23 @@ public interface SecurityTokenMemberLeafRepository
     List<SecurityTokenMemberLeafEntity> findPublishedByProgrammableTokenPolicyId(
             @Param("policyId") String policyId);
 
-    Optional<SecurityTokenMemberLeafEntity> findByProgrammableTokenPolicyIdAndMemberPkh(
+    /** Every leaf for a hash, across BOTH credential forms.
+     *
+     *  <p>Returns a list, not an Optional, deliberately: the unique key is
+     *  {@code (policy, member_pkh, credential_type)}, so one hash can legitimately have
+     *  two rows — a {@code VerificationKey} member and a {@code Script} member, which the
+     *  CIP-113 base layer treats as different holders. A singular derived query over a
+     *  non-unique key throws {@code IncorrectResultSizeDataAccessException} the moment
+     *  both exist, which is a 500 on a read path. Callers that know which form they mean
+     *  should use {@link #findByProgrammableTokenPolicyIdAndMemberPkhAndCredentialType}. */
+    List<SecurityTokenMemberLeafEntity> findByProgrammableTokenPolicyIdAndMemberPkh(
             String policyId, String memberPkh);
+
+    /** Identity-exact lookup — the only one that can name a single leaf, because the
+     *  credential form is part of a member's identity (it is the first byte of the MPF
+     *  leaf key). */
+    Optional<SecurityTokenMemberLeafEntity> findByProgrammableTokenPolicyIdAndMemberPkhAndCredentialType(
+            String policyId, String memberPkh, short credentialType);
 
     /** Mark every leaf added at-or-before {@code attemptStartedAt} as published. */
     @Modifying
@@ -45,10 +60,10 @@ public interface SecurityTokenMemberLeafRepository
     @Modifying
     @Query(value = """
         INSERT INTO security_token_member_leaf
-            (programmable_token_policy_id, member_pkh, valid_until_ms, bound_address, kyc_session_id, added_at)
+            (programmable_token_policy_id, member_pkh, credential_type, valid_until_ms, bound_address, kyc_session_id, added_at)
         VALUES
-            (:policyId, :memberPkh, :validUntilMs, :boundAddress, :kycSessionId, :addedAt)
-        ON CONFLICT (programmable_token_policy_id, member_pkh) DO UPDATE SET
+            (:policyId, :memberPkh, :credentialType, :validUntilMs, :boundAddress, :kycSessionId, :addedAt)
+        ON CONFLICT (programmable_token_policy_id, member_pkh, credential_type) DO UPDATE SET
             valid_until_ms  = EXCLUDED.valid_until_ms,
             bound_address   = EXCLUDED.bound_address,
             kyc_session_id  = EXCLUDED.kyc_session_id,
@@ -57,6 +72,7 @@ public interface SecurityTokenMemberLeafRepository
     void upsertMember(
             @Param("policyId") String policyId,
             @Param("memberPkh") String memberPkh,
+            @Param("credentialType") short credentialType,
             @Param("validUntilMs") long validUntilMs,
             @Param("boundAddress") String boundAddress,
             @Param("kycSessionId") String kycSessionId,

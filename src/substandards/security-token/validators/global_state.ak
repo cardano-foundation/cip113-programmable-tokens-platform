@@ -4,8 +4,8 @@ use aiken/collection/list
 use aiken/collection/pairs
 use aiken/interval.{Interval, IntervalBound, NegativeInfinity, PositiveInfinity}
 use aiken/primitive/bytearray
-use aiken_design_patterns/linked_list.{get_element_info, run_element_with}
-use cardano/address.{Address, Script}
+use aiken_design_patterns/linked_list.{Element, Node}
+use cardano/address.{Address, Credential, Script, VerificationKey}
 use cardano/assets.{
   PolicyId, Value, from_asset, from_lovelace, merge, quantity_of,
   without_lovelace, zero,
@@ -16,12 +16,14 @@ use cardano/transaction.{
 use constants
 use types/global_state.{
   AddTrustedEntity, DeactivateContract, GlobalStateDatum,
-  GlobalStateSpendRedeemer, MintSecurity, ModifySecurityInfo, PauseTransfers,
-  RemoveTrustedEntity, RotateAdmin, SetRequiresReceiverKyc, SetRequiresSenderKyc,
-  TrustedEntityMetadata, UpdateMemberRootHash, UpdateTrustedEntity,
-  set_admin_credential_hash, set_deactivated, set_member_root_hash,
-  set_mintable_amount, set_requires_receiver_kyc, set_requires_sender_kyc,
-  set_security_info, set_transfers_paused, set_trusted_entity_vkeys,
+  GlobalStateSpendRedeemer, LockUpgrades, MintSecurity, ModifySecurityInfo,
+  PauseTransfers, RemoveTrustedEntity, RotateAdmin, RotateMintingScript,
+  SetRequiresReceiverKyc, SetRequiresSenderKyc, TrustedEntityMetadata,
+  UpdateMemberRootHash, UpdateTrustedEntity, set_admin_credential_hash,
+  set_deactivated, set_member_root_hash, set_mintable_amount,
+  set_minting_script_credential_hash, set_requires_receiver_kyc,
+  set_requires_sender_kyc, set_security_info, set_transfers_paused,
+  set_trusted_entity_vkeys, set_upgrades_locked,
 }
 use types/power_users.{PowerUser}
 use utils.{must_be_signed_by_credential, quantity_of_policy_id}
@@ -70,6 +72,11 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
     !datum.deactivated,
     datum.mintable_amount >= 0,
     bytearray.length(datum.admin_credential_hash) == 28,
+    bytearray.length(datum.minting_script_credential_hash) == 28,
+    // Born unlocked. Locking is a single admin transaction away, so a
+    // deployment that wants immutability from day one loses nothing — but a
+    // token that started locked could never be corrected at all.
+    !datum.upgrades_locked,
     // network_id is IMMUTABLE and must fit the 1-byte field encoded into every
     // KYC-attestation payload (0–255). An out-of-range value would silently and
     // permanently disable attestation-based transfers.
@@ -85,6 +92,21 @@ fn sanitise_initial_datum(datum: GlobalStateDatum, self_mint: Value) -> Bool {
     // power_users LL root and denylist LL root must be minted in this tx
     quantity_of_policy_id(self_mint, datum.power_user_linked_list_policy_id) >= 1,
     quantity_of_policy_id(self_mint, datum.denylist_linked_list_policy_id) >= 1,
+    // The two lists must not be the same list. If the ids were equal,
+    // every power-user node would double as a denylist node — and since a
+    // power-user node's link is unconstrained by the denylist's ordering, the
+    // sanctions list would be satisfiable from day one and never bind. Both
+    // fields are IMMUTABLE after genesis (every spend branch reproduces the
+    // datum wholesale), so this is the only chance to catch it.
+    //
+    // The length checks are the same defence one step earlier: a malformed id
+    // can never name a real minting policy, so the corresponding list would be
+    // permanently un-initialisable. Off-chain must additionally verify both ids
+    // against the compiled list-validator hashes before signing genesis — that
+    // binding is not checkable here.
+    datum.power_user_linked_list_policy_id != datum.denylist_linked_list_policy_id,
+    bytearray.length(datum.power_user_linked_list_policy_id) == 28,
+    bytearray.length(datum.denylist_linked_list_policy_id) == 28,
     is_sorted_no_dup_vkeys(datum.trusted_entity_vkeys),
   }
 }
@@ -158,6 +180,14 @@ validator global_state_spend_validator(
   security_asset_name: ByteArray,
   issuance_policy_id: ByteArray,
   global_state_policy_id: ByteArray,
+  /// The POWER-USERS SPEND VALIDATOR's script hash — not the list
+  /// policy id. Element authentication ignores the address, so a power-user
+  /// NFT carried out of the list into a private wallet keeps authenticating
+  /// whatever ROLE FLAGS its holder writes into the datum. Here that would let
+  /// a revoked operator keep pausing the protocol. Not circular: the
+  /// power-users validators depend on the GlobalState MINT hash, never on this
+  /// spend validator's.
+  power_user_list_script_hash: ByteArray,
 ) {
   spend(
     datum_opt: Option<GlobalStateDatum>,
@@ -206,9 +236,22 @@ validator global_state_spend_validator(
       constants.global_state_asset_name,
     ) == 1
     // ensuring the token amount in the Utxo is preserverd - excluding lovelace
-    let value_preserved = without_lovelace(own_input.output.value) == without_lovelace(
-      global_state_output.value,
-    )
+    let value_preserved = and {
+      without_lovelace(own_input.output.value) == without_lovelace(
+        global_state_output.value,
+      ),
+      // ADA may be topped up but never removed. All eleven branches
+      // compose the same `value_preserved`, so without this line every
+      // authorised action doubles as an undeclared ADA withdrawal — and,
+      // worse, the control UTxO can be starved down to the min-ADA floor,
+      // after which any datum growth (a larger `security_info`, another
+      // trusted entity) makes the continuing output unsatisfiable and the
+      // protocol's ONLY control UTxO becomes permanently unspendable. There
+      // is no way to top it up out of band: every spend runs this validator.
+      assets.lovelace_of(global_state_output.value) >= assets.lovelace_of(
+        own_input.output.value,
+      ),
+    }
 
     // Non-MintSecurity branches reject concurrent security mint (preserves
     // supply-cap integrity across all non-cap-aware admin flows).
@@ -251,20 +294,11 @@ validator global_state_spend_validator(
           power_user_node_ref_input_index,
         )
 
-        let (power_user_credential_hash, power_user_data) = get_element_info(
+        let (power_user_credential_hash, power_user_data) = utils.authenticated_power_user(
           power_user_node_ref_input.output,
-          fn(_lovelace, node_key, data, _link) {
-            expect Some(key) = node_key
-            expect power_user_data: PowerUser = data
-            (key, power_user_data)
-          },
+          input_datum.power_user_linked_list_policy_id,
+          power_user_list_script_hash,
         )
-          |> run_element_with(
-              input_datum.power_user_linked_list_policy_id,
-              constants.linked_list_root_key,
-              constants.linked_list_node_key_prefix,
-              constants.linked_list_node_key_prefix_length,
-            )
 
         let expected_output_datum = set_transfers_paused(
           input_fields,
@@ -448,6 +482,48 @@ validator global_state_spend_validator(
           builtin.equals_data(expected_output_datum, global_state_output_datum),
         }
       }
+      RotateMintingScript { new_minting_script_credential_hash } -> {
+        let expected_output_datum = set_minting_script_credential_hash(
+          input_fields,
+          new_minting_script_credential_hash,
+        )
+        and {
+          no_concurrent_security_mint,
+          address_preserved,
+          nft_preserved,
+          value_preserved,
+          bytearray.length(new_minting_script_credential_hash) == 28,
+          // The one-way upgrade lock closes this path permanently. See
+          // `upgrades_locked` on GlobalStateDatum.
+          !input_datum.upgrades_locked,
+          // Admin-only, single-signature — see the doc comment on
+          // RotateMintingScript: unlike RotateAdmin, the OUTGOING authority's
+          // consent is deliberately not required, since replacing a buggy or
+          // compromised authority is exactly the case this must still work
+          // for. minting_logic_script.ak independently refuses to ever
+          // delegate to itself (own-hash self-authorisation guard), so this
+          // action does not need to defend against that specific value here.
+          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
+          builtin.equals_data(expected_output_datum, global_state_output_datum),
+        }
+      }
+      LockUpgrades -> {
+        let expected_output_datum = set_upgrades_locked(input_fields, True)
+        and {
+          no_concurrent_security_mint,
+          address_preserved,
+          nft_preserved,
+          value_preserved,
+          // One-way: refuse to re-lock, so the action is never a silent
+          // no-op and the transition True->True cannot be used to churn the
+          // UTxO. Nothing anywhere sets this field back to False — every
+          // branch reproduces the datum wholesale and only this branch
+          // touches it — so False is reachable exactly once, at genesis.
+          !input_datum.upgrades_locked,
+          must_be_signed_by_credential(self, input_datum.admin_credential_hash),
+          builtin.equals_data(expected_output_datum, global_state_output_datum),
+        }
+      }
       DeactivateContract -> {
         let expected_output_datum = set_deactivated(input_fields, True)
         and {
@@ -485,10 +561,24 @@ const t_issuance_policy: ByteArray =
 const t_admin: ByteArray =
   #"cccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
+// The power-users SPEND validator's hash. No PauseTransfers fixture
+// exercises it yet — see the note in the test section.
+const t_pu_script_hash: ByteArray =
+  #"d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+
 const t_gs_script_hash: ByteArray =
   #"dddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 
+const t_new_admin: ByteArray =
+  #"1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+
 const t_sec_name: ByteArray = "SEC"
+
+const t_minting_script: ByteArray =
+  #"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+const t_new_minting_script: ByteArray =
+  #"ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 
 fn t_out_ref(ix: Int) -> OutputReference {
   OutputReference {
@@ -511,6 +601,8 @@ fn t_datum(transfers_paused: Bool, deactivated: Bool) -> GlobalStateDatum {
     requires_sender_kyc: False,
     requires_receiver_kyc: False,
     network_id: 1,
+    minting_script_credential_hash: t_minting_script,
+    upgrades_locked: False,
   }
 }
 
@@ -584,7 +676,6 @@ fn t_tx(
 
 fn deactivate_redeemer() -> GlobalStateSpendRedeemer {
   GlobalStateSpendRedeemer {
-    config_ref_input_index: 0,
     global_state_output_index: 0,
     action: DeactivateContract,
   }
@@ -599,11 +690,265 @@ fn run_spend(
     t_sec_name,
     t_issuance_policy,
     t_gs_policy,
+    t_pu_script_hash,
     Some(input_datum),
     redeemer,
     t_out_ref(0),
     tx,
   )
+}
+
+// ── RotateMintingScript — admin-only, single-signature ───────────────────────
+
+fn rotate_minting_script_redeemer(
+  new_minting_script_credential_hash: ByteArray,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: RotateMintingScript { new_minting_script_credential_hash },
+  }
+}
+
+test rotate_minting_script_succeeds_when_admin_signs() {
+  // Admin alone is sufficient — note the signatory list holds neither the
+  // outgoing nor the incoming authority. Deliberately NOT dual-sig:
+  // replacing a buggy or compromised authority has to work precisely when
+  // that authority can no longer be trusted to co-sign its own removal.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+    upgrades_locked: False,
+  }
+  run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test rotate_minting_script_fails_without_admin_signature() {
+  // Deliberately NOT dual-sig: only the admin's signature is checked, so
+  // this must fail on a missing ADMIN signature alone — no signature from
+  // the outgoing minting script is required or checked at all.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+    upgrades_locked: False,
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    t_tx(input_datum, output_datum, []),
+  )
+}
+
+test rotate_minting_script_cannot_smuggle_another_field_change() {
+  // A rotation must change exactly one field. Without the whole-datum
+  // equality check an admin-signed rotation would be a carrier for any
+  // other datum edit — e.g. silently raising the supply cap alongside it.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+    upgrades_locked: False,
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test rotate_admin_succeeds_when_both_sign() {
+  // Dual-sig by design: requiring the INCOMING admin's signature too proves
+  // the new credential is live, so a typo cannot strand the protocol with an
+  // admin nobody controls.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_new_admin,
+  }
+  run_spend(
+    input_datum,
+    rotate_admin_redeemer(t_new_admin),
+    t_tx(input_datum, output_datum, [t_admin, t_new_admin]),
+  )
+}
+
+test rotate_admin_fails_without_outgoing_admin_signature() {
+  // Blocks silent takeover: whoever holds the new key cannot install it alone.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_new_admin,
+  }
+  !run_spend(
+    input_datum,
+    rotate_admin_redeemer(t_new_admin),
+    t_tx(input_datum, output_datum, [t_new_admin]),
+  )
+}
+
+test rotate_admin_fails_without_incoming_admin_signature() {
+  // The lost-key soft-brick guard: the outgoing admin alone cannot hand the
+  // protocol to a credential that has not proven it can sign.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_new_admin,
+  }
+  !run_spend(
+    input_datum,
+    rotate_admin_redeemer(t_new_admin),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test rotate_admin_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    admin_credential_hash: t_new_admin,
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    rotate_admin_redeemer(t_new_admin),
+    t_tx(input_datum, output_datum, [t_admin, t_new_admin]),
+  )
+}
+
+fn rotate_admin_redeemer(
+  new_admin_credential_hash: ByteArray,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: RotateAdmin { new_admin_credential_hash },
+  }
+}
+
+test rotate_minting_script_fails_when_length_invalid() {
+  let input_datum = t_datum(False, False)
+  let bad_hash = #"ab"
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: bad_hash,
+    upgrades_locked: False,
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(bad_hash),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test deactivated_input_rejects_rotate_minting_script() fail {
+  let input_datum = t_datum(True, True)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+    upgrades_locked: False,
+  }
+  run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── LockUpgrades — the one-way upgrade lock ─────────────────────────────────
+
+fn lock_upgrades_redeemer() -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: LockUpgrades,
+  }
+}
+
+fn t_datum_locked() -> GlobalStateDatum {
+  GlobalStateDatum { ..t_datum(False, False), upgrades_locked: True }
+}
+
+test lock_upgrades_succeeds_when_admin_signs() {
+  let input_datum = t_datum(False, False)
+  run_spend(
+    input_datum,
+    lock_upgrades_redeemer(),
+    t_tx(input_datum, t_datum_locked(), [t_admin]),
+  )
+}
+
+test lock_upgrades_fails_without_admin_signature() {
+  let input_datum = t_datum(False, False)
+  !run_spend(
+    input_datum,
+    lock_upgrades_redeemer(),
+    t_tx(input_datum, t_datum_locked(), []),
+  )
+}
+
+test lock_upgrades_is_one_way() {
+  // Re-locking is refused, so the action is never a silent no-op...
+  let input_datum = t_datum_locked()
+  !run_spend(
+    input_datum,
+    lock_upgrades_redeemer(),
+    t_tx(input_datum, t_datum_locked(), [t_admin]),
+  )
+}
+
+test lock_upgrades_cannot_be_undone() {
+  // ...and no action can clear it. Every branch reproduces the datum
+  // wholesale via `equals_data`, and only LockUpgrades touches this field —
+  // which sets it True — so False is reachable exactly once, at genesis.
+  // Attempting to unlock is checked here against LockUpgrades itself; the
+  // whole-datum equality is what blocks every other branch from doing it.
+  let input_datum = t_datum_locked()
+  !run_spend(
+    input_datum,
+    lock_upgrades_redeemer(),
+    t_tx(input_datum, t_datum(False, False), [t_admin]),
+  )
+}
+
+test lock_upgrades_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..t_datum_locked(),
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    lock_upgrades_redeemer(),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test rotate_minting_script_fails_once_upgrades_are_locked() {
+  // The lock closes the minting-authority upgrade path permanently.
+  let input_datum = t_datum_locked()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    minting_script_credential_hash: t_new_minting_script,
+  }
+  !run_spend(
+    input_datum,
+    rotate_minting_script_redeemer(t_new_minting_script),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test sanitise_rejects_genesis_that_is_born_locked() {
+  // A token locked at birth could never be corrected at all; locking is one
+  // admin transaction away, so nothing is lost by refusing it here.
+  let datum = GlobalStateDatum {
+    ..sanitise_datum(#"", 1),
+    upgrades_locked: True,
+  }
+  !sanitise_initial_datum(datum, sanitise_mint())
 }
 
 // ── DeactivateContract — success + guard on preconditions ────────────────────
@@ -675,7 +1020,6 @@ test deactivated_input_rejects_modify_security_info() fail {
     new_info,
   )
   let redeemer = GlobalStateSpendRedeemer {
-    config_ref_input_index: 0,
     global_state_output_index: 0,
     action: ModifySecurityInfo { new_security_info: new_info },
   }
@@ -702,10 +1046,63 @@ fn t_mintsecurity_tx(
 
 fn mintsecurity_redeemer() -> GlobalStateSpendRedeemer {
   GlobalStateSpendRedeemer {
-    config_ref_input_index: 0,
     global_state_output_index: 0,
     action: MintSecurity { issuance_policy_redeemer_index: 0 },
   }
+}
+
+/// The supply-cap branch must change exactly `mintable_amount` and nothing
+/// else. It is the highest-value branch to pin: a mint is the one routine
+/// operation that legitimately rewrites the datum, so if it could carry a
+/// second edit it would be the natural vehicle for one — rotating the admin,
+/// clearing a KYC flag or unlocking upgrades under cover of an ordinary
+/// issuance. The whole-datum equality is what prevents that; this test is its
+/// guard.
+test mint_security_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let mint = 100
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    mintable_amount: input_datum.mintable_amount - mint,
+    // …plus one edit that has no business riding along.
+    admin_credential_hash: t_new_admin,
+  }
+  !run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, mint, [t_admin]),
+  )
+}
+
+/// The control: the same transaction WITHOUT the smuggled edit is accepted.
+/// Without this, the test above would pass even if the whole branch were
+/// broken.
+test mint_security_accepts_a_clean_cap_decrement() {
+  let input_datum = t_datum(False, False)
+  let mint = 100
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    mintable_amount: input_datum.mintable_amount - mint,
+  }
+  run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, mint, [t_admin]),
+  )
+}
+
+/// The cap must actually be decremented. Here the datum is reproduced
+/// unchanged while 100 tokens are issued, which would leave headroom for the
+/// full original cap on top of live supply — the simplest form of the
+/// inflation this branch exists to prevent.
+test mint_security_rejects_a_cap_that_does_not_decrement() {
+  let input_datum = t_datum(False, False)
+  let output_datum = input_datum
+  !run_spend(
+    input_datum,
+    mintsecurity_redeemer(),
+    t_mintsecurity_tx(input_datum, output_datum, 100, [t_admin]),
+  )
 }
 
 test deactivated_input_rejects_burn() fail {
@@ -785,6 +1182,8 @@ fn sanitise_datum(
     requires_sender_kyc: False,
     requires_receiver_kyc: False,
     network_id,
+    minting_script_credential_hash: t_minting_script,
+    upgrades_locked: False,
   }
 }
 
@@ -814,4 +1213,816 @@ test sanitise_rejects_negative_network_id() {
 test sanitise_rejects_bad_root_hash_length() {
   // 2 bytes — neither empty nor 32.
   !sanitise_initial_datum(sanitise_datum(#"aabb", 1), sanitise_mint())
+}
+
+// ── PauseTransfers — the power-user gate and its list-address pin ───────────
+//
+// The address pin this branch carries matters more here than in the swappable
+// consumers: `global_state_spend_validator` cannot be rotated on a live
+// deployment, so the assertion is the primary defence rather than a
+// belt-and-braces one. Keep all three tests together — the positive control is
+// what makes the two negatives meaningful.
+
+const t_pause_pu_cred: ByteArray =
+  #"0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+
+/// The datum used by the pause tests — `t_datum` leaves the list policy ids
+/// empty, which no real deployment does.
+fn t_pause_datum(transfers_paused: Bool) -> GlobalStateDatum {
+  GlobalStateDatum {
+    ..t_datum(transfers_paused, False),
+    power_user_linked_list_policy_id: t_pu_ll_policy,
+    denylist_linked_list_policy_id: t_dl_ll_policy,
+  }
+}
+
+/// A power-user node with `can_pause`, at `payment` — varied so the address
+/// pin can be exercised in both directions.
+fn t_pu_node_at(payment: Credential) -> Input {
+  let pu = PowerUser {
+    credential_hash: t_pause_pu_cred,
+    is_admin: False,
+    can_mint: False,
+    can_burn: False,
+    can_pause: True,
+    can_force_transfer: False,
+  }
+  let element: Element<Data, PowerUser> = Element {
+    data: Node { data: pu },
+    link: None,
+  }
+  Input {
+    output_reference: t_out_ref(5),
+    output: Output {
+      address: Address { payment_credential: payment, stake_credential: None },
+      value: merge(
+        from_lovelace(2_000_000),
+        from_asset(
+          t_pu_ll_policy,
+          bytearray.concat(
+            constants.linked_list_node_key_prefix,
+            t_pause_pu_cred,
+          ),
+          1,
+        ),
+      ),
+      datum: InlineDatum(element),
+      reference_script: None,
+    },
+  }
+}
+
+fn t_pause_tx(node: Input) -> Transaction {
+  Transaction {
+    ..t_tx(t_pause_datum(False), t_pause_datum(True), [t_pause_pu_cred]),
+    reference_inputs: [node],
+  }
+}
+
+fn t_pause_redeemer() -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: PauseTransfers {
+      transfers_paused: True,
+      power_user_node_ref_input_index: 0,
+    },
+  }
+}
+
+/// The positive control. Without it the two negatives below would also pass
+/// if the branch were broken outright.
+test pause_succeeds_for_a_can_pause_power_user_in_the_list() {
+  run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    t_pause_tx(t_pu_node_at(Script(t_pu_script_hash))),
+  )
+}
+
+/// The same node, same NFT, same datum — parked at a SCRIPT address
+/// that is not the power-users list. `expect ... == power_user_list_script_hash`
+/// traps, hence `fail`.
+test pause_fails_when_the_power_user_node_is_at_the_wrong_script() fail {
+  run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    t_pause_tx(t_pu_node_at(Script(t_gs_script_hash))),
+  )
+}
+
+/// The reachable shape: the node NFT carried out of the list into a private
+/// wallet, where element authentication would otherwise still accept whatever
+/// role flags its holder writes. The `expect Script(..)` pattern match traps on
+/// a `VerificationKey` credential.
+test pause_fails_when_the_power_user_node_is_in_a_wallet() fail {
+  run_spend(
+    t_pause_datum(False),
+    t_pause_redeemer(),
+    t_pause_tx(
+      t_pu_node_at(
+        VerificationKey(
+          #"0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+        ),
+      ),
+    ),
+  )
+}
+
+/// One list must not double as the other. `sanitise_mint()` mints both
+/// roots under distinct policies, so with the datum ids made equal the mint
+/// check still passes and the new inequality assertion is what rejects it.
+/// Both fields are immutable after genesis, so this is the only chance.
+test sanitise_rejects_identical_list_policies() {
+  let d = sanitise_datum(#"", 1)
+  !sanitise_initial_datum(
+    GlobalStateDatum { ..d, denylist_linked_list_policy_id: t_pu_ll_policy },
+    sanitise_mint(),
+  )
+}
+
+/// A malformed policy id can never name a real minting policy, so the
+/// corresponding list would be permanently un-initialisable.
+///
+/// The mint is built to carry a root under the malformed id as well, so the
+/// pre-existing "both roots minted here" check PASSES and the new length check
+/// is the only thing that can reject this datum.
+test sanitise_rejects_short_list_policy_id() {
+  let d = sanitise_datum(#"", 1)
+  let short_policy = #"aabb"
+  !sanitise_initial_datum(
+    GlobalStateDatum { ..d, denylist_linked_list_policy_id: short_policy },
+    merge(
+      from_asset(t_pu_ll_policy, constants.linked_list_root_key, 1),
+      from_asset(short_policy, constants.linked_list_root_key, 1),
+    ),
+  )
+}
+
+// ============================================================================
+// Tests — the seven remaining spend branches: ModifySecurityInfo,
+// AddTrustedEntity, RemoveTrustedEntity, UpdateTrustedEntity,
+// SetRequiresSenderKyc, SetRequiresReceiverKyc, UpdateMemberRootHash
+// ============================================================================
+//
+// None of these seven branches contains an `expect` inside its `and { .. }`
+// block — every condition (signature, length, has_key, ..) is a plain Bool
+// combined with `and`, so a violated precondition or a missing signature
+// makes `run_spend` return False. It never traps. So unlike the
+// `deactivated_input_rejects_*` / `pause_fails_when_*` tests above, none of
+// the negatives below are `fail`-annotated.
+//
+// `deactivated_input_rejects_modify_security_info` (above) remains the only
+// terminal-guard test touching one of these seven branches — it is not
+// duplicated here.
+
+/// 32-byte trusted-entity vkeys, chosen so their byte-wise ascending order is
+/// obvious: 05 < 10 < 20 < 30 < 40.
+const t_vkey_05: ByteArray =
+  #"0505050505050505050505050505050505050505050505050505050505050505"
+
+const t_vkey_10: ByteArray =
+  #"1010101010101010101010101010101010101010101010101010101010101010"
+
+const t_vkey_20: ByteArray =
+  #"2020202020202020202020202020202020202020202020202020202020202020"
+
+const t_vkey_30: ByteArray =
+  #"3030303030303030303030303030303030303030303030303030303030303030"
+
+const t_vkey_40: ByteArray =
+  #"4040404040404040404040404040404040404040404040404040404040404040"
+
+/// Deliberately not 32 bytes.
+const t_vkey_bad_length: ByteArray = #"aabb"
+
+/// Trusted-entity fixture: two entries already sorted ascending, so tests can
+/// exercise insertion, removal, renaming and duplicate/absence checks against
+/// a non-trivial starting list.
+fn t_tel_datum() -> GlobalStateDatum {
+  GlobalStateDatum {
+    ..t_datum(False, False),
+    trusted_entity_vkeys: [
+      Pair(t_vkey_10, builtin.i_data(1)),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+  }
+}
+
+// ── ModifySecurityInfo — admin-only; no shape or value precondition ────────
+
+fn modify_security_info_redeemer(
+  new_security_info: Data,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: ModifySecurityInfo { new_security_info },
+  }
+}
+
+test modify_security_info_succeeds_when_admin_signs() {
+  let input_datum = t_datum(False, False)
+  let new_info: Data = builtin.constr_data(0, [builtin.i_data(7)])
+  let output_datum = GlobalStateDatum { ..input_datum, security_info: new_info }
+  run_spend(
+    input_datum,
+    modify_security_info_redeemer(new_info),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test modify_security_info_fails_without_admin_signature() {
+  let input_datum = t_datum(False, False)
+  let new_info: Data = builtin.constr_data(0, [builtin.i_data(7)])
+  let output_datum = GlobalStateDatum { ..input_datum, security_info: new_info }
+  !run_spend(
+    input_datum,
+    modify_security_info_redeemer(new_info),
+    t_tx(input_datum, output_datum, []),
+  )
+}
+
+test modify_security_info_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let new_info: Data = builtin.constr_data(0, [builtin.i_data(7)])
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    security_info: new_info,
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    modify_security_info_redeemer(new_info),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test modify_security_info_accepts_an_arbitrary_data_shape() {
+  // `security_info` is opaque, unconstrained `Data` — an admin-signed update
+  // to a plain integer (not even a Constr) is accepted exactly like a
+  // Constr-shaped one; there is no on-chain shape check to violate.
+  let input_datum = t_datum(False, False)
+  let new_info: Data = builtin.i_data(42)
+  let output_datum = GlobalStateDatum { ..input_datum, security_info: new_info }
+  run_spend(
+    input_datum,
+    modify_security_info_redeemer(new_info),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── AddTrustedEntity — 32-byte vkey, no duplicate, sorted insertion ────────
+
+fn add_trusted_entity_redeemer(
+  vkey: ByteArray,
+  metadata: TrustedEntityMetadata,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: AddTrustedEntity { vkey, metadata },
+  }
+}
+
+test add_trusted_entity_succeeds_when_admin_signs() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [
+      Pair(t_vkey_10, builtin.i_data(1)),
+      Pair(t_vkey_20, builtin.i_data(2)),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+  }
+  run_spend(
+    input_datum,
+    add_trusted_entity_redeemer(t_vkey_20, builtin.i_data(2)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test add_trusted_entity_fails_without_admin_signature() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [
+      Pair(t_vkey_10, builtin.i_data(1)),
+      Pair(t_vkey_20, builtin.i_data(2)),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+  }
+  !run_spend(
+    input_datum,
+    add_trusted_entity_redeemer(t_vkey_20, builtin.i_data(2)),
+    t_tx(input_datum, output_datum, []),
+  )
+}
+
+test add_trusted_entity_fails_when_vkey_wrong_length() {
+  // `t_vkey_bad_length` is 2 bytes, not 32 — `bytearray.length(vkey) == 32`
+  // is the only assertion this violates: the output below is the exact
+  // insertion the branch itself would compute, so equals_data would
+  // otherwise pass.
+  let input_datum = t_tel_datum()
+  let updated_entities = pairs.insert_by_ascending_key(
+    input_datum.trusted_entity_vkeys,
+    t_vkey_bad_length,
+    builtin.i_data(9),
+    bytearray.compare,
+  )
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: updated_entities,
+  }
+  !run_spend(
+    input_datum,
+    add_trusted_entity_redeemer(t_vkey_bad_length, builtin.i_data(9)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test add_trusted_entity_fails_when_vkey_already_present() {
+  // t_vkey_10 is already in the fixture's list — `!has_key` is the only
+  // assertion this violates. The output is what a naive (unguarded) insert
+  // would produce: a second Pair keyed on the same vkey, which is exactly
+  // the corruption this precondition exists to prevent.
+  let input_datum = t_tel_datum()
+  let updated_entities = pairs.insert_by_ascending_key(
+    input_datum.trusted_entity_vkeys,
+    t_vkey_10,
+    builtin.i_data(99),
+    bytearray.compare,
+  )
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: updated_entities,
+  }
+  !run_spend(
+    input_datum,
+    add_trusted_entity_redeemer(t_vkey_10, builtin.i_data(99)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test add_trusted_entity_cannot_smuggle_another_field_change() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [
+      Pair(t_vkey_10, builtin.i_data(1)),
+      Pair(t_vkey_20, builtin.i_data(2)),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    add_trusted_entity_redeemer(t_vkey_20, builtin.i_data(2)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test add_trusted_entity_inserts_smaller_vkey_in_sorted_order() {
+  // t_vkey_05 sorts BEFORE every existing entry. The expected output below
+  // is written out explicitly in ascending order — not computed by calling
+  // the same production helper the branch uses — so a broken sort insertion
+  // in the validator itself would actually be caught here.
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [
+      Pair(t_vkey_05, builtin.i_data(0)),
+      Pair(t_vkey_10, builtin.i_data(1)),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+  }
+  run_spend(
+    input_datum,
+    add_trusted_entity_redeemer(t_vkey_05, builtin.i_data(0)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── RemoveTrustedEntity — vkey must be present ──────────────────────────────
+
+fn remove_trusted_entity_redeemer(vkey: ByteArray) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: RemoveTrustedEntity { vkey },
+  }
+}
+
+test remove_trusted_entity_succeeds_when_admin_signs() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [Pair(t_vkey_30, builtin.i_data(3))],
+  }
+  run_spend(
+    input_datum,
+    remove_trusted_entity_redeemer(t_vkey_10),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test remove_trusted_entity_fails_without_admin_signature() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [Pair(t_vkey_30, builtin.i_data(3))],
+  }
+  !run_spend(
+    input_datum,
+    remove_trusted_entity_redeemer(t_vkey_10),
+    t_tx(input_datum, output_datum, []),
+  )
+}
+
+test remove_trusted_entity_fails_when_vkey_absent() {
+  // t_vkey_20 is not present in the fixture's list at all — `has_key` is the
+  // only assertion this violates; the output reproduces the input list
+  // unchanged, which is what the branch's own `list.filter` would compute
+  // for an absent key (a no-op), so nothing else here is what rejects it.
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: input_datum.trusted_entity_vkeys,
+  }
+  !run_spend(
+    input_datum,
+    remove_trusted_entity_redeemer(t_vkey_20),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test remove_trusted_entity_cannot_smuggle_another_field_change() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [Pair(t_vkey_30, builtin.i_data(3))],
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    remove_trusted_entity_redeemer(t_vkey_10),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── UpdateTrustedEntity — old present, new free (unless renaming to self), new 32 bytes ──
+
+fn update_trusted_entity_redeemer(
+  old_vkey: ByteArray,
+  new_vkey: ByteArray,
+  new_metadata: TrustedEntityMetadata,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: UpdateTrustedEntity { old_vkey, new_vkey, new_metadata },
+  }
+}
+
+test update_trusted_entity_succeeds_when_admin_signs() {
+  // Rename t_vkey_10 -> t_vkey_20, with new metadata.
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [
+      Pair(t_vkey_20, builtin.i_data(20)),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+  }
+  run_spend(
+    input_datum,
+    update_trusted_entity_redeemer(t_vkey_10, t_vkey_20, builtin.i_data(20)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test update_trusted_entity_fails_without_admin_signature() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [
+      Pair(t_vkey_20, builtin.i_data(20)),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+  }
+  !run_spend(
+    input_datum,
+    update_trusted_entity_redeemer(t_vkey_10, t_vkey_20, builtin.i_data(20)),
+    t_tx(input_datum, output_datum, []),
+  )
+}
+
+test update_trusted_entity_fails_when_old_vkey_absent() {
+  // t_vkey_40 is not present — `old_exists` is the only assertion this
+  // violates. new_clash_ok, the length check and the signature all hold, and
+  // the output is exactly what `without_old` + `insert_by_ascending_key`
+  // compute (filtering an absent key is a no-op), so equals_data would
+  // otherwise also pass.
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [
+      Pair(t_vkey_10, builtin.i_data(1)),
+      Pair(t_vkey_20, builtin.i_data(20)),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+  }
+  !run_spend(
+    input_datum,
+    update_trusted_entity_redeemer(t_vkey_40, t_vkey_20, builtin.i_data(20)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test update_trusted_entity_fails_when_new_vkey_collides_with_another_entry() {
+  // Renaming t_vkey_10 -> t_vkey_30 collides with the OTHER existing entry —
+  // `new_clash_ok` is the only assertion this violates. The output is what
+  // `without_old` (removes t_vkey_10) followed by the branch's own
+  // `insert_by_ascending_key(.., t_vkey_30, ..)` actually computes: a
+  // duplicate-keyed list, which is exactly the corruption this precondition
+  // exists to prevent.
+  let input_datum = t_tel_datum()
+  let without_old = list.filter(
+    input_datum.trusted_entity_vkeys,
+    fn(p) { p.1st != t_vkey_10 },
+  )
+  let updated_entities = pairs.insert_by_ascending_key(
+    without_old,
+    t_vkey_30,
+    builtin.i_data(30),
+    bytearray.compare,
+  )
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: updated_entities,
+  }
+  !run_spend(
+    input_datum,
+    update_trusted_entity_redeemer(t_vkey_10, t_vkey_30, builtin.i_data(30)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test update_trusted_entity_fails_when_new_vkey_wrong_length() {
+  // t_vkey_bad_length is 2 bytes — `bytearray.length(new_vkey) == 32` is the
+  // only assertion this violates. old_exists and new_clash_ok both hold
+  // (bad_length is absent from the list), and the output is exactly what
+  // the branch's own without_old + insert_by_ascending_key compute.
+  let input_datum = t_tel_datum()
+  let without_old = list.filter(
+    input_datum.trusted_entity_vkeys,
+    fn(p) { p.1st != t_vkey_10 },
+  )
+  let updated_entities = pairs.insert_by_ascending_key(
+    without_old,
+    t_vkey_bad_length,
+    builtin.i_data(9),
+    bytearray.compare,
+  )
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: updated_entities,
+  }
+  !run_spend(
+    input_datum,
+    update_trusted_entity_redeemer(
+      t_vkey_10,
+      t_vkey_bad_length,
+      builtin.i_data(9),
+    ),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test update_trusted_entity_cannot_smuggle_another_field_change() {
+  let input_datum = t_tel_datum()
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    trusted_entity_vkeys: [
+      Pair(t_vkey_20, builtin.i_data(20)),
+      Pair(t_vkey_30, builtin.i_data(3)),
+    ],
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    update_trusted_entity_redeemer(t_vkey_10, t_vkey_20, builtin.i_data(20)),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── SetRequiresSenderKyc — admin-only; guards against writing the sibling flag ──
+
+fn set_requires_sender_kyc_redeemer(enabled: Bool) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: SetRequiresSenderKyc { enabled },
+  }
+}
+
+test set_requires_sender_kyc_succeeds_when_admin_signs() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_sender_kyc: True,
+  }
+  run_spend(
+    input_datum,
+    set_requires_sender_kyc_redeemer(True),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test set_requires_sender_kyc_fails_without_admin_signature() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_sender_kyc: True,
+  }
+  !run_spend(
+    input_datum,
+    set_requires_sender_kyc_redeemer(True),
+    t_tx(input_datum, output_datum, []),
+  )
+}
+
+test set_requires_sender_kyc_rejects_flipping_the_other_flag() {
+  // Index-transposition guard: the redeemer asks to set the SENDER flag, but
+  // the output instead flips requires_receiver_kyc and leaves
+  // requires_sender_kyc at its input value — the whole-datum equality must
+  // catch a write landing on the wrong field index.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_receiver_kyc: True,
+  }
+  !run_spend(
+    input_datum,
+    set_requires_sender_kyc_redeemer(True),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test set_requires_sender_kyc_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_sender_kyc: True,
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    set_requires_sender_kyc_redeemer(True),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── SetRequiresReceiverKyc — admin-only; guards against writing the sibling flag ──
+
+fn set_requires_receiver_kyc_redeemer(enabled: Bool) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: SetRequiresReceiverKyc { enabled },
+  }
+}
+
+test set_requires_receiver_kyc_succeeds_when_admin_signs() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_receiver_kyc: True,
+  }
+  run_spend(
+    input_datum,
+    set_requires_receiver_kyc_redeemer(True),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test set_requires_receiver_kyc_fails_without_admin_signature() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_receiver_kyc: True,
+  }
+  !run_spend(
+    input_datum,
+    set_requires_receiver_kyc_redeemer(True),
+    t_tx(input_datum, output_datum, []),
+  )
+}
+
+test set_requires_receiver_kyc_rejects_flipping_the_other_flag() {
+  // Same transposition guard, other direction: the redeemer asks to set the
+  // RECEIVER flag, but the output instead flips requires_sender_kyc.
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_sender_kyc: True,
+  }
+  !run_spend(
+    input_datum,
+    set_requires_receiver_kyc_redeemer(True),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test set_requires_receiver_kyc_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    requires_receiver_kyc: True,
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    set_requires_receiver_kyc_redeemer(True),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+// ── UpdateMemberRootHash — new root must be empty or exactly 32 bytes ──────
+
+fn update_member_root_hash_redeemer(
+  new_member_root_hash: ByteArray,
+) -> GlobalStateSpendRedeemer {
+  GlobalStateSpendRedeemer {
+    global_state_output_index: 0,
+    action: UpdateMemberRootHash { new_member_root_hash },
+  }
+}
+
+test update_member_root_hash_succeeds_with_32_byte_root_when_admin_signs() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    member_root_hash: t_root32,
+  }
+  run_spend(
+    input_datum,
+    update_member_root_hash_redeemer(t_root32),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test update_member_root_hash_fails_without_admin_signature() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    member_root_hash: t_root32,
+  }
+  !run_spend(
+    input_datum,
+    update_member_root_hash_redeemer(t_root32),
+    t_tx(input_datum, output_datum, []),
+  )
+}
+
+test update_member_root_hash_fails_when_length_invalid() {
+  // 2 bytes — neither empty nor 32 — is the only assertion this violates;
+  // mirrors sanitise_rejects_bad_root_hash_length but exercised through the
+  // spend branch rather than genesis sanitisation.
+  let input_datum = t_datum(False, False)
+  let bad_root = #"aabb"
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    member_root_hash: bad_root,
+  }
+  !run_spend(
+    input_datum,
+    update_member_root_hash_redeemer(bad_root),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test update_member_root_hash_cannot_smuggle_another_field_change() {
+  let input_datum = t_datum(False, False)
+  let output_datum = GlobalStateDatum {
+    ..input_datum,
+    member_root_hash: t_root32,
+    mintable_amount: input_datum.mintable_amount + 1_000_000,
+  }
+  !run_spend(
+    input_datum,
+    update_member_root_hash_redeemer(t_root32),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
+}
+
+test update_member_root_hash_accepts_clearing_back_to_empty() {
+  // The other valid length, 0 bytes (no membership tree yet), is accepted
+  // just like 32 — the positive control that gives the wrong-length negative
+  // above its meaning: both endpoints of the "empty or 32" precondition are
+  // exercised, not just the one that happens to be non-empty.
+  let input_datum = GlobalStateDatum {
+    ..t_datum(False, False),
+    member_root_hash: t_root32,
+  }
+  let output_datum = GlobalStateDatum { ..input_datum, member_root_hash: #"" }
+  run_spend(
+    input_datum,
+    update_member_root_hash_redeemer(#""),
+    t_tx(input_datum, output_datum, [t_admin]),
+  )
 }

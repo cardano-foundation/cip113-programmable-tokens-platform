@@ -1,13 +1,13 @@
-name = "ft/bafin"
+name = "ft/rwa"
 version = "0.0.0"
 compiler = "v1.1.22"
 plutus = "v3"
 license = "Apache-2.0"
-description = "Aiken contracts for project 'ft/bafin'"
+description = "Aiken contracts for project 'ft/rwa'"
 
 [repository]
 user = "ft"
-project = "bafin"
+project = "rwa"
 platform = "github"
 
 [[dependencies]]
@@ -17,12 +17,25 @@ source = "github"
 
 [[dependencies]]
 name = "anastasia-labs/aiken-design-patterns"
-version = "v1.6.0"
+version = "v1.8.0"
 source = "github"
 
 [[dependencies]]
 name = "aiken-lang/merkle-patricia-forestry"
 version = "v2.1.0"
+source = "github"
+
+# Transitive dependencies of anastasia-labs/aiken-design-patterns v1.8.0.
+# Declared explicitly because its non-test `utils.ak` imports `aiken/fuzz` at
+# module level, and Aiken v1.1.23 does not resolve a dependency's own manifest.
+[[dependencies]]
+name = "aiken-lang/fuzz"
+version = "v2.2.0"
+source = "github"
+
+[[dependencies]]
+name = "keyan-m/aiken-scott-utils"
+version = "v1.4.0"
 source = "github"
 
 [config]

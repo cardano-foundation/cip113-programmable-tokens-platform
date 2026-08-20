@@ -65,6 +65,13 @@ export interface SecurityTokenGlobalState {
    *  action, mint or burn can ever run against this token again. */
   deactivated: boolean;
   adminCredentialHash: string;
+  /** Script hash of the minting authority the permanent proxy currently delegates every
+   *  mint/burn decision to. Rotatable via RotateMintingScript — that indirection is the
+   *  CIP-113 upgrade path, since the proxy's own hash is frozen into the registry node. */
+  mintingScriptCredentialHash: string;
+  /** One-way lock. Once true, BOTH the minting-authority rotation and the CIP-113
+   *  registry-node upgrade path are permanently frozen — no branch clears it. */
+  upgradesLocked: boolean;
 }
 
 export const getSecurityTokenGlobalState = (policyId: string) =>
@@ -290,6 +297,23 @@ export interface GsChangeSpec {
     | "SetRequiresReceiverKyc"
     | "UpdateMemberRootHash"
     | "RotateAdmin"
+    /** Point the permanent minting proxy at a different authority script. This is the
+     *  CIP-113 upgrade path for the mint rules: the proxy's own hash is frozen into the
+     *  registry node forever, so the rules can only change by changing what it delegates
+     *  to. Admin-signed only — the outgoing authority does not co-sign, because replacing
+     *  a broken or compromised one is exactly the case this must keep working for.
+     *
+     *  NOT VERIFIED ON CHAIN: that the target actually decides whether a mint is allowed.
+     *  The proxy checks only that the named script withdraws, so pointing this at any
+     *  other withdraw-capable script silently disables every mint control. After rotating,
+     *  confirm a mint lacking a power-user signature is REJECTED. */
+    | "RotateMintingScript"
+    /** Irreversible. Permanently freezes BOTH the minting-authority rotation and the
+     *  CIP-113 registry-node upgrade path, so the token's mint and transfer rules become
+     *  final. Meaningful to holders precisely because an admin key compromise cannot undo
+     *  it — and it also gives up the ability to patch a buggy authority, leaving
+     *  DeactivateContract as the only remaining lever. Rejected if already locked. */
+    | "LockUpgrades"
     /** Irreversible. Requires transfers to already be paused; afterwards the
      *  on-chain validator rejects every further spend of the global state. */
     | "DeactivateContract";
@@ -307,6 +331,8 @@ export interface GsChangeSpec {
   requiresReceiverKycEnabled?: boolean;
   newMemberRootHashHex?: string;
   newAdminCredentialHashHex?: string;
+  /** RotateMintingScript. 28-byte hex script hash of the new minting authority. */
+  newMintingScriptCredentialHashHex?: string;
 }
 
 /** Build a chain of admin-signed GS update txs (one per change). Returns the

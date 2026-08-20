@@ -35,9 +35,17 @@ public class SecurityTokenMembershipHook implements TokenMembershipHook {
                     session.getCardanoAddress());
             return;
         }
+        Short credentialType = AddressUtil.extractStakeCredentialTypeFromAddress(session.getCardanoAddress());
+        if (credentialType == null) {
+            log.warn("Cannot determine the stake credential FORM (key vs script) of address {} for "
+                     + "security-token auto-upsert. It is the first byte of the MPF leaf key, so "
+                     + "enrolling with a guess would create a leaf the holder cannot prove against.",
+                    session.getCardanoAddress());
+            return;
+        }
         try {
-            allowlistService.putMember(session.getBoundTokenPolicyId(), pkh, proof.validUntilPosixMs(),
-                    session.getCardanoAddress(), session.getSessionId());
+            allowlistService.putMember(session.getBoundTokenPolicyId(), pkh, credentialType,
+                    proof.validUntilPosixMs(), session.getCardanoAddress(), session.getSessionId());
             log.info("Auto-upserted member into security-token MPF tree: policy={}, sessionId={}",
                     session.getBoundTokenPolicyId(), session.getSessionId());
         } catch (Exception e) {

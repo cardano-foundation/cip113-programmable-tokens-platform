@@ -78,8 +78,10 @@ public class SecurityTokenRegistrationEntity {
     @Column(name = "ref_scripts_tx_hash", length = 64)
     private String refScriptsTxHash;
 
-    @Column(name = "minting_logic_ref_index")
-    private Integer mintingLogicRefIndex;
+    /** Output index of the minting AUTHORITY reference script (not the proxy — the
+     *  proxy is only 1 128 bytes and rides inline). See V18. */
+    @Column(name = "minting_authority_ref_index")
+    private Integer mintingAuthorityRefIndex;
 
     @Column(name = "gs_spend_ref_index")
     private Integer gsSpendRefIndex;
@@ -103,4 +105,28 @@ public class SecurityTokenRegistrationEntity {
     @Column(name = "cip68_reference_minted", nullable = false)
     @Builder.Default
     private boolean cip68ReferenceMinted = false;
+
+    /** Whether a cert transaction registering the {@code minting_authority} reward
+     *  account has been built. Every mint, burn and registration withdraws 0 from it
+     *  in addition to the proxy's account, and an unregistered reward account fails
+     *  phase-1 at submit — which script evaluation cannot catch. */
+    @Column(name = "minting_authority_reward_registered", nullable = false)
+    @Builder.Default
+    private boolean mintingAuthorityRewardRegistered = false;
+
+    /** The minting authority this token was DEPLOYED with, written once at genesis.
+     *
+     *  <p><b>Provenance only — deliberately not kept in sync.</b> The live value is
+     *  {@code GlobalStateDatum.minting_script_credential_hash}: the proxy reads it from
+     *  the datum, every builder reads it from the fetched GS UTxO, and the admin UI reads
+     *  it from {@code /global-state}. {@code RotateMintingScript} does not touch this
+     *  column, so after a rotation it records the ORIGINAL authority while the datum
+     *  records the current one — which is the point, since it answers "what was this
+     *  token issued under" and the chain no longer can.
+     *
+     *  <p>Never read it to decide anything about a transaction: anything needing the
+     *  CURRENT authority must read the datum, or it builds against a script the proxy no
+     *  longer delegates to. */
+    @Column(name = "minting_authority_hash", length = 56)
+    private String mintingAuthorityHash;
 }

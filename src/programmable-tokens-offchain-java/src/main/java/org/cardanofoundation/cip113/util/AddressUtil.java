@@ -155,4 +155,30 @@ public class AddressUtil {
             return null;
         }
     }
+
+    /**
+     * Which credential constructor an address's STAKE credential uses:
+     * {@code 0} = {@code VerificationKey}, {@code 1} = {@code Script}, {@code null} when
+     * the address has no delegation part or cannot be parsed.
+     *
+     * <p>Needed wherever a stake credential is enrolled in the security-token membership
+     * tree: the MPF leaf key is {@code credential_type ‖ hash}, so the form is part of
+     * the member's identity rather than a description of it. Defaulting to
+     * {@code VerificationKey} would be wrong for a token held at a script stake
+     * credential, and wrong in the silent direction — the leaf would be built under a key
+     * the holder can never prove against, and the only symptom is a transfer that fails
+     * evaluation with nothing pointing at the enrolment.
+     */
+    public static Short extractStakeCredentialTypeFromAddress(String bech32Address) {
+        try {
+            return new com.bloxbean.cardano.client.address.Address(bech32Address)
+                    .getDelegationCredential()
+                    .map(cred -> cred.getType() == com.bloxbean.cardano.client.address.CredentialType.Script
+                            ? (short) 1 : (short) 0)
+                    .orElse(null);
+        } catch (Exception e) {
+            log.warn("Failed to extract stake credential type from address: {}", bech32Address, e);
+            return null;
+        }
+    }
 }

@@ -802,6 +802,13 @@ public class ComplianceController {
                             .build();
                 }
 
+                // Context-aware handlers must be resolved WITH a context: the factory
+                // throws "requires context" for a null one, so falling through to the
+                // default here surfaced as an opaque 500 rather than a seizure. The
+                // security-token seize builder reads everything it needs from the
+                // registration row, so an empty context is the correct one.
+                case "security-token" -> buildSecurityTokenContext(progToken.policyId());
+
                 default -> null;
             };
 

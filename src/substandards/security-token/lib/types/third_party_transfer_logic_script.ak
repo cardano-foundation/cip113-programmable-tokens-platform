@@ -1,3 +1,4 @@
+use types/global_state.{GlobalStateLocation}
 use types/kyc_proof.{KycProof}
 
 /// One entry per unique destination (unique stake-credential among outputs
@@ -13,10 +14,22 @@ pub type ThirdPartyDestinationAction {
 
 pub type ThirdPartyTransferLogicScriptWithdrawRedeemer {
   /// Index into `self.reference_inputs` — the CIP-113 registry node for THIS
-  /// token. See `MintingLogicScriptWithdrawRedeemer` for why it is named
+  /// token. See `minting_logic_script.ak` for why it is named
   /// rather than searched for.
   registry_node_ref_input_index: Int,
-  global_state_ref_input_index: Int,
+  /// WHERE GlobalState is, not just which reference input it is.
+  ///
+  /// This validator only READS the datum (`requires_receiver_kyc` to decide
+  /// whether destinations need a proof, `deactivated` to refuse once the
+  /// protocol is decommissioned) — it makes no claim that depends on the GS
+  /// spend validator having run, so it accepts either form. Demanding a
+  /// reference input, as this field did when it was a bare
+  /// `global_state_ref_input_index`, made the BURN unbuildable: a burn must
+  /// SPEND GlobalState so `MintSecurity` credits the supply back, this
+  /// withdrawal is not droppable from a burn (CIP-113's `ThirdPartyAct` is the
+  /// only programmable-logic-global branch a burn can take), and Conway
+  /// rejects a transaction that both spends and references one UTxO.
+  global_state_location: GlobalStateLocation,
   power_user_node_ref_input_index: Int,
   destination_actions: List<ThirdPartyDestinationAction>,
 }
