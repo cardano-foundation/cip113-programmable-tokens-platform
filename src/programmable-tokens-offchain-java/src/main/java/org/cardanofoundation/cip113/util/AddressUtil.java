@@ -161,7 +161,7 @@ public class AddressUtil {
      * {@code 0} = {@code VerificationKey}, {@code 1} = {@code Script}, {@code null} when
      * the address has no delegation part or cannot be parsed.
      *
-     * <p>Needed wherever a stake credential is enrolled in the security-token membership
+     * <p>Needed wherever a stake credential is enrolled in the rwa-token membership
      * tree: the MPF leaf key is {@code credential_type ‖ hash}, so the form is part of
      * the member's identity rather than a description of it. Defaulting to
      * {@code VerificationKey} would be wrong for a token held at a script stake

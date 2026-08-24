@@ -17,8 +17,8 @@ import {
 import { AdminTokenSelector } from "./AdminTokenSelector";
 import {
   AdminTokenInfo,
-  SecurityTokenCapability,
-  hasSecurityTokenCapability,
+  RwaTokenCapability,
+  hasRwaTokenCapability,
 } from "@/lib/api/admin";
 import { decodeAssetNameDisplay } from "@/lib/utils/cip68";
 import { mintToken } from "@/lib/api";
@@ -40,12 +40,12 @@ import {
   type CredentialResponse,
 } from "@/lib/api/keri";
 import {
-  getSecurityTokenGlobalState,
+  getRwaTokenGlobalState,
   buildGlobalStateUpdateChain,
   submitTokenChain,
   parseSubmitChainFailure,
-  type SecurityTokenGlobalState,
-} from "@/lib/api/security-token";
+  type RwaTokenGlobalState,
+} from "@/lib/api/rwa-token";
 
 interface MintSectionProps {
   tokens: AdminTokenInfo[];
@@ -72,26 +72,26 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
 
   // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize substandards. KYC and
-  // security-token have no SDK implementation, so their mints must go through the
+  // rwa-token have no SDK implementation, so their mints must go through the
   // backend regardless of the toggle.
   const sdkAvailableForSelected = (token: AdminTokenInfo | null) =>
     sdkAvailable
     && token?.substandardId !== "kyc"
-    && token?.substandardId !== "security-token";
+    && token?.substandardId !== "rwa-token";
 
   // Per-page capability gate. Show:
   //   - any token where the wallet has ISSUER_ADMIN (legacy substandards)
   //   - all dummy tokens (open mint by design)
-  //   - security-tokens where the wallet has MINTER or ADMIN capability
+  //   - rwa-tokens where the wallet has MINTER or ADMIN capability
   //     in the on-chain power-users linked list (BaFin model)
-  // The backend's /admin/tokens endpoint already filters security-tokens by
+  // The backend's /admin/tokens endpoint already filters rwa-tokens by
   // power-user membership; this just enforces the per-page capability bit so
   // a token where the wallet is e.g. only PAUSER doesn't show up here.
   const mintableTokens = tokens.filter((t) => {
-    if (t.substandardId === "security-token") {
-      return hasSecurityTokenCapability(
+    if (t.substandardId === "rwa-token") {
+      return hasRwaTokenCapability(
         t,
-        SecurityTokenCapability.MINTER | SecurityTokenCapability.ADMIN,
+        RwaTokenCapability.MINTER | RwaTokenCapability.ADMIN,
       );
     }
     return t.roles.includes("ISSUER_ADMIN") || t.substandardId === "dummy";
@@ -176,17 +176,17 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   });
 
   const isKycToken = selectedToken?.substandardId === "kyc";
-  const isSecurityToken = selectedToken?.substandardId === "security-token";
+  const isRwaToken = selectedToken?.substandardId === "rwa-token";
 
-  // For security-token: fetch the on-chain GS datum whenever the selected
+  // For rwa-token: fetch the on-chain GS datum whenever the selected
   // token changes so we can show the admin the remaining mintable_amount
   // (and warn them before they exceed it). The backend exposes this via
-  // GET /security-token/{policyId}/global-state — it reads the GS UTxO and
+  // GET /rwa-token/{policyId}/global-state — it reads the GS UTxO and
   // parses the 9-field BaFin datum.
-  const [securityTokenGs, setSecurityTokenGs] =
-    useState<SecurityTokenGlobalState | null>(null);
-  const [securityTokenGsError, setSecurityTokenGsError] = useState<string | null>(null);
-  const [securityTokenGsLoading, setSecurityTokenGsLoading] = useState(false);
+  const [rwaTokenGs, setRwaTokenGs] =
+    useState<RwaTokenGlobalState | null>(null);
+  const [rwaTokenGsError, setRwaTokenGsError] = useState<string | null>(null);
+  const [rwaTokenGsLoading, setRwaTokenGsLoading] = useState(false);
 
   // D8 — a failed mint must not look like a successful one. The old flow reset the
   // form and left the previously-fetched mintable_amount on screen, so a mint that
@@ -203,24 +203,24 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   // switches tokens quickly, or when a manual refetch races the mount effect.
   const gsFetchSeq = useRef(0);
 
-  const refreshSecurityTokenGs = useCallback(async () => {
-    if (!isSecurityToken || !selectedToken) {
+  const refreshRwaTokenGs = useCallback(async () => {
+    if (!isRwaToken || !selectedToken) {
       gsFetchSeq.current++;
-      setSecurityTokenGs(null);
-      setSecurityTokenGsError(null);
-      setSecurityTokenGsLoading(false);
+      setRwaTokenGs(null);
+      setRwaTokenGsError(null);
+      setRwaTokenGsLoading(false);
       setDesiredReceiverKyc(null);
       setKycFlagError(null);
       setKycFlagTxHash(null);
       return null;
     }
     const seq = ++gsFetchSeq.current;
-    setSecurityTokenGsLoading(true);
-    setSecurityTokenGsError(null);
+    setRwaTokenGsLoading(true);
+    setRwaTokenGsError(null);
     try {
-      const gs = await getSecurityTokenGlobalState(selectedToken.policyId);
+      const gs = await getRwaTokenGlobalState(selectedToken.policyId);
       if (seq !== gsFetchSeq.current) return null;
-      setSecurityTokenGs(gs);
+      setRwaTokenGs(gs);
       // Re-seed the toggle from the datum on every successful read, so it always
       // starts from what is actually on chain rather than from a stale edit.
       setDesiredReceiverKyc(gs.requiresReceiverKyc);
@@ -230,16 +230,16 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       // Drop the previous value rather than keeping it on screen. A number we
       // can no longer verify is worse than an explicit "unknown" — the whole
       // point of D8 is that stale figures were being read as fresh ones.
-      setSecurityTokenGs(null);
-      setSecurityTokenGsError(err instanceof Error ? err.message : String(err));
+      setRwaTokenGs(null);
+      setRwaTokenGsError(err instanceof Error ? err.message : String(err));
       setDesiredReceiverKyc(null);
       return null;
     } finally {
-      if (seq === gsFetchSeq.current) setSecurityTokenGsLoading(false);
+      if (seq === gsFetchSeq.current) setRwaTokenGsLoading(false);
     }
-  }, [isSecurityToken, selectedToken]);
+  }, [isRwaToken, selectedToken]);
 
-  useEffect(() => { void refreshSecurityTokenGs(); }, [refreshSecurityTokenGs]);
+  useEffect(() => { void refreshRwaTokenGs(); }, [refreshRwaTokenGs]);
 
   /** Poll the GS datum until `mintable_amount` moves off `before`, i.e. until the
    *  mint is actually in a block.
@@ -257,9 +257,9 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         await new Promise((r) => setTimeout(r, 5_000));
         if (seq !== gsFetchSeq.current) return;   // token switched — abandon
         try {
-          const gs = await getSecurityTokenGlobalState(policyId);
+          const gs = await getRwaTokenGlobalState(policyId);
           if (seq !== gsFetchSeq.current) return;
-          setSecurityTokenGs(gs);
+          setRwaTokenGs(gs);
           if (gs.mintableAmount !== before) {
             setMintConfirmed(true);
             return;
@@ -275,9 +275,9 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
   /** True when the toggle has been moved away from what the chain currently says. */
   const receiverKycDirty =
-    securityTokenGs !== null
+    rwaTokenGs !== null
     && desiredReceiverKyc !== null
-    && desiredReceiverKyc !== securityTokenGs.requiresReceiverKyc;
+    && desiredReceiverKyc !== rwaTokenGs.requiresReceiverKyc;
 
   /** Apply the receiver-KYC flag on chain via SetRequiresReceiverKyc, then poll the
    *  global state until the datum reflects it.
@@ -316,7 +316,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       // Poll until the datum agrees. Until it does, a mint built now would be built
       // against the OLD flag — which is the whole reason this is a separate step.
       //
-      // Reads the global state DIRECTLY rather than through refreshSecurityTokenGs:
+      // Reads the global state DIRECTLY rather than through refreshRwaTokenGs:
       // that helper bumps gsFetchSeq on every call, so a loop that both calls it and
       // guards on the sequence would abandon itself on the second iteration. Same
       // shape as pollForMintOnChain, for the same reason.
@@ -326,9 +326,9 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         await new Promise((r) => setTimeout(r, 5_000));
         if (seq !== gsFetchSeq.current) return;   // token switched — abandon
         try {
-          const gs = await getSecurityTokenGlobalState(policyId);
+          const gs = await getRwaTokenGlobalState(policyId);
           if (seq !== gsFetchSeq.current) return;
-          setSecurityTokenGs(gs);
+          setRwaTokenGs(gs);
           setDesiredReceiverKyc(gs.requiresReceiverKyc);
           if (gs.requiresReceiverKyc === target) return;
         } catch {
@@ -350,7 +350,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       });
       // Put the toggle back where the chain has it, so the UI never shows a value
       // that was never applied.
-      void refreshSecurityTokenGs();
+      void refreshRwaTokenGs();
     } finally {
       setKycFlagBusy(false);
     }
@@ -373,12 +373,12 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       newErrors.quantity = "Quantity must be a positive number";
     } else if (BigInt(quantity) <= 0) {
       newErrors.quantity = "Quantity must be greater than 0";
-    } else if (isSecurityToken && securityTokenGs !== null
-        && BigInt(quantity) > BigInt(securityTokenGs.mintableAmount)) {
+    } else if (isRwaToken && rwaTokenGs !== null
+        && BigInt(quantity) > BigInt(rwaTokenGs.mintableAmount)) {
       // Hard supply cap from the GS datum. The on-chain GS spend's MintSecurity
       // branch also enforces this (remaining_amount >= 0), but failing here
       // gives a clearer error than a Plutus eval failure.
-      newErrors.quantity = `Exceeds remaining mintable amount (${securityTokenGs.mintableAmount.toLocaleString()})`;
+      newErrors.quantity = `Exceeds remaining mintable amount (${rwaTokenGs.mintableAmount.toLocaleString()})`;
     }
 
     if (!recipientAddress.trim()) {
@@ -415,7 +415,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
     // Snapshot what the chain said before we touched it, so the post-mint poll
     // has something to compare against.
-    const mintableBefore = securityTokenGs?.mintableAmount ?? null;
+    const mintableBefore = rwaTokenGs?.mintableAmount ?? null;
 
     try {
       setIsBuilding(true);
@@ -471,8 +471,8 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       // D8 — the mint changed on-chain state, so the cached global state is now
       // wrong by definition. Refetch immediately, then keep polling until
       // mintable_amount actually moves (or we give up saying so).
-      if (isSecurityToken && selectedToken) {
-        void refreshSecurityTokenGs();
+      if (isRwaToken && selectedToken) {
+        void refreshRwaTokenGs();
         if (mintableBefore !== null) {
           void pollForMintOnChain(selectedToken.policyId, mintableBefore);
         }
@@ -500,7 +500,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       // chain so the displayed cap is known-current rather than assumed-unchanged.
       setMintFailure(errorMessage);
       setStep("form");
-      if (isSecurityToken) void refreshSecurityTokenGs();
+      if (isRwaToken) void refreshRwaTokenGs();
     } finally {
       setIsBuilding(false);
       setIsSigning(false);
@@ -638,12 +638,12 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     setRecipientAddress(feePayerAddress);
     setTxHash(null);
     // D8 — "Mint More" used to return to a form still showing the PRE-mint
-    // mintable_amount, because the fetch effect keys on [isSecurityToken,
+    // mintable_amount, because the fetch effect keys on [isRwaToken,
     // selectedToken] and neither changes here. Refetch explicitly.
     setMintFailure(null);
     setMintConfirmed(false);
     setPreMintMintable(null);
-    if (isSecurityToken) void refreshSecurityTokenGs();
+    if (isRwaToken) void refreshRwaTokenGs();
     setEnableAttestation(false);
     setAttestationData(null);
     setAttestError(null);
@@ -687,10 +687,10 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           <CheckCircle className="h-8 w-8 text-green-500" />
         </div>
         <h3 className="text-lg font-semibold text-white mb-2">
-          {isSecurityToken && !mintConfirmed ? "Mint Submitted" : "Mint Complete!"}
+          {isRwaToken && !mintConfirmed ? "Mint Submitted" : "Mint Complete!"}
         </h3>
         <p className="text-sm text-dark-400 text-center mb-4">
-          {isSecurityToken && !mintConfirmed ? "Submitted a mint of " : "Successfully minted "}
+          {isRwaToken && !mintConfirmed ? "Submitted a mint of " : "Successfully minted "}
           {quantity}{" "}
           {selectedToken ? decodeAssetNameDisplay(selectedToken.assetName) : ""}{" "}
           tokens
@@ -705,7 +705,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
         {/* D8 — submitting is not the same as landing. Report which one we have
             observed, by watching mintable_amount rather than assuming. */}
-        {isSecurityToken && (
+        {isRwaToken && (
           <div className={`w-full px-4 py-3 rounded-lg mb-4 border ${
             mintConfirmed
               ? "bg-green-500/5 border-green-500/40"
@@ -718,7 +718,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
                   Remaining mintable went from{" "}
                   <span className="font-mono text-dark-300">{preMintMintable ?? "?"}</span> to{" "}
                   <span className="font-mono text-green-300">
-                    {securityTokenGs?.mintableAmount ?? "?"}
+                    {rwaTokenGs?.mintableAmount ?? "?"}
                   </span>.
                 </p>
               </>
@@ -733,7 +733,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
                   The wallet accepted the transaction into the mempool. Remaining mintable
                   still reads{" "}
                   <span className="font-mono text-dark-300">
-                    {securityTokenGs?.mintableAmount ?? "unknown"}
+                    {rwaTokenGs?.mintableAmount ?? "unknown"}
                   </span>
                   {preMintMintable !== null && (
                     <>, the same as before the mint (
@@ -1043,7 +1043,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           KYC tokens are minted via the backend (no SDK substandard available).
         </p>
       )}
-      {isSecurityToken && (
+      {isRwaToken && (
         <p className="text-xs text-dark-400 -mt-3">
           RWA tokens are minted via the backend (BaFin MintSecurity flow:
           spends the global-state UTxO and decrements the on-chain supply cap).
@@ -1090,10 +1090,10 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         </div>
       )}
 
-      {/* Security-token: remaining mintable_amount from the GS datum. The
+      {/* RWA-token: remaining mintable_amount from the GS datum. The
           cap is enforced on-chain via the GS spend's MintSecurity branch;
           showing it here lets the admin size their mint accordingly. */}
-      {isSecurityToken && (
+      {isRwaToken && (
         <div className="px-4 py-3 bg-dark-900 rounded-lg border border-dark-700">
           <div className="flex items-center justify-between gap-3">
             <div>
@@ -1103,37 +1103,37 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
                 </p>
                 <button
                   type="button"
-                  onClick={() => { void refreshSecurityTokenGs(); }}
-                  disabled={securityTokenGsLoading}
+                  onClick={() => { void refreshRwaTokenGs(); }}
+                  disabled={rwaTokenGsLoading}
                   className="text-xs text-dark-500 hover:text-primary-400 transition-colors"
                   title="Re-read the global state from chain"
                 >
                   refresh
                 </button>
               </div>
-              {securityTokenGsLoading ? (
+              {rwaTokenGsLoading ? (
                 <p className="mt-1 text-sm text-dark-400 italic">
                   Reading on-chain global state…
                 </p>
-              ) : securityTokenGsError ? (
+              ) : rwaTokenGsError ? (
                 <>
                   <p className="mt-1 text-lg font-semibold text-dark-500">unknown</p>
                   <p className="mt-1 text-sm text-red-400">
-                    Could not read GS datum: {securityTokenGsError}
+                    Could not read GS datum: {rwaTokenGsError}
                   </p>
                 </>
-              ) : securityTokenGs ? (
+              ) : rwaTokenGs ? (
                 <>
                   <p className="mt-1 text-lg font-semibold text-white">
-                    {securityTokenGs.mintableAmount.toLocaleString()}
+                    {rwaTokenGs.mintableAmount.toLocaleString()}
                     <span className="ml-2 text-sm text-dark-400 font-normal">tokens</span>
                   </p>
-                  {securityTokenGs.transfersPaused && (
+                  {rwaTokenGs.transfersPaused && (
                     <p className="mt-1 text-xs text-orange-400">
                       Transfers are currently paused on this token.
                     </p>
                   )}
-                  {securityTokenGs.deactivated && (
+                  {rwaTokenGs.deactivated && (
                     <p className="mt-1 text-xs text-red-400">
                       This contract has been decommissioned — no further mint can succeed.
                     </p>
@@ -1154,14 +1154,14 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
       {/* Receiver-KYC control. Sets the on-chain flag via SetRequiresReceiverKyc —
           it cannot be part of the mint tx, see applyReceiverKycFlag. */}
-      {isSecurityToken && securityTokenGs && (
+      {isRwaToken && rwaTokenGs && (
         <div className="px-4 py-3 bg-dark-900 rounded-lg border border-dark-700 space-y-2">
           <label className="flex items-start gap-3 cursor-pointer">
             <input
               type="checkbox"
-              checked={desiredReceiverKyc ?? securityTokenGs.requiresReceiverKyc}
+              checked={desiredReceiverKyc ?? rwaTokenGs.requiresReceiverKyc}
               onChange={(e) => setDesiredReceiverKyc(e.target.checked)}
-              disabled={kycFlagBusy || isBuilding || securityTokenGs.deactivated}
+              disabled={kycFlagBusy || isBuilding || rwaTokenGs.deactivated}
               className="mt-1 h-4 w-4 shrink-0 accent-primary-500 cursor-pointer disabled:cursor-not-allowed"
             />
             <span>
@@ -1171,14 +1171,14 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
               <span className="block text-xs text-dark-400 mt-1">
                 Currently{" "}
                 <span className="font-mono text-primary-400">
-                  {securityTokenGs.requiresReceiverKyc ? "on" : "off"}
+                  {rwaTokenGs.requiresReceiverKyc ? "on" : "off"}
                 </span>{" "}
                 on chain. When on, every mint and transfer destination must present a
                 membership proof against{" "}
                 <span className="font-mono text-primary-400">member_root_hash</span>.
                 Independent of the sender-side flag, which is currently{" "}
                 <span className="font-mono text-primary-400">
-                  {securityTokenGs.requiresSenderKyc ? "on" : "off"}
+                  {rwaTokenGs.requiresSenderKyc ? "on" : "off"}
                 </span>
                 .
               </span>
@@ -1234,8 +1234,8 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         disabled={isBuilding || !selectedToken}
         error={errors.quantity}
         helperText={
-          isSecurityToken && securityTokenGs
-            ? `Up to ${securityTokenGs.mintableAmount.toLocaleString()} can be minted before the supply cap is reached`
+          isRwaToken && rwaTokenGs
+            ? `Up to ${rwaTokenGs.mintableAmount.toLocaleString()} can be minted before the supply cap is reached`
             : "Number of tokens to mint"
         }
       />

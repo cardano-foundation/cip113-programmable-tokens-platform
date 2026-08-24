@@ -28,7 +28,7 @@ import lombok.experimental.SuperBuilder;
         @JsonSubTypes.Type(value = FreezeAndSeizeRegisterRequest.class, name = "freeze-and-seize"),
         @JsonSubTypes.Type(value = KycRegisterRequest.class, name = "kyc"),
         @JsonSubTypes.Type(value = KycExtendedRegisterRequest.class, name = "kyc-extended"),
-        @JsonSubTypes.Type(value = SecurityTokenRegisterRequest.class, name = "security-token")
+        @JsonSubTypes.Type(value = RwaTokenRegisterRequest.class, name = "rwa-token")
 })
 @Data
 @SuperBuilder
@@ -81,10 +81,10 @@ public abstract class RegisterTokenRequest {
      * </ul>
      *
      * <p>Note this changes {@code assetName} on chain, and for substandards that bake the asset
-     * name into a script parameter (freeze-and-seize, security-token) it therefore changes the
+     * name into a script parameter (freeze-and-seize, rwa-token) it therefore changes the
      * resulting token policy id.
      *
-     * <p>Supported by {@code dummy}, {@code freeze-and-seize} and {@code security-token}. The
+     * <p>Supported by {@code dummy}, {@code freeze-and-seize} and {@code rwa-token}. The
      * {@code kyc} and {@code kyc-extended} handlers reject a non-null value rather than silently
      * dropping it.
      */

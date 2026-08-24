@@ -131,7 +131,7 @@ public class Cip68RefusalTest {
         Assertions.assertTrue(error.contains(substandardId),
                 what + " error must name the substandard, got: " + error);
         // The error is only useful if it says where CIP-68 DOES work.
-        Assertions.assertTrue(error.contains("security-token"),
+        Assertions.assertTrue(error.contains("rwa-token"),
                 what + " error must point at the supported substandards, got: " + error);
     }
 }

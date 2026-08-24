@@ -5,7 +5,7 @@ import { PageContainer } from "@/components/layout/page-container";
 import { Input } from "@/components/ui/input";
 import { useWallet } from "@/hooks/use-wallet";
 import { listKycExtendedTokens } from "@/lib/api/kyc-extended";
-import { listSecurityTokens } from "@/lib/api/security-token";
+import { listRwaTokens } from "@/lib/api/rwa-token";
 import {
   TokenRowVerify,
   type VerifiableTokenSummary,
@@ -40,12 +40,12 @@ export default function VerifyIndexPage() {
     };
   }, [connected, wallet]);
 
-  // Load both kyc-extended AND security-token registrations in parallel and
+  // Load both kyc-extended AND rwa-token registrations in parallel and
   // merge into a single list tagged with `kind`. Failure on one list doesn't
   // hide rows from the other — surface a partial-error notice instead.
   useEffect(() => {
     let cancelled = false;
-    Promise.allSettled([listKycExtendedTokens(), listSecurityTokens()])
+    Promise.allSettled([listKycExtendedTokens(), listRwaTokens()])
       .then(([kycExtRes, secTokRes]) => {
         if (cancelled) return;
         const merged: VerifiableTokenSummary[] = [];
@@ -65,7 +65,7 @@ export default function VerifyIndexPage() {
               policyId: t.policyId,
               displayName: t.displayName,
               description: t.description,
-              kind: "security-token",
+              kind: "rwa-token",
               requiresReceiverKyc: t.requiresReceiverKyc,
             });
           }
@@ -74,9 +74,9 @@ export default function VerifyIndexPage() {
         if (kycExtRes.status === "rejected" && secTokRes.status === "rejected") {
           setError("Failed to load tokens from both lists");
         } else if (kycExtRes.status === "rejected") {
-          setError("Could not load kyc-extended tokens (security-tokens shown).");
+          setError("Could not load kyc-extended tokens (rwa-tokens shown).");
         } else if (secTokRes.status === "rejected") {
-          setError("Could not load security-tokens (kyc-extended shown).");
+          setError("Could not load rwa-tokens (kyc-extended shown).");
         }
       })
       .catch((e) => {
@@ -107,7 +107,7 @@ export default function VerifyIndexPage() {
           <h1 className="text-3xl font-bold text-white">Verify for a Token</h1>
           <p className="text-sm text-dark-300">
             Browse every token that supports on-chain KYC enrollment (kyc-extended
-            and security-token). Pick one to complete KYC — you don&apos;t need to
+            and rwa-token). Pick one to complete KYC — you don&apos;t need to
             own the token to verify.
           </p>
         </header>
@@ -133,7 +133,7 @@ export default function VerifyIndexPage() {
 
         {filtered && filtered.length === 0 && (
           <EmptyState message={tokens && tokens.length === 0
-            ? "No kyc-extended or security-token registrations on this network yet."
+            ? "No kyc-extended or rwa-token registrations on this network yet."
             : "No tokens match your search."} />
         )}
 

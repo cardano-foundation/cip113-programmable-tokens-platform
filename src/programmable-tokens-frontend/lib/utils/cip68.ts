@@ -24,7 +24,7 @@ const CIP67_PREFIX_LENGTH = 8;
 export const CIP68_SUPPORTED_SUBSTANDARDS = [
   "dummy",
   "freeze-and-seize",
-  "security-token",
+  "rwa-token",
 ] as const;
 
 /** Whether the given substandard/flow id supports CIP-68 registration. */
@@ -185,12 +185,12 @@ export function userTokenLabelFor(
  * The label a given substandard will apply — always `(333)`, for every substandard and every
  * quantity. Keeps the capped/uncapped decision in one place rather than at each call site.
  *
- * `security-token` used to be treated as capped, on the grounds that its GlobalState
+ * `rwa-token` used to be treated as capped, on the grounds that its GlobalState
  * `mintable_amount` only ever decreases. It does not: `global_state.ak` computes
  * `remaining = mintable_amount - minted_amount` with a signed `minted_amount`, so a burn passes a
  * negative and restores the allowance. `mint 1 → burn 1 → mint 1` is accepted, which is exactly
  * the lifetime supply of two that `(222)` promises cannot happen. `dummy` and `freeze-and-seize`
- * cap nothing at all. MUST match `Cip68.userTokenLabel` and the security-token genesis path in
+ * cap nothing at all. MUST match `Cip68.userTokenLabel` and the rwa-token genesis path in
  * the Java backend — the backend picks the label that actually goes on chain, and it participates
  * in the policy id, so a disagreement means the recorded asset name stops resolving.
  */
@@ -204,7 +204,7 @@ export function userTokenLabelForSubstandard(
 /**
  * Field ceilings for the CIP-68 metadata form, mirroring `Cip68`'s per-field limits in the Java
  * backend. The datum rides inside a transaction bounded at 16384 bytes, and the tightest measured
- * path (the security-token mint) leaves only ~1.4 KB of headroom — so these are enforced on the
+ * path (the rwa-token mint) leaves only ~1.4 KB of headroom — so these are enforced on the
  * server regardless. They exist here to stop the user typing 2 KB of description and only finding
  * out after they have paid for a blacklist init or a genesis.
  *

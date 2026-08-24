@@ -14,7 +14,7 @@ package org.cardanofoundation.cip113.model;
  * @param cip68Metadata    Optional CIP-68 metadata. When present, this mint additionally mints the
  *                         {@code (100)} reference token (quantity 1) carrying the metadata as an
  *                         inline datum, to the admin's programmable-logic-base address.
- *                         <p>This exists for {@code security-token}, whose registration is
+ *                         <p>This exists for {@code rwa-token}, whose registration is
  *                         structurally mint-free and whose registration path rejects a second asset
  *                         name under the policy — so its reference token has to be minted here, in a
  *                         {@code MintBurn} transaction, alongside a user-token mint. For

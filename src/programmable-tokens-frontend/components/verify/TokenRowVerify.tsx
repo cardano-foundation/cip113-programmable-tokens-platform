@@ -7,7 +7,7 @@ import { ArrowRight } from "lucide-react";
 import { useMpfMembershipStatus } from "@/hooks/useMpfMembershipStatus";
 
 /** Common shape across substandards that support KYC enrollment on the
- *  verify page. Kept minimal so it can wrap kyc-extended and security-token
+ *  verify page. Kept minimal so it can wrap kyc-extended and rwa-token
  *  summaries (and any future MPF-allowlist substandard). */
 export interface VerifiableTokenSummary {
   policyId: string;
@@ -15,10 +15,10 @@ export interface VerifiableTokenSummary {
   description?: string | null;
   /** Drives the destination URL:
    *    kyc-extended   → /verify/[policyId]
-   *    security-token → /verify/security-token/[policyId]
-   *  The security-token verify page handles the optional requires_receiver_kyc
+   *    rwa-token → /verify/rwa-token/[policyId]
+   *  The rwa-token verify page handles the optional requires_receiver_kyc
    *  toggle (skips MPF enrollment when off). */
-  kind: "kyc-extended" | "security-token";
+  kind: "kyc-extended" | "rwa-token";
   /** Substandard-specific hint shown as helper text. */
   requiresReceiverKyc?: boolean;
 }
@@ -30,8 +30,8 @@ interface Props {
 
 export function TokenRowVerify({ token, walletAddress }: Props) {
   // useMpfMembershipStatus probes the kyc-extended allowlist endpoint by
-  // policy id. The security-token inclusion endpoint lives at
-  // /security-token/{policyId}/proofs/{memberPkh} (same shape); extending
+  // policy id. The rwa-token inclusion endpoint lives at
+  // /rwa-token/{policyId}/proofs/{memberPkh} (same shape); extending
   // the hook to multi-substandard is a follow-up. For now only show the
   // membership badge for kyc-extended.
   const { status } = useMpfMembershipStatus(
@@ -49,12 +49,12 @@ export function TokenRowVerify({ token, walletAddress }: Props) {
       badge = <Badge variant="warning" size="sm">Expired</Badge>;
     }
   }
-  const substandardBadge = token.kind === "security-token"
+  const substandardBadge = token.kind === "rwa-token"
     ? <Badge variant="default" size="sm">RWA Token</Badge>
     : null;
 
-  const href = token.kind === "security-token"
-    ? `/verify/security-token/${token.policyId}`
+  const href = token.kind === "rwa-token"
+    ? `/verify/rwa-token/${token.policyId}`
     : `/verify/${token.policyId}`;
 
   return (
@@ -70,7 +70,7 @@ export function TokenRowVerify({ token, walletAddress }: Props) {
             {token.description && (
               <p className="text-sm text-dark-300 mt-1">{token.description}</p>
             )}
-            {token.kind === "security-token" && token.requiresReceiverKyc === false && (
+            {token.kind === "rwa-token" && token.requiresReceiverKyc === false && (
               <p className="text-xs text-dark-500 italic mt-1">
                 Receiver KYC is currently disabled for this token — enrollment is optional.
               </p>

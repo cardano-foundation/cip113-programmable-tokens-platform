@@ -14,16 +14,16 @@ import org.cardanofoundation.cip113.entity.FreezeAndSeizeTokenRegistrationEntity
 import org.cardanofoundation.cip113.entity.KycExtendedTokenRegistrationEntity;
 import org.cardanofoundation.cip113.entity.KycTokenRegistrationEntity;
 import org.cardanofoundation.cip113.entity.ProgrammableTokenRegistryEntity;
-import org.cardanofoundation.cip113.entity.SecurityTokenPowerUserEntity;
-import org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity;
+import org.cardanofoundation.cip113.entity.RwaTokenPowerUserEntity;
+import org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.KycExtendedTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.KycTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
-import org.cardanofoundation.cip113.repository.SecurityTokenPowerUserRepository;
-import org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository;
+import org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository;
+import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
 import org.cardanofoundation.cip113.service.ProtocolBootstrapService;
 import org.cardanofoundation.cip113.service.UtxoProvider;
 import org.cardanofoundation.cip113.util.BalanceValueHelper;
@@ -48,8 +48,8 @@ public class AdminController {
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeRepo;
     private final KycTokenRegistrationRepository kycTokenRegistrationRepo;
     private final KycExtendedTokenRegistrationRepository kycExtendedTokenRegistrationRepo;
-    private final SecurityTokenRegistrationRepository securityTokenRegistrationRepo;
-    private final SecurityTokenPowerUserRepository securityTokenPowerUserRepo;
+    private final RwaTokenRegistrationRepository rwaTokenRegistrationRepo;
+    private final RwaTokenPowerUserRepository rwaTokenPowerUserRepo;
     private final BlacklistInitRepository blacklistInitRepo;
     private final ProtocolBootstrapService protocolBootstrapService;
     private final ProgrammableTokenRegistryRepository programmableTokenRepo;
@@ -235,7 +235,7 @@ public class AdminController {
                     substandardId, List.of("ISSUER_ADMIN"), details));
         }
 
-        // 5. Query security-token registrations where the connected wallet is
+        // 5. Query rwa-token registrations where the connected wallet is
         // a POWER USER (admin / minter / burner / pauser / force-transfer) for
         // the token. This is broader than just "founding admin": it surfaces
         // tokens where the wallet was added to the on-chain power-users
@@ -244,22 +244,22 @@ public class AdminController {
         // registrations don't bleed through.
         //
         // Each row carries the wallet's capabilities bitfield (mirrors the
-        // SecurityTokenPowerUserCapability enum). The frontend filters per
+        // RwaTokenPowerUserCapability enum). The frontend filters per
         // page: mint needs MINTER|ADMIN, burn needs BURNER|ADMIN, etc.
-        List<SecurityTokenPowerUserEntity> securityTokenPus =
-                securityTokenPowerUserRepo.findByPowerUserPkh(pkh);
-        for (SecurityTokenPowerUserEntity pu : securityTokenPus) {
+        List<RwaTokenPowerUserEntity> rwaTokenPus =
+                rwaTokenPowerUserRepo.findByPowerUserPkh(pkh);
+        for (RwaTokenPowerUserEntity pu : rwaTokenPus) {
             String policyId = pu.getProgrammableTokenPolicyId();
             if (tokenMap.containsKey(policyId)) continue;
 
-            Optional<SecurityTokenRegistrationEntity> regOpt =
-                    securityTokenRegistrationRepo.findByProgrammableTokenPolicyId(policyId);
+            Optional<RwaTokenRegistrationEntity> regOpt =
+                    rwaTokenRegistrationRepo.findByProgrammableTokenPolicyId(policyId);
             if (regOpt.isEmpty()) continue;
-            SecurityTokenRegistrationEntity token = regOpt.get();
+            RwaTokenRegistrationEntity token = regOpt.get();
 
             Optional<ProgrammableTokenRegistryEntity> registryEntry =
                     programmableTokenRepo.findByPolicyId(policyId);
-            // Asset name lives on SecurityTokenRegistrationEntity itself —
+            // Asset name lives on RwaTokenRegistrationEntity itself —
             // fall back to it if the platform-wide ProgrammableTokenRegistryEntity
             // row is missing (e.g. mid-flow recovery state).
             String assetName = registryEntry
@@ -268,13 +268,13 @@ public class AdminController {
             String assetNameDisplay = hexToString(assetName);
             String substandardId = registryEntry
                     .map(ProgrammableTokenRegistryEntity::getSubstandardId)
-                    .orElse("security-token");
+                    .orElse("rwa-token");
 
             // The frontend's AdminRole type only knows ISSUER_ADMIN and
             // BLACKLIST_MANAGER; the chip renderer labels every other role
             // as "Blacklist". So surface ONLY those two role strings here.
             // Mint/burn/etc. tabs use the capabilities bitfield directly via
-            // hasSecurityTokenCapability() — they don't need a role string.
+            // hasRwaTokenCapability() — they don't need a role string.
             //
             //   ISSUER_ADMIN     → set when wallet IS the on-chain admin OR
             //                      when wallet holds the ADMIN capability
@@ -460,12 +460,12 @@ public class AdminController {
             String substandardId,
             List<String> roles,         // ["ISSUER_ADMIN", "BLACKLIST_MANAGER"]
             AdminTokenDetails details,
-            /** Security-token only: bitfield of the connected wallet's BaFin
+            /** RWA-token only: bitfield of the connected wallet's BaFin
              *  power-user capabilities for this token, mirrored from the
-             *  SecurityTokenPowerUserEntity row. Drives per-page filtering on
+             *  RwaTokenPowerUserEntity row. Drives per-page filtering on
              *  the frontend (mint → MINTER|ADMIN, burn → BURNER|ADMIN, etc.).
-             *  Null for non-security-token entries. */
-            Integer securityTokenCapabilities
+             *  Null for non-rwa-token entries. */
+            Integer rwaTokenCapabilities
     ) {
         public AdminTokenInfo(String policyId, String assetName, String assetNameDisplay,
                               String substandardId, List<String> roles, AdminTokenDetails details) {

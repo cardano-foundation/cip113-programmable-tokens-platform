@@ -99,7 +99,7 @@ public class AppConfig {
      *
      * <p><b>{@code devnet} must map to {@link NetworkType#DEV}, not fall through to
      * MAINNET.</b> These converters are what {@code validTo} is computed from, and every
-     * security-token path now sets a validity bound (the KYC membership proof only verifies
+     * rwa-token path now sets a validity bound (the KYC membership proof only verifies
      * against a Finite upper bound). Translating "now + N" with MAINNET's era history on a
      * devnet whose genesis is minutes old yields a slot far beyond the node's known horizon,
      * and the ledger rejects the transaction at submit with

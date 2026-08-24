@@ -24,9 +24,9 @@ import { getExplorerTxUrl } from "@/lib/utils";
 import { KycVerificationFlow } from "./KycVerificationFlow";
 import { getKycProof, clearKycProof, type KycProofCookie } from "@/lib/utils/kyc-cookie";
 import { useMpfMembershipStatus } from "@/hooks/useMpfMembershipStatus";
-import { useSecurityTokenMembershipStatus } from "@/hooks/useSecurityTokenMembershipStatus";
+import { useRwaTokenMembershipStatus } from "@/hooks/useRwaTokenMembershipStatus";
 import { getMpfInclusionProof, requestMpfInclusion } from "@/lib/api/kyc-extended";
-import { getSecurityTokenInclusionProof, requestSecurityTokenInclusion } from "@/lib/api/security-token";
+import { getRwaTokenInclusionProof, requestRwaTokenInclusion } from "@/lib/api/rwa-token";
 import { extractStakeCredHashFromAddress } from "@/lib/utils/address";
 import { getKeriSessionIdForWallet } from "@/lib/utils/keri-session";
 
@@ -74,15 +74,15 @@ export function TransferModal({
   // KYC state
   const [isKycToken, setIsKycToken] = useState(false);
   const [isKycExtendedToken, setIsKycExtendedToken] = useState(false);
-  const [isSecurityTokenToken, setIsSecurityTokenToken] = useState(false);
-  /** Security-token only: per-token toggle from the global-state datum. Defaults to true
+  const [isRwaTokenToken, setIsRwaTokenToken] = useState(false);
+  /** RWA-token only: per-token toggle from the global-state datum. Defaults to true
    *  (the safer regulatory-compliance posture) until the token context resolves. */
-  const [securityTokenRequiresReceiverKyc, setSecurityTokenRequiresReceiverKyc] = useState(true);
-  /** Security-token only: live `transfers_paused` flag from the global-state datum.
+  const [rwaTokenRequiresReceiverKyc, setRwaTokenRequiresReceiverKyc] = useState(true);
+  /** RWA-token only: live `transfers_paused` flag from the global-state datum.
    *  When true, the on-chain transfer_logic validator rejects every transfer — we
    *  surface a banner and disable the Send button so the user doesn't burn fees
    *  on a tx the network will refuse. */
-  const [securityTokenTransfersPaused, setSecurityTokenTransfersPaused] = useState(false);
+  const [rwaTokenTransfersPaused, setRwaTokenTransfersPaused] = useState(false);
   const [kycProof, setKycProofState] = useState<KycProofCookie | null>(null);
 
   const [recipientCheckStatus, setRecipientCheckStatus] = useState<RecipientCheckStatus>({ kind: "idle" });
@@ -100,23 +100,23 @@ export function TransferModal({
     isKycExtendedToken ? policyId : null,
     isKycExtendedToken ? senderAddress : null,
   );
-  // Same shape for security-token, on its own API surface.
-  const securityTokenSenderMembership = useSecurityTokenMembershipStatus(
-    isSecurityTokenToken ? policyId : null,
-    isSecurityTokenToken ? senderAddress : null,
+  // Same shape for rwa-token, on its own API surface.
+  const rwaTokenSenderMembership = useRwaTokenMembershipStatus(
+    isRwaTokenToken ? policyId : null,
+    isRwaTokenToken ? senderAddress : null,
   );
 
-  const senderMpfReady = isSecurityTokenToken
-    ? securityTokenSenderMembership.status.kind === "verified"
-        && securityTokenSenderMembership.status.onChainSynced
+  const senderMpfReady = isRwaTokenToken
+    ? rwaTokenSenderMembership.status.kind === "verified"
+        && rwaTokenSenderMembership.status.onChainSynced
     : senderMembership.status.kind === "verified"
         && senderMembership.status.onChainSynced;
-  // For security-token, the on-chain transfer_logic_script requires the sender
+  // For rwa-token, the on-chain transfer_logic_script requires the sender
   // to be in the MPF tree — a fresh kycProof cookie alone won't satisfy the
   // validator until the new root is published. So gate STRICTLY on on-chain
-  // membership for security-token. For kyc-extended, the cookie is an accepted
+  // membership for rwa-token. For kyc-extended, the cookie is an accepted
   // fallback (the validator filters senders out of receiver_witnesses).
-  const senderReady = isSecurityTokenToken
+  const senderReady = isRwaTokenToken
     ? senderMpfReady
     : isKycExtendedToken
       ? senderMpfReady || !!kycProof
@@ -124,10 +124,10 @@ export function TransferModal({
         ? !!kycProof
         : true;
 
-  /** When `requiresReceiverKyc` is false on a security-token, we don't gate Send on the
+  /** When `requiresReceiverKyc` is false on a rwa-token, we don't gate Send on the
    *  recipient probe — the validator skips the check anyway. */
   const recipientReady =
-    !(isKycExtendedToken || (isSecurityTokenToken && securityTokenRequiresReceiverKyc)) ||
+    !(isKycExtendedToken || (isRwaTokenToken && rwaTokenRequiresReceiverKyc)) ||
     recipientCheckStatus.kind === "verified" ||
     recipientCheckStatus.kind === "self";
 
@@ -143,9 +143,9 @@ export function TransferModal({
       setRecipientCheckStatus({ kind: "idle" });
       setIsKycToken(false);
       setIsKycExtendedToken(false);
-      setIsSecurityTokenToken(false);
-      setSecurityTokenRequiresReceiverKyc(true);
-      setSecurityTokenTransfersPaused(false);
+      setIsRwaTokenToken(false);
+      setRwaTokenRequiresReceiverKyc(true);
+      setRwaTokenTransfersPaused(false);
 
       getTokenContext(policyId)
         .then((ctx) => {
@@ -158,11 +158,11 @@ export function TransferModal({
             setIsKycExtendedToken(true);
             const cachedProof = getKycProof(policyId, senderAddress);
             if (cachedProof) setKycProofState(cachedProof);
-          } else if (ctx.substandardId === "security-token") {
+          } else if (ctx.substandardId === "rwa-token") {
             setIsKycToken(true);
-            setIsSecurityTokenToken(true);
-            setSecurityTokenRequiresReceiverKyc(ctx.requiresReceiverKyc ?? true);
-            setSecurityTokenTransfersPaused(ctx.transfersPaused ?? false);
+            setIsRwaTokenToken(true);
+            setRwaTokenRequiresReceiverKyc(ctx.requiresReceiverKyc ?? true);
+            setRwaTokenTransfersPaused(ctx.transfersPaused ?? false);
             const cachedProof = getKycProof(policyId, senderAddress);
             if (cachedProof) setKycProofState(cachedProof);
           }
@@ -172,11 +172,11 @@ export function TransferModal({
   }, [isOpen, policyId]);
 
   // Recipient MPF membership probe. We probe for kyc-extended and ALWAYS for
-  // security-token so the admin can see the receiver's enrollment status even
+  // rwa-token so the admin can see the receiver's enrollment status even
   // when {@code requires_receiver_kyc} is false. Whether the probe gates the
   // Send button is decided separately in {@link recipientReady} below.
   useEffect(() => {
-    const needsProbe = isKycExtendedToken || isSecurityTokenToken;
+    const needsProbe = isKycExtendedToken || isRwaTokenToken;
     if (!needsProbe) {
       setRecipientCheckStatus({ kind: "idle" });
       return;
@@ -206,8 +206,8 @@ export function TransferModal({
     setRecipientCheckStatus({ kind: "checking" });
     const token = ++recipientProbingToken.current;
 
-    const probeFn = isSecurityTokenToken
-      ? () => getSecurityTokenInclusionProof(policyId, recipientPkh)
+    const probeFn = isRwaTokenToken
+      ? () => getRwaTokenInclusionProof(policyId, recipientPkh)
       : () => getMpfInclusionProof(policyId, recipientPkh);
 
     probeFn()
@@ -228,7 +228,7 @@ export function TransferModal({
         }
         setRecipientCheckStatus({ kind: "error", message: "Could not check recipient status" });
       });
-  }, [recipientAddress, isKycExtendedToken, isSecurityTokenToken, securityTokenRequiresReceiverKyc, policyId, senderAddress]);
+  }, [recipientAddress, isKycExtendedToken, isRwaTokenToken, rwaTokenRequiresReceiverKyc, policyId, senderAddress]);
 
   const handleSetMax = () => {
     setQuantity(asset.amount.toString());
@@ -268,7 +268,7 @@ export function TransferModal({
     // paused, but an Enter-key submit or dev-tools poke could still reach
     // here. Surface a clear toast rather than building a tx the on-chain
     // validator will reject.
-    if (isSecurityTokenToken && securityTokenTransfersPaused) {
+    if (isRwaTokenToken && rwaTokenTransfersPaused) {
       showToast({
         title: "Transfers paused",
         description: "The token admin has paused transfers via the global-state PauseTransfers action. Wait for the admin to re-enable transfers and try again.",
@@ -306,10 +306,10 @@ export function TransferModal({
           recipientAddress: recipientAddress.trim(),
         };
 
-        if (isKycExtendedToken || isSecurityTokenToken) {
+        if (isKycExtendedToken || isRwaTokenToken) {
           // Sender proof: membership (preferred) or attestation cookie
-          const ms = isSecurityTokenToken
-              ? securityTokenSenderMembership.status
+          const ms = isRwaTokenToken
+              ? rwaTokenSenderMembership.status
               : senderMembership.status;
           if (ms.kind === "verified" && ms.onChainSynced) {
             request.senderMpfProofCborHex = ms.proofCborHex;
@@ -321,10 +321,10 @@ export function TransferModal({
             throw new Error("Please complete KYC verification before sending");
           }
 
-          // Receiver proof: required for kyc-extended (always) and for security-token
+          // Receiver proof: required for kyc-extended (always) and for rwa-token
           // when `requires_receiver_kyc` is true. Self-sends skip the proof either way.
           const receiverRequired =
-              isKycExtendedToken || (isSecurityTokenToken && securityTokenRequiresReceiverKyc);
+              isKycExtendedToken || (isRwaTokenToken && rwaTokenRequiresReceiverKyc);
           if (receiverRequired) {
             if (recipientCheckStatus.kind === "verified") {
               request.mpfProofCborHex = recipientCheckStatus.proofCborHex;
@@ -368,7 +368,7 @@ export function TransferModal({
       // We isolate it in its own tx so Eternl can sign it without choking on
       // mixed-script signing.
       const needsCertRegistration =
-        isSecurityTokenToken
+        isRwaTokenToken
         && errorMessage.includes("transferLogic stake credential not yet registered");
       if (needsCertRegistration) {
         try {
@@ -378,7 +378,7 @@ export function TransferModal({
             variant: "info",
           });
           const { buildRegisterTransferLogicTx } = await import(
-            "@/lib/api/security-token"
+            "@/lib/api/rwa-token"
           );
           const { unsignedCborTx: regCbor } = await buildRegisterTransferLogicTx(
             policyId, senderAddress,
@@ -455,7 +455,7 @@ export function TransferModal({
             />
           )}
 
-          {step === "kyc-sender" && isSecurityTokenToken && (
+          {step === "kyc-sender" && isRwaTokenToken && (
             <KycVerificationFlow
               policyId={policyId}
               senderAddress={senderAddress}
@@ -463,21 +463,21 @@ export function TransferModal({
               onComplete={async (proof) => {
                 setKycProofState(proof);
                 try {
-                  await requestSecurityTokenInclusion(policyId, {
+                  await requestRwaTokenInclusion(policyId, {
                     boundAddress: senderAddress,
                     kycSessionId: getKeriSessionIdForWallet(senderAddress),
                     validUntilMs: proof.validUntilMs,
                   });
-                  securityTokenSenderMembership.refresh();
+                  rwaTokenSenderMembership.refresh();
                 } catch (err) {
-                  console.error("Failed to register sender in security-token allowlist:", err);
+                  console.error("Failed to register sender in rwa-token allowlist:", err);
                 }
                 setStep("form");
               }}
             />
           )}
 
-          {step === "kyc-verify" && isKycToken && !isKycExtendedToken && !isSecurityTokenToken && (
+          {step === "kyc-verify" && isKycToken && !isKycExtendedToken && !isRwaTokenToken && (
             <KycVerificationFlow
               policyId={policyId}
               senderAddress={senderAddress}
@@ -491,12 +491,12 @@ export function TransferModal({
 
           {step === "form" && (
             <form onSubmit={handleSubmit} className="space-y-5">
-              {/* Pause notice — fires when the security-token's GS datum has
+              {/* Pause notice — fires when the rwa-token's GS datum has
                   transfers_paused=true. The on-chain transfer_logic validator
                   rejects every transfer in this state, so we surface a banner
                   AND disable the Send button below to spare the user the fees
                   on a tx the network would refuse anyway. */}
-              {isSecurityTokenToken && securityTokenTransfersPaused && (
+              {isRwaTokenToken && rwaTokenTransfersPaused && (
                 <div className="flex items-start gap-3 px-4 py-3 bg-warning-900/20 border border-warning-700/40 rounded-lg">
                   <AlertCircle className="h-5 w-5 text-warning-400 mt-0.5 shrink-0" />
                   <div className="text-sm">
@@ -527,11 +527,11 @@ export function TransferModal({
                       {isKycExtendedToken && senderMembership.status.kind === "verified" && !senderMembership.status.onChainSynced && (
                         <p className="text-[10px] text-warning-400 leading-tight mt-0.5">Allowlist sync pending…</p>
                       )}
-                      {/* security-token: surface sender's on-chain membership status.
+                      {/* rwa-token: surface sender's on-chain membership status.
                           Sender MUST be in the on-chain tree to send (BaFin transfer_logic
                           verifies a membership proof for every input's stake credential). */}
-                      {isSecurityTokenToken && (() => {
-                        const s = securityTokenSenderMembership.status;
+                      {isRwaTokenToken && (() => {
+                        const s = rwaTokenSenderMembership.status;
                         if (s.kind === "loading") return (
                           <p className="text-[10px] text-dark-400 leading-tight mt-0.5">Checking allowlist…</p>
                         );
@@ -557,13 +557,13 @@ export function TransferModal({
                       })()}
                     </div>
                   </div>
-                  {/* For security-token, Verified badge follows on-chain membership
+                  {/* For rwa-token, Verified badge follows on-chain membership
                       (not the cookie). For other substandards, falls back to kycProof. */}
                   <div className="shrink-0">
-                  {isSecurityTokenToken ? (
-                    securityTokenSenderMembership.status.kind === "verified" && securityTokenSenderMembership.status.onChainSynced ? (
+                  {isRwaTokenToken ? (
+                    rwaTokenSenderMembership.status.kind === "verified" && rwaTokenSenderMembership.status.onChainSynced ? (
                       <Badge variant="success" size="sm">Verified</Badge>
-                    ) : securityTokenSenderMembership.status.kind === "loading" ? (
+                    ) : rwaTokenSenderMembership.status.kind === "loading" ? (
                       <Loader2 className="h-4 w-4 text-dark-400 animate-spin" />
                     ) : (
                       <Button
@@ -571,14 +571,14 @@ export function TransferModal({
                         variant="outline"
                         className="h-7 text-xs px-3 whitespace-nowrap"
                         onClick={() => setStep("kyc-sender")}
-                        disabled={securityTokenSenderMembership.status.kind === "publish-pending"}
-                        title={securityTokenSenderMembership.status.kind === "publish-pending"
+                        disabled={rwaTokenSenderMembership.status.kind === "publish-pending"}
+                        title={rwaTokenSenderMembership.status.kind === "publish-pending"
                           ? "Already enrolled off-chain. Ask the admin to publish the new MPF root via the Global State tab."
                           : undefined}
                       >
-                        {securityTokenSenderMembership.status.kind === "publish-pending"
+                        {rwaTokenSenderMembership.status.kind === "publish-pending"
                           ? "Awaiting publish"
-                          : securityTokenSenderMembership.status.kind === "expired"
+                          : rwaTokenSenderMembership.status.kind === "expired"
                           ? "Re-verify"
                           : "Verify KYC"}
                       </Button>
@@ -720,11 +720,11 @@ export function TransferModal({
                   variant="primary"
                   className="flex-1"
                   isLoading={isBuilding}
-                  disabled={isBuilding || !senderReady || !recipientReady || securityTokenTransfersPaused}
+                  disabled={isBuilding || !senderReady || !recipientReady || rwaTokenTransfersPaused}
                 >
                   {isBuilding
                     ? "Building..."
-                    : securityTokenTransfersPaused
+                    : rwaTokenTransfersPaused
                       ? "Transfers paused"
                       : !senderReady
                         ? "KYC Required"

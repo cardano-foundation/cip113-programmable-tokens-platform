@@ -131,7 +131,7 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
             if (request.getCip68Metadata() != null) {
                 return TransactionContext.typedError(
                         "CIP-68 is not supported for the 'kyc-extended' substandard. Supported: "
-                        + "dummy, freeze-and-seize, security-token. Register without CIP-68 metadata.");
+                        + "dummy, freeze-and-seize, rwa-token. Register without CIP-68 metadata.");
             }
             var adminPkh = Credential.fromKey(request.getAdminPubKeyHash());
             var globalStatePolicyId = request.getGlobalStatePolicyId();
@@ -434,7 +434,7 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
             if (request.cip68Metadata() != null) {
                 return TransactionContext.typedError(
                         "CIP-68 is not supported for the 'kyc-extended' substandard. Supported: "
-                        + "dummy, freeze-and-seize, security-token. Mint without CIP-68 metadata.");
+                        + "dummy, freeze-and-seize, rwa-token. Mint without CIP-68 metadata.");
             }
 
             var adminUtxos = accountService.findAdaOnlyUtxo(request.feePayerAddress(), 10_000_000L);

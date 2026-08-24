@@ -9,8 +9,8 @@ import { Shield, Plus, Minus, CheckCircle, ExternalLink } from "lucide-react";
 import { AdminTokenSelector } from "./AdminTokenSelector";
 import {
   AdminTokenInfo,
-  SecurityTokenCapability,
-  hasSecurityTokenCapability,
+  RwaTokenCapability,
+  hasRwaTokenCapability,
 } from "@/lib/api/admin";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useCIP113 } from "@/contexts/cip113-context";
@@ -36,12 +36,12 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
 
   // Per-page capability gate. Show:
   //   - tokens where the wallet has BLACKLIST_MANAGER role (legacy F&S)
-  //   - security-tokens where the wallet has ADMIN capability — BaFin's
+  //   - rwa-tokens where the wallet has ADMIN capability — BaFin's
   //     denylist mutations (AddDenylist / RemoveDenylist) are admin-gated
   //     directly in the GS validator, not a separate PowerUser role
   const manageableTokens = tokens.filter((t) => {
-    if (t.substandardId === "security-token") {
-      return hasSecurityTokenCapability(t, SecurityTokenCapability.ADMIN);
+    if (t.substandardId === "rwa-token") {
+      return hasRwaTokenCapability(t, RwaTokenCapability.ADMIN);
     }
     return t.roles.includes("BLACKLIST_MANAGER");
   });
@@ -92,10 +92,10 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
       let unsignedCborTx: string;
 
       // SDK (cip113-sdk-ts) only knows about dummy + freeze-and-seize.
-      // security-token MUST go through the backend path (its on-chain denylist
+      // rwa-token MUST go through the backend path (its on-chain denylist
       // mutations are wired into /compliance/blacklist/{add,remove} now via the
-      // BlacklistManageable interface on SecurityTokenSubstandardHandler).
-      const forceBackend = selectedToken.substandardId === "security-token";
+      // BlacklistManageable interface on RwaTokenSubstandardHandler).
+      const forceBackend = selectedToken.substandardId === "rwa-token";
 
       if (txBuilder === "sdk" && !forceBackend) {
         await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
@@ -143,7 +143,7 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
       setTxHash(submittedTxHash);
       setStep("success");
 
-      const isDenylist = selectedToken?.substandardId === "security-token";
+      const isDenylist = selectedToken?.substandardId === "rwa-token";
       const listName = isDenylist ? "Denylist" : "Blacklist";
       showToast({
         title: `${action === "add" ? "Added to" : "Removed from"} ${listName}`,
@@ -318,7 +318,7 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
         disabled={isBuilding || !selectedToken}
         error={errors.targetAddress}
         helperText={
-          selectedToken?.substandardId === "security-token"
+          selectedToken?.substandardId === "rwa-token"
             ? (action === "add"
                 ? "Address whose stake credential will be added to the on-chain denylist. Transfers to it will be rejected."
                 : "Address whose stake credential will be removed from the denylist. Transfers to it will be allowed again.")
@@ -338,8 +338,8 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
         {isBuilding
           ? "Building Transaction..."
           : action === "add"
-          ? (selectedToken?.substandardId === "security-token" ? "Add to Denylist" : "Add to Blacklist")
-          : (selectedToken?.substandardId === "security-token" ? "Remove from Denylist" : "Remove from Blacklist")}
+          ? (selectedToken?.substandardId === "rwa-token" ? "Add to Denylist" : "Add to Blacklist")
+          : (selectedToken?.substandardId === "rwa-token" ? "Remove from Denylist" : "Remove from Blacklist")}
       </Button>
     </form>
   );

@@ -131,7 +131,7 @@ class Cip68Test {
     /**
      * H4: the {@code (222)} branch is unreachable from any shipped call site.
      *
-     * <p>{@code security-token} used to reach it at a cap of 1, on the reasoning that GlobalState's
+     * <p>{@code rwa-token} used to reach it at a cap of 1, on the reasoning that GlobalState's
      * {@code mintable_amount} only ever decreases. It does not — {@code global_state.ak:229-245}
      * computes {@code remaining = mintable_amount - minted_amount} with a signed
      * {@code minted_amount}, so a burn restores the allowance and {@code mint 1 → burn 1 → mint 1}
@@ -140,7 +140,7 @@ class Cip68Test {
      * <p>This asserts on the source rather than on behaviour deliberately: the label is baked into
      * a script parameter and therefore into the policy id, so a regression here is not a cosmetic
      * relabel — it silently produces a different token. The end-to-end counterpart is
-     * {@code OfflineCip68EvalTest#securityTokenAtACapOfOneIsStillFungible}.
+     * {@code OfflineCip68EvalTest#rwaTokenAtACapOfOneIsStillFungible}.
      */
     @Test
     void noSubstandardClaimsALifetimeCap() throws Exception {

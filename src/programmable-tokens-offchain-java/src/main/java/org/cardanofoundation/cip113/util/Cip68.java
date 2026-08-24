@@ -198,19 +198,19 @@ public final class Cip68 {
      *
      * <h3>No substandard on this platform passes {@code true}</h3>
      * All three CIP-68 substandards — {@code dummy}, {@code freeze-and-seize} and
-     * {@code security-token} — use {@link #uncappedUserTokenLabel()}. None of the pinned contracts
+     * {@code rwa-token} — use {@link #uncappedUserTokenLabel()}. None of the pinned contracts
      * caps lifetime supply:
      * <ul>
      *   <li>{@code dummy}'s {@code validators/transfer.ak} {@code issue} is {@code redeemer == 100}
      *       and constrains no asset name or amount; {@code freeze-and-seize}'s
      *       {@code issuer_admin_contract} ignores its {@code _asset_name} parameter. Both expose an
      *       unconstrained later mint under the same policy and name.</li>
-     *   <li>{@code security-token} <em>looks</em> capped — GlobalState carries a
+     *   <li>{@code rwa-token} <em>looks</em> capped — GlobalState carries a
      *       {@code mintable_amount} — but it is not. {@code global_state.ak:229-245} computes
      *       {@code remaining = mintable_amount - minted_amount} with a <em>signed</em>
      *       {@code minted_amount}, so a burn passes a negative and <strong>restores</strong> the
      *       allowance (this platform mirrors that arithmetic in
-     *       {@code SecurityTokenSubstandardHandler.buildBurnTransaction}). {@code mint 1 → burn 1
+     *       {@code RwaTokenSubstandardHandler.buildBurnTransaction}). {@code mint 1 → burn 1
      *       → mint 1} is therefore accepted and lifetime issuance exceeds one. A cap of 1 bounds
      *       the amount outstanding at any instant, which is not what {@code (222)} claims.</li>
      * </ul>
@@ -242,8 +242,8 @@ public final class Cip68 {
      *
      * <p>Shorthand for {@code userTokenLabel(quantity, false)}, kept as a named method so the call
      * sites read as a decision rather than a magic boolean. Every CIP-68 substandard on this
-     * platform — {@code dummy}, {@code freeze-and-seize} and {@code security-token} — uses this;
-     * see {@link #userTokenLabel} for why {@code security-token}'s {@code mintable_amount} is not
+     * platform — {@code dummy}, {@code freeze-and-seize} and {@code rwa-token} — uses this;
+     * see {@link #userTokenLabel} for why {@code rwa-token}'s {@code mintable_amount} is not
      * a lifetime cap.
      */
     public static int uncappedUserTokenLabel() {
@@ -255,7 +255,7 @@ public final class Cip68 {
      *
      * <h3>Where the number comes from</h3>
      * The datum is entirely user-supplied text and rides inside a transaction that is already
-     * close to the ledger's 16 384-byte limit. The tightest measured path is the security-token
+     * close to the ledger's 16 384-byte limit. The tightest measured path is the rwa-token
      * mint at <strong>14 923 bytes</strong>, whose datum (the six-field reference fixture)
      * serializes to roughly 220 bytes — leaving 1 461 bytes of headroom. A 512-byte ceiling can
      * therefore grow that transaction by at most ~292 bytes, to ~15 215, keeping well over a

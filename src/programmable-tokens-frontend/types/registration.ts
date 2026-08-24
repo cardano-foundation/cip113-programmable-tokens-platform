@@ -230,11 +230,11 @@ export interface KycExtendedRegistrationData extends BaseRegistrationData {
 }
 
 /**
- * Security-token substandard registration data — BaFin-style: MPF allowlist +
+ * RWA-token substandard registration data — BaFin-style: MPF allowlist +
  * denylist linked list + power-user linked list + togglable receiver KYC.
  */
-export interface SecurityTokenRegistrationData extends BaseRegistrationData {
-  substandardId: 'security-token';
+export interface RwaTokenRegistrationData extends BaseRegistrationData {
+  substandardId: 'rwa-token';
   adminPubKeyHash: string;
   globalStatePolicyId: string;
   denylistPolicyId: string;
@@ -250,7 +250,7 @@ export type RegistrationRequest =
   | FreezeAndSeizeRegistrationData
   | KycRegistrationData
   | KycExtendedRegistrationData
-  | SecurityTokenRegistrationData;
+  | RwaTokenRegistrationData;
 
 // ============================================================================
 // Step-Specific Data Types

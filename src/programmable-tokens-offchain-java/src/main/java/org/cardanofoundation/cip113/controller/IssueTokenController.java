@@ -49,7 +49,7 @@ public class IssueTokenController {
 
     /** Submit a chain of pre-signed transactions sequentially with mempool chaining.
      *
-     *  <p>Used by the security-token wizard (and any other substandard that builds
+     *  <p>Used by the rwa-token wizard (and any other substandard that builds
      *  multi-tx chains): the frontend signs an ordered list of CBORs in a single
      *  wallet popup via CIP-30 {@code signTxs} and POSTs them here. We submit each
      *  via the backend's {@code TransactionService} so the wallet's own submission

@@ -24,7 +24,7 @@ import {
 import { getPaymentKeyHash } from '@/lib/utils/address';
 import { getExplorerTxUrl } from '@/lib/utils/format';
 import { getKycExtendedAdminPkh } from '@/lib/api/kyc-extended';
-import type { KycRegisterRequest, KycExtendedRegisterRequest, SecurityTokenRegisterRequest, Cip170AttestationData } from '@/types/api';
+import type { KycRegisterRequest, KycExtendedRegisterRequest, RwaTokenRegisterRequest, Cip170AttestationData } from '@/types/api';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
 import { Shield, Copy, QrCode } from 'lucide-react';
 
@@ -170,12 +170,12 @@ export function KycBuildSignSubmitStep({
       const adminAddress = addresses[0];
 
       const isKycExtended = wizardState.flowId === 'kyc-extended';
-      const isSecurityToken = wizardState.flowId === 'security-token';
+      const isRwaToken = wizardState.flowId === 'rwa-token';
 
       // kyc-extended: issuerAdminPkh must be the BACKEND's signing key PKH so the
       // backend can autonomously sign UpdateMemberRootHash transactions.
       //
-      // security-token: issuerAdminPkh must be the USER's wallet PKH because
+      // rwa-token: issuerAdminPkh must be the USER's wallet PKH because
       // BaFin's on-chain admin gates every admin action on a signature from
       // `admin_credential_hash`, which was set to the wallet PKH at genesis.
       let adminPubKeyHash: string;
@@ -188,11 +188,11 @@ export function KycBuildSignSubmitStep({
 
       const substandardId = isKycExtended
         ? 'kyc-extended'
-        : isSecurityToken
-          ? 'security-token'
+        : isRwaToken
+          ? 'rwa-token'
           : 'kyc';
 
-      const regRequest: KycRegisterRequest | KycExtendedRegisterRequest | SecurityTokenRegisterRequest = {
+      const regRequest: KycRegisterRequest | KycExtendedRegisterRequest | RwaTokenRegisterRequest = {
         substandardId,
         feePayerAddress: adminAddress,
         assetName: stringToHex(tokenDetails.assetName),

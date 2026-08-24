@@ -9,10 +9,10 @@ import { useToast } from '@/components/ui/use-toast';
 import { getSigningEntityVkey } from '@/lib/api/keri';
 import { getKycExtendedAdminPkh } from '@/lib/api/kyc-extended';
 import {
-  buildSecurityTokenChain,
+  buildRwaTokenChain,
   submitTokenChain,
   PowerUserCapability,
-} from '@/lib/api/security-token';
+} from '@/lib/api/rwa-token';
 import { useProtocolVersion } from '@/contexts/protocol-version-context';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import { toCip68Wire } from '@/lib/utils/cip68-wire';
@@ -20,7 +20,7 @@ import type { StepComponentProps, CIP68MetadataFormData } from '@/types/registra
 
 interface KycConfigData {
   globalStatePolicyId: string;
-  /** security-token only: the prog-token policy id returned from the chain build. */
+  /** rwa-token only: the prog-token policy id returned from the chain build. */
   programmableTokenPolicyId?: string;
 }
 
@@ -53,7 +53,7 @@ export function KycConfigStep({
   onBack,
 }: StepComponentProps<KycConfigData>) {
   const isKycExtendedFlow = wizardState.flowId === 'kyc-extended';
-  const isSecurityTokenFlow = wizardState.flowId === 'security-token';
+  const isRwaTokenFlow = wizardState.flowId === 'rwa-token';
   const { wallet, rawApi } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
@@ -107,7 +107,7 @@ export function KycConfigStep({
   const mintBlockedByKyc = willFirstMint && requiresReceiverKyc && !seedRecipientInAllowlist;
   const mintExceedsCap = willFirstMint && capQty !== null && mintQty > capQty;
   const registrationBlocked =
-    isSecurityTokenFlow && (mintQtyInvalid || mintBlockedByKyc || mintExceedsCap);
+    isRwaTokenFlow && (mintQtyInvalid || mintBlockedByKyc || mintExceedsCap);
 
   // Clear the opt-in the moment it stops being applicable. The checkbox only renders
   // while receiver KYC is on AND something is being minted; without this, ticking it
@@ -248,13 +248,13 @@ export function KycConfigStep({
       const { initGlobalState } = await import('@/lib/api/compliance');
 
       const isKycExtended = wizardState.flowId === 'kyc-extended';
-      const isSecurityToken = wizardState.flowId === 'security-token';
+      const isRwaToken = wizardState.flowId === 'rwa-token';
       const flowSubstandardId = isKycExtended ? 'kyc-extended' : 'kyc';
 
       // kyc-extended parameterises the global-state script with the BACKEND's
       // signing key PKH so the backend can autonomously sign UpdateMemberRootHash.
       //
-      // security-token follows a different model: the on-chain
+      // rwa-token follows a different model: the on-chain
       // `admin_credential_hash` is the USER's wallet PKH, because BaFin's
       // global_state validator gates every admin action (AddPowerUser,
       // AddTrustedEntity, RotateAdmin, …) on a signature from that key.
@@ -262,7 +262,7 @@ export function KycConfigStep({
       // sign admin txs — but the user signs in their wallet, so the tx would
       // fail with `missingSignatories` pointing at the backend's PKH.
       //
-      // (Autonomous MPF root sync for security-token is a separate problem
+      // (Autonomous MPF root sync for rwa-token is a separate problem
       // left for a follow-up: either the user signs root-hash updates manually,
       // or admin is later delegated to the backend via RotateAdmin.)
       let adminPkh: string | undefined;
@@ -270,12 +270,12 @@ export function KycConfigStep({
         setStatusMessage('Fetching backend admin key…');
         const adminInfo = await getKycExtendedAdminPkh();
         adminPkh = adminInfo.adminPkh;
-      } else if (isSecurityToken) {
+      } else if (isRwaToken) {
         const { getPaymentKeyHash } = await import('@/lib/utils/address');
         adminPkh = getPaymentKeyHash(adminAddress);
       }
 
-      // Security-token: chained build + single-popup sign + batched submit.
+      // RWA-token: chained build + single-popup sign + batched submit.
       //
       // The backend assembles the full 3-tx registration chain in one call
       // (genesis → AddPowerUser → registration), deterministically chained
@@ -289,7 +289,7 @@ export function KycConfigStep({
       // Whether it ALSO mints the first supply is up to `initialMintQuantity`
       // below: non-zero folds a MintSecurity GlobalState spend into the same
       // transaction; zero leaves the first mint as a separate admin action.
-      if (isSecurityToken) {
+      if (isRwaToken) {
         // Refuse before the backend writes anything. Phase 1 of the chain persists
         // a registration row and a bootstrap power-user row as a side effect of
         // BUILDING the genesis tx, so a combination that can never produce a valid
@@ -332,7 +332,7 @@ export function KycConfigStep({
           ? trustedEntities
           : (signingEntityVkey ? [signingEntityVkey] : []);
 
-        const chain = await buildSecurityTokenChain({
+        const chain = await buildRwaTokenChain({
           feePayerAddress: adminAddress,
           assetName: tokenDetails?.assetName
             ? Buffer.from(tokenDetails.assetName, 'utf8').toString('hex')
@@ -412,7 +412,7 @@ export function KycConfigStep({
         } catch (batchErr) {
           // Fallback: sequential signTx (one popup per tx). Surface the reason
           // so we know to keep the batch path primary.
-          console.warn('[security-token] signTxs batch failed, falling back to sequential signTx:',
+          console.warn('[rwa-token] signTxs batch failed, falling back to sequential signTx:',
             (batchErr as Error)?.message);
           setStatusMessage(`Phase 2/3 — wallet doesn't support batch sign, falling back to ${totalTxs} popups…`);
           signedCbors = [];
@@ -579,11 +579,11 @@ export function KycConfigStep({
         </p>
       </div>
 
-      {isSecurityTokenFlow && (
+      {isRwaTokenFlow && (
         <Card className="p-4 space-y-3 border border-primary-700/40 bg-primary-900/10">
           <h4 className="text-sm font-medium text-white">What happens when you click &ldquo;Initialize&rdquo;</h4>
           <p className="text-sm text-dark-300">
-            Setting up a BaFin-style security token chains{' '}
+            Setting up a BaFin-style RWA token chains{' '}
             <span className="text-white">{willFirstMint ? 'five transactions' : 'four transactions'}</span>.
             The backend builds them all up-front, your wallet signs them as a single batch (CIP-103), and the
             backend submits them sequentially without waiting for confirmations.
@@ -652,13 +652,13 @@ export function KycConfigStep({
             <span className="text-primary-400 font-mono text-xs mt-0.5">security_info</span>
             <span>Arbitrary compliance/regulation metadata stored on-chain</span>
           </li>
-          {(isKycExtendedFlow || isSecurityTokenFlow) && (
+          {(isKycExtendedFlow || isRwaTokenFlow) && (
             <li className="flex items-start gap-2">
               <span className="text-primary-400 font-mono text-xs mt-0.5">member_root_hash</span>
               <span>Blake2b-256 root of the Merkle Patricia Forestry allowlist. Updated automatically by the backend whenever a user completes KYC. Transfers to recipients not in the tree are rejected on-chain.</span>
             </li>
           )}
-          {isSecurityTokenFlow && (
+          {isRwaTokenFlow && (
             <>
               <li className="flex items-start gap-2">
                 <span className="text-primary-400 font-mono text-xs mt-0.5">admin_credential_hash</span>
@@ -694,7 +694,7 @@ export function KycConfigStep({
           helperText={`Hard cap on how many tokens can ever be minted. Defaults to the token supply (${defaultQuantity}); 0 means no tokens can be minted at all, not "no cap".`}
         />
 
-        {isSecurityTokenFlow && (
+        {isRwaTokenFlow && (
           /* Not an input. The initial supply is collected once, on the previous step
              ("Initial Supply"), and used verbatim here — a second box for the same
              number is two sources of truth for one on-chain value. */
@@ -733,7 +733,7 @@ export function KycConfigStep({
         />
       </Card>
 
-      {isSecurityTokenFlow && (
+      {isRwaTokenFlow && (
         <Card className="p-4 space-y-3">
           <label className="flex items-start gap-3 cursor-pointer">
             <input
@@ -928,7 +928,7 @@ export function KycConfigStep({
           isLoading={isProcessing}
           disabled={isProcessing || registrationBlocked}
         >
-          {isSecurityTokenFlow ? 'Register RWA Token' : 'Initialize Global State & Continue'}
+          {isRwaTokenFlow ? 'Register RWA Token' : 'Initialize Global State & Continue'}
         </Button>
       </div>
     </div>

@@ -70,7 +70,7 @@ public class ComplianceController {
     private final GlobalStateInitRepository globalStateInitRepository;
 
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
-    private final org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository securityTokenRegistrationRepository;
+    private final org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository rwaTokenRegistrationRepository;
 
     // ========== Blacklist Endpoints ==========
 
@@ -164,7 +164,7 @@ public class ComplianceController {
                             .build();
                 }
 
-                case "security-token" -> buildSecurityTokenContext(request.tokenPolicyId());
+                case "rwa-token" -> buildRwaTokenContext(request.tokenPolicyId());
 
                 default -> null;
             };
@@ -234,7 +234,7 @@ public class ComplianceController {
                             .build();
                 }
 
-                case "security-token" -> buildSecurityTokenContext(request.tokenPolicyId());
+                case "rwa-token" -> buildRwaTokenContext(request.tokenPolicyId());
 
                 default -> null;
             };
@@ -314,7 +314,7 @@ public class ComplianceController {
     // KYC does NOT use these endpoints — it uses the /global-state/* endpoints instead.
 
     /**
-     * Initialize a whitelist for a programmable token (security token).
+     * Initialize a whitelist for a programmable token (RWA token).
      * Creates the on-chain linked list structure for tracking approved addresses.
      * Requires the token to be already registered in the programmable token registry.
      *
@@ -666,16 +666,16 @@ public class ComplianceController {
     }
 
     /**
-     * Build a security-token context (issuer + GS/DL/PU policies + bootstrap
+     * Build a rwa-token context (issuer + GS/DL/PU policies + bootstrap
      * UTxO + receiver-KYC flag + root-hash state) from the persisted
-     * registration row. Mirrors the security-token arm in
+     * registration row. Mirrors the rwa-token arm in
      * {@code TokenOperationsService.transferToken / mintToken / burnToken}.
      */
-    private SubstandardContext buildSecurityTokenContext(String policyId) {
-        var reg = securityTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId)
+    private SubstandardContext buildRwaTokenContext(String policyId) {
+        var reg = rwaTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId)
                 .orElseThrow(() -> new RuntimeException(
-                        "could not find security-token registration data for policy: " + policyId));
-        return org.cardanofoundation.cip113.service.substandard.context.SecurityTokenContext.builder()
+                        "could not find rwa-token registration data for policy: " + policyId));
+        return org.cardanofoundation.cip113.service.substandard.context.RwaTokenContext.builder()
                 .issuerAdminPkh(reg.getIssuerAdminPkh())
                 .globalStatePolicyId(reg.getGlobalStatePolicyId())
                 .denylistPolicyId(reg.getDenylistPolicyId())
@@ -805,9 +805,9 @@ public class ComplianceController {
                 // Context-aware handlers must be resolved WITH a context: the factory
                 // throws "requires context" for a null one, so falling through to the
                 // default here surfaced as an opaque 500 rather than a seizure. The
-                // security-token seize builder reads everything it needs from the
+                // rwa-token seize builder reads everything it needs from the
                 // registration row, so an empty context is the correct one.
-                case "security-token" -> buildSecurityTokenContext(progToken.policyId());
+                case "rwa-token" -> buildRwaTokenContext(progToken.policyId());
 
                 default -> null;
             };

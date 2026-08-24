@@ -8,7 +8,7 @@ import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistMa
 import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
 import org.cardanofoundation.cip113.service.substandard.context.KycContext;
 import org.cardanofoundation.cip113.service.substandard.context.KycExtendedContext;
-import org.cardanofoundation.cip113.service.substandard.context.SecurityTokenContext;
+import org.cardanofoundation.cip113.service.substandard.context.RwaTokenContext;
 import org.cardanofoundation.cip113.service.substandard.context.SubstandardContext;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
@@ -64,7 +64,7 @@ public class SubstandardHandlerFactory {
             if (handler instanceof FreezeAndSeizeHandler
                     || handler instanceof KycSubstandardHandler
                     || handler instanceof KycExtendedSubstandardHandler
-                    || handler instanceof SecurityTokenSubstandardHandler) {
+                    || handler instanceof RwaTokenSubstandardHandler) {
                 contextAwareSubstandards.add(id);
                 log.info("Registered context-aware substandard: {}", id);
             } else {
@@ -163,17 +163,17 @@ public class SubstandardHandlerFactory {
             return handler;
         }
 
-        if ("security-token".equals(substandardId)) {
-            if (!(context instanceof SecurityTokenContext stCtx)) {
+        if ("rwa-token".equals(substandardId)) {
+            if (!(context instanceof RwaTokenContext stCtx)) {
                 throw new IllegalArgumentException(
-                        "security-token handler requires SecurityTokenContext, got: " +
+                        "rwa-token handler requires RwaTokenContext, got: " +
                         (context != null ? context.getClass().getSimpleName() : "null"));
             }
 
-            SecurityTokenSubstandardHandler handler =
-                    applicationContext.getBean(SecurityTokenSubstandardHandler.class);
+            RwaTokenSubstandardHandler handler =
+                    applicationContext.getBean(RwaTokenSubstandardHandler.class);
             handler.setContext(stCtx);
-            log.debug("Created SecurityTokenSubstandardHandler with context: {}", stCtx);
+            log.debug("Created RwaTokenSubstandardHandler with context: {}", stCtx);
             return handler;
         }
 

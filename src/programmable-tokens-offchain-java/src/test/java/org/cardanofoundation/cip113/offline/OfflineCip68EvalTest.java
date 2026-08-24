@@ -163,7 +163,7 @@ public class OfflineCip68EvalTest {
      * tomorrow. A {@code (222)} here would be a promise the substandard cannot keep, and no
      * off-chain guard can keep it either, since whoever holds the minting authority can build the
      * transaction without this backend. So {@code dummy} and {@code freeze-and-seize} are always
-     * {@code (333)}; {@code security-token} is the only one that may claim {@code (222)}, because
+     * {@code (333)}; {@code rwa-token} is the only one that may claim {@code (222)}, because
      * its GlobalState {@code mintable_amount} is a real on-chain ceiling.
      */
     @Test
@@ -440,7 +440,7 @@ public class OfflineCip68EvalTest {
         Assertions.assertTrue(size < 16384, "tx exceeds 16384 bytes: " + size);
     }
 
-    // ------------------------------------------------------------------ security-token
+    // ------------------------------------------------------------------ rwa-token
 
     /**
      * No reference-script output this platform publishes may be Ada-only.
@@ -469,7 +469,7 @@ public class OfflineCip68EvalTest {
      */
     @Test
     public void publishedReferenceScriptOutputsAreNeverAdaOnly() throws Exception {
-        var st = securityTokenChain(METADATA, 1_000_000L, "1000",
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
                 BootstrapFixture.ADMIN.baseAddress());
         var built = st.built();
         var reg = st.registrations().get(built.programmableTokenPolicyId());
@@ -497,7 +497,7 @@ public class OfflineCip68EvalTest {
         }
         Assertions.assertTrue(checked >= 2,
                 "expected at least the two published per-token scripts, found " + checked);
-        log.info("[security-token] {} reference-script outputs checked, all carry a marker", checked);
+        log.info("[rwa-token] {} reference-script outputs checked, all carry a marker", checked);
         Assertions.assertNotNull(reg.getRefScriptsTxHash());
     }
 
@@ -518,18 +518,18 @@ public class OfflineCip68EvalTest {
      * measures the serialized transaction.
      */
     @Test
-    public void securityTokenBurnFitsUnderMaxTxSize() throws Exception {
+    public void rwaTokenBurnFitsUnderMaxTxSize() throws Exception {
         // Mint to the ADMIN, not Alice: the burner must be a power user holding both
         // can_burn (minting_logic) and can_force_transfer (third_party_transfer_logic),
         // and the bootstrap power user is the admin.
-        var st = securityTokenChain(METADATA, 1_000_000L, "1000",
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
                 BootstrapFixture.ADMIN.baseAddress());
         var chain = st.chain();
         var boot = st.boot();
         var handler = st.handler();
         var built = st.built();
         var reg = st.registrations().get(built.programmableTokenPolicyId());
-        var label = "security-token";
+        var label = "rwa-token";
 
         // The publish step is what makes the burn buildable at all — assert it ran and was
         // recorded, otherwise the burn's own precondition would be what fails and this test
@@ -580,9 +580,209 @@ public class OfflineCip68EvalTest {
                 "burn exceeds the 16384-byte ledger limit at " + size + " bytes");
     }
     /**
+     * An ordinary transfer validates.
+     *
+     * <p>This path had NO offline coverage until the 2026-08-21 upstream move, which is
+     * exactly the wrong combination: {@code transfer_logic_script} lost two compile-time
+     * parameters ({@code registry_policy_id}, {@code plb_script_hash}) AND its redeemer lost
+     * its leading {@code registry_node_ref_input_index}. A wrong parameter list yields a
+     * script hash nobody can satisfy; a wrong redeemer shape fails to decode. Neither is
+     * visible until something builds a real transfer and evaluates it.
+     *
+     * <p>Alice receives the registration's first mint and sends part of it to the admin,
+     * which also exercises the change output — so the validator sees TWO destinations and
+     * the destination-action list has to line up with them in output order.
+     */
+    @Test
+    public void rwaTokenTransferEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ALICE.baseAddress(), /*rewardAccountsRegistered=*/ true);
+        var chain = st.chain();
+        var boot = st.boot();
+        var handler = st.handler();
+        var built = st.built();
+        var reg = st.registrations().get(built.programmableTokenPolicyId());
+        var policyId = built.programmableTokenPolicyId();
+        var label = "rwa-token";
+
+        // Alice holds the token but no ADA — the bootstrap only funds the admin — and the
+        // transfer needs a fee-paying input at the SENDER's address.
+        chain.seedAda("offline-transfer-alice-funding", BootstrapFixture.ALICE.baseAddress(), 7, 100);
+
+        var request = new org.cardanofoundation.cip113.model.TransferTokenRequest(
+                BootstrapFixture.ALICE.baseAddress(),
+                policyId + reg.getSecurityAssetNameHex(),
+                "400",                                  // partial: forces a change output
+                BootstrapFixture.ADMIN.baseAddress(),
+                null, null, null, null, null, null, null);
+
+        var result = handler.buildTransferTransaction(request, boot.params());
+        Assertions.assertTrue(result.isSuccessful(), "transfer build failed: " + result.error());
+
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(result.unsignedCborTx()));
+        int evaluated = chain.reportAndCheckRedeemers(label + "/transfer", tx);
+        Assertions.assertTrue(evaluated > 0,
+                "no redeemer was genuinely evaluated on the transfer — transfer_logic and "
+                + "prog-logic-global did not run, so this proves nothing");
+        Assertions.assertTrue(tx.serialize().length < 16384,
+                "transfer exceeds the 16384-byte ledger limit");
+    }
+
+    /**
+     * Adding and removing a denylist entry both validate.
+     *
+     * <p>The denylist SPEND validator changed at the 2026-08-21 upstream — it now resolves
+     * its own input and requires it to carry the list policy — so its hash moved, and its
+     * hash is threaded into three other validators as {@code denylist_script_hash}. That
+     * makes it worth an end-to-end check rather than an assumption.
+     */
+    @Test
+    public void rwaTokenDenylistAddAndRemoveEvaluate() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var chain = st.chain();
+        var boot = st.boot();
+        var handler = st.handler();
+        var policyId = st.built().programmableTokenPolicyId();
+        var label = "rwa-token";
+
+        var targetStake = stakeCredHex(BootstrapFixture.ALICE.baseAddress());
+
+        var add = handler.buildAddToBlacklistTransaction(
+                new org.cardanofoundation.cip113.service.substandard.capabilities
+                        .BlacklistManageable.AddToBlacklistRequest(
+                        policyId,
+                        st.registrations().get(policyId).getSecurityAssetNameHex(),
+                        BootstrapFixture.ALICE.baseAddress(),
+                        BootstrapFixture.ADMIN.baseAddress()),
+                boot.params());
+        Assertions.assertTrue(add.isSuccessful(),
+                "denylist add build failed for stake " + targetStake + ": " + add.error());
+        var addTx = Transaction.deserialize(HexUtil.decodeHexString(add.unsignedCborTx()));
+        Assertions.assertTrue(chain.reportAndCheckRedeemers(label + "/denylist-add", addTx) > 0,
+                "no redeemer was evaluated on the denylist add");
+
+        // REMOVE IS NOT IMPLEMENTED, and this pins that rather than papering over it.
+        //
+        // The endpoint and the capability exist — BlacklistManageable declares it and the
+        // controller routes to it — so from outside the platform it looks available. The
+        // builder refuses explicitly instead: removing an element from the denylist linked
+        // list means finding the node AND its predecessor anchor, and that walk was never
+        // written. Asserting the refusal keeps the gap visible; the day someone implements
+        // it, this test fails and tells them to replace it with a real evaluation.
+        chain.submit(addTx);
+
+        var remove = handler.buildRemoveFromBlacklistTransaction(
+                new org.cardanofoundation.cip113.service.substandard.capabilities
+                        .BlacklistManageable.RemoveFromBlacklistRequest(
+                        policyId,
+                        st.registrations().get(policyId).getSecurityAssetNameHex(),
+                        BootstrapFixture.ALICE.baseAddress(),
+                        BootstrapFixture.ADMIN.baseAddress()),
+                boot.params());
+        Assertions.assertFalse(remove.isSuccessful(),
+                "denylist remove is a stub — if it now builds, implement a real evaluation "
+                + "assertion here instead of this one");
+        Assertions.assertTrue(String.valueOf(remove.error()).contains("not yet implemented"),
+                "the refusal must say the path is unimplemented rather than fail obscurely; "
+                + "got: " + remove.error());
+        log.info("[{}/denylist-remove] correctly refused as unimplemented: {}",
+                label, remove.error());
+    }
+
+    /**
+     * The standalone member-root-hash publisher validates.
+     *
+     * <p>{@code UpdateMemberRootHash} is reachable two ways — as one of the thirteen
+     * {@code GlobalStateSpendAction}s through the update chain, and through this dedicated
+     * builder, which is what the KYC sync path calls. They are different code, so covering
+     * the chain does not cover this.
+     */
+    @Test
+    public void rwaTokenUpdateMemberRootHashEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var chain = st.chain();
+        var boot = st.boot();
+        var policyId = st.built().programmableTokenPolicyId();
+
+        var adminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        byte[] newRoot = HexUtil.decodeHexString(
+                "1111111111111111111111111111111111111111111111111111111111111111");
+
+        var result = st.handler().buildUpdateMemberRootHashTransaction(
+                policyId, newRoot, BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
+        Assertions.assertTrue(result.isSuccessful(),
+                "update-member-root-hash build failed: " + result.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(result.unsignedCborTx()));
+        Assertions.assertTrue(
+                chain.reportAndCheckRedeemers("rwa-token/member-root-hash", tx) > 0,
+                "no redeemer was evaluated on the member-root-hash update");
+    }
+
+    /**
+     * The admin global-state actions validate.
+     *
+     * <p>{@code global_state_spend_validator}'s hash moved at the 2026-08-21 upstream, and
+     * every admin action spends the GlobalState UTxO through it. The redeemer shape did not
+     * change — all thirteen {@code GlobalStateSpendAction} constructors kept their order —
+     * but "the shape is unchanged" is a claim about the type, not about whether the
+     * validator still accepts what we build.
+     *
+     * <p>Three representative actions, chained: each transaction spends the previous one's
+     * GlobalState output, which is the property that makes a multi-field admin edit possible
+     * at all (the validator forbids batching, so N field changes are N transactions).
+     */
+    @Test
+    public void rwaTokenGlobalStateAdminActionsEvaluate() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var chain = st.chain();
+        var boot = st.boot();
+        var handler = st.handler();
+        var policyId = st.built().programmableTokenPolicyId();
+        var label = "rwa-token";
+
+        var adminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+
+        java.util.function.BiFunction<String, Object[], org.cardanofoundation.cip113.service
+                .substandard.RwaTokenSubstandardHandler.GsChangeSpec> spec =
+                (action, f) -> new org.cardanofoundation.cip113.service.substandard
+                        .RwaTokenSubstandardHandler.GsChangeSpec(
+                        action,
+                        (Boolean) f[0], (String) f[1], null, null, null, null, null,
+                        (Boolean) f[2], (Boolean) f[3], null, null, null);
+
+        var changes = java.util.List.of(
+                spec.apply("ModifySecurityInfo", new Object[]{null, "44deadbeef", null, null}),
+                spec.apply("SetRequiresSenderKyc", new Object[]{null, null, Boolean.TRUE, null}),
+                spec.apply("PauseTransfers", new Object[]{Boolean.TRUE, null, null, null}));
+
+        var result = handler.buildGlobalStateUpdateChain(
+                policyId, changes, BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
+        Assertions.assertTrue(result.isSuccessful(),
+                "global-state update chain build failed: " + result.error());
+        Assertions.assertEquals(3, result.metadata().size(),
+                "one transaction per action — the validator forbids batching field changes");
+
+        int totalEvaluated = 0;
+        for (int i = 0; i < result.metadata().size(); i++) {
+            var tx = Transaction.deserialize(HexUtil.decodeHexString(result.metadata().get(i)));
+            totalEvaluated += chain.reportAndCheckRedeemers(label + "/global-state[" + i + "]", tx);
+        }
+        Assertions.assertTrue(totalEvaluated >= 3,
+                "each chained admin transaction must have run the global-state spend validator; "
+                + "only " + totalEvaluated + " redeemers were genuinely evaluated");
+    }
+
+    /**
      * A seizure actually validates on chain.
      *
-     * <p>The security token's regulatory force-transfer path is CIP-113's
+     * <p>The RWA token's regulatory force-transfer path is CIP-113's
      * {@code ThirdPartyAct} branch, gated by this substandard's
      * {@code third_party_transfer_logic_script} and the {@code can_force_transfer}
      * power-user role. The platform advertised no seize capability at all for this
@@ -594,15 +794,15 @@ public class OfflineCip68EvalTest {
      * holder of {@code can_force_transfer}) seizes it to itself.
      */
     @Test
-    public void securityTokenSeizeEvaluates() throws Exception {
-        var st = securityTokenChain(METADATA, 1_000_000L, "1000",
+    public void rwaTokenSeizeEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
                 BootstrapFixture.ALICE.baseAddress());
         var chain = st.chain();
         var boot = st.boot();
         var handler = st.handler();
         var built = st.built();
         var reg = st.registrations().get(built.programmableTokenPolicyId());
-        var label = "security-token";
+        var label = "rwa-token";
 
         Assertions.assertNotNull(reg.getThirdPartyTransferLogicRefIndex(),
                 "third_party_transfer_logic must be published — it does not fit inline");
@@ -659,8 +859,8 @@ public class OfflineCip68EvalTest {
      * signs a transaction the chain will reject, and learns why only at submit.
      */
     @Test
-    public void securityTokenSeizeRefusedForNonPowerUser() throws Exception {
-        var st = securityTokenChain(METADATA, 1_000_000L, "1000",
+    public void rwaTokenSeizeRefusedForNonPowerUser() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
                 BootstrapFixture.ALICE.baseAddress());
         var boot = st.boot();
         var handler = st.handler();
@@ -689,7 +889,7 @@ public class OfflineCip68EvalTest {
         Assertions.assertTrue(result.error() != null && result.error().contains("power user"),
                 "the refusal must name the missing power-user node, not some unrelated "
                 + "precondition — it read: " + result.error());
-        log.info("[security-token/seize] refused as expected: {}", result.error());
+        log.info("[rwa-token/seize] refused as expected: {}", result.error());
     }
 
     /**
@@ -706,14 +906,14 @@ public class OfflineCip68EvalTest {
      * supply cap and from the denylist and KYC gates.
      */
     @Test
-    public void securityTokenChainAndCip68Mint() throws Exception {
-        var st = securityTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress());
+    public void rwaTokenChainAndCip68Mint() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress());
         var chain = st.chain();
         var boot = st.boot();
         var handler = st.handler();
         var registrations = st.registrations();
         var built = st.built();
-        var label = "security-token";
+        var label = "rwa-token";
         var policyId = built.programmableTokenPolicyId();
 
         // ── the registration: this is where the CIP-68 pair is created ──
@@ -750,13 +950,37 @@ public class OfflineCip68EvalTest {
                 "the reference NFT must be APPENDED at output 4 — inserting it earlier would"
                 + " shift the registry node off 2 or the GlobalState off 3");
 
-        // The contract requires a PLB payment credential AND an inline stake credential on
-        // the reference output; an enterprise address traps.
+        // The user token sits at its recipient's stake credential, as always.
+        //
+        // The REFERENCE NFT does not, and this changed at the 2026-08-21 upstream.
+        // `reference_nft_output_is_pinned` used to require a programmable-logic-base payment
+        // credential plus any inline stake credential; it now requires
+        // `credential_hash(owner) == admin_credential_hash` — the stake half must hash to the
+        // credential GlobalState names as admin, i.e. the one that SIGNS, which for a base
+        // address is the PAYMENT key hash and not the delegation one. Asserting the old
+        // delegation hash here would pass only for a builder the chain rejects.
+        //
+        // (The PLB payment credential is no longer demanded by this validator either. We
+        // still use it, because the reference NFT is a token of this policy and CIP-113
+        // confines those to the base — so the assertion below is now pinning OUR choice
+        // rather than the substandard's requirement.)
         var plb = boot.params().programmableLogicBaseParams().scriptHash();
+        var adminCredentialHash = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
         Cip68Evidence.assertProgrammableLogicBaseAddress(label + "/registration", regTx,
                 userToken.outputIndex(), plb, stakeCredHex(BootstrapFixture.ALICE.baseAddress()));
         Cip68Evidence.assertProgrammableLogicBaseAddress(label + "/registration", regTx,
-                refToken.outputIndex(), plb, stakeCredHex(BootstrapFixture.ADMIN.baseAddress()));
+                refToken.outputIndex(), plb, adminCredentialHash);
+        // …and the same output must carry NONE of the RWA token, the other half of the
+        // tightened check.
+        Assertions.assertEquals(0,
+                Cip68Evidence.tokensOfPolicy(regTx, policyId).stream()
+                        .filter(t -> t.outputIndex() == refToken.outputIndex())
+                        .filter(t -> !Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label()))
+                        .count(),
+                "the reference-NFT output must hold no RWA token — "
+                + "reference_nft_output_is_pinned now requires quantity_of(security) == 0");
         Cip68Evidence.assertDatumRoundTrip(label + "/registration", regTx, refToken.outputIndex(), METADATA);
 
         Assertions.assertTrue(registrations.get(policyId).isCip68ReferenceMinted(),
@@ -809,8 +1033,8 @@ public class OfflineCip68EvalTest {
      * stored metadata is the record of an NFT that already exists.
      */
     @Test
-    public void securityTokenRefusesToGuessWhenTheReferenceLookupFails() throws Exception {
-        var st = securityTokenChain(METADATA, 1_000_000L, "1000",
+    public void rwaTokenRefusesToGuessWhenTheReferenceLookupFails() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
                 BootstrapFixture.ALICE.baseAddress());
         var policyId = st.built().programmableTokenPolicyId();
         var reg = st.registrations().get(policyId);
@@ -828,7 +1052,7 @@ public class OfflineCip68EvalTest {
                 + mint.error());
 
         var mintTx = Transaction.deserialize(HexUtil.decodeHexString(mint.unsignedCborTx()));
-        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("security-token/no-lookup", mintTx) > 0,
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("rwa-token/no-lookup", mintTx) > 0,
                 "no redeemer was genuinely evaluated");
         Assertions.assertEquals(1, Cip68Evidence.tokensOfPolicy(mintTx, policyId).size(),
                 "one asset name under the issuance policy");
@@ -845,10 +1069,10 @@ public class OfflineCip68EvalTest {
      * construction rather than by locking.
      */
     @Test
-    public void securityTokenReferenceMintIsClaimedByCompareAndSet() throws Exception {
+    public void rwaTokenReferenceMintIsClaimedByCompareAndSet() throws Exception {
         // WITH a first mint: the reference NFT rides on RegisterMint, so a CIP-68 token
         // registered structurally would have no (100) at all.
-        var st = securityTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress());
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress());
         var policyId = st.built().programmableTokenPolicyId();
         var reg = st.registrations().get(policyId);
 
@@ -872,15 +1096,15 @@ public class OfflineCip68EvalTest {
      * allowance — so the token is fungible and must carry (333), never (222).
      */
     @Test
-    public void securityTokenAtACapOfOneIsStillFungible() throws Exception {
+    public void rwaTokenAtACapOfOneIsStillFungible() throws Exception {
         // A first mint of 1 against a cap of 1: exactly the boundary. A CIP-68 token must be
         // registered WITH a mint (the (100) rides on RegisterMint), and a cap of 1 leaves no
         // room for a second, so the label is read off the registration itself.
-        var st = securityTokenChain(METADATA, 1L, "1", BootstrapFixture.ALICE.baseAddress());
+        var st = rwaTokenChain(METADATA, 1L, "1", BootstrapFixture.ALICE.baseAddress());
         var policyId = st.built().programmableTokenPolicyId();
         var registeredName = st.registrations().get(policyId).getSecurityAssetNameHex();
 
-        log.info("[security-token/cap-1] registered asset name = {} (label {})",
+        log.info("[rwa-token/cap-1] registered asset name = {} (label {})",
                 registeredName, Cip68.readLabel(registeredName));
 
         Assertions.assertEquals(Integer.valueOf(Cip68.LABEL_FT), Cip68.readLabel(registeredName),
@@ -1149,7 +1373,7 @@ public class OfflineCip68EvalTest {
                         Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
                         // Deliberately null, not a mock: isStakeAddressRegistered never touches the
                         // builder, and mocking QuickTxBuilder instruments it for every test in the
-                        // JVM under the inline mock maker — which silently broke the security-token
+                        // JVM under the inline mock maker — which silently broke the rwa-token
                         // burn's real evaluator whenever this class ran as a whole.
                         null,
                         Mockito.mock(AccountService.class),
@@ -1213,7 +1437,7 @@ public class OfflineCip68EvalTest {
         return repo;
     }
 
-    // ------------------------------------------------------------ security-token fixtures
+    // ------------------------------------------------------------ rwa-token fixtures
 
     /**
      * The CIP-113 in-place upgrade path evaluates.
@@ -1234,8 +1458,8 @@ public class OfflineCip68EvalTest {
      * admin signature, and the nothing-minted rule.
      */
     @Test
-    public void securityTokenRegistryNodeUpgradeEvaluates() throws Exception {
-        var st = securityTokenChain(METADATA, 1_000_000L, "1000",
+    public void rwaTokenRegistryNodeUpgradeEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
                 BootstrapFixture.ALICE.baseAddress());
         var policyId = st.built().programmableTokenPolicyId();
 
@@ -1254,7 +1478,7 @@ public class OfflineCip68EvalTest {
                 "registry-node upgrade build failed: " + upgrade.error());
 
         var tx = Transaction.deserialize(HexUtil.decodeHexString(upgrade.unsignedCborTx()));
-        int evaluated = st.chain().reportAndCheckRedeemers("security-token/upgradeRegistryNode", tx);
+        int evaluated = st.chain().reportAndCheckRedeemers("rwa-token/upgradeRegistryNode", tx);
         Assertions.assertTrue(evaluated > 0,
                 "no redeemer was genuinely evaluated on the registry-node upgrade — the "
                 + "ex-units would be a ceiling fallback, which proves nothing about the scripts");
@@ -1291,12 +1515,12 @@ public class OfflineCip68EvalTest {
      * there now.
      */
     @Test
-    public void securityTokenGenesisRegistersBothMintingRewardAccounts() throws Exception {
-        var st = securityTokenChain(METADATA, 1_000_000L, "1000",
+    public void rwaTokenGenesisRegistersBothMintingRewardAccounts() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
                 BootstrapFixture.ALICE.baseAddress());
         var reg = st.registrations().get(st.built().programmableTokenPolicyId());
 
-        var scripts = new org.cardanofoundation.cip113.service.SecurityTokenScriptBuilderService(
+        var scripts = new org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService(
                 HandlerFixtures.substandardService(),
                 HandlerFixtures.protocolScriptBuilderService())
                 .resolveScripts(
@@ -1331,7 +1555,7 @@ public class OfflineCip68EvalTest {
 
         String proxyHash = scripts.mintingLogicProxyHashHex();
         String authorityHash = scripts.mintingAuthorityHashHex();
-        log.info("[security-token/genesis] registers script stake credentials {} (proxy={}, authority={})",
+        log.info("[rwa-token/genesis] registers script stake credentials {} (proxy={}, authority={})",
                 registered, proxyHash, authorityHash);
 
         Assertions.assertTrue(registered.contains(proxyHash),
@@ -1350,23 +1574,61 @@ public class OfflineCip68EvalTest {
     }
 
     /**
-     * A security-token protocol whose genesis → AddPowerUser → registration chain has been built,
+     * A rwa-token protocol whose genesis → AddPowerUser → registration chain has been built,
      * evaluated and virtually submitted, ready for a mint.
      *
      * <p>{@code utxoProvider} and {@code registrationRepository} are exposed because the H3 cases
      * re-stub them mid-test: the whole finding is about what happens when the chain lookup gives a
      * different answer from the one an immediately-consistent in-memory chain can produce.
      */
-    private record SecurityTokenChain(
+    /** A stake-registration repository that reports every reward account as registered.
+     *
+     *  <p>Reward-account existence is a LEDGER rule, not a Plutus one, so it is invisible to
+     *  script evaluation and cannot be exercised offline. What these tests are for is the
+     *  script side; the registration certs are built for real by the chain under test. */
+    private static CustomStakeRegistrationRepository registeredStakeRepository() {
+        var repo = Mockito.mock(CustomStakeRegistrationRepository.class);
+        var entity = new com.bloxbean.cardano.yaci.store.staking.storage.impl.model.StakeRegistrationEntity();
+        entity.setType(com.bloxbean.cardano.yaci.core.model.certs.CertificateType.STAKE_REGISTRATION);
+        Mockito.when(repo.findRegistrationsByStakeAddress(Mockito.anyString()))
+                .thenReturn(java.util.Optional.of(entity));
+        return repo;
+    }
+
+    /** Power-user mirror that grants ADMIN to the bootstrap admin and nobody else. */
+    private static org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository
+            adminOnlyPowerUserRepository() {
+        var repo = Mockito.mock(
+                org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository.class);
+        String adminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        Mockito.when(repo.findByProgrammableTokenPolicyIdAndPowerUserPkh(
+                        Mockito.anyString(), Mockito.anyString()))
+                .thenAnswer(inv -> {
+                    if (!adminPkh.equalsIgnoreCase(inv.getArgument(1))) {
+                        return java.util.Optional.empty();
+                    }
+                    var e = new org.cardanofoundation.cip113.entity.RwaTokenPowerUserEntity();
+                    e.setProgrammableTokenPolicyId(inv.getArgument(0));
+                    e.setPowerUserPkh(adminPkh);
+                    // Every capability, matching the bootstrap power user the genesis mints.
+                    e.setCapabilities(31);
+                    return java.util.Optional.of(e);
+                });
+        return repo;
+    }
+
+    private record RwaTokenChain(
             OfflineChain chain,
             BootstrapFixture.Bootstrapped boot,
-            org.cardanofoundation.cip113.service.substandard.SecurityTokenSubstandardHandler handler,
-            java.util.Map<String, org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity>
+            org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler handler,
+            java.util.Map<String, org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity>
                     registrations,
-            org.cardanofoundation.cip113.service.substandard.SecurityTokenSubstandardHandler.ChainBuildResult
+            org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler.ChainBuildResult
                     built,
             org.cardanofoundation.cip113.service.UtxoProvider utxoProvider,
-            org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository
+            org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository
                     registrationRepository) {
     }
 
@@ -1378,13 +1640,18 @@ public class OfflineCip68EvalTest {
      * is {@code ABSENT}. It never returns {@code UNKNOWN} on its own — an in-memory chain has no
      * failure mode — which is precisely why the H3 test re-stubs it.
      */
-    private static org.cardanofoundation.cip113.service.UtxoProvider securityTokenUtxoProvider(
+    private static org.cardanofoundation.cip113.service.UtxoProvider rwaTokenUtxoProvider(
             OfflineChain chain) {
         var utxoProvider = Mockito.mock(org.cardanofoundation.cip113.service.UtxoProvider.class);
         Mockito.when(utxoProvider.findUtxo(Mockito.anyString(), Mockito.anyInt()))
                 .thenAnswer(inv -> chain.utxoSupplier().getTxOutput(inv.getArgument(0), inv.getArgument(1)));
         Mockito.when(utxoProvider.findUtxos(Mockito.anyString()))
                 .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
+        // Linked-list anchors (denylist, power users) are found BY POLICY, not by unit —
+        // their asset name is the empty root name — so the mutation builders need this or
+        // they cannot see the roots the genesis transaction minted.
+        Mockito.when(utxoProvider.findUtxosByPolicy(Mockito.anyString()))
+                .thenAnswer(inv -> chain.findUtxosByPolicy(inv.getArgument(0)));
         Mockito.when(utxoProvider.findUtxoByAsset(Mockito.anyString(), Mockito.anyString()))
                 .thenAnswer(inv -> {
                     String unit = inv.getArgument(0) + (String) inv.getArgument(1);
@@ -1401,21 +1668,21 @@ public class OfflineCip68EvalTest {
     }
 
     /**
-     * An in-memory {@code SecurityTokenRegistrationRepository}.
+     * An in-memory {@code RwaTokenRegistrationRepository}.
      *
      * <p>{@code claimCip68ReferenceMint} implements the real compare-and-set semantics against the
      * map — set the flag and return 1 only if it was clear, otherwise return 0 and change nothing.
      * A mock that returned Mockito's default {@code 0} would make every reference mint look like a
      * lost race; one that always returned 1 would never exercise the guard.
      */
-    private static org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository
-            securityTokenRegistrationRepository(
+    private static org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository
+            rwaTokenRegistrationRepository(
                     java.util.Map<String,
-                            org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity> registrations) {
+                            org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity> registrations) {
         var repo = Mockito.mock(
-                org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository.class);
+                org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository.class);
         Mockito.when(repo.save(Mockito.any())).thenAnswer(inv -> {
-            var entity = (org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity)
+            var entity = (org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity)
                     inv.getArgument(0);
             registrations.put(entity.getProgrammableTokenPolicyId(), entity);
             return entity;
@@ -1434,14 +1701,14 @@ public class OfflineCip68EvalTest {
     }
 
     /**
-     * Build, evaluate and virtually submit the whole security-token registration chain.
+     * Build, evaluate and virtually submit the whole rwa-token registration chain.
      *
      * @param metadata             CIP-68 metadata, or null for a non-CIP-68 registration
      * @param initialMintableAmount the GlobalState cap — note this does NOT choose the label
      */
-    private SecurityTokenChain securityTokenChain(Cip68Metadata metadata, long initialMintableAmount)
+    private RwaTokenChain rwaTokenChain(Cip68Metadata metadata, long initialMintableAmount)
             throws Exception {
-        return securityTokenChain(metadata, initialMintableAmount, "0",
+        return rwaTokenChain(metadata, initialMintableAmount, "0",
                 BootstrapFixture.ALICE.baseAddress());
     }
 
@@ -1454,18 +1721,30 @@ public class OfflineCip68EvalTest {
      *        user holding both can_burn and can_force_transfer, so a burn test must send the
      *        supply to the admin rather than to Alice.
      */
-    private SecurityTokenChain securityTokenChain(Cip68Metadata metadata, long initialMintableAmount,
+    private RwaTokenChain rwaTokenChain(Cip68Metadata metadata, long initialMintableAmount,
                                                   String initialMintQuantity, String recipientAddress)
+            throws Exception {
+        return rwaTokenChain(metadata, initialMintableAmount, initialMintQuantity,
+                recipientAddress, /*rewardAccountsRegistered=*/ false);
+    }
+
+    /** @param rewardAccountsRegistered when true, the stake-registration repository reports
+     *  every reward account as already registered. Needed by paths whose PRECONDITION is a
+     *  registered account (the transfer refuses outright without one) and harmful to paths
+     *  that assert genesis creates those accounts — hence a parameter rather than a default. */
+    private RwaTokenChain rwaTokenChain(Cip68Metadata metadata, long initialMintableAmount,
+                                                  String initialMintQuantity, String recipientAddress,
+                                                  boolean rewardAccountsRegistered)
             throws Exception {
         var chain = new OfflineChain();
         var boot = BootstrapFixture.bootstrap(chain);
-        var label = "security-token";
+        var label = "rwa-token";
 
         var registrations = new java.util.HashMap<String,
-                org.cardanofoundation.cip113.entity.SecurityTokenRegistrationEntity>();
+                org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity>();
 
-        var utxoProvider = securityTokenUtxoProvider(chain);
-        var registrationRepository = securityTokenRegistrationRepository(registrations);
+        var utxoProvider = rwaTokenUtxoProvider(chain);
+        var registrationRepository = rwaTokenRegistrationRepository(registrations);
 
         // The chain orchestrator builds genesis → AddPowerUser → registration back-to-back with
         // nothing submitted in between, handing each transaction's outputs to this supplier so
@@ -1474,15 +1753,24 @@ public class OfflineCip68EvalTest {
         var hybridUtxoSupplier =
                 new org.cardanofoundation.cip113.service.HybridUtxoSupplier(chain.utxoService());
 
-        var handler = new org.cardanofoundation.cip113.service.substandard.SecurityTokenSubstandardHandler(
-                new org.cardanofoundation.cip113.service.SecurityTokenScriptBuilderService(
+        var handler = new org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler(
+                new org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService(
                         HandlerFixtures.substandardService(),
                         HandlerFixtures.protocolScriptBuilderService()),
                 HandlerFixtures.protocolScriptBuilderService(),
-                Mockito.mock(org.cardanofoundation.cip113.service.SecurityTokenAllowlistService.class),
+                Mockito.mock(org.cardanofoundation.cip113.service.RwaTokenAllowlistService.class),
                 registrationRepository,
-                Mockito.mock(org.cardanofoundation.cip113.repository.SecurityTokenDenylistEntryRepository.class),
-                Mockito.mock(org.cardanofoundation.cip113.repository.SecurityTokenPowerUserRepository.class),
+                Mockito.mock(org.cardanofoundation.cip113.repository.RwaTokenDenylistEntryRepository.class),
+                // The power-user DB MIRROR, stubbed for the admin only.
+                //
+                // Denylist mutations gate on it off-chain ("is this signer an ADMIN power
+                // user?") so the on-chain `is_admin` failure does not surface as an opaque
+                // script error. In a live deployment genesis writes that row; the offline
+                // chain has no database, so a bare mock refuses every mutation before a
+                // transaction is ever built. Scoped to the ADMIN's pkh rather than blanket-
+                // true, so a test that expects a NON-admin to be refused still gets its
+                // refusal.
+                adminOnlyPowerUserRepository(),
                 Mockito.mock(ProgrammableTokenRegistryRepository.class),
                 utxoProvider,
                 new AccountService(utxoProvider),
@@ -1497,7 +1785,16 @@ public class OfflineCip68EvalTest {
                 // an unsubmitted output, so the evaluator resolves them through this rather
                 // than the backend — without it the app falls back to fabricated ex-units.
                 new org.cardanofoundation.cip113.service.HybridScriptSupplier(chain.scriptSupplier()),
-                Mockito.mock(CustomStakeRegistrationRepository.class),
+                // OPT-IN, and deliberately not the default. Genesis SKIPS emitting the
+                // minting proxy/authority registration certs when it believes those accounts
+                // already exist (see the two `AlreadyRegistered` checks in the handler), so a
+                // blanket "everything is registered" stub silently deletes the certs that
+                // rwaTokenGenesisRegistersBothMintingRewardAccounts exists to assert —
+                // it turned a passing invariant test red, which is the stub lying rather than
+                // the code breaking. Only the paths that need a PRE-existing reward account
+                // (transfer) ask for it.
+                rewardAccountsRegistered ? registeredStakeRepository()
+                                         : Mockito.mock(CustomStakeRegistrationRepository.class),
                 // A real converter, not a mock. Every mint now clamps its validity upper
                 // bound through cardanoConverters.time().toSlot(); an unstubbed mock returns
                 // null from time() and the whole mint path dies with an NPE that looks
@@ -1511,8 +1808,8 @@ public class OfflineCip68EvalTest {
         var adminPkh = new Address(BootstrapFixture.ADMIN.baseAddress())
                 .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
 
-        var registerRequest = org.cardanofoundation.cip113.model.SecurityTokenRegisterRequest.builder()
-                .substandardId("security-token")
+        var registerRequest = org.cardanofoundation.cip113.model.RwaTokenRegisterRequest.builder()
+                .substandardId("rwa-token")
                 .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
                 .recipientAddress(recipientAddress)
                 .assetName(BASE_ASSET_NAME_HEX)
@@ -1530,7 +1827,7 @@ public class OfflineCip68EvalTest {
 
         var chainResult = handler.buildFullRegistrationChain(registerRequest, boot.params());
         Assertions.assertTrue(chainResult.isSuccessful(),
-                "security-token registration chain build failed: " + chainResult.error());
+                "rwa-token registration chain build failed: " + chainResult.error());
 
         var built = chainResult.metadata();
         log.info("[{}] chain built: globalStatePolicy={} progTokenPolicy={} denylistPolicy={}",
@@ -1576,11 +1873,11 @@ public class OfflineCip68EvalTest {
             chain.submit(stageTx);
         }
 
-        return new SecurityTokenChain(chain, boot, handler, registrations, built,
+        return new RwaTokenChain(chain, boot, handler, registrations, built,
                 utxoProvider, registrationRepository);
     }
 
-    /** A security-token mint request against the offline fixture's admin/recipient pair. */
+    /** A rwa-token mint request against the offline fixture's admin/recipient pair. */
     private static org.cardanofoundation.cip113.model.MintTokenRequest mintTokenRequest(
             String policyId, String assetName, String quantity, Cip68Metadata metadata) {
         return new org.cardanofoundation.cip113.model.MintTokenRequest(

@@ -57,7 +57,21 @@ dependencies {
 
 	implementation 'org.cardanofoundation:signify:0.1.2-d92f263-SNAPSHOT'
 
-	implementation 'io.micrometer:micrometer-registry-prometheus:latest.release'
+	// Version comes from the Spring Boot BOM (io.spring.dependency-management), NOT from
+	// a dynamic `latest.release`.
+	//
+	// `latest.release` resolved micrometer-registry-prometheus 1.18.0-M1 — a MILESTONE,
+	// which Gradle happily treats as a release — while the Boot 3.3.4 BOM pins
+	// prometheus-metrics-exposition-formats to 1.2.1. The milestone calls
+	// ExpositionFormats.init(PrometheusProperties), which does not exist in 1.2.1, so the
+	// app died at startup with NoSuchMethodError while every test stayed green: the
+	// Prometheus registry is only constructed when the context boots.
+	//
+	// A dynamic version also means the build is not reproducible — it can break with no
+	// local change, purely because someone published a new version. That is what happened
+	// here. Let the BOM decide, so the registry and the client are always the pair Boot
+	// tested together.
+	implementation 'io.micrometer:micrometer-registry-prometheus'
 
 	implementation 'org.postgresql:postgresql:42.6.0'
 	testImplementation 'com.h2database:h2:2.1.214'
@@ -76,13 +90,13 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
-	// SecurityTokenUpstreamPinTest hashes the vendored security-token contract
+	// RwaTokenUpstreamPinTest hashes the vendored rwa-token contract
 	// tree, which lives OUTSIDE this Gradle project and is therefore not one of
 	// the test task's implicit inputs. Without this declaration, editing a
 	// vendored Aiken file leaves `test` UP-TO-DATE and the drift guard silently
 	// never runs — exactly the failure mode the pin exists to prevent.
-	inputs.dir(file("$projectDir/../substandards/security-token"))
-	      .withPropertyName('vendoredSecurityToken')
+	inputs.dir(file("$projectDir/../substandards/rwa-token"))
+	      .withPropertyName('vendoredRwaToken')
 	      .withPathSensitivity(PathSensitivity.RELATIVE)
 
 	// Gradle discards the test JVM's stdout/stderr, so log.info and System.out

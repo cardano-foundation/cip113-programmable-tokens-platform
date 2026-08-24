@@ -25,8 +25,8 @@ import {
 import { AdminTokenSelector } from "./AdminTokenSelector";
 import {
   AdminTokenInfo,
-  SecurityTokenCapability,
-  hasSecurityTokenCapability,
+  RwaTokenCapability,
+  hasRwaTokenCapability,
 } from "@/lib/api/admin";
 import { getSigningEntityVkey } from "@/lib/api/keri";
 import { readGlobalState, updateGlobalState } from "@/lib/api/compliance";
@@ -34,11 +34,11 @@ import {
   buildGlobalStateUpdateChain,
   submitTokenChain,
   parseSubmitChainFailure,
-  getSecurityTokenGlobalState,
+  getRwaTokenGlobalState,
   acknowledgeRootPublish,
   type GsChangeSpec,
   type SubmitChainPartialFailure,
-} from "@/lib/api/security-token";
+} from "@/lib/api/rwa-token";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useToast } from "@/components/ui/use-toast";
 import { getExplorerTxUrl } from "@/lib/utils";
@@ -61,12 +61,12 @@ export function GlobalStateSection({
   const { selectedVersion } = useProtocolVersion();
 
   // kyc: legacy ISSUER_ADMIN role gating.
-  // security-token: BaFin's GS spend validator is admin-gated via the
+  // rwa-token: BaFin's GS spend validator is admin-gated via the
   //   admin_credential_hash field of the datum — anyone with the ADMIN
   //   capability bit in the on-chain power-users LL counts as such.
   const manageableTokens = tokens.filter((t) => {
-    if (t.substandardId === "security-token") {
-      return hasSecurityTokenCapability(t, SecurityTokenCapability.ADMIN);
+    if (t.substandardId === "rwa-token") {
+      return hasRwaTokenCapability(t, RwaTokenCapability.ADMIN);
     }
     return t.roles.includes("ISSUER_ADMIN") && t.substandardId === "kyc";
   });
@@ -124,10 +124,10 @@ export function GlobalStateSection({
       setGlobalState(null);
       return;
     }
-    // security-token has its own GS endpoint at /api/v1/security-token/.../global-state
-    // and renders SecurityTokenGlobalStatePanel below; the kyc compliance endpoint
-    // would 404 for security-token policies, so skip the load here.
-    if (selectedToken.substandardId === "security-token") {
+    // rwa-token has its own GS endpoint at /api/v1/rwa-token/.../global-state
+    // and renders RwaTokenGlobalStatePanel below; the kyc compliance endpoint
+    // would 404 for rwa-token policies, so skip the load here.
+    if (selectedToken.substandardId === "rwa-token") {
       setGlobalState(null);
       return;
     }
@@ -328,10 +328,10 @@ export function GlobalStateSection({
     );
   }
 
-  // Branch render: security-tokens use the BaFin GS validator which has a
+  // Branch render: rwa-tokens use the BaFin GS validator which has a
   // different datum shape, different actions, and admin gating via
   // admin_credential_hash (not a power-user role). Render its own panel.
-  if (selectedToken?.substandardId === "security-token") {
+  if (selectedToken?.substandardId === "rwa-token") {
     return (
       <div className="space-y-6">
         <AdminTokenSelector
@@ -341,7 +341,7 @@ export function GlobalStateSection({
           disabled={false}
           filterByRole="ISSUER_ADMIN"
         />
-        <SecurityTokenGlobalStatePanel
+        <RwaTokenGlobalStatePanel
           policyId={selectedToken.policyId}
           adminAddress={adminAddress}
           signingEntityVkey={signingEntityVkey}
@@ -590,7 +590,7 @@ export function GlobalStateSection({
   );
 }
 
-// ── Security-token global state panel ───────────────────────────────────────
+// ── RWA-token global state panel ───────────────────────────────────────
 //
 // Each BaFin GlobalStateSpendAction is one redeemer variant, and the
 // global_state_spend_validator enforces the action's effect on the continuing
@@ -600,7 +600,7 @@ export function GlobalStateSection({
 // changes all follow the same pattern (one backend endpoint that builds the
 // one-action tx, the same signing flow here).
 
-function SecurityTokenGlobalStatePanel({
+function RwaTokenGlobalStatePanel({
   policyId,
   adminAddress,
   signingEntityVkey,
@@ -652,7 +652,7 @@ function SecurityTokenGlobalStatePanel({
     setLoading(true);
     setError(null);
     try {
-      const gs = await getSecurityTokenGlobalState(policyId);
+      const gs = await getRwaTokenGlobalState(policyId);
       const next = {
         transfersPaused: gs.transfersPaused,
         deactivated: gs.deactivated ?? false,

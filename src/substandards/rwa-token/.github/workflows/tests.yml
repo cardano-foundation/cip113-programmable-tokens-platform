@@ -1,0 +1,19 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aiken-lang/setup-aiken@v1
+        with:
+          version: v1.1.23
+      - run: aiken fmt --check
+      - run: aiken check -D
+      - run: aiken build
+      - run: git diff --exit-code -- plutus.json
