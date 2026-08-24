@@ -65,7 +65,7 @@ public class OfflineChain {
     public static final BigInteger PLACEHOLDER_STEPS = BigInteger.valueOf(10_000);
 
     /**
-     * The hand-picked cost {@code SecurityTokenSubstandardHandler#buildRegisterTransferLogicTransaction}
+     * The hand-picked cost {@code RwaTokenSubstandardHandler#buildRegisterTransferLogicTransaction}
      * stamps on the Cert publish redeemer it injects. That injection happens in a
      * {@code postBalanceTx} hook — i.e. AFTER {@code ScriptCostEvaluators.evaluateScriptCost()}
      * has already run — so the redeemer does not exist when the evaluator sees the transaction
@@ -152,7 +152,7 @@ public class OfflineChain {
      * The same builder, but reading UTxOs through {@code supplier} instead of this chain's raw
      * set.
      *
-     * <p>Needed for multi-transaction orchestrators. The security-token registration chain builds
+     * <p>Needed for multi-transaction orchestrators. The rwa-token registration chain builds
      * three transactions back-to-back without submitting anything, feeding each one's outputs
      * into its own {@code HybridUtxoSupplier} so the next can spend them. In production the
      * QuickTxBuilder bean is constructed over that very supplier — so a test that injects a
@@ -370,6 +370,23 @@ public class OfflineChain {
         return utxoSupplier.all().stream()
                 .filter(u -> u.getAmount().stream().anyMatch(a -> unit.equalsIgnoreCase(a.getUnit())))
                 .findFirst();
+    }
+
+    /**
+     * Every UTxO carrying any asset of {@code policyId}.
+     *
+     * <p>Stands in for {@code UtxoProvider.findUtxosByPolicy}. Without it the denylist and
+     * power-user linked-list roots are invisible offline, and the builders that look their
+     * anchors up by policy — every add/remove mutation — report "root NFT not found on
+     * chain" and cannot be exercised at all.
+     */
+    public List<Utxo> findUtxosByPolicy(String policyId) {
+        return utxoSupplier.all().stream()
+                .filter(u -> u.getAmount().stream().anyMatch(a ->
+                        a.getUnit() != null && a.getUnit().toLowerCase()
+                                .startsWith(policyId.toLowerCase())
+                        && !"lovelace".equalsIgnoreCase(a.getUnit())))
+                .toList();
     }
 
     // ---------------------------------------------------------------- protocol params

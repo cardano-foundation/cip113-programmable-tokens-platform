@@ -10,8 +10,8 @@ import { UtxoInfo } from "@/types/api";
 import {
   AdminTokenInfo,
   getUtxosForBurning,
-  SecurityTokenCapability,
-  hasSecurityTokenCapability,
+  RwaTokenCapability,
+  hasRwaTokenCapability,
 } from "@/lib/api/admin";
 import { AdminTokenSelector } from "./AdminTokenSelector";
 import { burnToken } from "@/lib/api/minting";
@@ -50,13 +50,13 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
 
   // Per-page capability gate. Show:
   //   - tokens where the wallet has ISSUER_ADMIN (legacy substandards)
-  //   - security-tokens where the wallet has BURNER or ADMIN capability
+  //   - rwa-tokens where the wallet has BURNER or ADMIN capability
   //     in the on-chain power-users linked list (BaFin model)
   const issuerTokens = adminTokens.filter((t) => {
-    if (t.substandardId === "security-token") {
-      return hasSecurityTokenCapability(
+    if (t.substandardId === "rwa-token") {
+      return hasRwaTokenCapability(
         t,
-        SecurityTokenCapability.BURNER | SecurityTokenCapability.ADMIN,
+        RwaTokenCapability.BURNER | RwaTokenCapability.ADMIN,
       );
     }
     return t.roles.includes("ISSUER_ADMIN");
@@ -142,11 +142,11 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
       let unsignedTx: string;
 
       // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize substandards.
-      // For security-token (and kyc / kyc-extended) the SDK path errors with
-      // "Substandard 'security-token' not registered" — force the backend route
+      // For rwa-token (and kyc / kyc-extended) the SDK path errors with
+      // "Substandard 'rwa-token' not registered" — force the backend route
       // regardless of the toggle for those substandards.
       const sdkSupportsSelected =
-        selectedToken.substandardId !== "security-token"
+        selectedToken.substandardId !== "rwa-token"
         && selectedToken.substandardId !== "kyc"
         && selectedToken.substandardId !== "kyc-extended";
 
@@ -197,7 +197,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
       // of the burn tx (Conway tag-7 + multi-script body), so we isolate
       // it into a structurally tiny tx that signs cleanly.
       const needsCertRegistration =
-        selectedToken?.substandardId === "security-token"
+        selectedToken?.substandardId === "rwa-token"
         && msg.includes("transferLogic stake credential not yet registered");
       if (needsCertRegistration && selectedToken) {
         try {
@@ -207,7 +207,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
             variant: "info",
           });
           const { buildRegisterTransferLogicTx } = await import(
-            "@/lib/api/security-token"
+            "@/lib/api/rwa-token"
           );
           const { unsignedCborTx } = await buildRegisterTransferLogicTx(
             selectedToken.policyId,

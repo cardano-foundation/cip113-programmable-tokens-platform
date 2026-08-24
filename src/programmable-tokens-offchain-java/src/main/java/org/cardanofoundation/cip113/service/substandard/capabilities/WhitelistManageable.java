@@ -5,7 +5,7 @@ import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 
 /**
  * Whitelist management capability for KYC/securities compliance.
- * Used for security tokens where only whitelisted (KYC-verified) addresses
+ * Used for RWA tokens where only whitelisted (KYC-verified) addresses
  * are permitted to hold or transfer the asset.
  *
  * Unlike blacklist (which blocks specific addresses), whitelist requires
@@ -72,7 +72,7 @@ public interface WhitelistManageable {
     ) {}
 
     /**
-     * Initialize a new whitelist for a programmable token (security token).
+     * Initialize a new whitelist for a programmable token (RWA token).
      * This creates the on-chain linked list structure for tracking approved addresses.
      *
      * @param request        The whitelist initialization request
@@ -85,7 +85,7 @@ public interface WhitelistManageable {
 
     /**
      * Add an address/credential to the whitelist (grant KYC approval).
-     * Once whitelisted, the address can receive and transfer the security token.
+     * Once whitelisted, the address can receive and transfer the RWA token.
      *
      * @param request        The add to whitelist request
      * @param protocolParams The protocol bootstrap parameters
@@ -97,7 +97,7 @@ public interface WhitelistManageable {
 
     /**
      * Remove an address/credential from the whitelist (revoke KYC approval).
-     * Once removed, the address can no longer receive the security token.
+     * Once removed, the address can no longer receive the RWA token.
      * Note: Existing holdings may need to be handled separately based on regulations.
      *
      * @param request        The remove from whitelist request

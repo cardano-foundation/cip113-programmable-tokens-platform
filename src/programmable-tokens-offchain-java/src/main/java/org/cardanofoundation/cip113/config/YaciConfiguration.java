@@ -17,6 +17,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.service.CostModelOverlayProtocolParamsSupplier;
 import org.cardanofoundation.cip113.service.HybridScriptSupplier;
 import org.cardanofoundation.cip113.service.HybridUtxoSupplier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -55,13 +56,51 @@ public class YaciConfiguration {
         return new CostModelOverlayProtocolParamsSupplier(primary, koiosBackendService);
     }
 
+    /**
+     * Slot configuration for the local evaluator.
+     *
+     * <p>The evaluator translates the transaction's validity range into the POSIX times a
+     * script sees, and without a slot config it assumes MAINNET — whose Shelley era starts
+     * at slot 4 492 800. A devnet's slots start near zero, so every transaction carrying a
+     * validity bound is rejected before it is even scored, with
+     * {@code SlotTooFarInThePast { oldest_allowed: 4492800 }}.
+     *
+     * <p>A devnet's zero time is its genesis {@code systemStart}, which changes each time
+     * the cluster is recreated — so it is read from configuration rather than baked in.
+     * Returning {@code null} keeps the library default, which is correct for mainnet.
+     */
+    private static com.bloxbean.cardano.client.common.model.SlotConfig slotConfigFor(
+            String network, Long devnetSystemStartMs) {
+        return switch (network == null ? "" : network) {
+            case "devnet", "yaci", "dev" -> {
+                if (devnetSystemStartMs == null) {
+                    log.warn("network={} but cardano.devnet.system-start-ms is unset — the local "
+                             + "evaluator will assume MAINNET slots and reject every transaction "
+                             + "with a validity bound as SlotTooFarInThePast", network);
+                    yield null;
+                }
+                // Devnet slots are one second and start at zero.
+                yield new com.bloxbean.cardano.client.common.model.SlotConfig(
+                        1000, 0L, devnetSystemStartMs);
+            }
+            default -> null;
+        };
+    }
+
     @Bean
     public TransactionEvaluator aikenTransactionEvaluator(HybridUtxoSupplier hybridUtxoSupplier,
                                                           HybridScriptSupplier hybridScriptSupplier,
                                                           ProtocolParamsSupplier protocolParamsSupplier,
-                                                          BFBackendService bfBackendService) {
+                                                          BFBackendService bfBackendService,
+                                                          @Value("${network}") String network,
+                                                          @Value("${cardano.devnet.system-start-ms:#{null}}")
+                                                          Long devnetSystemStartMs) {
 
-        var aikenEvaluator = new AikenTransactionEvaluator(hybridUtxoSupplier, protocolParamsSupplier, hybridScriptSupplier);
+        var slotConfig = slotConfigFor(network, devnetSystemStartMs);
+        var aikenEvaluator = slotConfig == null
+                ? new AikenTransactionEvaluator(hybridUtxoSupplier, protocolParamsSupplier, hybridScriptSupplier)
+                : new AikenTransactionEvaluator(hybridUtxoSupplier, protocolParamsSupplier, hybridScriptSupplier,
+                        slotConfig);
 
         // Three-tier evaluator: aiken-java-binding → Blockfrost → ceiling-cost fallback.
         // aiken-java-binding 0.1.0 doesn't yet handle Aiken MPF v2.1.0 proofs that pass

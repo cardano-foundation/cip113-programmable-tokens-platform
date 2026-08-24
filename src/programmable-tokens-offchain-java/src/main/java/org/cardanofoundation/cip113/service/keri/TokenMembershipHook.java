@@ -10,7 +10,7 @@ import org.cardanofoundation.cip113.model.keri.KycProofResponse;
 public interface TokenMembershipHook {
 
     /** Substandard id this hook handles (e.g. {@code "kyc-extended"},
-     *  {@code "security-token"}). Must match the value stored on the bound
+     *  {@code "rwa-token"}). Must match the value stored on the bound
      *  programmable-token-registry row. */
     String substandardId();
 

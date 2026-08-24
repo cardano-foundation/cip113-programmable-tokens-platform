@@ -38,7 +38,7 @@ export function SuccessStep({
   const signSubmitResult = wizardState.stepStates['sign-submit']?.result as { txHash?: string; data?: { policyId?: string; txHash?: string } } | undefined;
   const initBlacklistResult = wizardState.stepStates['init-blacklist']?.result?.data as { blacklistNodePolicyId?: string; txHash?: string } | undefined;
 
-  // security-token registers the policy and mints the FIRST SUPPLY in the same
+  // rwa-token registers the policy and mints the FIRST SUPPLY in the same
   // transaction, but the amount minted is the one chosen on the kyc-config step —
   // not necessarily the "quantity" typed on token-details, which for a structural
   // registration (initial supply 0) is minted by nothing at all. Prefer what was

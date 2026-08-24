@@ -26,6 +26,27 @@ public class UtxoProvider {
     @Nullable
     private final UtxoRepository utxoRepository;
 
+    /**
+     * The chain's current tip slot, or empty when the backend cannot answer.
+     *
+     * <p>Exists so a transaction's validity bound can be expressed as "tip + N slots"
+     * rather than by translating a wall-clock instant through an era history. The two are
+     * equivalent on a public network, but only the former works on a devnet: a devnet's
+     * genesis is minutes old and starts in Conway, so no era history is available to
+     * translate against and every TTL comes out past the node's horizon.
+     */
+    public Optional<Long> currentTipSlot() {
+        try {
+            var latest = bfBackendService.getBlockService().getLatestBlock();
+            if (latest.isSuccessful() && latest.getValue() != null) {
+                return Optional.of(latest.getValue().getSlot());
+            }
+        } catch (Exception e) {
+            log.debug("could not read the chain tip: {}", e.toString());
+        }
+        return Optional.empty();
+    }
+
     public Optional<Utxo> findUtxo(String txHash, int outputIndex) {
 
         if (utxoRepository == null) {

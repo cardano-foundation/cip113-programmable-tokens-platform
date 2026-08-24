@@ -18,15 +18,15 @@ import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryReposito
 import org.cardanofoundation.cip113.service.substandard.DummySubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler;
 import org.cardanofoundation.cip113.service.substandard.KycExtendedSubstandardHandler;
-import org.cardanofoundation.cip113.service.substandard.SecurityTokenSubstandardHandler;
+import org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.KycSubstandardHandler;
 import org.cardanofoundation.cip113.service.substandard.SubstandardHandlerFactory;
 import org.cardanofoundation.cip113.service.substandard.capabilities.BasicOperations;
-import org.cardanofoundation.cip113.repository.SecurityTokenRegistrationRepository;
+import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
 import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
 import org.cardanofoundation.cip113.service.substandard.context.KycContext;
 import org.cardanofoundation.cip113.service.substandard.context.KycExtendedContext;
-import org.cardanofoundation.cip113.service.substandard.context.SecurityTokenContext;
+import org.cardanofoundation.cip113.service.substandard.context.RwaTokenContext;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -59,7 +59,7 @@ public class TokenOperationsService {
 
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
-    private final SecurityTokenRegistrationRepository securityTokenRegistrationRepository;
+    private final RwaTokenRegistrationRepository rwaTokenRegistrationRepository;
 
     /**
      * Pre-register a programmable token by registering required stake addresses.
@@ -109,10 +109,10 @@ public class TokenOperationsService {
                         .orElseThrow(() -> new UnsupportedOperationException("kyc-extended does not support basic operations"));
                 yield basicOps.buildPreRegistrationTransaction(kxRequest, protocolParams);
             }
-            case SecurityTokenRegisterRequest stRequest -> {
-                var handler = handlerFactory.getHandler("security-token", loadSecurityTokenContext(stRequest));
-                var basicOps = (BasicOperations<SecurityTokenRegisterRequest>) handler.asBasicOperations()
-                        .orElseThrow(() -> new UnsupportedOperationException("security-token does not support basic operations"));
+            case RwaTokenRegisterRequest stRequest -> {
+                var handler = handlerFactory.getHandler("rwa-token", loadRwaTokenContext(stRequest));
+                var basicOps = (BasicOperations<RwaTokenRegisterRequest>) handler.asBasicOperations()
+                        .orElseThrow(() -> new UnsupportedOperationException("rwa-token does not support basic operations"));
                 yield basicOps.buildPreRegistrationTransaction(stRequest, protocolParams);
             }
             default -> throw new UnsupportedOperationException(
@@ -173,10 +173,10 @@ public class TokenOperationsService {
                         .orElseThrow(() -> new UnsupportedOperationException("kyc-extended does not support basic operations"));
                 yield basicOps.buildRegistrationTransaction(kxRequest, protocolParams);
             }
-            case SecurityTokenRegisterRequest stRequest -> {
-                var handler = handlerFactory.getHandler("security-token", loadSecurityTokenContext(stRequest));
-                var basicOps = (BasicOperations<SecurityTokenRegisterRequest>) handler.asBasicOperations()
-                        .orElseThrow(() -> new UnsupportedOperationException("security-token does not support basic operations"));
+            case RwaTokenRegisterRequest stRequest -> {
+                var handler = handlerFactory.getHandler("rwa-token", loadRwaTokenContext(stRequest));
+                var basicOps = (BasicOperations<RwaTokenRegisterRequest>) handler.asBasicOperations()
+                        .orElseThrow(() -> new UnsupportedOperationException("rwa-token does not support basic operations"));
                 yield basicOps.buildRegistrationTransaction(stRequest, protocolParams);
             }
             default -> throw new UnsupportedOperationException(
@@ -189,30 +189,30 @@ public class TokenOperationsService {
         return txContext;
     }
 
-    /** Loads the SecurityTokenContext for a request, populating policy ids + bootstrap
+    /** Loads the RwaTokenContext for a request, populating policy ids + bootstrap
      *  input from the registration row written at genesis-init time.
      *
      *  <p>The request body's {@code globalStatePolicyId} field is named for the
-     *  kyc-extended convention but actually carries the security-token's
-     *  prog-token policy id (= what {@code /security-token/init} returns under
+     *  kyc-extended convention but actually carries the rwa-token's
+     *  prog-token policy id (= what {@code /rwa-token/init} returns under
      *  the same misnamed field). We try both lookups in case the frontend ever
      *  switches: prog-token policy id first, then GS NFT policy id as fallback. */
-    private SecurityTokenContext loadSecurityTokenContext(SecurityTokenRegisterRequest request) {
+    private RwaTokenContext loadRwaTokenContext(RwaTokenRegisterRequest request) {
         var policyId = request.getGlobalStatePolicyId();
         if (policyId == null || policyId.isBlank()) {
             throw new IllegalArgumentException(
-                    "security-token registration: globalStatePolicyId (= prog-token policy id from /init) is required");
+                    "rwa-token registration: globalStatePolicyId (= prog-token policy id from /init) is required");
         }
-        var regOpt = securityTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId)
-                .or(() -> securityTokenRegistrationRepository.findByGlobalStatePolicyId(policyId));
+        var regOpt = rwaTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId)
+                .or(() -> rwaTokenRegistrationRepository.findByGlobalStatePolicyId(policyId));
         if (regOpt.isEmpty()) {
             throw new IllegalStateException(
-                    "no security-token registration row found for policy=" + policyId +
+                    "no rwa-token registration row found for policy=" + policyId +
                     " (tried both prog-token-policy-id and GS-policy-id lookups) — " +
                     "was the genesis init step completed and confirmed on chain?");
         }
         var reg = regOpt.get();
-        return SecurityTokenContext.builder()
+        return RwaTokenContext.builder()
                 .issuerAdminPkh(reg.getIssuerAdminPkh())
                 .globalStatePolicyId(reg.getGlobalStatePolicyId())
                 .denylistPolicyId(reg.getDenylistPolicyId())
@@ -282,14 +282,14 @@ public class TokenOperationsService {
             }
             case "kyc-extended" -> buildKycExtendedContext(request.tokenPolicyId());
 
-            case "security-token" -> {
-                // security-token handler needs full context (gs/pu/dl policies,
+            case "rwa-token" -> {
+                // rwa-token handler needs full context (gs/pu/dl policies,
                 // asset name, bootstrap input) for its BaFin MintSecurity flow.
                 // The row was written at genesis-init time.
-                var stReg = securityTokenRegistrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId())
+                var stReg = rwaTokenRegistrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId())
                         .orElseThrow(() -> new RuntimeException(
-                                "could not find security-token registration for policy " + request.tokenPolicyId()));
-                yield SecurityTokenContext.builder()
+                                "could not find rwa-token registration for policy " + request.tokenPolicyId()));
+                yield RwaTokenContext.builder()
                         .issuerAdminPkh(stReg.getIssuerAdminPkh())
                         .globalStatePolicyId(stReg.getGlobalStatePolicyId())
                         .denylistPolicyId(stReg.getDenylistPolicyId())
@@ -319,7 +319,7 @@ public class TokenOperationsService {
                     kycSubstandardHandler.buildMintTransaction(request, protocolParams);
             case KycExtendedSubstandardHandler kxHandler ->
                     kxHandler.buildMintTransaction(request, protocolParams);
-            case SecurityTokenSubstandardHandler stHandler ->
+            case RwaTokenSubstandardHandler stHandler ->
                     stHandler.buildMintTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
@@ -384,14 +384,14 @@ public class TokenOperationsService {
             }
             case "kyc-extended" -> buildKycExtendedContext(request.tokenPolicyId());
 
-            case "security-token" -> {
-                // security-token handler needs full context (gs/pu/dl policies,
+            case "rwa-token" -> {
+                // rwa-token handler needs full context (gs/pu/dl policies,
                 // asset name, bootstrap input) for its BaFin MintSecurity flow.
                 // The row was written at genesis-init time.
-                var stReg = securityTokenRegistrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId())
+                var stReg = rwaTokenRegistrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId())
                         .orElseThrow(() -> new RuntimeException(
-                                "could not find security-token registration for policy " + request.tokenPolicyId()));
-                yield SecurityTokenContext.builder()
+                                "could not find rwa-token registration for policy " + request.tokenPolicyId()));
+                yield RwaTokenContext.builder()
                         .issuerAdminPkh(stReg.getIssuerAdminPkh())
                         .globalStatePolicyId(stReg.getGlobalStatePolicyId())
                         .denylistPolicyId(stReg.getDenylistPolicyId())
@@ -421,7 +421,7 @@ public class TokenOperationsService {
                     kycSubstandardHandler.buildBurnTransaction(request, protocolParams);
             case KycExtendedSubstandardHandler kxHandler ->
                     kxHandler.buildBurnTransaction(request, protocolParams);
-            case SecurityTokenSubstandardHandler stHandler ->
+            case RwaTokenSubstandardHandler stHandler ->
                     stHandler.buildBurnTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
@@ -489,14 +489,14 @@ public class TokenOperationsService {
             }
             case "kyc-extended" -> buildKycExtendedContext(programmableToken.policyId());
 
-            case "security-token" -> {
-                // security-token handler is context-aware (gs/pu/dl policies +
+            case "rwa-token" -> {
+                // rwa-token handler is context-aware (gs/pu/dl policies +
                 // asset name + bootstrap input). Same context shape as the mint
                 // and burn flows — see those branches above.
-                var stReg = securityTokenRegistrationRepository.findByProgrammableTokenPolicyId(programmableToken.policyId())
+                var stReg = rwaTokenRegistrationRepository.findByProgrammableTokenPolicyId(programmableToken.policyId())
                         .orElseThrow(() -> new RuntimeException(
-                                "could not find security-token registration for policy " + programmableToken.policyId()));
-                yield SecurityTokenContext.builder()
+                                "could not find rwa-token registration for policy " + programmableToken.policyId()));
+                yield RwaTokenContext.builder()
                         .issuerAdminPkh(stReg.getIssuerAdminPkh())
                         .globalStatePolicyId(stReg.getGlobalStatePolicyId())
                         .denylistPolicyId(stReg.getDenylistPolicyId())
@@ -526,7 +526,7 @@ public class TokenOperationsService {
                     kycSubstandardHandler.buildTransferTransaction(request, protocolParams);
             case KycExtendedSubstandardHandler kxHandler ->
                     kxHandler.buildTransferTransaction(request, protocolParams);
-            case SecurityTokenSubstandardHandler stHandler ->
+            case RwaTokenSubstandardHandler stHandler ->
                     stHandler.buildTransferTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };

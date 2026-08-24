@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/card";
 import { CheckCircle, AlertCircle, Loader2, Shield } from "lucide-react";
 
 /** Common shape used by the verify view across substandards. Both
- *  {@code KycExtendedTokenSummary} and {@code SecurityTokenSummary} satisfy
+ *  {@code KycExtendedTokenSummary} and {@code RwaTokenSummary} satisfy
  *  this shape. */
 export interface VerifyTokenDisplay {
   policyId: string;

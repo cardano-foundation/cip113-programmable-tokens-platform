@@ -7,7 +7,10 @@ import { Input } from "@/components/ui/input";
 import { TxBuilderToggle, type TransactionBuilder } from "@/components/ui/tx-builder-toggle";
 import { AlertTriangle, CheckCircle, ExternalLink } from "lucide-react";
 import { AdminTokenSelector } from "./AdminTokenSelector";
-import { AdminTokenInfo } from "@/lib/api/admin";
+import { AdminTokenInfo,
+  RwaTokenCapability,
+  hasRwaTokenCapability,
+} from "@/lib/api/admin";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useCIP113 } from "@/contexts/cip113-context";
 import { useToast } from "@/components/ui/use-toast";
@@ -28,8 +31,17 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
   const network = process.env.NEXT_PUBLIC_NETWORK || "preview";
 
-  // Filter tokens where user has ISSUER_ADMIN role (seize requires issuer admin)
-  const seizableTokens = tokens.filter((t) => t.roles.includes("ISSUER_ADMIN"));
+  // Who may seize, per substandard.
+  //
+  // For a rwa-token the authorising role is the on-chain power-user capability
+  // `can_force_transfer`, which is what third_party_transfer_logic_script gates every
+  // seizure on — and it is NOT the same thing as ISSUER_ADMIN. Offering a token here that
+  // the backend will refuse produces a signature request that dies at build time with
+  // "does not hold can_force_transfer", so the selector matches the builder's own rule.
+  const seizableTokens = tokens.filter((t) =>
+    t.substandardId === "rwa-token"
+      ? hasRwaTokenCapability(t, RwaTokenCapability.FORCE_TRANSFER)
+      : t.roles.includes("ISSUER_ADMIN"));
 
   const [selectedToken, setSelectedToken] = useState<AdminTokenInfo | null>(null);
   const [targetUtxo, setTargetUtxo] = useState("");
@@ -101,7 +113,18 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
 
       let unsignedCborTx: string;
 
-      if (txBuilder === "sdk") {
+      // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize. For rwa-token
+      // (and kyc / kyc-extended) the SDK path errors with "Substandard not registered",
+      // so force the backend route regardless of the toggle — the same guard BurnSection
+      // already has. Without it a rwa-token seizure fails on the SDK path even though
+      // the backend implements it, which reads as "seize is broken" rather than "wrong
+      // builder".
+      const sdkSupportsSelected =
+        selectedToken.substandardId !== "rwa-token"
+        && selectedToken.substandardId !== "kyc"
+        && selectedToken.substandardId !== "kyc-extended";
+
+      if (txBuilder === "sdk" && sdkSupportsSelected) {
         await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
         const protocol = await getProtocol();
         const result = await protocol.compliance.seize({
@@ -268,7 +291,10 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
             setErrors((prev) => ({ ...prev, token: "" }));
           }}
           disabled={isBuilding}
-          filterByRole="ISSUER_ADMIN"
+          // No filterByRole: `seizableTokens` above is already the authoritative rule, and
+          // it is capability-based for rwa-tokens. Re-filtering on ISSUER_ADMIN here
+          // would hide a token from a wallet that holds can_force_transfer but not ADMIN —
+          // exactly the delegated-enforcement case the power-user roles exist to support.
         />
         {errors.token && (
           <p className="mt-2 text-sm text-red-400">{errors.token}</p>

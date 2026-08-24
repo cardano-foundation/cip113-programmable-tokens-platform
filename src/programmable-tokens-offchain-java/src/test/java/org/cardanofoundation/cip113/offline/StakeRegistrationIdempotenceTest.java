@@ -83,7 +83,7 @@ public class StakeRegistrationIdempotenceTest {
                         Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
                         // Deliberately null, not a mock: isStakeAddressRegistered never touches the
                         // builder, and mocking QuickTxBuilder instruments it for every test in the
-                        // JVM under the inline mock maker — which silently broke the security-token
+                        // JVM under the inline mock maker — which silently broke the rwa-token
                         // burn's real evaluator whenever this class ran as a whole.
                         null,
                         Mockito.mock(AccountService.class),

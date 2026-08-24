@@ -9,7 +9,11 @@ import { BurnSection } from "./BurnSection";
 import { BlacklistSection } from "./BlacklistSection";
 import { SeizeSection } from "./SeizeSection";
 import { GlobalStateSection } from "./GlobalStateSection";
-import { AdminTokenInfo } from "@/lib/api/admin";
+import {
+  AdminTokenInfo,
+  RwaTokenCapability,
+  hasRwaTokenCapability,
+} from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
 
 interface AdminPanelProps {
@@ -73,12 +77,30 @@ export function AdminPanel({ tokens, adminAddress }: AdminPanelProps) {
     return tokens.some((token) => token.roles.includes(role));
   };
 
-  const hasKycTokens = tokens.some(
+  // Who may open the Global State tab.
+  //
+  // This used to be `kyc` tokens ONLY, from when global state was a KYC-only
+  // feature. It has not been true for a long time: GlobalStateSection has a
+  // dedicated rwa-token branch (RwaTokenGlobalStatePanel) covering all
+  // twelve GlobalStateSpendActions, and the `kyc` substandard is disabled by
+  // default in the backend (`substandards.disabled: kyc,kyc-extended`). So on any
+  // deployment that issues RWA tokens the tab was filtered out and the whole
+  // panel was unreachable, with no error and nothing to click.
+  //
+  // The two predicates below deliberately MIRROR the ones GlobalStateSection uses
+  // to build its own `manageableTokens`. If they drift apart, the tab appears with
+  // an empty token selector (or worse, hides a token the panel could manage).
+  const hasKycAdminTokens = tokens.some(
     (t) => t.substandardId === "kyc" && t.roles.includes("ISSUER_ADMIN")
+  );
+  const hasRwaTokenAdminTokens = tokens.some((t) =>
+    hasRwaTokenCapability(t, RwaTokenCapability.ADMIN)
   );
 
   const availableTabs = tabs.filter((tab) => {
-    if (tab.id === "global-state") return hasKycTokens;
+    if (tab.id === "global-state") {
+      return hasKycAdminTokens || hasRwaTokenAdminTokens;
+    }
     return hasRole(tab.requiredRole);
   });
 

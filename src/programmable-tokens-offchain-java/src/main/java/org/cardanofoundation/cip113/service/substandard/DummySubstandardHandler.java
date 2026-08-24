@@ -592,7 +592,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                         + "token per deployment is all the directory can hold, and choosing a "
                         + "different asset name will produce this same policy again. Mint more of "
                         + "the existing token instead, or use a substandard whose issuance policy is "
-                        + "parameterised per token (freeze-and-seize, security-token).",
+                        + "parameterised per token (freeze-and-seize, rwa-token).",
                         progTokenPolicyId));
             }
 

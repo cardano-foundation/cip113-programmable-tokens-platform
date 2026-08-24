@@ -17,7 +17,7 @@ export async function GET() {
     flows: {
       dummy: getEnvBoolean('FLOW_DUMMY_ENABLED', true),
       'freeze-and-seize': getEnvBoolean('FLOW_FREEZE_AND_SEIZE_ENABLED', true),
-      'security-token': getEnvBoolean('FLOW_SECURITY_TOKEN_ENABLED', true),
+      'rwa-token': getEnvBoolean('FLOW_SECURITY_TOKEN_ENABLED', true),
       // Disabled by default, matching the backend's substandards.disabled. Set
       // FLOW_KYC_ENABLED / FLOW_KYC_EXTENDED_ENABLED to re-enable without a rebuild.
       kyc: getEnvBoolean('FLOW_KYC_ENABLED', false),

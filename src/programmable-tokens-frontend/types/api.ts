@@ -34,7 +34,7 @@ export type SubstandardsResponse = Substandard[];
  * strings plus an `enabled` flag: this is the wire shape, with `decimals` as a number and
  * empty optionals dropped. `toCip68Wire()` in lib/utils/cip68-wire.ts does the conversion.
  *
- * Only `dummy`, `freeze-and-seize` and `security-token` accept this. The other handlers
+ * Only `dummy`, `freeze-and-seize` and `rwa-token` accept this. The other handlers
  * reject a non-null value rather than silently dropping it.
  */
 export interface Cip68MetadataRequest {
@@ -55,7 +55,7 @@ export interface BaseRegisterTokenRequest {
   recipientAddress: string;    // Recipient address (can be empty string)
   chainingTransactionCborHex?: string;  // Full CBOR hex of a preceding tx (for mempool chaining)
   /** When set, registration mints the CIP-68 pair: labelled user token + (100) reference token.
-   *  Note this changes the on-chain asset name, and for freeze-and-seize / security-token
+   *  Note this changes the on-chain asset name, and for freeze-and-seize / rwa-token
    *  (which bake the name into a script parameter) it changes the token policy id too. */
   cip68Metadata?: Cip68MetadataRequest;
 }
@@ -88,12 +88,12 @@ export interface KycExtendedRegisterRequest extends BaseRegisterTokenRequest {
   attestation?: Cip170AttestationData;
 }
 
-/** Security-token (BaFin) substandard - same shape as kyc-extended for the registration
- *  step. The backend's SecurityTokenSubstandardHandler.buildRegistrationTransaction
+/** RWA-token (BaFin) substandard - same shape as kyc-extended for the registration
+ *  step. The backend's RwaTokenSubstandardHandler.buildRegistrationTransaction
  *  builds a combined tx (stake-cred registrations + CIP-113 directory insert +
  *  MintSecurity + initial token mint) — the user signs once. */
-export interface SecurityTokenRegisterRequest extends BaseRegisterTokenRequest {
-  substandardId: 'security-token';
+export interface RwaTokenRegisterRequest extends BaseRegisterTokenRequest {
+  substandardId: 'rwa-token';
   adminPubKeyHash: string;
   globalStatePolicyId: string;
   attestation?: Cip170AttestationData;
@@ -105,7 +105,7 @@ export type RegisterTokenRequest =
   | FreezeAndSeizeRegisterRequest
   | KycRegisterRequest
   | KycExtendedRegisterRequest
-  | SecurityTokenRegisterRequest;
+  | RwaTokenRegisterRequest;
 
 export interface RegisterTokenResponse {
   policyId: string;              // Generated policy ID
@@ -130,7 +130,7 @@ export interface MintTokenRequest {
   quantity: string;             // Amount as string to handle large numbers
   recipientAddress: string;     // Recipient address
   attestation?: Cip170AttestationData;  // Optional CIP-170 attestation
-  /** security-token only: mints the (100) reference token alongside this user-token mint.
+  /** rwa-token only: mints the (100) reference token alongside this user-token mint.
    *  Its registration cannot carry it — the registration path rejects a second asset name
    *  under the policy — so the CIP-68 pair is completed on the first mint instead. */
   cip68Metadata?: Cip68MetadataRequest;

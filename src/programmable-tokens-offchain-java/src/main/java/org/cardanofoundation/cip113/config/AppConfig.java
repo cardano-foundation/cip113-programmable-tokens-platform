@@ -94,11 +94,28 @@ public class AppConfig {
 
     }
 
+    /**
+     * Time&nbsp;&harr;&nbsp;slot converters for the configured network.
+     *
+     * <p><b>{@code devnet} must map to {@link NetworkType#DEV}, not fall through to
+     * MAINNET.</b> These converters are what {@code validTo} is computed from, and every
+     * rwa-token path now sets a validity bound (the KYC membership proof only verifies
+     * against a Finite upper bound). Translating "now + N" with MAINNET's era history on a
+     * devnet whose genesis is minutes old yields a slot far beyond the node's known horizon,
+     * and the ledger rejects the transaction at submit with
+     * {@code TimeTranslationPastHorizon} — after the user has signed.
+     *
+     * <p>Nothing offline catches this: script evaluation does not translate time, so the
+     * validators score perfectly and the transaction still cannot be submitted. It was found
+     * by running the registration against a live devnet, where every path that carries a TTL
+     * failed. {@code NetworkType.DEV} carries protocol magic 42, which is Yaci DevKit's.
+     */
     @Bean
     public CardanoConverters cardanoConverters(@Value("${network}") String network) {
         var networkType = switch (network) {
             case "preprod" -> NetworkType.PREPROD;
             case "preview" -> NetworkType.PREVIEW;
+            case "devnet", "yaci", "dev" -> NetworkType.DEV;
             default -> NetworkType.MAINNET;
         };
         log.info("INIT Converters network: {}, network type: {}", network, networkType);

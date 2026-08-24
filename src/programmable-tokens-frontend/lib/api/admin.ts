@@ -26,16 +26,16 @@ export interface AdminTokenInfo {
     blacklistAdminPkh?: string;
     globalStatePolicyId?: string;
   };
-  /** Security-token only: bitfield of the connected wallet's BaFin power-user
-   *  capabilities for this token. Backed by {@link SecurityTokenCapability}.
-   *  Use {@link hasSecurityTokenCapability} to test specific bits. Null/undefined
+  /** RWA-token only: bitfield of the connected wallet's BaFin power-user
+   *  capabilities for this token. Backed by {@link RwaTokenCapability}.
+   *  Use {@link hasRwaTokenCapability} to test specific bits. Null/undefined
    *  for tokens of other substandards. */
-  securityTokenCapabilities?: number;
+  rwaTokenCapabilities?: number;
 }
 
 /** Bit positions matching the on-chain BaFin PowerUser record. Mirrors
- *  the backend's {@code SecurityTokenPowerUserCapability} enum. */
-export const SecurityTokenCapability = {
+ *  the backend's {@code RwaTokenPowerUserCapability} enum. */
+export const RwaTokenCapability = {
   ADMIN: 1 << 0,
   MINTER: 1 << 1,
   BURNER: 1 << 2,
@@ -44,14 +44,14 @@ export const SecurityTokenCapability = {
 } as const;
 
 /** True iff the connected wallet has AT LEAST ONE of the given capabilities
- *  on the given security-token. Returns false for non-security tokens (since
+ *  on the given rwa-token. Returns false for non-RWA tokens (since
  *  these capabilities are BaFin-specific). */
-export function hasSecurityTokenCapability(
+export function hasRwaTokenCapability(
   token: AdminTokenInfo,
   capabilities: number,
 ): boolean {
-  if (token.substandardId !== "security-token") return false;
-  const cap = token.securityTokenCapabilities ?? 0;
+  if (token.substandardId !== "rwa-token") return false;
+  const cap = token.rwaTokenCapabilities ?? 0;
   return (cap & capabilities) !== 0;
 }
 

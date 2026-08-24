@@ -17,11 +17,11 @@ export function TokenDetailsStep({
   onBack,
   isProcessing,
 }: TokenDetailsStepProps) {
-  // For the RWA/security-token flow this figure IS `initialMintQuantity` — the
+  // For the RWA/rwa-token flow this figure IS `initialMintQuantity` — the
   // supply the registration transaction itself mints. Zero is meaningful there: it
   // registers the policy structurally and leaves the first mint as a separate admin
   // action. Every other flow mints unconditionally, so zero stays an error.
-  const allowsZeroSupply = wizardState?.flowId === 'security-token';
+  const allowsZeroSupply = wizardState?.flowId === 'rwa-token';
   const { connected, wallet } = useWallet();
   // This step is shared by all five flows, but only three of them mint the CIP-68 pair. For the
   // rest the form is not rendered at all — collecting metadata that goes nowhere is exactly the
