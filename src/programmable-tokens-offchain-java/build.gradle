@@ -90,13 +90,18 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
-	// RwaTokenUpstreamPinTest hashes the vendored rwa-token contract
-	// tree, which lives OUTSIDE this Gradle project and is therefore not one of
-	// the test task's implicit inputs. Without this declaration, editing a
-	// vendored Aiken file leaves `test` UP-TO-DATE and the drift guard silently
-	// never runs — exactly the failure mode the pin exists to prevent.
+	// The upstream-pin tests hash vendored contract trees that live OUTSIDE this
+	// Gradle project and are therefore not among the test task's implicit inputs.
+	// Without these declarations, editing a vendored Aiken file leaves `test`
+	// UP-TO-DATE and the drift guard silently never runs — exactly the failure mode
+	// the pins exist to prevent.
 	inputs.dir(file("$projectDir/../substandards/rwa-token"))
 	      .withPropertyName('vendoredRwaToken')
+	      .withPathSensitivity(PathSensitivity.RELATIVE)
+
+	// Cip113CoreUpstreamPinTest, same reasoning for the CIP-113 core tree.
+	inputs.dir(file("$projectDir/../core-contracts"))
+	      .withPropertyName('vendoredCoreContracts')
 	      .withPathSensitivity(PathSensitivity.RELATIVE)
 
 	// Gradle discards the test JVM's stdout/stderr, so log.info and System.out

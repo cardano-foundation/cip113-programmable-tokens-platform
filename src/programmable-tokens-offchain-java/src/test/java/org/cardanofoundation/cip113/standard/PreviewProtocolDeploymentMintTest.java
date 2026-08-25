@@ -32,6 +32,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.AbstractPreviewTest;
+import org.cardanofoundation.cip113.core.CoreProtocolParamsDatum;
 import org.cardanofoundation.cip113.model.blueprint.Plutus;
 import org.cardanofoundation.cip113.model.bootstrap.*;
 import org.junit.jupiter.api.Assertions;
@@ -68,7 +69,8 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
     private String COORDINATION_SPEND_CONTRACT;
     private String PROTOCOL_PARAMS_CONTRACT;
     private String PROGRAMMABLE_LOGIC_BASE_CONTRACT;
-    private String PROGRAMMABLE_LOGIC_GLOBAL_CONTRACT;
+    private String TRANSFER_CONTRACT;
+    private String THIRD_PARTY_CONTRACT;
     private String UNFRACKING_CONTRACT;
     private String UPGRADE_MULTISIG_CONTRACT;
     private String ISSUANCE_CBOR_HEX_CONTRACT;
@@ -84,7 +86,8 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         COORDINATION_SPEND_CONTRACT = getCompiledCodeFor("coordination_spend.coordination_spend.spend", validators);
         PROTOCOL_PARAMS_CONTRACT = getCompiledCodeFor("protocol_params_mint.protocol_params_mint.mint", validators);
         PROGRAMMABLE_LOGIC_BASE_CONTRACT = getCompiledCodeFor("programmable_logic_base.programmable_logic_base.spend", validators);
-        PROGRAMMABLE_LOGIC_GLOBAL_CONTRACT = getCompiledCodeFor("programmable_logic_global.programmable_logic_global.withdraw", validators);
+        TRANSFER_CONTRACT = getCompiledCodeFor("transfer.transfer.withdraw", validators);
+        THIRD_PARTY_CONTRACT = getCompiledCodeFor("third_party.third_party.withdraw", validators);
         UNFRACKING_CONTRACT = getCompiledCodeFor("unfracking.unfracking.withdraw", validators);
         UPGRADE_MULTISIG_CONTRACT = getCompiledCodeFor("upgrade_multisig.upgrade_multisig.withdraw", validators);
         ISSUANCE_CBOR_HEX_CONTRACT = getCompiledCodeFor("issuance_cbor_hex_mint.issuance_cbor_hex_mint.mint", validators);
@@ -180,10 +183,16 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
 
         // ---- 3-5. Everything anchored on the params policy (no PLG->PLB chain any more)
         var programmableLogicBaseContract = applyParams(PROGRAMMABLE_LOGIC_BASE_CONTRACT, paramsPolicy);
-        var programmableLogicGlobalContract = applyParams(PROGRAMMABLE_LOGIC_GLOBAL_CONTRACT, paramsPolicy);
+        // Three delegates. programmable_logic_base dispatches to exactly one of them per spend,
+        // naming it by a field of the params datum, so all three must be deployed, published as
+        // reference scripts, and stake-registered -- even though any one transaction loads only
+        // one of them.
+        var transferContract = applyParams(TRANSFER_CONTRACT, paramsPolicy);
+        var thirdPartyContract = applyParams(THIRD_PARTY_CONTRACT, paramsPolicy);
         var unfrackingContract = applyParams(UNFRACKING_CONTRACT, paramsPolicy);
 
-        var programmableLogicGlobalRewardAddress = AddressProvider.getRewardAddress(programmableLogicGlobalContract, network);
+        var transferRewardAddress = AddressProvider.getRewardAddress(transferContract, network);
+        var thirdPartyRewardAddress = AddressProvider.getRewardAddress(thirdPartyContract, network);
         var unfrackingRewardAddress = AddressProvider.getRewardAddress(unfrackingContract, network);
 
         // ---- 6. upgrade_multisig: the trampoline-2 authority named by upgrade_logic_cred.
@@ -214,20 +223,24 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 scriptCred(registrySpendContract));
         log.info("registryMint policy: {}", registryMintContract.getPolicyId());
 
-        // ProgrammableLogicGlobalParams (validators/programmable_logic/params.ak:12-37).
-        // Field order is load-bearing: PLB reads field 3 and unfracking reads fields 0-1
-        // by index via builtins, without deserialising the record.
-        var coordinationDatum = ConstrPlutusData.of(0,
-                // 0: registry_node_cs — the registry NFT policy
-                BytesPlutusData.of(registryMintContract.getScriptHash()),
-                // 1: prog_logic_cred — payment credential of EVERY programmable token UTxO (frozen)
-                scriptCred(programmableLogicBaseContract),
-                // 2: unfracking_cred — read only by PLG's UnfrackingAct arm
-                scriptCred(unfrackingContract),
-                // 3: prog_logic_global_cred — read by PLB on every spend; this is what makes PLG swappable
-                scriptCred(programmableLogicGlobalContract),
-                // 4: upgrade_logic_cred — trampoline-2 authority, read only by coordination_spend
-                scriptCred(upgradeMultisigContract));
+        // The live wiring. Field order is load-bearing and is NOT spelled out here any more:
+        // CoreProtocolParamsDatum owns it, so the deployment and the runtime decoder cannot
+        // drift apart, and the field reorder in the last upstream revision was a change in one
+        // place rather than in every builder that had written the record by hand.
+        var coordinationParamsDatum = new CoreProtocolParamsDatum(
+                HexUtil.encodeHexString(registryMintContract.getScriptHash()),
+                Credential.fromScript(programmableLogicBaseContract.getScriptHash()),
+                Credential.fromScript(transferContract.getScriptHash()),
+                Credential.fromScript(thirdPartyContract.getScriptHash()),
+                Credential.fromScript(unfrackingContract.getScriptHash()),
+                Credential.fromScript(upgradeMultisigContract.getScriptHash()),
+                CoreProtocolParamsDatum.DEFAULT_MAX_INLINE_DATUM_BYTES);
+        // protocol_params_mint only shape-checks this datum, so nothing on chain would stop a
+        // deployment that bricks the protocol -- a wrong-length credential nothing can satisfy,
+        // or two delegates sharing a credential, which collapses PLB's dispatch. Checked here
+        // because here is the only place it CAN be checked.
+        coordinationParamsDatum.validateForDeployment();
+        var coordinationDatum = coordinationParamsDatum.toPlutusData();
 
         var protocolParamNft = Asset.builder()
                 .name(HexUtil.encodeHexString("ProtocolParams".getBytes(), true))
@@ -275,7 +288,11 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 scriptCred(programmableLogicBaseContract),                 // programmable_logic_base
                 BytesPlutusData.of(registryMintContract.getScriptHash()),  // registry_node_cs
                 ConstrPlutusData.of(1, BytesPlutusData.of(HexUtil.decodeHexString(dummyPolicyId))), // minting_logic_cred
-                scriptCred(programmableLogicGlobalContract));              // plg_stake_cred (NEW)
+                // params_policy: a BARE PolicyId. This parameter used to be plg_stake_cred, a
+                // Credential -- same position, same arity, different encoding. Passing the old
+                // shape would still produce a template, and every token registered against it
+                // would derive a policy id that registry_mint refuses.
+                BytesPlutusData.of(protocolParamsContract.getScriptHash()));
 
         var encodedIssuanceDummyContract = HexUtil.encodeHexString(issuanceDummyContract.serializeScriptBody());
         var contractParts = encodedIssuanceDummyContract.split(dummyPolicyId);
@@ -374,7 +391,8 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 .payToContract(issuanceAlwaysFailAddress.getAddress(), ValueUtil.toAmountList(issuanceCborHexValue), issuanceCborHexDatum)
                 // reference scripts (amounts cover min-UTxO for the script sizes)
                 .payToAddress(refInputAccount.baseAddress(), Amount.ada(5), programmableLogicBaseContract)
-                .payToAddress(refInputAccount.baseAddress(), Amount.ada(20), programmableLogicGlobalContract)
+                .payToAddress(refInputAccount.baseAddress(), Amount.ada(20), transferContract)
+                .payToAddress(refInputAccount.baseAddress(), Amount.ada(20), thirdPartyContract)
                 .payToAddress(refInputAccount.baseAddress(), Amount.ada(12), unfrackingContract)
                 // re-fragment the admin wallet for follow-up tests
                 .payToAddress(adminAccount.baseAddress(), Amount.ada(50))
@@ -387,7 +405,8 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         // only, so redeploying with the same signer set collides with the existing registration
         // and the node rejects the whole tx with StakeKeyRegisteredDELEG. Register only what is
         // not already on-chain.
-        for (var rewardAddress : List.of(programmableLogicGlobalRewardAddress,
+        for (var rewardAddress : List.of(transferRewardAddress,
+                thirdPartyRewardAddress,
                 unfrackingRewardAddress,
                 upgradeMultisigRewardAddress)) {
             if (isStakeAddressRegistered(rewardAddress.getAddress())) {
@@ -411,9 +430,11 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         // Resolve reference-script output indices dynamically — hardcoding them (e.g. 3 and 4)
         // breaks as soon as an output is added or reordered upstream.
         var plbRefIdx = findRefScriptOutputIndex(transaction, programmableLogicBaseContract);
-        var plgRefIdx = findRefScriptOutputIndex(transaction, programmableLogicGlobalContract);
+        var transferRefIdx = findRefScriptOutputIndex(transaction, transferContract);
+        var thirdPartyRefIdx = findRefScriptOutputIndex(transaction, thirdPartyContract);
         var unfrackingRefIdx = findRefScriptOutputIndex(transaction, unfrackingContract);
-        log.info("ref script indices — plb: {}, plg: {}, unfracking: {}", plbRefIdx, plgRefIdx, unfrackingRefIdx);
+        log.info("ref script indices - plb: {}, transfer: {}, third_party: {}, unfracking: {}",
+                plbRefIdx, transferRefIdx, thirdPartyRefIdx, unfrackingRefIdx);
 
         // This devnet's max-tx-size is 16384 bytes; assert it explicitly rather than relying on
         // buildAndSign() having silently accepted it — a failure here should read as "the tx grew
@@ -449,11 +470,17 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
                 HexUtil.encodeHexString(coordinationNonce),
                 HexUtil.encodeHexString(coordinationSpendScript.getScriptHash()),
                 coordinationAddress.getAddress());
-        var programmableLogicGlobalParams = new ProgrammableLogicGlobalParams(
-                protocolParamsContract.getPolicyId(), programmableLogicGlobalContract.getPolicyId());
+        var transferParams = new DelegateParams(
+                protocolParamsContract.getPolicyId(),
+                HexUtil.encodeHexString(transferContract.getScriptHash()),
+                transferRewardAddress.getAddress());
+        var thirdPartyParams = new DelegateParams(
+                protocolParamsContract.getPolicyId(),
+                HexUtil.encodeHexString(thirdPartyContract.getScriptHash()),
+                thirdPartyRewardAddress.getAddress());
         var programmableLogicBaseParams = new ProgrammableLogicBaseParams(
                 protocolParamsContract.getPolicyId(), programmableLogicBaseContract.getPolicyId());
-        var unfrackingParams = new UnfrackingParams(
+        var unfrackingParams = new DelegateParams(
                 protocolParamsContract.getPolicyId(),
                 HexUtil.encodeHexString(unfrackingContract.getScriptHash()),
                 unfrackingRewardAddress.getAddress());
@@ -473,17 +500,22 @@ public class PreviewProtocolDeploymentMintTest extends AbstractPreviewTest {
         var directorySpendParams = new DirectorySpendParams(
                 protocolParamsContract.getPolicyId(), registrySpendContract.getPolicyId());
 
-        var protocolBootstrapParams = new ProtocolBootstrapParams(protocolParams,
+        var protocolBootstrapParams = new ProtocolBootstrapParams(
+                ProtocolBootstrapParams.CURRENT_SCHEMA_VERSION,
+                protocolParams,
                 coordinationParams,
-                programmableLogicGlobalParams,
-                programmableLogicBaseParams,
+                transferParams,
+                thirdPartyParams,
                 unfrackingParams,
+                programmableLogicBaseParams,
                 upgradeMultisigParams,
                 issuanceParams,
                 directoryParams,
                 directorySpendParams,
+                CoreProtocolParamsDatum.DEFAULT_MAX_INLINE_DATUM_BYTES,
                 new TxInput(txHash, plbRefIdx),
-                new TxInput(txHash, plgRefIdx),
+                new TxInput(txHash, transferRefIdx),
+                new TxInput(txHash, thirdPartyRefIdx),
                 new TxInput(txHash, unfrackingRefIdx),
                 txHash);
 

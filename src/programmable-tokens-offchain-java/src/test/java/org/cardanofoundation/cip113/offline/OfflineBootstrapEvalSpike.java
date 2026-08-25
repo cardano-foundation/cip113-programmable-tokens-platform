@@ -40,6 +40,7 @@ import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import com.bloxbean.cardano.client.util.HexUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.core.CoreProtocolParamsDatum;
 import org.cardanofoundation.cip113.PreviewConstants;
 import org.cardanofoundation.cip113.model.blueprint.Plutus;
 import org.cardanofoundation.cip113.model.blueprint.Validator;
@@ -115,7 +116,8 @@ public class OfflineBootstrapEvalSpike {
     private String COORDINATION_SPEND_CONTRACT;
     private String PROTOCOL_PARAMS_CONTRACT;
     private String PROGRAMMABLE_LOGIC_BASE_CONTRACT;
-    private String PROGRAMMABLE_LOGIC_GLOBAL_CONTRACT;
+    private String TRANSFER_CONTRACT;
+    private String THIRD_PARTY_CONTRACT;
     private String UNFRACKING_CONTRACT;
     private String UPGRADE_MULTISIG_CONTRACT;
     private String ISSUANCE_CBOR_HEX_CONTRACT;
@@ -132,7 +134,8 @@ public class OfflineBootstrapEvalSpike {
         COORDINATION_SPEND_CONTRACT = compiledCodeFor("coordination_spend.coordination_spend.spend", validators);
         PROTOCOL_PARAMS_CONTRACT = compiledCodeFor("protocol_params_mint.protocol_params_mint.mint", validators);
         PROGRAMMABLE_LOGIC_BASE_CONTRACT = compiledCodeFor("programmable_logic_base.programmable_logic_base.spend", validators);
-        PROGRAMMABLE_LOGIC_GLOBAL_CONTRACT = compiledCodeFor("programmable_logic_global.programmable_logic_global.withdraw", validators);
+        TRANSFER_CONTRACT = compiledCodeFor("transfer.transfer.withdraw", validators);
+        THIRD_PARTY_CONTRACT = compiledCodeFor("third_party.third_party.withdraw", validators);
         UNFRACKING_CONTRACT = compiledCodeFor("unfracking.unfracking.withdraw", validators);
         UPGRADE_MULTISIG_CONTRACT = compiledCodeFor("upgrade_multisig.upgrade_multisig.withdraw", validators);
         ISSUANCE_CBOR_HEX_CONTRACT = compiledCodeFor("issuance_cbor_hex_mint.issuance_cbor_hex_mint.mint", validators);
@@ -202,11 +205,12 @@ public class OfflineBootstrapEvalSpike {
 
         // ---- 3-5. Everything anchored on the params policy
         var programmableLogicBaseContract = applyParams(PROGRAMMABLE_LOGIC_BASE_CONTRACT, paramsPolicy);
-        var programmableLogicGlobalContract = applyParams(PROGRAMMABLE_LOGIC_GLOBAL_CONTRACT, paramsPolicy);
+        var transferContract = applyParams(TRANSFER_CONTRACT, paramsPolicy);
+        var thirdPartyContract = applyParams(THIRD_PARTY_CONTRACT, paramsPolicy);
         var unfrackingContract = applyParams(UNFRACKING_CONTRACT, paramsPolicy);
 
-        var programmableLogicGlobalRewardAddress =
-                AddressProvider.getRewardAddress(programmableLogicGlobalContract, network);
+        var transferRewardAddress = AddressProvider.getRewardAddress(transferContract, network);
+        var thirdPartyRewardAddress = AddressProvider.getRewardAddress(thirdPartyContract, network);
         var unfrackingRewardAddress = AddressProvider.getRewardAddress(unfrackingContract, network);
 
         // ---- 6. upgrade_multisig: 1-of-1 on the admin key
@@ -234,13 +238,16 @@ public class OfflineBootstrapEvalSpike {
                 scriptCred(registrySpendContract));
         log.info("registryMint policy: {}", registryMintContract.getPolicyId());
 
-        // ProgrammableLogicGlobalParams — field order is load-bearing.
-        var coordinationDatum = ConstrPlutusData.of(0,
-                BytesPlutusData.of(registryMintContract.getScriptHash()),   // 0: registry_node_cs
-                scriptCred(programmableLogicBaseContract),                  // 1: prog_logic_cred
-                scriptCred(unfrackingContract),                             // 2: unfracking_cred
-                scriptCred(programmableLogicGlobalContract),                // 3: prog_logic_global_cred
-                scriptCred(upgradeMultisigContract));                       // 4: upgrade_logic_cred
+        // Field order is load-bearing and owned by CoreProtocolParamsDatum, so it is not
+        // spelled out here: this spike and the runtime decoder cannot disagree about it.
+        var coordinationDatum = new CoreProtocolParamsDatum(
+                HexUtil.encodeHexString(registryMintContract.getScriptHash()),
+                Credential.fromScript(programmableLogicBaseContract.getScriptHash()),
+                Credential.fromScript(transferContract.getScriptHash()),
+                Credential.fromScript(thirdPartyContract.getScriptHash()),
+                Credential.fromScript(unfrackingContract.getScriptHash()),
+                Credential.fromScript(upgradeMultisigContract.getScriptHash()),
+                CoreProtocolParamsDatum.DEFAULT_MAX_INLINE_DATUM_BYTES).toPlutusData();
 
         var protocolParamNft = Asset.builder()
                 .name(HexUtil.encodeHexString("ProtocolParams".getBytes(StandardCharsets.UTF_8), true))
@@ -284,7 +291,9 @@ public class OfflineBootstrapEvalSpike {
                 scriptCred(programmableLogicBaseContract),                 // programmable_logic_base
                 BytesPlutusData.of(registryMintContract.getScriptHash()),  // registry_node_cs
                 ConstrPlutusData.of(1, BytesPlutusData.of(HexUtil.decodeHexString(dummyPolicyId))), // minting_logic_cred
-                scriptCred(programmableLogicGlobalContract));              // plg_stake_cred
+                // params_policy: a BARE PolicyId, where this used to be plg_stake_cred,
+                // a Credential. Same position, different encoding.
+                BytesPlutusData.of(protocolParamsContract.getScriptHash()));
 
         var encodedIssuanceDummyContract = HexUtil.encodeHexString(issuanceDummyContract.serializeScriptBody());
         var contractParts = encodedIssuanceDummyContract.split(dummyPolicyId);
@@ -347,14 +356,17 @@ public class OfflineBootstrapEvalSpike {
                 .payToContract(registrySpendAddress.getAddress(), ValueUtil.toAmountList(registryValue), originNodeDatum)
                 .payToContract(issuanceAlwaysFailAddress.getAddress(), ValueUtil.toAmountList(issuanceCborHexValue), issuanceCborHexDatum)
                 .payToAddress(refInputAccount.baseAddress(), Amount.ada(5), programmableLogicBaseContract)
-                .payToAddress(refInputAccount.baseAddress(), Amount.ada(20), programmableLogicGlobalContract)
+                .payToAddress(refInputAccount.baseAddress(), Amount.ada(20), transferContract)
+                .payToAddress(refInputAccount.baseAddress(), Amount.ada(20), thirdPartyContract)
                 .payToAddress(refInputAccount.baseAddress(), Amount.ada(12), unfrackingContract)
                 .payToAddress(adminAccount.baseAddress(), Amount.ada(50))
                 .payToAddress(adminAccount.baseAddress(), Amount.ada(50))
                 .withChangeAddress(adminAccount.baseAddress());
 
-        // Offline: nothing is registered on the fabricated "chain", so register all three.
-        for (var rewardAddress : List.of(programmableLogicGlobalRewardAddress,
+        // Offline: nothing is registered on the fabricated "chain", so register all four --
+        // the three delegates plus the upgrade authority.
+        for (var rewardAddress : List.of(transferRewardAddress,
+                thirdPartyRewardAddress,
                 unfrackingRewardAddress,
                 upgradeMultisigRewardAddress)) {
             tx.registerStakeAddress(rewardAddress.getAddress());
@@ -365,7 +377,7 @@ public class OfflineBootstrapEvalSpike {
         // the supplier is wired in as the spike requires.
         var scriptSupplier = new InMemoryScriptSupplier(List.of(
                 issuanceAlwaysFailScript, coordinationSpendScript, protocolParamsContract,
-                programmableLogicBaseContract, programmableLogicGlobalContract, unfrackingContract,
+                programmableLogicBaseContract, transferContract, thirdPartyContract, unfrackingContract,
                 upgradeMultisigContract, issuanceCborHexContract, registrySpendContract,
                 registryMintContract));
 

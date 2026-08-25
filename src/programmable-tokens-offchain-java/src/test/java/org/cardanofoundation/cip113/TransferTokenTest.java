@@ -226,7 +226,7 @@ public class TransferTokenTest extends AbstractPreviewTest {
                 ListPlutusData.of(ConstrPlutusData.of(0, BigIntPlutusData.of(1)))
         );
 
-        log.info("protocolBootstrapParams.programmableGlobalRefInput(): {}", protocolBootstrapParams.programmableGlobalRefInput());
+        log.info("protocolBootstrapParams.transferRefInput(): {}", protocolBootstrapParams.transferRefInput());
 
         var tx = new ScriptTx()
                 .collectFrom(walletUtxos)

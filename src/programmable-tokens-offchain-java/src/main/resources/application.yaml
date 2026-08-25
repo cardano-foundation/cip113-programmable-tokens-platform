@@ -164,9 +164,21 @@ koios:
 
 store:
   cardano:
-    host: ""
-    port: 0
+    # The devkit's node-to-node port, as published by the yaci-cli container. Empty host / port 0
+    # left the store with nowhere to connect when running the backend directly (the docker
+    # compose file injects STORE_CARDANO_HOST/PORT, so only a local `bootRun` was affected).
+    # Environment variables still win over these, via Spring's relaxed binding.
+    host: localhost
+    port: 3001
     protocol-magic: 42
+    # REQUIRED, even though they look like no-ops. The unprofiled document at the top of this
+    # file sets a MAINNET sync start (block 586ead17… at slot 154984561), and Spring merges
+    # that document into every profile — so without these overrides a devnet inherits a
+    # mainnet block hash. yaci-store's InitService then treats it as a custom start point,
+    # cannot resolve a Shelley start for protocol magic 42, and refuses to start with
+    # "Shelley start point is not configured properly". Empty/zero means "sync from genesis",
+    # which is what a devnet wants. preview and preprod override the same pair for the same
+    # reason.
     sync-start-blockhash: ""
     sync-start-slot: 0
     byron-genesis-file: classpath:/devkit/byron-genesis.json

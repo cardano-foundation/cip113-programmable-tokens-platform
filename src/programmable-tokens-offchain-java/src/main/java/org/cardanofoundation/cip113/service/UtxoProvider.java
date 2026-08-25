@@ -26,6 +26,9 @@ public class UtxoProvider {
     @Nullable
     private final UtxoRepository utxoRepository;
 
+    /** This backend's own chain index, queried by asset. See {@link LocalAssetUtxoRepository}. */
+    private final org.cardanofoundation.cip113.repository.LocalAssetUtxoRepository localAssetUtxoRepository;
+
     /**
      * The chain's current tip slot, or empty when the backend cannot answer.
      *
@@ -205,8 +208,58 @@ public class UtxoProvider {
      *  @return the UTxO holding the NFT, or {@link Optional#empty()} if the
      *          asset isn't indexed yet or has no on-chain holder. */
     public Optional<Utxo> findUtxoByAsset(String policyId, String assetNameHex) {
+        String unit = policyId + assetNameHex.toLowerCase();
+
+        // Local index FIRST. This backend writes address_utxo itself from the node it is
+        // synced to, so it can answer "who holds this unit?" on every network — including a
+        // devnet, where the Blockfrost-compatible asset index cannot: yaci-store returns
+        // `200 []` for /assets/{unit}/addresses and has no /assets/{unit} at all. Because an
+        // empty-but-successful response is indistinguishable from a confirmed absence, that
+        // path reported assets sitting in a block as "not on chain" — see
+        // LocalAssetUtxoRepository for the full account.
+        //
+        // Preferring local over remote also removes a network round trip from the hot path
+        // and keeps the answer consistent with the UTxO set the builders are already using
+        // via HybridUtxoSupplier.
+        Optional<Utxo> local = findUnspentHoldingUnitLocally(unit);
+        if (local.isPresent()) {
+            return local;
+        }
+
+        return findUtxoByAssetViaAssetIndex(unit, policyId, assetNameHex);
+    }
+
+    /**
+     * Ask this backend's own chain index which unspent UTxO holds {@code unit}.
+     *
+     * <p>Returns empty when the repository is absent (tests construct {@code UtxoProvider}
+     * without one) or when the index genuinely has no such UTxO — in the latter case the
+     * caller falls through to the remote asset index, which covers the window where this
+     * backend is still syncing but a remote indexer is already ahead.
+     */
+    private Optional<Utxo> findUnspentHoldingUnitLocally(String unit) {
+        if (localAssetUtxoRepository == null) {
+            return Optional.empty();
+        }
         try {
-            String unit = policyId + assetNameHex.toLowerCase();
+            var rows = localAssetUtxoRepository.findUnspentHoldingUnit(
+                    "[{\"unit\":\"" + unit + "\"}]");
+            if (rows.isEmpty()) {
+                return Optional.empty();
+            }
+            // Ordered by slot DESC, so the newest wins. For a one-shot NFT there is only ever
+            // one unspent holder; ordering matters only if an index lag briefly shows two.
+            return Optional.of(UtxoUtil.toUtxo(rows.getFirst()));
+        } catch (Exception e) {
+            log.warn("local by-unit lookup for {} failed, falling back to the asset index: {}",
+                    unit, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /** The original Blockfrost asset-index path: unit -> holding address -> that address's UTxOs. */
+    private Optional<Utxo> findUtxoByAssetViaAssetIndex(String unit, String policyId, String assetNameHex) {
+        try {
             var addressesResult = bfBackendService.getAssetService().getAssetAddresses(unit, 1, 1);
             if (!addressesResult.isSuccessful() || addressesResult.getValue() == null
                     || addressesResult.getValue().isEmpty()) {

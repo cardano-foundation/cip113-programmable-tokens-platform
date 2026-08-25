@@ -15,7 +15,6 @@ import com.bloxbean.cardano.client.transaction.spec.*;
 import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import com.bloxbean.cardano.client.util.HexUtil;
 import com.bloxbean.cardano.yaci.core.model.certs.CertificateType;
-import com.easy1staking.cardano.comparator.TransactionInputComparator;
 import com.easy1staking.cardano.comparator.UtxoComparator;
 import com.easy1staking.cardano.model.AssetType;
 import com.easy1staking.util.Pair;
@@ -23,6 +22,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.core.CoreDatums;
+import org.cardanofoundation.cip113.core.CoreLayout;
+import org.cardanofoundation.cip113.core.CoreRedeemers;
+import org.cardanofoundation.cip113.core.CoreWithdrawal;
 import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.entity.GlobalStateInitEntity;
 import org.cardanofoundation.cip113.entity.KycExtendedTokenRegistrationEntity;
@@ -307,7 +310,7 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
             // SmartTokenMintingAction { minting_logic_cred, minting_registry_proof } wrapper is
             // gone (the credential is now the validator's compile-time parameter).
             // Registry node output is at index 2: [0] PLB, [1] updated covering node, [2] new node.
-            var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2)); // OutputIndex { index: 2 }
+            var issuanceRedeemer = CoreRedeemers.mintProofOutputIndex(2);
 
             var programmableToken = Asset.builder()
                     .name("0x" + request.getAssetName())
@@ -341,7 +344,7 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
 
             var tx = new Tx()
                     .collectFrom(feePayerUtxos)
-                    .collectFrom(directoryUtxo, ConstrPlutusData.of(0))
+                    .collectFrom(directoryUtxo, CoreRedeemers.registrySpend())
                     .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, ConstrPlutusData.of(0))
                     .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
                     .mintAsset(directoryMintContract, directoryMintNft, directoryMintRedeemer)
@@ -467,13 +470,16 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
                     .transactionId(progTokenRegistry.getTxHash())
                     .index(progTokenRegistry.getOutputIndex())
                     .build();
-            var sortedReferenceInputs = Stream.of(registryRefInput)
-                    .sorted(new TransactionInputComparator())
-                    .toList();
-            var registryRefInputIndex = sortedReferenceInputs.indexOf(registryRefInput);
+            // Sole reference input, so the index is trivially 0 -- taken through CoreLayout
+            // anyway, because `indexOf` returns -1 for anything it cannot find and -1 inside a
+            // redeemer is an out-of-range read the validator reports as an unrelated failure.
+            // CoreLayout throws instead, and adding a second reference input here later will
+            // then be a change that keeps working rather than one that silently renumbers.
+            var mintLayout = CoreLayout.builder().referenceInput(registryRefInput).build();
+            var registryRefInputIndex = mintLayout.referenceInputIndex(registryRefInput);
 
             // types.MintingRegistryProof directly (no SmartTokenMintingAction wrapper in v0.4.0).
-            var issuanceRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(registryRefInputIndex)); // RefInput { index }
+            var issuanceRedeemer = CoreRedeemers.mintProofRefInput(registryRefInputIndex);
 
             var programmableToken = Asset.builder()
                     .name("0x" + request.assetName())
@@ -627,8 +633,11 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
 
             var senderProgTokensUtxos = utxoProvider.findUtxos(senderProgrammableTokenAddress.getAddress());
 
-            var programmableLogicGlobal = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
-            var programmableLogicGlobalAddress = AddressProvider.getRewardAddress(programmableLogicGlobal, network.getCardanoNetwork());
+            // A transfer loads the `transfer` delegate and neither of the other two:
+            // programmable_logic_base dispatches to exactly one delegate per input.
+            var coreTransfer = protocolScriptBuilderService.getParameterizedTransferScript(protocolParams);
+            var coreTransferAddress = AddressProvider.getRewardAddress(coreTransfer, network.getCardanoNetwork());
+            var coreTransferCredential = Credential.fromScript(coreTransfer.getScriptHash());
             var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
 
             var parameterisedTransferContract = kycExtendedScriptBuilder.buildTransferScript(
@@ -727,19 +736,32 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
                     .build();
 
             var sortedReferenceInputs = Stream.of(
-                            globalStateRefInput,
-                            TransactionInput.builder()
-                                    .transactionId(protocolParamsUtxo.getTxHash())
-                                    .index(protocolParamsUtxo.getOutputIndex())
-                                    .build(),
-                            TransactionInput.builder()
-                                    .transactionId(progTokenRegistry.getTxHash())
-                                    .index(progTokenRegistry.getOutputIndex())
-                                    .build())
-                    .sorted(new TransactionInputComparator())
+                            globalStateRefInput)
                     .toList();
 
-            var globalStateIdx = sortedReferenceInputs.indexOf(globalStateRefInput);
+            var protocolParamsRefInput = TransactionInput.builder()
+                    .transactionId(protocolParamsUtxo.getTxHash())
+                    .index(protocolParamsUtxo.getOutputIndex())
+                    .build();
+            var registryRefInput = TransactionInput.builder()
+                    .transactionId(progTokenRegistry.getTxHash())
+                    .index(progTokenRegistry.getOutputIndex())
+                    .build();
+
+            // Declared together, before any index is taken: wdrl_idx is a position over the
+            // WHOLE withdrawal map, so the substandard's own withdrawal has to be visible here.
+            var substandardTransferCredential = Credential.fromScript(parameterisedTransferContract.getScriptHash());
+            var layout = CoreLayout.builder()
+                    .referenceInput(globalStateRefInput)
+                    .referenceInput(protocolParamsRefInput)
+                    .referenceInput(registryRefInput)
+                    .withdrawal(coreTransferCredential)
+                    .withdrawal(substandardTransferCredential)
+                    .build();
+            sortedReferenceInputs = layout.referenceInputs();
+            var paramsIdx = layout.referenceInputIndex(protocolParamsRefInput);
+
+            var globalStateIdx = layout.referenceInputIndex(globalStateRefInput);
             var vkeyIdx = request.kycVkeyIndex() != null ? request.kycVkeyIndex() : 0;
 
             // SenderProof: Constr 0 = Attestation { kyc_proof }, Constr 1 = Membership { proof }.
@@ -781,28 +803,32 @@ public class KycExtendedSubstandardHandler implements SubstandardHandler, BasicO
                     senderProofsList,
                     receiverProofsList);
 
-            var registryIndex = sortedReferenceInputs.indexOf(TransactionInput.builder()
-                    .transactionId(progTokenRegistry.getTxHash())
-                    .index(progTokenRegistry.getOutputIndex())
-                    .build());
+            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(paramsIdx, List.of(
+                    CoreRedeemers.tokenExists(layout.referenceInputIndex(registryRefInput))));
 
-            var programmableGlobalRedeemer = ConstrPlutusData.of(0,
-                    ListPlutusData.of(ConstrPlutusData.of(0, BigIntPlutusData.of(registryIndex)))
-            );
+            var baseSpendRedeemer = CoreRedeemers.spendViaTransfer(
+                    paramsIdx, layout.withdrawalIndex(coreTransferCredential));
 
             var tx = new Tx()
                     .collectFrom(adminUtxos);
 
-            inputUtxos.forEach(utxo -> tx.collectFrom(utxo, ConstrPlutusData.of(0)));
+            inputUtxos.forEach(utxo -> tx.collectFrom(utxo, baseSpendRedeemer));
 
-            tx.withdraw(substandardTransferAddress.getAddress(), BigInteger.ZERO, transferRedeemer)
-                    .withdraw(programmableLogicGlobalAddress.getAddress(), BigInteger.ZERO, programmableGlobalRedeemer)
-                    .payToContract(senderProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(returningValue), ConstrPlutusData.of(0))
-                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenValue), ConstrPlutusData.of(0));
+            // Added in LEDGER order: a withdrawal's redeemer is matched to its entry by position
+            // in the canonical map, so pre-sorting removes any dependence on the serialiser
+            // re-indexing them afterwards.
+            layout.inWithdrawalOrder(
+                            List.of(new CoreWithdrawal(substandardTransferCredential, substandardTransferAddress.getAddress(), transferRedeemer),
+                                    new CoreWithdrawal(coreTransferCredential, coreTransferAddress.getAddress(), coreTransferRedeemer)),
+                            CoreWithdrawal::credential)
+                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
+
+            tx.payToContract(senderProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(returningValue), CoreDatums.programmableTokenDatum())
+                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenValue), CoreDatums.programmableTokenDatum());
 
             sortedReferenceInputs.forEach(tx::readFrom);
 
-            tx.attachRewardValidator(programmableLogicGlobal)
+            tx.attachRewardValidator(coreTransfer)
                     .attachRewardValidator(parameterisedTransferContract)
                     .attachSpendingValidator(programmableLogicBase)
                     .withChangeAddress(senderAddress.getAddress());

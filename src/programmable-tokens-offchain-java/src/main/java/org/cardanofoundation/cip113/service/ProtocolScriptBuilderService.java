@@ -1,333 +1,105 @@
 package org.cardanofoundation.cip113.service;
 
-import com.bloxbean.cardano.aiken.AikenScriptUtil;
-import com.bloxbean.cardano.client.plutus.blueprint.PlutusBlueprintUtil;
-import com.bloxbean.cardano.client.plutus.blueprint.model.PlutusVersion;
-import com.bloxbean.cardano.client.plutus.spec.*;
-import com.bloxbean.cardano.client.util.HexUtil;
+import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.core.CoreScriptFactory;
+import org.cardanofoundation.cip113.core.CoreValidator;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.springframework.stereotype.Service;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
 /**
- * Service for building parameterized protocol scripts based on protocol version.
- * This eliminates code duplication across controllers by centralizing script parameterization logic.
- * Scripts are cached per protocol version for performance.
+ * Names the core scripts the way the existing callers ask for them.
+ *
+ * <p>This used to <em>be</em> the parameterisation layer: eight near-identical methods,
+ * each with its own blueprint-title literal, its own parameter list, its own
+ * {@code Optional} unwrap and its own try/catch around a debug log. All of that now lives
+ * in {@link CoreScriptFactory}, where the parameter lists sit together in one switch and
+ * can be read against the blueprint as a table. What remains here is the vocabulary:
+ * {@code getParameterizedDirectoryMintScript} and friends are called from every
+ * substandard handler, and renaming them is a separate change from moving the knowledge
+ * out of them.
+ *
+ * <p>Kept deliberately thin. New code should depend on {@link CoreScriptFactory} directly;
+ * this class exists so that migrating the handlers can be done one at a time, with the
+ * script hashes proven unchanged at every step by
+ * {@code ProtocolScriptBuilderServiceHashDerivationTest}.
+ *
+ * <p>Note the vocabulary itself predates the contracts it describes: "directory" is the
+ * old name for what upstream now calls the registry, so {@code DirectoryMint} is
+ * {@code registry_mint} and {@code DirectorySpend} is {@code registry_spend}. The mapping
+ * below is the only place that has to be known.
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class ProtocolScriptBuilderService {
 
-    private final ProtocolBootstrapService protocolBootstrapService;
+    private final CoreScriptFactory coreScripts;
 
-    // Cache: protocolTxHash -> scriptName -> PlutusScript
-    private final Map<String, Map<String, PlutusScript>> scriptCache = new ConcurrentHashMap<>();
-
-    /**
-     * Get parameterized Directory Mint (registry_mint) script
-     * Parameters (plutus.json validators[].parameters for registry_mint.registry_mint.mint):
-     * utxo_ref (OutputReference), issuance_cbor_hex_cs (PolicyId), registry_spend_cred (Credential)
-     */
+    /** {@code registry_mint} — the registry-node NFT policy. */
     public PlutusScript getParameterizedDirectoryMintScript(ProtocolBootstrapParams protocolParams) {
-        return getCachedOrBuild(protocolParams.txHash(), "directory_mint", () -> {
-            var utxo1 = protocolParams.directoryMintParams().txInput();
-            var issuanceScriptHash = protocolParams.directoryMintParams().issuanceScriptHash();
-            var registrySpendScriptHash = protocolParams.directorySpendParams().scriptHash();
-
-            var directoryParameters = ListPlutusData.of(
-                    ConstrPlutusData.of(0,
-                            BytesPlutusData.of(HexUtil.decodeHexString(utxo1.txHash())),
-                            BigIntPlutusData.of(utxo1.outputIndex())),
-                    BytesPlutusData.of(HexUtil.decodeHexString(issuanceScriptHash)),
-                    ConstrPlutusData.of(1, BytesPlutusData.of(HexUtil.decodeHexString(registrySpendScriptHash)))
-            );
-
-            var contractOpt = protocolBootstrapService.getProtocolContract("registry_mint.registry_mint.mint");
-            if (contractOpt.isEmpty()) {
-                throw new IllegalStateException("Registry mint contract not found");
-            }
-
-            var script = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
-                    AikenScriptUtil.applyParamToScript(directoryParameters, contractOpt.get()),
-                    PlutusVersion.v3
-            );
-
-            try {
-                log.debug("Built directory mint script with hash: {}", HexUtil.encodeHexString(script.getScriptHash()));
-            } catch (Exception e) {
-                log.debug("Built directory mint script (could not compute hash)");
-            }
-            return script;
-        });
+        return coreScripts.script(CoreValidator.REGISTRY_MINT, protocolParams);
     }
 
-    /**
-     * Get parameterized Directory Spend (registry_spend) script
-     * Parameters: protocol params script hash
-     */
+    /** {@code registry_spend} — spends registry nodes (insert, in-place update). */
     public PlutusScript getParameterizedDirectorySpendScript(ProtocolBootstrapParams protocolParams) {
-        return getCachedOrBuild(protocolParams.txHash(), "directory_spend", () -> {
-            var protocolParamsScriptHash = protocolParams.protocolParams().scriptHash();
-
-            var directorySpendParameters = ListPlutusData.of(
-                    BytesPlutusData.of(HexUtil.decodeHexString(protocolParamsScriptHash))
-            );
-
-            var contractOpt = protocolBootstrapService.getProtocolContract("registry_spend.registry_spend.spend");
-            if (contractOpt.isEmpty()) {
-                throw new IllegalStateException("Registry spend contract not found");
-            }
-
-            var script = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
-                    AikenScriptUtil.applyParamToScript(directorySpendParameters, contractOpt.get()),
-                    PlutusVersion.v3
-            );
-
-            try {
-                log.debug("Built directory spend script with hash: {}", HexUtil.encodeHexString(script.getScriptHash()));
-            } catch (Exception e) {
-                log.debug("Built directory spend script (could not compute hash)");
-            }
-            return script;
-        });
+        return coreScripts.script(CoreValidator.REGISTRY_SPEND, protocolParams);
     }
 
     /**
-     * Get parameterized Issuance Mint script
-     * Parameters (plutus.json validators[].parameters for issuance_mint.issuance_mint.mint):
-     * programmable_logic_base (Credential), registry_node_cs (PolicyId), minting_logic_cred (Credential),
-     * plg_stake_cred (Credential)
+     * {@code issuance_mint} for one substandard — its policy id is the registered token's
+     * identity, because the substandard's minting-logic credential is baked into it.
      */
-    public PlutusScript getParameterizedIssuanceMintScript(
-            ProtocolBootstrapParams protocolParams,
-            PlutusScript substandardIssueScript
-    ) {
-        try {
-            // Don't cache this one since it depends on substandard script which varies
-            var programmableLogicBaseScriptHash = protocolParams.programmableLogicBaseParams().scriptHash();
-            var registryNodeCs = protocolParams.directoryMintParams().scriptHash();
-            var programmableLogicGlobalScriptHash = protocolParams.programmableLogicGlobalPrams().scriptHash();
-
-            var issuanceParameters = ListPlutusData.of(
-                    ConstrPlutusData.of(1,
-                            BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicBaseScriptHash))
-                    ),
-                    BytesPlutusData.of(HexUtil.decodeHexString(registryNodeCs)),
-                    ConstrPlutusData.of(1,
-                            BytesPlutusData.of(substandardIssueScript.getScriptHash())
-                    ),
-                    ConstrPlutusData.of(1,
-                            BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicGlobalScriptHash))
-                    )
-            );
-
-            var contractOpt = protocolBootstrapService.getProtocolContract("issuance_mint.issuance_mint.mint");
-            if (contractOpt.isEmpty()) {
-                throw new IllegalStateException("Issuance mint contract not found");
-            }
-
-            var script = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
-                    AikenScriptUtil.applyParamToScript(issuanceParameters, contractOpt.get()),
-                    PlutusVersion.v3
-            );
-
-            try {
-                log.debug("Built issuance mint script with policy ID: {}", script.getPolicyId());
-            } catch (Exception e) {
-                log.debug("Built issuance mint script (could not compute policy ID)");
-            }
-            return script;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to build issuance mint script", e);
-        }
+    public PlutusScript getParameterizedIssuanceMintScript(ProtocolBootstrapParams protocolParams,
+                                                           PlutusScript substandardIssueScript) {
+        return coreScripts.issuanceMint(protocolParams, substandardIssueScript);
     }
 
-    /**
-     * Get parameterized Programmable Logic Base script
-     * Parameters (plutus.json validators[].parameters for programmable_logic_base.programmable_logic_base.spend):
-     * params_policy — a bare protocol-params policy id ByteArray, not a Credential.
-     */
+    /** {@code programmable_logic_base} — the payment credential of every programmable address. */
     public PlutusScript getParameterizedProgrammableLogicBaseScript(ProtocolBootstrapParams protocolParams) {
-
-        return getCachedOrBuild(protocolParams.txHash(), "programmable_logic_base", () -> {
-
-            var protocolParamsPolicyId = protocolParams.programmableLogicBaseParams().protocolParamsPolicyId();
-
-            var parameters = ListPlutusData.of(BytesPlutusData.of(HexUtil.decodeHexString(protocolParamsPolicyId)));
-
-            var contractOpt = protocolBootstrapService.getProtocolContract("programmable_logic_base.programmable_logic_base.spend");
-            if (contractOpt.isEmpty()) {
-                throw new IllegalStateException("Programmable logic base contract not found");
-            }
-
-            return PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
-                    AikenScriptUtil.applyParamToScript(parameters, contractOpt.get()),
-                    PlutusVersion.v3
-            );
-
-        });
+        return coreScripts.script(CoreValidator.PROGRAMMABLE_LOGIC_BASE, protocolParams);
     }
 
     /**
-     * Get parameterized Programmable Logic Global script
-     * Parameters: protocol params script hash
+     * {@code transfer} — the withdraw-0 validator every ordinary transfer invokes.
+     *
+     * <p>This replaces {@code getParameterizedProgrammableLogicGlobalScript}. The rename is
+     * not cosmetic and the method was deliberately not kept under the old name: the
+     * coordinator it used to return authorised transfers, seizures AND unfracking, and this
+     * one authorises transfers only. Every former caller has to say which of the three it
+     * meant, and a compile error at each call site is how that question gets asked.
      */
-    public PlutusScript getParameterizedProgrammableLogicGlobalScript(ProtocolBootstrapParams protocolParams) {
-        return getCachedOrBuild(protocolParams.txHash(), "programmable_logic_global", () -> {
-            var protocolParamsScriptHash = protocolParams.protocolParams().scriptHash();
-
-            var parameters = ListPlutusData.of(
-                    BytesPlutusData.of(HexUtil.decodeHexString(protocolParamsScriptHash))
-            );
-
-            var contractOpt = protocolBootstrapService.getProtocolContract("programmable_logic_global.programmable_logic_global.withdraw");
-            if (contractOpt.isEmpty()) {
-                throw new IllegalStateException("Programmable logic global contract not found");
-            }
-
-            var script = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
-                    AikenScriptUtil.applyParamToScript(parameters, contractOpt.get()),
-                    PlutusVersion.v3
-            );
-
-            try {
-                log.debug("Built programmable logic global script with hash: {}", HexUtil.encodeHexString(script.getScriptHash()));
-            } catch (Exception e) {
-                log.debug("Built programmable logic global script (could not compute hash)");
-            }
-            return script;
-        });
+    public PlutusScript getParameterizedTransferScript(ProtocolBootstrapParams protocolParams) {
+        return coreScripts.script(CoreValidator.TRANSFER, protocolParams);
     }
 
     /**
-     * Get parameterized Always Fail script
-     * Parameters: nonce (ByteArray)
+     * {@code third_party} — the withdraw-0 validator authorising seizure, clawback, freeze
+     * enforcement and burn. Previously the {@code ThirdPartyAct} arm inside the coordinator;
+     * now its own script, which a transfer transaction never loads.
      */
+    public PlutusScript getParameterizedThirdPartyScript(ProtocolBootstrapParams protocolParams) {
+        return coreScripts.script(CoreValidator.THIRD_PARTY, protocolParams);
+    }
+
+    /** {@code unfracking} — holder-driven same-owner restructuring. Deployed, not yet exposed. */
+    public PlutusScript getParameterizedUnfrackingScript(ProtocolBootstrapParams protocolParams) {
+        return coreScripts.script(CoreValidator.UNFRACKING, protocolParams);
+    }
+
+    /** {@code always_fail} under a caller-chosen nonce. */
     public PlutusScript getParameterizedAlwaysFailScript(String nonce) {
-        var parameters = ListPlutusData.of(
-                BytesPlutusData.of(HexUtil.decodeHexString(nonce))
-        );
-
-        var contractOpt = protocolBootstrapService.getProtocolContract("always_fail.always_fail.spend");
-        if (contractOpt.isEmpty()) {
-            throw new IllegalStateException("Always fail contract not found");
-        }
-
-        var script = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
-                AikenScriptUtil.applyParamToScript(parameters, contractOpt.get()),
-                PlutusVersion.v3
-        );
-
-        try {
-            log.debug("Built always fail script with hash: {}", HexUtil.encodeHexString(script.getScriptHash()));
-        } catch (Exception e) {
-            log.debug("Built always fail script (could not compute hash)");
-        }
-        return script;
+        return coreScripts.alwaysFail(nonce);
     }
 
-    /**
-     * Get parameterized Protocol Params Mint script
-     * Parameters: utxo (tx hash + output index), always_fail script hash
-     */
+    /** {@code protocol_params_mint} — the one-shot protocol-params NFT policy. */
     public PlutusScript getParameterizedProtocolParamsMintScript(ProtocolBootstrapParams protocolParams) {
-        return getCachedOrBuild(protocolParams.txHash(), "protocol_params_mint", () -> {
-            var txInput = protocolParams.protocolParams().txInput();
-            var alwaysFailScriptHash = protocolParams.protocolParams().alwaysFailScriptHash();
-
-            var parameters = ListPlutusData.of(
-                    ConstrPlutusData.of(0,
-                            BytesPlutusData.of(HexUtil.decodeHexString(txInput.txHash())),
-                            BigIntPlutusData.of(txInput.outputIndex())),
-                    BytesPlutusData.of(HexUtil.decodeHexString(alwaysFailScriptHash))
-            );
-
-            var contractOpt = protocolBootstrapService.getProtocolContract("protocol_params_mint.protocol_params_mint.mint");
-            if (contractOpt.isEmpty()) {
-                throw new IllegalStateException("Protocol params mint contract not found");
-            }
-
-            var script = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
-                    AikenScriptUtil.applyParamToScript(parameters, contractOpt.get()),
-                    PlutusVersion.v3
-            );
-
-            try {
-                log.debug("Built protocol params mint script with hash: {}", HexUtil.encodeHexString(script.getScriptHash()));
-            } catch (Exception e) {
-                log.debug("Built protocol params mint script (could not compute hash)");
-            }
-            return script;
-        });
+        return coreScripts.script(CoreValidator.PROTOCOL_PARAMS_MINT, protocolParams);
     }
 
-    /**
-     * Get parameterized Issuance CBOR Hex Mint script
-     * Parameters: utxo (tx hash + output index), always_fail script hash
-     */
+    /** {@code issuance_cbor_hex_mint} — the one-shot NFT carrying the issuance template bytes. */
     public PlutusScript getParameterizedIssuanceCborHexMintScript(ProtocolBootstrapParams protocolParams) {
-        return getCachedOrBuild(protocolParams.txHash(), "issuance_cbor_hex_mint", () -> {
-            var txInput = protocolParams.issuanceParams().txInput();
-            var alwaysFailScriptHash = protocolParams.issuanceParams().alwaysFailScriptHash();
-
-            var parameters = ListPlutusData.of(
-                    ConstrPlutusData.of(0,
-                            BytesPlutusData.of(HexUtil.decodeHexString(txInput.txHash())),
-                            BigIntPlutusData.of(txInput.outputIndex())),
-                    BytesPlutusData.of(HexUtil.decodeHexString(alwaysFailScriptHash))
-            );
-
-            var contractOpt = protocolBootstrapService.getProtocolContract("issuance_cbor_hex_mint.issuance_cbor_hex_mint.mint");
-            if (contractOpt.isEmpty()) {
-                throw new IllegalStateException("Issuance CBOR hex mint contract not found");
-            }
-
-            var script = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
-                    AikenScriptUtil.applyParamToScript(parameters, contractOpt.get()),
-                    PlutusVersion.v3
-            );
-
-            try {
-                log.debug("Built issuance CBOR hex mint script with hash: {}", HexUtil.encodeHexString(script.getScriptHash()));
-            } catch (Exception e) {
-                log.debug("Built issuance CBOR hex mint script (could not compute hash)");
-            }
-            return script;
-        });
-    }
-
-    /**
-     * Clear cache for a specific protocol version
-     */
-    public void clearCache(String protocolTxHash) {
-        scriptCache.remove(protocolTxHash);
-        log.info("Cleared script cache for protocol version: {}", protocolTxHash);
-    }
-
-    /**
-     * Clear all caches
-     */
-    public void clearAllCaches() {
-        scriptCache.clear();
-        log.info("Cleared all script caches");
-    }
-
-    /**
-     * Helper method to get cached script or build it
-     */
-    private PlutusScript getCachedOrBuild(String protocolTxHash, String scriptName, ScriptBuilder builder) {
-        return scriptCache
-                .computeIfAbsent(protocolTxHash, k -> new ConcurrentHashMap<>())
-                .computeIfAbsent(scriptName, k -> builder.build());
-    }
-
-    @FunctionalInterface
-    private interface ScriptBuilder {
-        PlutusScript build();
+        return coreScripts.script(CoreValidator.ISSUANCE_CBOR_HEX_MINT, protocolParams);
     }
 }

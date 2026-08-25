@@ -6,6 +6,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
+import { logError } from '@/lib/utils/error-message';
 
 interface RegistrationPreviewProps {
   unsignedCborTx: string;
@@ -55,7 +56,7 @@ export function RegistrationPreview({
       console.error('Error signing/submitting transaction:', error);
       showToast({
         title: 'Transaction Failed',
-        description: error instanceof Error ? error.message : 'Failed to sign or submit transaction',
+        description: logError('registration preview sign/submit', error),
         variant: 'error',
       });
     } finally {

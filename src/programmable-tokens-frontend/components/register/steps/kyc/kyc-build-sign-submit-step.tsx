@@ -27,6 +27,7 @@ import { getKycExtendedAdminPkh } from '@/lib/api/kyc-extended';
 import type { KycRegisterRequest, KycExtendedRegisterRequest, RwaTokenRegisterRequest, Cip170AttestationData } from '@/types/api';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
 import { Shield, Copy, QrCode } from 'lucide-react';
+import { logError } from '@/lib/utils/error-message';
 
 type BuildStatus =
   | 'idle'
@@ -216,7 +217,7 @@ export function KycBuildSignSubmitStep({
       });
     } catch (error) {
       setStatus('error');
-      const message = error instanceof Error ? error.message : 'Failed to build transaction';
+      const message = logError('kyc build', error);
       setErrorMessage(message);
       showToastRef.current({
         title: 'Build Failed',
@@ -399,7 +400,7 @@ export function KycBuildSignSubmitStep({
       });
     } catch (error) {
       setStatus('error');
-      const message = error instanceof Error ? error.message : 'Failed to sign or submit';
+      const message = logError('kyc sign/submit', error);
       setErrorMessage(message);
 
       if (message.toLowerCase().includes('user declined') ||

@@ -12,6 +12,7 @@ import com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.PlutusData;
 import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.quicktx.Tx;
 import com.bloxbean.cardano.client.transaction.spec.Asset;
@@ -22,7 +23,6 @@ import com.bloxbean.cardano.client.util.HexUtil;
 import com.bloxbean.cardano.yaci.core.model.certs.CertificateType;
 import com.bloxbean.cardano.yaci.store.utxo.storage.impl.model.UtxoId;
 import com.bloxbean.cardano.yaci.store.utxo.storage.impl.repository.UtxoRepository;
-import com.easy1staking.cardano.comparator.TransactionInputComparator;
 import com.easy1staking.cardano.model.AssetType;
 import com.easy1staking.cardano.util.UtxoUtil;
 import com.easy1staking.util.Pair;
@@ -30,6 +30,10 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.core.CoreDatums;
+import org.cardanofoundation.cip113.core.CoreLayout;
+import org.cardanofoundation.cip113.core.CoreRedeemers;
+import org.cardanofoundation.cip113.core.CoreWithdrawal;
 import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.entity.ProgrammableTokenRegistryEntity;
 import org.cardanofoundation.cip113.model.*;
@@ -308,10 +312,9 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 // types.RegistryInsert { key: ByteArray, minting_logic_script: Credential }.
                 // v0.4.0: the 2nd field is a Credential, not a bare hash — Script(hash) is
                 // Constr 1 [bytes].
-                var directoryMintRedeemer = ConstrPlutusData.of(1,
-                        BytesPlutusData.of(issuanceContract.getScriptHash()),
-                        ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash()))
-                );
+                var directoryMintRedeemer = CoreRedeemers.registryInsert(
+                        HexUtil.encodeHexString(issuanceContract.getScriptHash()),
+                        substandardIssueContract.getScriptHash());
 
                 var directoryMintNft = Asset.builder()
                         .name("0x" + issuanceContract.getPolicyId())
@@ -425,7 +428,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 // look at shifts from 2 to 3. Getting this wrong makes issuance_mint read the
                 // wrong output and trap, which is why it is derived rather than written twice.
                 var registryNodeOutputIndex = cip68Metadata == null ? 2 : 3;
-                var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(registryNodeOutputIndex)); // OutputIndex { index }
+                var issuanceRedeemer = CoreRedeemers.mintProofOutputIndex(registryNodeOutputIndex);
 
                 // Programmable Token Mint
                 var programmableToken = Asset.builder()
@@ -490,13 +493,13 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
 
                 var tx = new Tx()
                         .collectFrom(registrarUtxos)
-                        .collectFrom(directoryUtxo, ConstrPlutusData.of(0))
+                        .collectFrom(directoryUtxo, CoreRedeemers.registrySpend())
                         .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(100))
                         // Mint Token
                         .mintAsset(issuanceContract, mintedAssets, issuanceRedeemer)
                         // Redeemer is DirectoryInit (constr(0))
                         .mintAsset(directoryMintContract, directoryMintNft, directoryMintRedeemer)
-                        .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue), ConstrPlutusData.of(0));
+                        .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue), CoreDatums.programmableTokenDatum());
 
                 // Output 1, CIP-68 only. Must sit between the user token and the two node
                 // outputs so `registryNodeOutputIndex` above stays correct.
@@ -716,14 +719,15 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                     .index(progTokenRegistry.getOutputIndex())
                     .build();
 
-            // Sort reference inputs to compute the registry node index
-            var sortedReferenceInputs = Stream.of(registryRefInput)
-                    .sorted(new TransactionInputComparator())
-                    .toList();
-            var registryRefInputIndex = sortedReferenceInputs.indexOf(registryRefInput);
+            // The registry node's position among the reference inputs, in the order the LEDGER
+            // will present them -- not the order they were added here. CoreLayout owns that
+            // ordering; see its javadoc for why it cannot be computed locally once the
+            // transaction carries more than one reference input.
+            var layout = CoreLayout.builder()
+                    .referenceInput(registryRefInput)
+                    .build();
 
-            // types.MintingRegistryProof directly (no SmartTokenMintingAction wrapper in v0.4.0).
-            var issuanceRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(registryRefInputIndex)); // RefInput { index }
+            var issuanceRedeemer = CoreRedeemers.mintProofRefInput(layout.referenceInputIndex(registryRefInput));
 
             // Programmable Token Mint
             var programmableToken = Asset.builder()
@@ -754,7 +758,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                     .collectFrom(feePayerUtxos)
                     .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(100))
                     .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
-                    .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(progammableTokenValue), ConstrPlutusData.of(0))
+                    .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(progammableTokenValue), CoreDatums.programmableTokenDatum())
                     .readFrom(registryRefInput)
                     .attachRewardValidator(substandardIssueContract)
                     .withChangeAddress(mintTokenRequest.feePayerAddress());
@@ -808,7 +812,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             log.info("policy id: {}, asset name: {}", progToken.policyId(), progToken.unsafeHumanAssetName());
 
             // A (100) reference token cannot go through this path. Every output below is rebuilt
-            // with `ConstrPlutusData.of(0)` as its datum — the ordinary programmable-token datum —
+            // with CoreDatums.programmableTokenDatum() — the ordinary programmable-token datum —
             // which would DESTROY the metadata the reference token exists to carry. The token
             // would survive; the CIP-68 pair would not, and the (222)/(333) user token would be
             // left advertising metadata that no longer resolves. Preserving the datum instead is
@@ -884,11 +888,13 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
 
             var senderUtxos = accountService.findAdaOnlyUtxo(senderAddress.getAddress(), 10_000_000L);
 
-            // Programmable Logic Global parameterization
-            var programmableLogicGlobal = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolBootstrapParams);
-            var programmableLogicGlobalAddress = AddressProvider.getRewardAddress(programmableLogicGlobal, network.getCardanoNetwork());
-            log.info("programmableLogicGlobalAddress policy: {}", programmableLogicGlobalAddress.getAddress());
-            log.info("protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash(): {}", protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash());
+            // The core `transfer` delegate. A transfer loads THIS script and neither of the
+            // other two: programmable_logic_base dispatches to exactly one delegate per input,
+            // and the seize and unfracking validators are separate reference scripts that an
+            // ordinary transfer never pays for.
+            var coreTransfer = protocolScriptBuilderService.getParameterizedTransferScript(protocolBootstrapParams);
+            var coreTransferAddress = AddressProvider.getRewardAddress(coreTransfer, network.getCardanoNetwork());
+            var coreTransferCredential = Credential.fromScript(coreTransfer.getScriptHash());
 
 //            // Programmable Logic Base parameterization
             var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolBootstrapParams);
@@ -923,18 +929,6 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                     .index(progTokenRegistry.getOutputIndex())
                     .build();
 
-            var sortedReferenceInputs = Stream.of(protocolParamsRefInput, progTokenRegistryRefInput)
-                    .sorted(new TransactionInputComparator())
-                    .toList();
-
-            var registryIndex = sortedReferenceInputs.indexOf(progTokenRegistryRefInput);
-
-            var programmableGlobalRedeemer = ConstrPlutusData.of(0,
-                    // only one prop and it's a list
-                    ListPlutusData.of(ConstrPlutusData.of(0, BigIntPlutusData.of(registryIndex)))
-            );
-
-            // FIXME:
             var substandardTransferContractOpt = substandardService.getSubstandardValidator("dummy", "transfer.transfer.withdraw");
             if (substandardTransferContractOpt.isEmpty()) {
                 log.warn("could not resolve transfer contract");
@@ -942,7 +936,32 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             }
             var substandardTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(substandardTransferContractOpt.get().scriptBytes(), PlutusVersion.v3);
             var substandardTransferAddress = AddressProvider.getRewardAddress(substandardTransferContract, network.getCardanoNetwork());
-            log.info("substandardTransferAddress: {}", substandardTransferAddress.getAddress());
+            var substandardTransferCredential = Credential.fromScript(substandardTransferContract.getScriptHash());
+
+            // Everything the transaction will carry, declared before any index is taken. The
+            // substandard's withdrawal has to be declared here too: wdrl_idx is a position in
+            // the map over ALL withdrawals, so a layout that saw only the framework's would
+            // hand out an index that is right in isolation and wrong in the transaction.
+            var layout = CoreLayout.builder()
+                    .referenceInput(protocolParamsRefInput)
+                    .referenceInput(progTokenRegistryRefInput)
+                    .withdrawal(coreTransferCredential)
+                    .withdrawal(substandardTransferCredential)
+                    .build();
+
+            var paramsIdx = layout.referenceInputIndex(protocolParamsRefInput);
+
+            // programmable_logic_base runs once per spent programmable input. Its redeemer picks
+            // the delegate arm and witnesses where that delegate sits in the withdrawal map, so
+            // PLB can resolve it by index instead of scanning -- a cost paid per input.
+            var baseSpendRedeemer = CoreRedeemers.spendViaTransfer(
+                    paramsIdx, layout.withdrawalIndex(coreTransferCredential));
+
+            // One registry proof per distinct spent policy, ascending by policy. This transfer
+            // moves a single policy, so there is exactly one -- but the shape is a list because
+            // the validator walks spent policies and proofs in lockstep.
+            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(paramsIdx, List.of(
+                    CoreRedeemers.tokenExists(layout.referenceInputIndex(progTokenRegistryRefInput))));
 
             var inputUtxos = senderProgTokensUtxos.stream()
                     .reduce(new Pair<List<Utxo>, Value>(List.of(), Value.builder().build()),
@@ -966,15 +985,21 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             var tx = new Tx()
                     .collectFrom(senderUtxos);
 
-            inputUtxos.forEach(utxo -> {
-                tx.collectFrom(utxo, ConstrPlutusData.of(0));
-            });
+            inputUtxos.forEach(utxo -> tx.collectFrom(utxo, baseSpendRedeemer));
 
-            // must be first Provide proofs
-            tx.withdraw(substandardTransferAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(200))
-                    .withdraw(programmableLogicGlobalAddress.getAddress(), BigInteger.ZERO, programmableGlobalRedeemer)
-                    .payToContract(senderProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(returningValue), ConstrPlutusData.of(0))
-                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenValue2), ConstrPlutusData.of(0))
+            // Added in LEDGER order, not in the order they were written. A withdrawal's redeemer
+            // is matched to its entry by position in the canonical map; adding them pre-sorted
+            // means the builder never has to re-index them afterwards.
+            layout.inWithdrawalOrder(
+                            List.of(new CoreWithdrawal(substandardTransferCredential, substandardTransferAddress.getAddress(),
+                                            BigIntPlutusData.of(200)),
+                                    new CoreWithdrawal(coreTransferCredential, coreTransferAddress.getAddress(),
+                                            coreTransferRedeemer)),
+                            CoreWithdrawal::credential)
+                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
+
+            tx.payToContract(senderProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(returningValue), CoreDatums.programmableTokenDatum())
+                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenValue2), CoreDatums.programmableTokenDatum())
                     .readFrom(TransactionInput.builder()
                             .transactionId(protocolParamsUtxo.getTxHash())
                             .index(protocolParamsUtxo.getOutputIndex())
@@ -982,7 +1007,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                             .transactionId(progTokenRegistry.getTxHash())
                             .index(progTokenRegistry.getOutputIndex())
                             .build())
-                    .attachRewardValidator(programmableLogicGlobal) // global
+                    .attachRewardValidator(coreTransfer)
                     .attachRewardValidator(substandardTransferContract)
                     .attachSpendingValidator(programmableLogicBase) // base
                     .withChangeAddress(senderAddress.getAddress());

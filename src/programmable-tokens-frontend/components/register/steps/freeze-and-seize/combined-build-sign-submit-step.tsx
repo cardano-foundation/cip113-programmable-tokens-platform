@@ -20,6 +20,7 @@ import { getExplorerTxUrl } from '@/lib/utils/format';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import type { FreezeAndSeizeRegisterRequest } from '@/types/api';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
+import { logError } from '@/lib/utils/error-message';
 
 type CombinedStatus =
   | 'idle'
@@ -256,7 +257,7 @@ export function CombinedBuildSignSubmitStep({
       });
     } catch (error) {
       setStatus('error');
-      const message = error instanceof Error ? error.message : 'Failed to build transactions';
+      const message = logError('freeze-and-seize build', error);
       setErrorMessage(message);
       showToastRef.current({
         title: 'Build Failed',
@@ -406,7 +407,7 @@ export function CombinedBuildSignSubmitStep({
       }
 
       setStatus('error');
-      const message = error instanceof Error ? error.message : 'Failed to sign or submit';
+      const message = logError('freeze-and-seize sign/submit', error);
       setErrorMessage(message);
 
       if (message.toLowerCase().includes('user declined') ||
@@ -482,7 +483,7 @@ export function CombinedBuildSignSubmitStep({
     } catch (error) {
       if (error instanceof Error && error.message === 'Aborted') return;
       setStatus('error');
-      const message = error instanceof Error ? error.message : 'Failed to submit registration';
+      const message = logError('freeze-and-seize registration submit', error);
       setErrorMessage(message);
       onError(message);
     } finally {

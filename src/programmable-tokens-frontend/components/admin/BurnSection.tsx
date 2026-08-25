@@ -18,6 +18,7 @@ import { burnToken } from "@/lib/api/minting";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useCIP113 } from "@/contexts/cip113-context";
 import { useToast } from "@/components/ui/use-toast";
+import { logError } from '@/lib/utils/error-message';
 
 interface BurnSectionProps {
   adminTokens: AdminTokenInfo[];
@@ -191,7 +192,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
 
     } catch (error) {
       console.error("Burn failed:", error);
-      const msg = error instanceof Error ? error.message : "Burn failed";
+      const msg = logError('burn', error);
       // Auto-trigger the one-shot transferLogic cert registration if the
       // backend tells us it's missing. Eternl can't sign that cert as part
       // of the burn tx (Conway tag-7 + multi-script body), so we isolate
