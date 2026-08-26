@@ -31,7 +31,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
   const { wallet } = useWallet();
   const { selectedVersion } = useProtocolVersion();
   const { toast: showToast } = useToast();
-  const { getProtocol, ensureSubstandard, available: sdkAvailable } = useCIP113();
+  const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
 
   const [selectedToken, setSelectedToken] = useState<AdminTokenInfo | null>(null);
@@ -296,7 +296,8 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
       </CardHeader>
 
       <CardContent className="space-y-6">
-        <TxBuilderToggle value={txBuilder} onChange={setTxBuilder} sdkAvailable={sdkAvailable} />
+        <TxBuilderToggle value={txBuilder} onChange={setTxBuilder} sdkAvailable={sdkAvailable}
+        sdkUnavailableReason={sdkUnavailableReason} />
 
         {/* Warning Banner */}
         <div className="p-4 bg-yellow-900/20 border border-yellow-600/30 rounded-lg flex items-start gap-3">

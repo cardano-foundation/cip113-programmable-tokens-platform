@@ -33,15 +33,40 @@ export interface DirectorySpendParams {
   scriptHash: string;
 }
 
+/** A deployed withdraw-0 delegate: `transfer`, `third_party` or `unfracking`.
+ *  All three are parameterised by the protocol-params NFT policy and deployed the same way,
+ *  so the backend models them with one shape. */
+export interface DelegateParams {
+  protocolParamsPolicyId: string;
+  scriptHash: string;
+  rewardAddress: string;
+}
+
+/**
+ * One recorded deployment of the CIP-113 core protocol, as served by the backend.
+ *
+ * The core upgrade dissolved the `programmable_logic_global` coordinator into `transfer`
+ * and `third_party`, so `programmableLogicGlobalPrams` / `programmableGlobalRefInput` are
+ * gone and three delegates are named individually. `schemaVersion` is what the backend
+ * checks before it will transact against a record: anything below the current version
+ * describes a protocol whose programmable-token addresses this build cannot spend from.
+ */
 export interface ProtocolBootstrapParams {
+  schemaVersion: number;
   protocolParams: ProtocolParams;
-  programmableLogicGlobalPrams: ProgrammableLogicGlobalParams;
+  transferParams: DelegateParams;
+  thirdPartyParams: DelegateParams;
+  unfrackingParams: DelegateParams;
   programmableLogicBaseParams: ProgrammableLogicBaseParams;
   issuanceParams: IssuanceParams;
   directoryMintParams: DirectoryMintParams;
   directorySpendParams: DirectorySpendParams;
+  /** Bound on the inline datum a HOLDER-created programmable output may carry. */
+  maxInlineDatumBytes: number;
   programmableBaseRefInput: TxInput;
-  programmableGlobalRefInput: TxInput;
+  transferRefInput: TxInput;
+  thirdPartyRefInput: TxInput;
+  unfrackingRefInput: TxInput;
   txHash: string;
 }
 

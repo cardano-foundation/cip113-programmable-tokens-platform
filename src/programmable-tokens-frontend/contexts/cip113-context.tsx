@@ -92,6 +92,8 @@ interface CIP113ContextValue {
     userAssetNameHex?: string;
   }>;
   available: boolean;
+  /** Why the SDK is unavailable, for the UI to explain rather than just hide the option. */
+  sdkUnavailableReason?: string;
 }
 
 const CIP113Context = createContext<CIP113ContextValue>({
@@ -100,6 +102,7 @@ const CIP113Context = createContext<CIP113ContextValue>({
   registerTokenCallback: () => Promise.reject(new Error("CIP113Provider not mounted")),
   buildFESRegistration: () => Promise.reject(new Error("CIP113Provider not mounted")),
   available: false,
+  sdkUnavailableReason: undefined,
 });
 
 // ---------------------------------------------------------------------------
@@ -114,9 +117,14 @@ function toDeploymentParams(bp: ProtocolBootstrapParams): DeploymentParams {
       policyId: bp.protocolParams.scriptHash,
       alwaysFailScriptHash: bp.protocolParams.alwaysFailScriptHash,
     },
+    // The core upgrade dissolved `programmable_logic_global` into `transfer` +
+    // `third_party`, and the deployment record renamed the field to match. The SDK's
+    // DeploymentParams still calls this slot `programmableLogicGlobal`, so the transfer
+    // delegate is mapped into it — which is the correct correspondence for the transfer
+    // path, and the only one the SDK models at all.
     programmableLogicGlobal: {
-      policyId: bp.programmableLogicGlobalPrams.scriptHash,
-      scriptHash: bp.programmableLogicGlobalPrams.scriptHash,
+      policyId: bp.transferParams.scriptHash,
+      scriptHash: bp.transferParams.scriptHash,
     },
     programmableLogicBase: {
       scriptHash: bp.programmableLogicBaseParams.scriptHash,
@@ -136,7 +144,7 @@ function toDeploymentParams(bp: ProtocolBootstrapParams): DeploymentParams {
       scriptHash: bp.directorySpendParams.scriptHash,
     },
     programmableBaseRefInput: bp.programmableBaseRefInput,
-    programmableGlobalRefInput: bp.programmableGlobalRefInput,
+    programmableGlobalRefInput: bp.transferRefInput,
   };
 }
 
@@ -181,7 +189,27 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
   const registeredFESTokens = useRef<Set<string>>(new Set());
   const fesBlueprintRef = useRef<PlutusBlueprint | null>(null);
 
-  const available = !!blockfrostKey;
+  // The SDK is DISABLED against this deployment, deliberately.
+  //
+  // @easy1staking/cip113-sdk-ts@0.3.1 resolves core validators by blueprint title and
+  // hard-codes "programmable_logic_global.programmable_logic_global.withdraw". The core
+  // contracts have since dissolved that coordinator into `transfer` and `third_party`, so
+  // that title resolves to undefined and every SDK build dies on `.scriptHash` of it. The
+  // redeemers moved too — programmable_logic_base now takes a three-constructor
+  // BaseSpendRedeemer carrying params_idx and wdrl_idx, and the protocol-params datum grew
+  // from 5 fields to 7 with fields 2-4 REORDERED — so a title fix alone would not be enough:
+  // the SDK would build transactions the chain rejects.
+  //
+  // Every builder in this app already has a backend path, which is built against the current
+  // contracts and is what the registration chain uses regardless. So the SDK is switched off
+  // here rather than left to fail at signing time. Re-enable by restoring
+  // `!!blockfrostKey` once the SDK ships a release built against the split core.
+  const SDK_INCOMPATIBLE_REASON =
+    "The CIP-113 TypeScript SDK is pinned to the pre-split core contracts "
+    + "(it looks up programmable_logic_global, which no longer exists) and has not been "
+    + "upgraded yet. All transactions are built by the Java backend, which tracks the "
+    + "current contracts.";
+  const available = false;
 
   /** Get the Evolution SDK chain preset for the configured network */
   const getChain = useCallback(() => {
@@ -452,7 +480,8 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
   }, [getProtocol, network]);
 
   const value = useMemo(
-    () => ({ getProtocol, ensureSubstandard, registerTokenCallback, buildFESRegistration, available }),
+    () => ({ getProtocol, ensureSubstandard, registerTokenCallback, buildFESRegistration, available,
+              sdkUnavailableReason: available ? undefined : SDK_INCOMPATIBLE_REASON }),
     [getProtocol, ensureSubstandard, registerTokenCallback, buildFESRegistration, available]
   );
 
