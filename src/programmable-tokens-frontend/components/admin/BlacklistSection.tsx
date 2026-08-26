@@ -101,6 +101,12 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
         await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
         const protocol = await getProtocol();
         const params = {
+          // Route explicitly. 0.4.0 made this REQUIRED rather than falling back to
+          // trying every registered substandard: freeze/unfreeze are administrative
+          // operations over someone else's tokens, and a try-all reports "no
+          // substandard can handle this" when the truth is "it was handled and the
+          // chain refused". Passing the token's own id keeps that distinction.
+          substandardId: selectedToken.substandardId,
           feePayerAddress: adminAddress,
           tokenPolicyId: selectedToken.policyId,
           assetName: selectedToken.assetName,

@@ -128,6 +128,10 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
         await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
         const protocol = await getProtocol();
         const result = await protocol.compliance.seize({
+          // Route explicitly — REQUIRED since 0.4.0. See the note in BlacklistSection:
+          // a try-all would report "no substandard can handle seize" when the truth is
+          // that one did and the validator refused.
+          substandardId: selectedToken.substandardId,
           feePayerAddress: adminAddress,
           tokenPolicyId: selectedToken.policyId,
           assetName: selectedToken.assetName,
