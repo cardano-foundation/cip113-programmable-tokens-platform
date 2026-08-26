@@ -244,27 +244,31 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
   const registeredFESTokens = useRef<Set<string>>(new Set());
   const fesBlueprintRef = useRef<PlutusBlueprint | null>(null);
 
-  // The SDK is DISABLED against this deployment, deliberately.
+  // The SDK path is available again, against cip113-sdk-ts 0.4.0.
   //
-  // @easy1staking/cip113-sdk-ts@0.3.1 resolves core validators by blueprint title and
-  // hard-codes "programmable_logic_global.programmable_logic_global.withdraw". The core
-  // contracts have since dissolved that coordinator into `transfer` and `third_party`, so
-  // that title resolves to undefined and every SDK build dies on `.scriptHash` of it. The
-  // redeemers moved too — programmable_logic_base now takes a three-constructor
-  // BaseSpendRedeemer carrying params_idx and wdrl_idx, and the protocol-params datum grew
-  // from 5 fields to 7 with fields 2-4 REORDERED — so a title fix alone would not be enough:
-  // the SDK would build transactions the chain rejects.
+  // It was switched off for 0.3.1, which resolved core validators by blueprint title and
+  // hard-coded "programmable_logic_global.programmable_logic_global.withdraw" — a coordinator
+  // the core has since dissolved into `transfer` and `third_party`. 0.4.0 is the first release
+  // built against the split core: it models the three delegates separately and bundles the
+  // v0.5.0-alpha.2 blueprint this backend serves.
   //
-  // Every builder in this app already has a backend path, which is built against the current
-  // contracts and is what the registration chain uses regardless. So the SDK is switched off
-  // here rather than left to fail at signing time. Re-enable by restoring
-  // `!!blockfrostKey` once the SDK ships a release built against the split core.
-  const SDK_INCOMPATIBLE_REASON =
-    "The CIP-113 TypeScript SDK is pinned to the pre-split core contracts "
-    + "(it looks up programmable_logic_global, which no longer exists) and has not been "
-    + "upgraded yet. All transactions are built by the Java backend, which tracks the "
-    + "current contracts.";
-  const available = false;
+  // Availability is a capability check, not a health check. It says the SDK CAN be selected,
+  // not that it is the default and not that every operation has been exercised — the default
+  // stays `backend` at each call site (PLAN.md A-5) and end-to-end verification is T-018.
+  //
+  // The only thing that makes it unavailable now is a missing Blockfrost key, since the SDK
+  // path talks to Blockfrost directly rather than through the backend.
+  //
+  // ⚠ That direct link is also the open defect in PLAN.md A-2: the SDK path picks its chain
+  // from NEXT_PUBLIC_NETWORK while the backend picks its own, and no endpoint exposes the
+  // backend's network, so nothing reconciles them. Worse, NEXT_PUBLIC_* are inlined into the
+  // client bundle at BUILD time, so the frontend's answer is frozen in the image while the
+  // backend's is runtime config. Flipping the toggle can therefore change which chain you are
+  // transacting against, not merely which builder assembles the transaction.
+  const SDK_UNAVAILABLE_REASON =
+    "NEXT_PUBLIC_BLOCKFROST_API_KEY is not set. The SDK builder talks to Blockfrost "
+    + "directly, so without a key only the Java backend can build transactions.";
+  const available = !!blockfrostKey;
 
   /** Get the Evolution SDK chain preset for the configured network */
   const getChain = useCallback(() => {
@@ -536,7 +540,7 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
 
   const value = useMemo(
     () => ({ getProtocol, ensureSubstandard, registerTokenCallback, buildFESRegistration, available,
-              sdkUnavailableReason: available ? undefined : SDK_INCOMPATIBLE_REASON }),
+              sdkUnavailableReason: available ? undefined : SDK_UNAVAILABLE_REASON }),
     [getProtocol, ensureSubstandard, registerTokenCallback, buildFESRegistration, available]
   );
 

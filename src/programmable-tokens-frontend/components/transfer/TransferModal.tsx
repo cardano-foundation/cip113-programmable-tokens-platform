@@ -64,9 +64,12 @@ export function TransferModal({
   const [step, setStep] = useState<TransferStep>("form");
   const [quantity, setQuantity] = useState("");
   const [recipientAddress, setRecipientAddress] = useState("");
-  const [transactionBuilder, setTransactionBuilder] = useState<TransactionBuilder>(
-    sdkAvailable ? "sdk" : "backend"
-  );
+  // Default to the backend builder even when the SDK is available. Parity means the SDK
+  // CAN build a transaction, not that it becomes the default route (PLAN.md A-5) — the
+  // SDK path is opt-in per operation via the toggle until T-018 has verified all seven
+  // operations against a live deployment. Deriving this from `sdkAvailable` would flip
+  // every user onto an unverified path the moment the capability was re-enabled.
+  const [transactionBuilder, setTransactionBuilder] = useState<TransactionBuilder>("backend");
   const [isBuilding, setIsBuilding] = useState(false);
   const [isSigning, setIsSigning] = useState(false);
   const [txHash, setTxHash] = useState<string | null>(null);

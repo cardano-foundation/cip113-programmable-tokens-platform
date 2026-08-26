@@ -60,7 +60,12 @@ export function CombinedBuildSignSubmitStep({
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
   const { buildFESRegistration, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
-  const [useSDK, setUseSDK] = useState(sdkAvailable);
+  // Default to the backend builder even when the SDK is available. Parity means the SDK
+  // CAN build a transaction, not that it becomes the default route (PLAN.md A-5) — the
+  // SDK path is opt-in per operation via the toggle until T-018 has verified all seven
+  // operations against a live deployment. Deriving this from `sdkAvailable` would flip
+  // every user onto an unverified path the moment the capability was re-enabled.
+  const [useSDK, setUseSDK] = useState(false);
 
   const [status, setStatus] = useState<CombinedStatus>('idle');
   const [errorMessage, setErrorMessage] = useState('');

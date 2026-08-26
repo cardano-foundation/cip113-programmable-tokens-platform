@@ -32,7 +32,12 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
   const { selectedVersion } = useProtocolVersion();
   const { toast: showToast } = useToast();
   const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
-  const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
+  // Default to the backend builder even when the SDK is available. Parity means the SDK
+  // CAN build a transaction, not that it becomes the default route (PLAN.md A-5) — the
+  // SDK path is opt-in per operation via the toggle until T-018 has verified all seven
+  // operations against a live deployment. Deriving this from `sdkAvailable` would flip
+  // every user onto an unverified path the moment the capability was re-enabled.
+  const [txBuilder, setTxBuilder] = useState<TransactionBuilder>("backend");
 
   const [selectedToken, setSelectedToken] = useState<AdminTokenInfo | null>(null);
   const [targetAddress, setTargetAddress] = useState("");
