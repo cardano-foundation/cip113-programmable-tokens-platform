@@ -1,0 +1,14 @@
+export SPRING_PROFILES_ACTIVE=preview
+
+export WALLET_MNEMONIC="nest wild farm beyond decide arm chuckle home raven card parrot nothing crazy casino hub broken scan height marine movie gloom village common off"
+
+export STORE_CARDANO_HOST=preview-node.play.dev.cardano.org
+export STORE_CARDANO_PORT=3001
+
+export BLOCKFROST_KEY=previewLuT5YB85o7hilvwv454mApBAwoMOsWUf
+
+export STORE_CARDANO_SYNCSTARTBLOCKHASH="fb36e2fd24fbd4af40ce400e2fdbd31460fb5f6f215cd463ab68639486d8e800"
+export STORE_CARDANO_SYNCSTARTSLOT="119969665"
+
+export KERI_URL=https://keria.dev.idw-sandboxes.cf-deployments.org
+export KERI_BOOT_URL=https://keria-boot.dev.idw-sandboxes.cf-deployments.org

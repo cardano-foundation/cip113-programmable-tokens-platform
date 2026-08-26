@@ -26,6 +26,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.AbstractPreviewTest;
 import org.cardanofoundation.cip113.config.AppConfig;
+import org.cardanofoundation.cip113.core.CoreBlueprint;
+import org.cardanofoundation.cip113.core.CoreScriptFactory;
 import org.cardanofoundation.cip113.model.LinkedListNode;
 import org.cardanofoundation.cip113.model.onchain.RegistryNode;
 import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
@@ -80,9 +82,9 @@ public class PreviewRegisterTest extends AbstractPreviewTest {
     private final ProtocolBootstrapService protocolBootstrapService =
             new ProtocolBootstrapService(OBJECT_MAPPER, new AppConfig.Network(BOOTSTRAP_NETWORK));
 
-    private final ProtocolScriptBuilderService protocolScriptBuilderService = new ProtocolScriptBuilderService(protocolBootstrapService);
+    private final ProtocolScriptBuilderService protocolScriptBuilderService = new ProtocolScriptBuilderService(new CoreScriptFactory(new CoreBlueprint()));
 
-    private final UtxoProvider utxoProvider = new UtxoProvider(bfBackendService, null);
+    private final UtxoProvider utxoProvider = new UtxoProvider(bfBackendService, null, null);
 
     private final AccountService accountService = new AccountService(utxoProvider);
 

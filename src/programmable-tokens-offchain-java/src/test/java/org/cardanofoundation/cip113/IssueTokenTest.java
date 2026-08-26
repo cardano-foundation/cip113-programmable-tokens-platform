@@ -139,7 +139,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(
-                                protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash()))
+                                protocolBootstrapParams.transferParams().scriptHash()))
                 )
         );
         var issuanceContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(issuanceParameters, ISSUANCE_MINT), PlutusVersion.v3);
@@ -399,7 +399,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(
-                                protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash()))
+                                protocolBootstrapParams.transferParams().scriptHash()))
                 )
         );
         var issuanceContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(issuanceParameters, ISSUANCE_MINT), PlutusVersion.v3);
@@ -629,7 +629,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(
-                                protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash()))
+                                protocolBootstrapParams.transferParams().scriptHash()))
                 )
         );
         var issuanceContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(issuanceParameters, ISSUANCE_MINT), PlutusVersion.v3);

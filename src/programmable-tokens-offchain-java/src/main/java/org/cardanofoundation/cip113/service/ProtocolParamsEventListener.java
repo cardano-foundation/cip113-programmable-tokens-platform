@@ -46,7 +46,12 @@ public class ProtocolParamsEventListener {
                                         // Create entity and save
                                         ProtocolParamsEntity entity = ProtocolParamsEntity.builder()
                                                 .registryNodePolicyId(protocolParams.registryNodePolicyId())
-                                                .progLogicScriptHash(protocolParams.programmableLogicBaseScriptHash())
+                                                .progLogicScriptHash(protocolParams.progLogicCredHex())
+                                                .transferCred(protocolParams.transferCredHex())
+                                                .thirdPartyCred(protocolParams.thirdPartyCredHex())
+                                                .unfrackingCred(protocolParams.unfrackingCredHex())
+                                                .upgradeCred(protocolParams.upgradeCredHex())
+                                                .maxInlineDatumBytes(protocolParams.maxInlineDatumBytes())
                                                 .txHash(addressUtxo.getTxHash())
                                                 .slot(slot)
                                                 .blockHeight(blockHeight)

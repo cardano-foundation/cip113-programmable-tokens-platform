@@ -12,6 +12,7 @@ import { getPaymentKeyHash } from '@/lib/utils/address';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import { extractKnownCredential } from '@/lib/utils/known-credential';
 import type { DummyRegisterRequest, FreezeAndSeizeRegisterRequest } from '@/types/api';
+import { logError } from '@/lib/utils/error-message';
 import type {
   StepComponentProps,
   TokenDetailsData,
@@ -278,7 +279,7 @@ export function PreRegistrationStep({
       }
 
       setPhase('error');
-      const message = error instanceof Error ? error.message : 'Pre-registration failed';
+      const message = logError('pre-registration', error);
       setErrorMessage(message);
 
       if (message.toLowerCase().includes('user declined') ||

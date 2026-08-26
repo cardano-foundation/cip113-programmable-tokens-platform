@@ -27,6 +27,8 @@ import com.easy1staking.cardano.model.AssetType;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.AbstractPreviewTest;
 import org.cardanofoundation.cip113.config.AppConfig;
+import org.cardanofoundation.cip113.core.CoreBlueprint;
+import org.cardanofoundation.cip113.core.CoreScriptFactory;
 import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
 import org.cardanofoundation.cip113.model.onchain.siezeandfreeze.blacklist.BlacklistBootstrap;
 import org.cardanofoundation.cip113.model.onchain.siezeandfreeze.blacklist.BlacklistNodeParser;
@@ -49,7 +51,7 @@ public class PreviewSeizeTest extends AbstractPreviewTest implements PreviewFree
 
     private final Network network = Networks.preview();
 
-    private final UtxoProvider utxoProvider = new UtxoProvider(bfBackendService, null);
+    private final UtxoProvider utxoProvider = new UtxoProvider(bfBackendService, null, null);
 
     private final AccountService accountService = new AccountService(utxoProvider);
 
@@ -57,7 +59,7 @@ public class PreviewSeizeTest extends AbstractPreviewTest implements PreviewFree
 
     private final ProtocolBootstrapService protocolBootstrapService = new ProtocolBootstrapService(OBJECT_MAPPER, new AppConfig.Network("preview"));
 
-    private final ProtocolScriptBuilderService protocolScriptBuilderService = new ProtocolScriptBuilderService(protocolBootstrapService);
+    private final ProtocolScriptBuilderService protocolScriptBuilderService = new ProtocolScriptBuilderService(new CoreScriptFactory(new CoreBlueprint()));
 
     private SubstandardService substandardService;
 
@@ -151,10 +153,10 @@ public class PreviewSeizeTest extends AbstractPreviewTest implements PreviewFree
 
 
 //        // Programmable Logic Global parameterization
-        var programmableLogicGlobal = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolBootstrapParams);
+        var programmableLogicGlobal = protocolScriptBuilderService.getParameterizedTransferScript(protocolBootstrapParams);
         var programmableLogicGlobalAddress = AddressProvider.getRewardAddress(programmableLogicGlobal, network);
         log.info("programmableLogicGlobalAddress policy: {}", programmableLogicGlobalAddress.getAddress());
-        log.info("protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash(): {}", protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash());
+        log.info("protocolBootstrapParams.transferParams().scriptHash(): {}", protocolBootstrapParams.transferParams().scriptHash());
 //
 ////            // Programmable Logic Base parameterization
         var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolBootstrapParams);

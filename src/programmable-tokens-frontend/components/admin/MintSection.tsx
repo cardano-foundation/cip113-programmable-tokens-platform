@@ -68,7 +68,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const { wallet } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
-  const { getProtocol, ensureSubstandard, available: sdkAvailable } = useCIP113();
+  const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
 
   // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize substandards. KYC and
@@ -1034,6 +1034,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
       <TxBuilderToggle
+        sdkUnavailableReason={sdkUnavailableReason}
         value={sdkAvailableForSelected(selectedToken) ? txBuilder : "backend"}
         onChange={setTxBuilder}
         sdkAvailable={sdkAvailableForSelected(selectedToken)}

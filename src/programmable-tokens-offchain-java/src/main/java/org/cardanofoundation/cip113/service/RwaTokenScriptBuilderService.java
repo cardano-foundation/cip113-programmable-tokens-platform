@@ -23,7 +23,7 @@ import java.math.BigInteger;
  *  applies their script parameters. One method per validator.
  *
  *  <p>Validator naming mirrors the upstream Aiken module structure verbatim; refer
- *  to {@code src/substandards/rwa-token/} for the on-chain code.
+ *  to the rwa-token entry in {@code contracts-pin.json} for the upstream repository and commit.
  *
  *  <h2>Prefer {@link #resolveScripts} over the individual builders</h2>
  *  At the current pin the validators are cross-parameterised: several take the

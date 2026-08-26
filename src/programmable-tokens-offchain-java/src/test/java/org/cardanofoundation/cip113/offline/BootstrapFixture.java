@@ -39,11 +39,11 @@ import org.cardanofoundation.cip113.model.bootstrap.CoordinationParams;
 import org.cardanofoundation.cip113.model.bootstrap.DirectoryMintParams;
 import org.cardanofoundation.cip113.model.bootstrap.DirectorySpendParams;
 import org.cardanofoundation.cip113.model.bootstrap.IssuanceParams;
+import org.cardanofoundation.cip113.model.bootstrap.DelegateParams;
 import org.cardanofoundation.cip113.model.bootstrap.ProgrammableLogicBaseParams;
-import org.cardanofoundation.cip113.model.bootstrap.ProgrammableLogicGlobalParams;
+import org.cardanofoundation.cip113.core.CoreProtocolParamsDatum;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.model.bootstrap.TxInput;
-import org.cardanofoundation.cip113.model.bootstrap.UnfrackingParams;
 import org.cardanofoundation.cip113.model.bootstrap.UpgradeMultisigParams;
 
 import java.math.BigInteger;
@@ -101,10 +101,12 @@ public final class BootstrapFixture {
                                Utxo registryOriginUtxo,
                                Utxo issuanceCborHexUtxo,
                                Utxo plbRefUtxo,
-                               Utxo plgRefUtxo,
+                               Utxo transferRefUtxo,
+                               Utxo thirdPartyRefUtxo,
                                Utxo unfrackingRefUtxo,
                                PlutusScript programmableLogicBase,
-                               PlutusScript programmableLogicGlobal,
+                               PlutusScript transfer,
+                               PlutusScript thirdParty,
                                PlutusScript unfracking,
                                PlutusScript registryMint,
                                PlutusScript registrySpend,
@@ -186,10 +188,15 @@ public final class BootstrapFixture {
 
         // ---- 3-5. Everything anchored on the params policy
         var plb = applyParams(compiledCodeFor("programmable_logic_base.programmable_logic_base.spend", validators), paramsPolicy);
-        var plg = applyParams(compiledCodeFor("programmable_logic_global.programmable_logic_global.withdraw", validators), paramsPolicy);
+        // Three delegates now, not one. programmable_logic_base dispatches to exactly one of
+        // them per spend, naming it by a field of the params datum below, so all three have to
+        // be deployed and stake-registered even though a given transaction loads only one.
+        var transfer = applyParams(compiledCodeFor("transfer.transfer.withdraw", validators), paramsPolicy);
+        var thirdParty = applyParams(compiledCodeFor("third_party.third_party.withdraw", validators), paramsPolicy);
         var unfracking = applyParams(compiledCodeFor("unfracking.unfracking.withdraw", validators), paramsPolicy);
 
-        var plgRewardAddress = AddressProvider.getRewardAddress(plg, NETWORK);
+        var transferRewardAddress = AddressProvider.getRewardAddress(transfer, NETWORK);
+        var thirdPartyRewardAddress = AddressProvider.getRewardAddress(thirdParty, NETWORK);
         var unfrackingRewardAddress = AddressProvider.getRewardAddress(unfracking, NETWORK);
 
         // ---- 6. upgrade_multisig: 1-of-1 on the admin key
@@ -215,13 +222,24 @@ public final class BootstrapFixture {
                 BytesPlutusData.of(issuanceCborHex.getScriptHash()),
                 scriptCred(registrySpend));
 
-        // ProgrammableLogicGlobalParams — field order is load-bearing.
-        var coordinationDatum = ConstrPlutusData.of(0,
-                BytesPlutusData.of(registryMint.getScriptHash()),
-                scriptCred(plb),
-                scriptCred(unfracking),
-                scriptCred(plg),
-                scriptCred(upgradeMultisig));
+        // ProgrammableLogicGlobalParams — field order is load-bearing, which is exactly why
+        // it is no longer spelled out here. CoreProtocolParamsDatum owns the layout, and this
+        // fixture deploying through it means the 29 offline evaluation tests are also a test of
+        // that encoder: the scripts they run read this datum, so a wrong field order fails them.
+        var coordinationParams = new CoreProtocolParamsDatum(
+                HexUtil.encodeHexString(registryMint.getScriptHash()),
+                Credential.fromScript(plb.getScriptHash()),
+                Credential.fromScript(transfer.getScriptHash()),
+                Credential.fromScript(thirdParty.getScriptHash()),
+                Credential.fromScript(unfracking.getScriptHash()),
+                Credential.fromScript(upgradeMultisig.getScriptHash()),
+                CoreProtocolParamsDatum.DEFAULT_MAX_INLINE_DATUM_BYTES);
+        // Nothing on chain checks these at mint time -- protocol_params_mint only shape-checks
+        // the datum -- so the fixture deploys through the same guard production does. A fixture
+        // that could deploy an unsound protocol would let a test pass on a protocol nobody
+        // should ever have.
+        coordinationParams.validateForDeployment();
+        var coordinationDatum = coordinationParams.toPlutusData();
 
         var protocolParamNft = Asset.builder()
                 .name(HexUtil.encodeHexString("ProtocolParams".getBytes(StandardCharsets.UTF_8), true))
@@ -259,7 +277,10 @@ public final class BootstrapFixture {
                 scriptCred(plb),
                 BytesPlutusData.of(registryMint.getScriptHash()),
                 ConstrPlutusData.of(1, BytesPlutusData.of(HexUtil.decodeHexString(dummyPolicyId))),
-                scriptCred(plg));
+                // params_policy: a BARE PolicyId. It was plg_stake_cred, a Credential -- same
+                // position, same arity, different encoding, and the template bytes this produces
+                // are what every registration's policy id is derived from.
+                BytesPlutusData.of(protocolParamsMint.getScriptHash()));
         var parts = HexUtil.encodeHexString(issuanceDummy.serializeScriptBody()).split(dummyPolicyId);
         if (parts.length != 2 || parts[1].isEmpty()) {
             throw new IllegalStateException("issuance template marker split produced " + parts.length + " parts");
@@ -309,17 +330,19 @@ public final class BootstrapFixture {
                 .payToContract(registrySpendAddress.getAddress(), ValueUtil.toAmountList(registryValue), originNodeDatum)
                 .payToContract(alwaysFailAddress.getAddress(), ValueUtil.toAmountList(issuanceCborHexValue), issuanceCborHexDatum)
                 .payToAddress(REF_INPUT.baseAddress(), Amount.ada(5), plb)
-                .payToAddress(REF_INPUT.baseAddress(), Amount.ada(20), plg)
+                .payToAddress(REF_INPUT.baseAddress(), Amount.ada(20), transfer)
+                .payToAddress(REF_INPUT.baseAddress(), Amount.ada(20), thirdParty)
                 .payToAddress(REF_INPUT.baseAddress(), Amount.ada(12), unfracking)
                 .payToAddress(ADMIN.baseAddress(), Amount.ada(50))
                 .payToAddress(ADMIN.baseAddress(), Amount.ada(50))
                 .withChangeAddress(ADMIN.baseAddress());
 
-        for (var rewardAddress : List.of(plgRewardAddress, unfrackingRewardAddress, upgradeMultisigRewardAddress)) {
+        for (var rewardAddress : List.of(transferRewardAddress, thirdPartyRewardAddress,
+                unfrackingRewardAddress, upgradeMultisigRewardAddress)) {
             tx.registerStakeAddress(rewardAddress.getAddress());
         }
 
-        chain.withScripts(alwaysFail, coordinationSpend, protocolParamsMint, plb, plg, unfracking,
+        chain.withScripts(alwaysFail, coordinationSpend, protocolParamsMint, plb, transfer, thirdParty, unfracking,
                 upgradeMultisig, issuanceCborHex, registrySpend, registryMint);
 
         var quickTxBuilder = new QuickTxBuilder(chain.utxoSupplier(), chain.protocolParamsSupplier(),
@@ -336,7 +359,8 @@ public final class BootstrapFixture {
         var outputs = chain.submit(transaction);
 
         int plbRefIdx = refScriptOutputIndex(transaction, plb);
-        int plgRefIdx = refScriptOutputIndex(transaction, plg);
+        int transferRefIdx = refScriptOutputIndex(transaction, transfer);
+        int thirdPartyRefIdx = refScriptOutputIndex(transaction, thirdParty);
         int unfrackingRefIdx = refScriptOutputIndex(transaction, unfracking);
 
         var coordinationUtxo = outputAt(outputs, coordinationAddress.getAddress());
@@ -344,6 +368,7 @@ public final class BootstrapFixture {
         var issuanceCborHexUtxo = outputAt(outputs, alwaysFailAddress.getAddress());
 
         var params = new ProtocolBootstrapParams(
+                ProtocolBootstrapParams.CURRENT_SCHEMA_VERSION,
                 new org.cardanofoundation.cip113.model.bootstrap.ProtocolParams(
                         new TxInput(utxo1.getTxHash(), utxo1.getOutputIndex()),
                         protocolParamsMint.getPolicyId(),
@@ -352,11 +377,16 @@ public final class BootstrapFixture {
                         HexUtil.encodeHexString(coordinationNonce),
                         HexUtil.encodeHexString(coordinationSpend.getScriptHash()),
                         coordinationAddress.getAddress()),
-                new ProgrammableLogicGlobalParams(protocolParamsMint.getPolicyId(), plg.getPolicyId()),
-                new ProgrammableLogicBaseParams(protocolParamsMint.getPolicyId(), plb.getPolicyId()),
-                new UnfrackingParams(protocolParamsMint.getPolicyId(),
+                new DelegateParams(protocolParamsMint.getPolicyId(),
+                        HexUtil.encodeHexString(transfer.getScriptHash()),
+                        transferRewardAddress.getAddress()),
+                new DelegateParams(protocolParamsMint.getPolicyId(),
+                        HexUtil.encodeHexString(thirdParty.getScriptHash()),
+                        thirdPartyRewardAddress.getAddress()),
+                new DelegateParams(protocolParamsMint.getPolicyId(),
                         HexUtil.encodeHexString(unfracking.getScriptHash()),
                         unfrackingRewardAddress.getAddress()),
+                new ProgrammableLogicBaseParams(protocolParamsMint.getPolicyId(), plb.getPolicyId()),
                 new UpgradeMultisigParams(List.of(HexUtil.encodeHexString(adminVkh)), 1,
                         HexUtil.encodeHexString(upgradeMultisig.getScriptHash()),
                         upgradeMultisigRewardAddress.getAddress()),
@@ -366,8 +396,10 @@ public final class BootstrapFixture {
                 new DirectoryMintParams(new TxInput(utxo1.getTxHash(), utxo1.getOutputIndex()),
                         issuanceCborHex.getPolicyId(), registryMint.getPolicyId()),
                 new DirectorySpendParams(protocolParamsMint.getPolicyId(), registrySpend.getPolicyId()),
+                CoreProtocolParamsDatum.DEFAULT_MAX_INLINE_DATUM_BYTES,
                 new TxInput(txHash, plbRefIdx),
-                new TxInput(txHash, plgRefIdx),
+                new TxInput(txHash, transferRefIdx),
+                new TxInput(txHash, thirdPartyRefIdx),
                 new TxInput(txHash, unfrackingRefIdx),
                 txHash);
 
@@ -377,8 +409,9 @@ public final class BootstrapFixture {
 
         return new Bootstrapped(transaction, params, outputs,
                 coordinationUtxo, registryOriginUtxo, issuanceCborHexUtxo,
-                outputs.get(plbRefIdx), outputs.get(plgRefIdx), outputs.get(unfrackingRefIdx),
-                plb, plg, unfracking, registryMint, registrySpend, issuanceCborHex,
+                outputs.get(plbRefIdx), outputs.get(transferRefIdx), outputs.get(thirdPartyRefIdx),
+                outputs.get(unfrackingRefIdx),
+                plb, transfer, thirdParty, unfracking, registryMint, registrySpend, issuanceCborHex,
                 protocolParamsMint, coordinationSpend, alwaysFail);
     }
 

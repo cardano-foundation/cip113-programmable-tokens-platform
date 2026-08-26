@@ -27,7 +27,7 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
   const { wallet } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
-  const { getProtocol, ensureSubstandard, available: sdkAvailable } = useCIP113();
+  const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
   const network = process.env.NEXT_PUBLIC_NETWORK || "preview";
 
@@ -263,7 +263,8 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      <TxBuilderToggle value={txBuilder} onChange={setTxBuilder} sdkAvailable={sdkAvailable} />
+      <TxBuilderToggle value={txBuilder} onChange={setTxBuilder} sdkAvailable={sdkAvailable}
+        sdkUnavailableReason={sdkUnavailableReason} />
 
       {/* Warning Banner */}
       <div className="px-4 py-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">

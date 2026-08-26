@@ -44,7 +44,7 @@ public class PreviewBlacklistManagementTest extends AbstractPreviewTest implemen
 
     private final Network network = Networks.preview();
 
-    private final UtxoProvider utxoProvider = new UtxoProvider(bfBackendService, null);
+    private final UtxoProvider utxoProvider = new UtxoProvider(bfBackendService, null, null);
 
     private final AccountService accountService = new AccountService(utxoProvider);
 

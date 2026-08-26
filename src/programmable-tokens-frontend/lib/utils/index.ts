@@ -1,4 +1,5 @@
 export { cn } from "./cn";
+export { describeError, logError } from "./error-message";
 export {
   truncateAddress,
   formatADA,

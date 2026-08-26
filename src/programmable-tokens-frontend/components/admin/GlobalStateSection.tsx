@@ -44,6 +44,7 @@ import { useToast } from "@/components/ui/use-toast";
 import { getExplorerTxUrl } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import type { GlobalStateAction, GlobalStateData } from "@/types/compliance";
+import { logError } from '@/lib/utils/error-message';
 
 interface GlobalStateSectionProps {
   tokens: AdminTokenInfo[];
@@ -110,7 +111,7 @@ export function GlobalStateSection({
       console.error("Failed to load global state:", error);
       showToast({
         title: "Error Loading State",
-        description: error instanceof Error ? error.message : "Could not read on-chain global state",
+        description: logError('read global state', error),
         variant: "error",
       });
       setGlobalState(null);

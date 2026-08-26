@@ -19,7 +19,6 @@ import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import com.bloxbean.cardano.client.util.HexUtil;
 import com.bloxbean.cardano.yaci.core.model.certs.CertificateType;
 import com.bloxbean.cardano.yaci.store.utxo.storage.impl.repository.UtxoRepository;
-import com.easy1staking.cardano.comparator.TransactionInputComparator;
 import com.easy1staking.cardano.comparator.UtxoComparator;
 import com.easy1staking.cardano.model.AssetType;
 import com.easy1staking.cardano.util.AmountUtil;
@@ -29,6 +28,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.core.CoreDatums;
+import org.cardanofoundation.cip113.core.CoreLayout;
+import org.cardanofoundation.cip113.core.CoreRedeemers;
+import org.cardanofoundation.cip113.core.CoreWithdrawal;
 import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.entity.BlacklistInitEntity;
 import org.cardanofoundation.cip113.entity.FreezeAndSeizeTokenRegistrationEntity;
@@ -720,13 +723,16 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .transactionId(progTokenRegistry.getTxHash())
                     .index(progTokenRegistry.getOutputIndex())
                     .build();
-            var sortedReferenceInputs = Stream.of(registryRefInput)
-                    .sorted(new TransactionInputComparator())
-                    .toList();
-            var registryRefInputIndex = sortedReferenceInputs.indexOf(registryRefInput);
+            // Sole reference input, so the index is trivially 0 -- taken through CoreLayout
+            // anyway, because `indexOf` returns -1 for anything it cannot find and -1 inside a
+            // redeemer is an out-of-range read the validator reports as an unrelated failure.
+            // CoreLayout throws instead, and adding a second reference input here later will
+            // then be a change that keeps working rather than one that silently renumbers.
+            var mintLayout = CoreLayout.builder().referenceInput(registryRefInput).build();
+            var registryRefInputIndex = mintLayout.referenceInputIndex(registryRefInput);
 
             // types.MintingRegistryProof directly (no SmartTokenMintingAction wrapper in v0.4.0).
-            var issuanceRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(registryRefInputIndex)); // RefInput { index }
+            var issuanceRedeemer = CoreRedeemers.mintProofRefInput(registryRefInputIndex);
 
             // Programmable Token Mint
             var programmableToken = Asset.builder()
@@ -851,8 +857,13 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .build();
             log.info("programmableToken: {}", programmableToken);
 
-            var programmableLogicGlobal = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
-            var programmableLogicGlobalAddress = AddressProvider.getRewardAddress(programmableLogicGlobal, network.getCardanoNetwork());
+            // Burn is an ADMINISTRATIVE action, so it goes through `third_party` -- not through
+            // `transfer`. Before the coordinator was dissolved both were arms of one validator
+            // and the choice was a redeemer constructor; now it is a different script, a
+            // different reference script, and a different reward account to withdraw from.
+            var coreThirdParty = protocolScriptBuilderService.getParameterizedThirdPartyScript(protocolParams);
+            var coreThirdPartyAddress = AddressProvider.getRewardAddress(coreThirdParty, network.getCardanoNetwork());
+            var coreThirdPartyCredential = Credential.fromScript(coreThirdParty.getScriptHash());
 
             // Directory SPEND parameterization
             var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
@@ -896,27 +907,33 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .transactionId(progTokenRegistry.getTxHash())
                     .index(progTokenRegistry.getOutputIndex())
                     .build();
-            var sortedReferenceInputs = Stream.of(TransactionInput.builder()
-                            .transactionId(protocolParamsUtxo.getTxHash())
-                            .index(protocolParamsUtxo.getOutputIndex())
-                            .build(), registryRefInput)
-                    .sorted(new TransactionInputComparator())
-                    .toList();
+            var protocolParamsRefInput = TransactionInput.builder()
+                    .transactionId(protocolParamsUtxo.getTxHash())
+                    .index(protocolParamsUtxo.getOutputIndex())
+                    .build();
 
-            var registryRefInputInex = sortedReferenceInputs.indexOf(registryRefInput);
-            log.info("registryRefInputInex: {}", registryRefInputInex);
+            var substandardIssueCredential = Credential.fromScript(substandardIssueContract.getScriptHash());
+            var layout = CoreLayout.builder()
+                    .referenceInput(protocolParamsRefInput)
+                    .referenceInput(registryRefInput)
+                    .withdrawal(coreThirdPartyCredential)
+                    .withdrawal(substandardIssueCredential)
+                    .build();
+            var sortedReferenceInputs = layout.referenceInputs();
+            var paramsIdx = layout.referenceInputIndex(protocolParamsRefInput);
+            var registryRefInputInex = layout.referenceInputIndex(registryRefInput);
 
-            // Build issuance redeemer with RefInput proof (burn = already registered token)
-            // types.MintingRegistryProof directly (no SmartTokenMintingAction wrapper in v0.4.0).
-            var issuanceRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(registryRefInputInex)); // RefInput { index }
+            // Burn of an already-registered policy: the registry node is a reference input.
+            var issuanceRedeemer = CoreRedeemers.mintProofRefInput(registryRefInputInex);
 
             var seizeInputIndex = sortedInputUtxos.indexOf(utxoToBurn);
             log.info("seizeInputIndex: {}", seizeInputIndex);
 
-            var programmableGlobalRedeemer = ConstrPlutusData.of(1,
-                    BigIntPlutusData.of(registryRefInputInex),
-                    BigIntPlutusData.of(0) // outputs_start_idx
-            );
+            // outputs_start_idx = 0: the burned UTxO's continuation is the first output.
+            var coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(paramsIdx, registryRefInputInex, 0);
+
+            var baseSpendRedeemer = CoreRedeemers.spendViaThirdParty(
+                    paramsIdx, layout.withdrawalIndex(coreThirdPartyCredential));
 
             var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
             log.info("programmableLogicBase policy: {}", programmableLogicBase.getPolicyId());
@@ -936,16 +953,24 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
 
             var tx = new Tx()
                     .collectFrom(adminUtxos)
-                    .collectFrom(utxoToBurn, ConstrPlutusData.of(0))
-                    .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, ConstrPlutusData.of(0))
-                    .withdraw(programmableLogicGlobalAddress.getAddress(), BigInteger.ZERO, programmableGlobalRedeemer)
-                    .payToContract(utxoToBurn.getAddress(), ValueUtil.toAmountList(returningValue), ConstrPlutusData.of(0))
+                    .collectFrom(utxoToBurn, baseSpendRedeemer)
+                    .payToContract(utxoToBurn.getAddress(), ValueUtil.toAmountList(returningValue), CoreDatums.programmableTokenDatum())
                     .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
                     .readFrom(sortedReferenceInputs.toArray(new TransactionInput[0]))
-                    .attachSpendingValidator(programmableLogicBase) // base
-                    .attachRewardValidator(programmableLogicGlobal) // global
+                    .attachSpendingValidator(programmableLogicBase)
+                    .attachRewardValidator(coreThirdParty)
                     .attachRewardValidator(substandardIssueContract)
                     .withChangeAddress(request.feePayerAddress());
+
+            // Withdrawals added in LEDGER order, after the rest of the transaction: their
+            // redeemers are matched to entries by position in the canonical map.
+            layout.inWithdrawalOrder(
+                            List.of(new CoreWithdrawal(substandardIssueCredential, substandardIssueAddress.getAddress(),
+                                            ConstrPlutusData.of(0)),
+                                    new CoreWithdrawal(coreThirdPartyCredential, coreThirdPartyAddress.getAddress(),
+                                            coreThirdPartyRedeemer)),
+                            CoreWithdrawal::credential)
+                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
 
             var transaction = quickTxBuilder.compose(tx)
                     .withRequiredSigners(adminPkh.getBytes())
@@ -1050,13 +1075,12 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var senderProgTokensUtxos = utxoProvider.findUtxos(senderProgrammableTokenAddress.getAddress());
 
 
-//        // Programmable Logic Global parameterization
-            var programmableLogicGlobal = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
-            var programmableLogicGlobalAddress = AddressProvider.getRewardAddress(programmableLogicGlobal, network.getCardanoNetwork());
-            log.info("programmableLogicGlobalAddress policy: {}", programmableLogicGlobalAddress.getAddress());
-            log.info("protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash(): {}", protocolParams.programmableLogicGlobalPrams().scriptHash());
-//
-////            // Programmable Logic Base parameterization
+            // The `transfer` delegate. A transfer loads this reference script and neither of the
+            // other two -- programmable_logic_base dispatches to exactly one delegate per input.
+            var coreTransfer = protocolScriptBuilderService.getParameterizedTransferScript(protocolParams);
+            var coreTransferAddress = AddressProvider.getRewardAddress(coreTransfer, network.getCardanoNetwork());
+            var coreTransferCredential = Credential.fromScript(coreTransfer.getScriptHash());
+
             var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
             log.info("programmableLogicBase policy: {}", programmableLogicBase.getPolicyId());
 
@@ -1167,44 +1191,62 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                                     .index(progTokenRegistry.getOutputIndex())
                                     .build())
                     )
-                    .sorted(new TransactionInputComparator())
                     .toList();
+
+            var protocolParamsRefInput = TransactionInput.builder()
+                    .transactionId(protocolParamsUtxo.getTxHash())
+                    .index(protocolParamsUtxo.getOutputIndex())
+                    .build();
+            var registryRefInput = TransactionInput.builder()
+                    .transactionId(progTokenRegistry.getTxHash())
+                    .index(progTokenRegistry.getOutputIndex())
+                    .build();
+
+            var substandardTransferCredential =
+                    Credential.fromScript(parameterisedSubstandardTransferContract.getScriptHash());
+            var layoutBuilder = CoreLayout.builder()
+                    .withdrawal(coreTransferCredential)
+                    .withdrawal(substandardTransferCredential);
+            sortedReferenceInputs.forEach(layoutBuilder::referenceInput);
+            var layout = layoutBuilder.build();
+            sortedReferenceInputs = layout.referenceInputs();
+            var paramsIdx = layout.referenceInputIndex(protocolParamsRefInput);
 
             var proofList = proofs.stream().map(pair -> {
                 log.info("first: {}, second: {}", pair.first(), pair.second());
-                var index = sortedReferenceInputs.indexOf(TransactionInput.builder().transactionId(pair.second().getTxHash()).index(pair.second().getOutputIndex()).build());
+                var index = layout.referenceInputIndex(TransactionInput.builder().transactionId(pair.second().getTxHash()).index(pair.second().getOutputIndex()).build());
                 log.info("adding index: {} as a blacklist non-belonging proof", index);
                 return ConstrPlutusData.of(0, BigIntPlutusData.of(index));
             }).toList();
             var freezeAndSeizeRedeemer = ListPlutusData.of();
             proofList.forEach(freezeAndSeizeRedeemer::add);
 
-            var registryIndex = sortedReferenceInputs.indexOf(TransactionInput.builder().transactionId(progTokenRegistry.getTxHash()).index(progTokenRegistry.getOutputIndex()).build());
+            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(paramsIdx, List.of(
+                    CoreRedeemers.tokenExists(layout.referenceInputIndex(registryRefInput))));
 
-            var programmableGlobalRedeemer = ConstrPlutusData.of(0,
-                    // only one prop and it's a list
-                    ListPlutusData.of(ConstrPlutusData.of(0, BigIntPlutusData.of(registryIndex)))
-            );
+            var baseSpendRedeemer = CoreRedeemers.spendViaTransfer(
+                    paramsIdx, layout.withdrawalIndex(coreTransferCredential));
 
             var tx = new Tx()
                     .collectFrom(adminUtxos);
 
-            inputUtxos.forEach(utxo -> {
-                tx.collectFrom(utxo, ConstrPlutusData.of(0));
-            });
+            inputUtxos.forEach(utxo -> tx.collectFrom(utxo, baseSpendRedeemer));
 
-            log.info("substandardTransferAddress.getAddress(): {}", substandardTransferAddress.getAddress());
-            log.info("programmableLogicGlobalAddress.getAddress(): {}", programmableLogicGlobalAddress.getAddress());
+            // Added in LEDGER order: withdrawal redeemers are matched to entries by position in
+            // the canonical map, so pre-sorting removes any dependence on the serialiser
+            // re-indexing them afterwards.
+            layout.inWithdrawalOrder(
+                            List.of(new CoreWithdrawal(substandardTransferCredential, substandardTransferAddress.getAddress(), freezeAndSeizeRedeemer),
+                                    new CoreWithdrawal(coreTransferCredential, coreTransferAddress.getAddress(), coreTransferRedeemer)),
+                            CoreWithdrawal::credential)
+                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
 
-//        // must be first Provide proofs
-            tx.withdraw(substandardTransferAddress.getAddress(), BigInteger.ZERO, freezeAndSeizeRedeemer)
-                    .withdraw(programmableLogicGlobalAddress.getAddress(), BigInteger.ZERO, programmableGlobalRedeemer)
-                    .payToContract(senderProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(returningValue), ConstrPlutusData.of(0))
-                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenValue2), ConstrPlutusData.of(0));
+            tx.payToContract(senderProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(returningValue), CoreDatums.programmableTokenDatum())
+                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenValue2), CoreDatums.programmableTokenDatum());
 
             sortedReferenceInputs.forEach(tx::readFrom);
 
-            tx.attachRewardValidator(programmableLogicGlobal) // global
+            tx.attachRewardValidator(coreTransfer)
                     .attachRewardValidator(parameterisedSubstandardTransferContract)
                     .attachSpendingValidator(programmableLogicBase) // base
                     .withChangeAddress(senderAddress.getAddress());
@@ -1756,13 +1798,13 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     network.getCardanoNetwork());
 
 
-//        // Programmable Logic Global parameterization
-            var programmableLogicGlobal = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
-            var programmableLogicGlobalAddress = AddressProvider.getRewardAddress(programmableLogicGlobal, network.getCardanoNetwork());
-            log.info("programmableLogicGlobalAddress policy: {}", programmableLogicGlobalAddress.getAddress());
-            log.info("protocolBootstrapParams.programmableLogicGlobalPrams().scriptHash(): {}", protocolParams.programmableLogicGlobalPrams().scriptHash());
-//
-////            // Programmable Logic Base parameterization
+            // Seizure is an ADMINISTRATIVE action: it goes through `third_party`, which since the
+            // coordinator was dissolved is a separate validator with its own reference script and
+            // its own reward account -- not a redeemer constructor on the transfer script.
+            var coreThirdParty = protocolScriptBuilderService.getParameterizedThirdPartyScript(protocolParams);
+            var coreThirdPartyAddress = AddressProvider.getRewardAddress(coreThirdParty, network.getCardanoNetwork());
+            var coreThirdPartyCredential = Credential.fromScript(coreThirdParty.getScriptHash());
+
             var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
             log.info("programmableLogicBase policy: {}", programmableLogicBase.getPolicyId());
 
@@ -1823,34 +1865,53 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .transactionId(progTokenRegistry.getTxHash())
                     .index(progTokenRegistry.getOutputIndex())
                     .build();
-            var sortedReferenceInputs = Stream.of(TransactionInput.builder()
-                            .transactionId(protocolParamsUtxo.getTxHash())
-                            .index(protocolParamsUtxo.getOutputIndex())
-                            .build(), registryRefInput)
-                    .sorted(new TransactionInputComparator())
-                    .toList();
+            var protocolParamsRefInput = TransactionInput.builder()
+                    .transactionId(protocolParamsUtxo.getTxHash())
+                    .index(protocolParamsUtxo.getOutputIndex())
+                    .build();
 
-            var registryRefInputInex = sortedReferenceInputs.indexOf(registryRefInput);
-            log.info("registryRefInputInex: {}", registryRefInputInex);
+            var substandardIssueAdminCredential =
+                    Credential.fromScript(substandardIssueAdminContract.getScriptHash());
+            var layout = CoreLayout.builder()
+                    .referenceInput(protocolParamsRefInput)
+                    .referenceInput(registryRefInput)
+                    .withdrawal(coreThirdPartyCredential)
+                    .withdrawal(substandardIssueAdminCredential)
+                    .build();
+            var sortedReferenceInputs = layout.referenceInputs();
+            var paramsIdx = layout.referenceInputIndex(protocolParamsRefInput);
+            var registryRefInputInex = layout.referenceInputIndex(registryRefInput);
 
-            var programmableGlobalRedeemer = ConstrPlutusData.of(1,
-                    BigIntPlutusData.of(registryRefInputInex),
-                    BigIntPlutusData.of(1) // outputs_start_idx
-            );
+            // outputs_start_idx = 1: output 0 is the seized value's destination, output 1 is the
+            // CONTINUING output paired with the seized input. third_party pairs every acted-on
+            // PLB input positionally from this offset, and each pair must agree byte-for-byte on
+            // address, datum and reference script -- a seizure moves tokens, not ownership.
+            var coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(paramsIdx, registryRefInputInex, 1);
+
+            var baseSpendRedeemer = CoreRedeemers.spendViaThirdParty(
+                    paramsIdx, layout.withdrawalIndex(coreThirdPartyCredential));
 
             var tx = new Tx()
                     .collectFrom(adminUtxos)
-                    .collectFrom(utxoToSeize, ConstrPlutusData.of(0))
-                    .withdraw(substandardIssueAdminAddress.getAddress(), BigInteger.ZERO, ConstrPlutusData.of(0))
-                    .withdraw(programmableLogicGlobalAddress.getAddress(), BigInteger.ZERO, programmableGlobalRedeemer)
-                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenAssetToSeize), ConstrPlutusData.of(0))
+                    .collectFrom(utxoToSeize, baseSpendRedeemer)
+                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenAssetToSeize), CoreDatums.programmableTokenDatum())
                     // The CONTINUING output: same address, same datum as the input it continues.
                     .payToContract(utxoToSeize.getAddress(), ValueUtil.toAmountList(utxoToSeize.toValue().subtract(tokenAssetToSeize)), continuingDatum)
                     .readFrom(sortedReferenceInputs.toArray(new TransactionInput[0]))
-                    .attachRewardValidator(programmableLogicGlobal) // global
+                    .attachRewardValidator(coreThirdParty)
                     .attachRewardValidator(substandardIssueAdminContract)
-                    .attachSpendingValidator(programmableLogicBase) // base
+                    .attachSpendingValidator(programmableLogicBase)
                     .withChangeAddress(feePayerAddress.getAddress());
+
+            // Withdrawals in LEDGER order: their redeemers are matched to entries by position in
+            // the canonical map.
+            layout.inWithdrawalOrder(
+                            List.of(new CoreWithdrawal(substandardIssueAdminCredential,
+                                            substandardIssueAdminAddress.getAddress(), ConstrPlutusData.of(0)),
+                                    new CoreWithdrawal(coreThirdPartyCredential,
+                                            coreThirdPartyAddress.getAddress(), coreThirdPartyRedeemer)),
+                            CoreWithdrawal::credential)
+                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
 
 
             var transaction = quickTxBuilder.compose(tx)

@@ -20,6 +20,7 @@ import { getExplorerTxUrl } from '@/lib/utils/format';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import type { FreezeAndSeizeRegisterRequest } from '@/types/api';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
+import { logError } from '@/lib/utils/error-message';
 
 type CombinedStatus =
   | 'idle'
@@ -58,7 +59,7 @@ export function CombinedBuildSignSubmitStep({
   const { connected, wallet, rawApi } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
-  const { buildFESRegistration, available: sdkAvailable } = useCIP113();
+  const { buildFESRegistration, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   const [useSDK, setUseSDK] = useState(sdkAvailable);
 
   const [status, setStatus] = useState<CombinedStatus>('idle');
@@ -256,7 +257,7 @@ export function CombinedBuildSignSubmitStep({
       });
     } catch (error) {
       setStatus('error');
-      const message = error instanceof Error ? error.message : 'Failed to build transactions';
+      const message = logError('freeze-and-seize build', error);
       setErrorMessage(message);
       showToastRef.current({
         title: 'Build Failed',
@@ -406,7 +407,7 @@ export function CombinedBuildSignSubmitStep({
       }
 
       setStatus('error');
-      const message = error instanceof Error ? error.message : 'Failed to sign or submit';
+      const message = logError('freeze-and-seize sign/submit', error);
       setErrorMessage(message);
 
       if (message.toLowerCase().includes('user declined') ||
@@ -482,7 +483,7 @@ export function CombinedBuildSignSubmitStep({
     } catch (error) {
       if (error instanceof Error && error.message === 'Aborted') return;
       setStatus('error');
-      const message = error instanceof Error ? error.message : 'Failed to submit registration';
+      const message = logError('freeze-and-seize registration submit', error);
       setErrorMessage(message);
       onError(message);
     } finally {
@@ -617,16 +618,22 @@ export function CombinedBuildSignSubmitStep({
                 <button
                   onClick={() => setUseSDK(true)}
                   disabled={!sdkAvailable || cip68Enabled}
+                  title={!sdkAvailable ? sdkUnavailableReason : cip68Enabled
+                    ? 'CIP-68 is enabled, so the transaction is built server-side.'
+                    : undefined}
+                  aria-label={!sdkAvailable ? sdkUnavailableReason : undefined}
                   className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
                     effectiveUseSDK ? 'bg-primary-500 text-white' : 'bg-dark-700 text-dark-400 hover:text-white'
-                  } ${!sdkAvailable || cip68Enabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  } ${!sdkAvailable || cip68Enabled ? 'opacity-50 cursor-not-allowed line-through' : ''}`}
                 >
                   SDK (Evolution)
                 </button>
               </div>
             </div>
             <p className="text-xs text-dark-500">
-              {cip68Enabled
+              {!sdkAvailable
+                ? sdkUnavailableReason
+                : cip68Enabled
                 ? 'CIP-68 is enabled, so transactions are built server-side. Both builders label the user token (333), but whether they produce byte-identical datums, min-UTxO sizing and output ordering is unverified — and freeze-and-seize bakes the asset name into issuer_admin, so any divergence would yield a different token policy id.'
                 : effectiveUseSDK
                 ? 'Building transactions client-side with CIP-113 SDK + Evolution SDK'

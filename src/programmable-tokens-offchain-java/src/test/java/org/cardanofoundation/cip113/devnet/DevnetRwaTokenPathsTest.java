@@ -222,7 +222,7 @@ public class DevnetRwaTokenPathsTest {
      */
     private static org.cardanofoundation.cip113.service.UtxoProvider zeroBasedPagingUtxoProvider(
             BFBackendService backend) {
-        return new org.cardanofoundation.cip113.service.UtxoProvider(backend, null) {
+        return new org.cardanofoundation.cip113.service.UtxoProvider(backend, null, null) {
             @Override
             public java.util.Optional<com.bloxbean.cardano.client.api.model.Utxo> findUtxoByAsset(
                     String policyId, String assetNameHex) {

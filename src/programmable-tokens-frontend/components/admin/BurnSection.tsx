@@ -18,6 +18,7 @@ import { burnToken } from "@/lib/api/minting";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useCIP113 } from "@/contexts/cip113-context";
 import { useToast } from "@/components/ui/use-toast";
+import { logError } from '@/lib/utils/error-message';
 
 interface BurnSectionProps {
   adminTokens: AdminTokenInfo[];
@@ -30,7 +31,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
   const { wallet } = useWallet();
   const { selectedVersion } = useProtocolVersion();
   const { toast: showToast } = useToast();
-  const { getProtocol, ensureSubstandard, available: sdkAvailable } = useCIP113();
+  const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
 
   const [selectedToken, setSelectedToken] = useState<AdminTokenInfo | null>(null);
@@ -191,7 +192,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
 
     } catch (error) {
       console.error("Burn failed:", error);
-      const msg = error instanceof Error ? error.message : "Burn failed";
+      const msg = logError('burn', error);
       // Auto-trigger the one-shot transferLogic cert registration if the
       // backend tells us it's missing. Eternl can't sign that cert as part
       // of the burn tx (Conway tag-7 + multi-script body), so we isolate
@@ -295,7 +296,8 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
       </CardHeader>
 
       <CardContent className="space-y-6">
-        <TxBuilderToggle value={txBuilder} onChange={setTxBuilder} sdkAvailable={sdkAvailable} />
+        <TxBuilderToggle value={txBuilder} onChange={setTxBuilder} sdkAvailable={sdkAvailable}
+        sdkUnavailableReason={sdkUnavailableReason} />
 
         {/* Warning Banner */}
         <div className="p-4 bg-yellow-900/20 border border-yellow-600/30 rounded-lg flex items-start gap-3">

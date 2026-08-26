@@ -8,7 +8,8 @@ import com.bloxbean.cardano.yaci.store.utxo.storage.impl.repository.UtxoReposito
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.config.AppConfig;
-import org.cardanofoundation.cip113.service.ProtocolBootstrapService;
+import org.cardanofoundation.cip113.core.CoreBlueprint;
+import org.cardanofoundation.cip113.core.CoreScriptFactory;
 import org.cardanofoundation.cip113.service.ProtocolScriptBuilderService;
 import org.cardanofoundation.cip113.service.SubstandardService;
 import org.mockito.Mockito;
@@ -57,24 +58,20 @@ public final class HandlerFixtures {
     }
 
     /**
-     * The real {@link ProtocolScriptBuilderService}, backed by a bootstrap service that resolves
-     * compiled validators straight out of {@code src/main/resources/plutus.json}.
+     * The real {@link ProtocolScriptBuilderService}, over the real {@link CoreScriptFactory}
+     * and {@link CoreBlueprint}.
      *
-     * <p>Mocked rather than {@code init()}-ed on purpose: the real init also loads
-     * {@code protocol-bootstraps-devnet.json}, and this test's protocol is the one
-     * {@link BootstrapFixture} just built, not whatever is committed in that file.
+     * <p>Nothing is mocked any more. {@code CoreBlueprint} reads {@code plutus.json} off the
+     * classpath, which is the same file {@link BootstrapFixture#protocolValidators()} reads,
+     * so the scripts these handlers build are parameterised from exactly the bytes the
+     * fixture deployed. Previously this stubbed {@code ProtocolBootstrapService} to answer
+     * blueprint-title lookups, because the real bootstrap service also loads
+     * {@code protocol-bootstraps-devnet.json} — a committed deployment record that has
+     * nothing to do with the protocol the fixture just built. Resolving the blueprint is now
+     * separate from resolving a deployment, so that stub is no longer needed.
      */
     public static ProtocolScriptBuilderService protocolScriptBuilderService() throws Exception {
-        var validators = BootstrapFixture.protocolValidators();
-        var bootstrapService = Mockito.mock(ProtocolBootstrapService.class);
-        Mockito.when(bootstrapService.getProtocolContract(anyString())).thenAnswer(inv -> {
-            String title = inv.getArgument(0);
-            return validators.stream()
-                    .filter(v -> v.title().equals(title))
-                    .findAny()
-                    .map(org.cardanofoundation.cip113.model.blueprint.Validator::compiledCode);
-        });
-        return new ProtocolScriptBuilderService(bootstrapService);
+        return new ProtocolScriptBuilderService(new CoreScriptFactory(new CoreBlueprint()));
     }
 
     /** Convert an offline-chain UTxO into the JPA entity the yaci-store repositories return. */

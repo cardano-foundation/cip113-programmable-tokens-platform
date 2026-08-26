@@ -47,10 +47,39 @@ public class YaciConfiguration {
         return new HybridScriptSupplier(new DefaultScriptSupplier(bfBackendService.getScriptService()));
     }
 
+    /**
+     * Protocol parameters for transaction building — above all the Plutus cost models, which
+     * are hashed into every script transaction's {@code scriptIntegrityHash}.
+     *
+     * <p>On the public testnets the primary source (Blockfrost) has served a stale PlutusV3
+     * cost model across a hard fork, so a Koios overlay pins the current epoch's — see
+     * {@link CostModelOverlayProtocolParamsSupplier} for that history.
+     *
+     * <p><b>The overlay must not run on a devnet.</b> It is not a fallback but a
+     * cross-chain substitution: {@code koios.url} points at a PUBLIC network, so on a devnet
+     * it fetches preview's cost model and writes it over the local chain's. Those genuinely
+     * differ — a Yaci devnet serves 251 PlutusV3 entries where post-fork preview serves 350 —
+     * and the cost models are part of the script integrity hash. Every Plutus transaction is
+     * then built against one chain's cost model and validated against another's, and the node
+     * rejects it with {@code ScriptIntegrityHashMismatch}: two hashes, no indication that a
+     * cost model came from the wrong chain.
+     *
+     * <p>On a devnet the primary source is yaci-store, reading the node this backend is
+     * actually talking to, so it is authoritative by construction and needs no overlay.
+     */
     @Bean
     public ProtocolParamsSupplier protocolParamsSupplier(BFBackendService bfBackendService,
-                                                         KoiosBackendService koiosBackendService) {
+                                                         KoiosBackendService koiosBackendService,
+                                                         @Value("${network}") String network) {
         var primary = new DefaultProtocolParamsSupplier(bfBackendService.getEpochService());
+
+        if ("devnet".equals(network) || "dev".equals(network) || "yaci".equals(network)) {
+            log.info("INIT ProtocolParams: using the local backend directly (no Koios cost-model "
+                    + "overlay on {} — the overlay reads a public network and would substitute "
+                    + "another chain's cost model into the script integrity hash)", network);
+            return primary;
+        }
+
         // Koios's no-arg /epoch_params can return a stale finalized epoch on preview,
         // causing PPViewHashesDontMatch — overlay forces the current epoch's cost model.
         return new CostModelOverlayProtocolParamsSupplier(primary, koiosBackendService);

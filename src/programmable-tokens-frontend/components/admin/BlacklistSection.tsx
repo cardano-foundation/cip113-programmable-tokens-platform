@@ -30,7 +30,7 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
   const { wallet } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
-  const { getProtocol, ensureSubstandard, available: sdkAvailable } = useCIP113();
+  const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
   const network = process.env.NEXT_PUBLIC_NETWORK || "preview";
 
@@ -252,7 +252,8 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      <TxBuilderToggle value={txBuilder} onChange={setTxBuilder} sdkAvailable={sdkAvailable} />
+      <TxBuilderToggle value={txBuilder} onChange={setTxBuilder} sdkAvailable={sdkAvailable}
+        sdkUnavailableReason={sdkUnavailableReason} />
 
       {/* Token Selector */}
       <div>

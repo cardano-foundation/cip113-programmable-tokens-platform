@@ -11,6 +11,7 @@ import { registerToken, stringToHex } from '@/lib/api';
 import { getPaymentKeyHash } from '@/lib/utils/address';
 import { toCip68Wire } from '@/lib/utils/cip68-wire';
 import type { DummyRegisterRequest, FreezeAndSeizeRegisterRequest } from '@/types/api';
+import { logError } from '@/lib/utils/error-message';
 import type {
   StepComponentProps,
   TokenDetailsData,
@@ -156,7 +157,7 @@ export function BuildPreviewStep({
       });
     } catch (error) {
       setPhase('error');
-      const message = error instanceof Error ? error.message : 'Failed to build transaction';
+      const message = logError('build', error);
       setErrorMessage(message);
       showToast({
         title: 'Build Failed',

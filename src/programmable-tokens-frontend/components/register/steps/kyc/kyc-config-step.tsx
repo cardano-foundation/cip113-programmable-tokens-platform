@@ -17,6 +17,7 @@ import { useProtocolVersion } from '@/contexts/protocol-version-context';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import { toCip68Wire } from '@/lib/utils/cip68-wire';
 import type { StepComponentProps, CIP68MetadataFormData } from '@/types/registration';
+import { logError } from '@/lib/utils/error-message';
 
 interface KycConfigData {
   globalStatePolicyId: string;
@@ -548,13 +549,14 @@ export function KycConfigStep({
         completedAt: Date.now(),
       });
     } catch (error) {
-      console.error('KYC config error:', error);
-      let errorMessage = 'Failed to initialize Global State';
-      if (error instanceof Error) {
-        errorMessage = error.message.includes('User declined')
-          ? 'Transaction was cancelled'
-          : error.message;
-      }
+      // describeError, not `error instanceof Error`: CIP-30 wallets throw plain
+      // { code, info } objects, so the instanceof branch is false for every wallet
+      // rejection and the node's actual reason — which lives in `info` — was being
+      // replaced by the constant below.
+      const described = logError('rwa global-state init', error);
+      const errorMessage = described.includes('User declined') || described.includes('user declined')
+        ? 'Transaction was cancelled'
+        : described;
       showToast({
         title: 'Global state setup failed',
         description: errorMessage,

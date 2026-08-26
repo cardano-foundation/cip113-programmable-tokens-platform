@@ -90,14 +90,11 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
-	// RwaTokenUpstreamPinTest hashes the vendored rwa-token contract
-	// tree, which lives OUTSIDE this Gradle project and is therefore not one of
-	// the test task's implicit inputs. Without this declaration, editing a
-	// vendored Aiken file leaves `test` UP-TO-DATE and the drift guard silently
-	// never runs — exactly the failure mode the pin exists to prevent.
-	inputs.dir(file("$projectDir/../substandards/rwa-token"))
-	      .withPropertyName('vendoredRwaToken')
-	      .withPathSensitivity(PathSensitivity.RELATIVE)
+	// NOTE: this task used to declare two vendored contract trees (../core-contracts and
+	// ../substandards/rwa-token) as inputs, so that editing an Aiken file invalidated the
+	// test task. Those trees are gone — only the compiled blueprints are shipped now, and
+	// they live in src/main/resources, which is already an implicit input. See
+	// docs/CONTRACTS.md and ContractBlueprintPinTest.
 
 	// Gradle discards the test JVM's stdout/stderr, so log.info and System.out
 	// from a test are invisible by default — including the deployment test's

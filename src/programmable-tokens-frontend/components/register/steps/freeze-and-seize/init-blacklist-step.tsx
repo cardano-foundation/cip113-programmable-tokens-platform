@@ -11,6 +11,7 @@ import { initBlacklist } from '@/lib/api/compliance';
 import { stringToHex } from '@/lib/api';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import type { StepComponentProps, BlacklistInitResult, TokenDetailsData } from '@/types/registration';
+import { logError } from '@/lib/utils/error-message';
 
 interface InitBlacklistStepProps extends StepComponentProps<Record<string, unknown>, BlacklistInitResult> {}
 
@@ -198,7 +199,7 @@ export function InitBlacklistStep({
       }
 
       setStatus('error');
-      const message = error instanceof Error ? error.message : 'Failed to initialize blacklist';
+      const message = logError('blacklist init', error);
       setErrorMessage(message);
 
       if (message.toLowerCase().includes('user declined') ||

@@ -1,0 +1,45 @@
+{
+  "_comment": [
+    "Provenance for the two compiled contract blueprints this backend ships.",
+    "",
+    "The Aiken SOURCE for both used to be vendored into this repository (src/core-contracts",
+    "and src/substandards/rwa-token). It no longer is: the backend consumes only plutus.json,",
+    "and carrying ~1.2 MB of source to ship a 112 KB artifact duplicated files that upstream",
+    "already owns. What was worth keeping is this record -- WHICH upstream revision each",
+    "blueprint came from -- because without it the answer is only recoverable by scanning",
+    "upstream commits comparing validator hashes, which is exactly how this file came to exist.",
+    "",
+    "The trade accepted with that removal: the blueprints can no longer be rebuilt or audited",
+    "from inside this repository. Both remain reproducible OUTSIDE it -- see docs/CONTRACTS.md",
+    "for the exact commands.",
+    "",
+    "ContractBlueprintPinTest checks the sha256 values below on every build, so an accidental",
+    "edit to a blueprint fails loudly even though the source is gone."
+  ],
+  "blueprints": [
+    {
+      "name": "cip113-core",
+      "resource": "plutus.json",
+      "repository": "https://github.com/cardano-foundation/cip113-programmable-tokens",
+      "commit": "9db7e0629a1509cc9d41d069f0ef0ed251601173",
+      "commit_date": "2026-08-24T15:41:08+01:00",
+      "upstream_version": "0.5.0-alpha.2",
+      "aiken_compiler": "v1.1.23+8949565",
+      "sha256": "bd297f36e9e955d814fb3a67fbc7e51c2344b54d952d38b03ef9f32c1d43b9ad",
+      "verbatim_from_upstream": true,
+      "note": "Upstream's committed plutus.json, byte for byte. It also reproduces from its own source: rebuilding the tree at this commit with aiken v1.1.23+8949565 yields all 27 validator entries identically, preamble included. Taking upstream's file and rebuilding it are therefore interchangeable."
+    },
+    {
+      "name": "rwa-token",
+      "resource": "substandards/rwa-token/plutus.json",
+      "repository": "https://github.com/cardano-foundation/cpt-rwa-ch-de-cmta-reference",
+      "commit": "9761a05e5d7d298a940c990989438cc894a0dad5",
+      "commit_date": "2026-08-24T00:00:00Z",
+      "aiken_compiler": "v1.1.23+8949565",
+      "sha256": "2f1f1799f499339dd9ecc9e0ae683bf9bdc77e5b9d5654e624f6e807f4185f48",
+      "verbatim_from_upstream": false,
+      "upstream_committed_sha256": "301b2d9f67b09aee84e3ce76555b35eda4c32e97c06ab8e9852bd509cbaae291",
+      "note": "NOT upstream's committed plutus.json. Upstream's is STALE: at this commit it does not reproduce from its own source -- global_state.global_state_spend_validator is committed as 57e2c6d5ca432b24871d113a1f0f4664ca4ea574d8ce892537356f49 (4901 bytes) where the source compiles to e720eb536b26eb8c639e96a17de4404ab4dbf18224ae9cc2242e13a9 (4698 bytes). plutus.json and validators/global_state.ak were last touched by the SAME commit, so the blueprint was committed without being regenerated after a final source edit. We ship the REBUILD, because the script that goes on chain must be the source that gets audited. Reproduce it by rebuilding upstream at this commit -- see docs/CONTRACTS.md. upstream_committed_sha256 records the stale bytes so it stays possible to tell whether upstream has since regenerated."
+    }
+  ]
+}

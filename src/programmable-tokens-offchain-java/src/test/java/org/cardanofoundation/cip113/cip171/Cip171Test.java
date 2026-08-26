@@ -46,10 +46,10 @@ public class Cip171Test extends AbstractPreviewTest {
                 BigIntPlutusData.of(ipTxInput.outputIndex()));
         log.info("ipParameters.serializeToHex(): {}", ipParameters.serializeToHex());
 
-        var programmableLogicGlobalParams = protocolBootstrapParams.programmableLogicGlobalPrams();
-        var plgParameters = BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicGlobalParams.protocolParamsScriptHash()));
+        var transferParams = protocolBootstrapParams.transferParams();
+        var plgParameters = BytesPlutusData.of(HexUtil.decodeHexString(transferParams.protocolParamsPolicyId()));
         log.info("plgParameters.serializeToHex(): {}", plgParameters.serializeToHex());
-        log.info("programmableLogicGlobalParams.scriptHash(): {}", programmableLogicGlobalParams.scriptHash());
+        log.info("transferParams.scriptHash(): {}", transferParams.scriptHash());
 
         var programmableLogicBaseParams = protocolBootstrapParams.programmableLogicBaseParams();
         var plbParameters = ConstrPlutusData.of(1,
@@ -59,7 +59,7 @@ public class Cip171Test extends AbstractPreviewTest {
         log.info("programmableLogicBaseParams.scriptHash(): {}", programmableLogicBaseParams.scriptHash());
 
         var directorySpendParams = protocolBootstrapParams.directorySpendParams();
-        var dspParameters = BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicGlobalParams.protocolParamsScriptHash()));
+        var dspParameters = BytesPlutusData.of(HexUtil.decodeHexString(transferParams.protocolParamsPolicyId()));
         log.info("dspParameters.serializeToHex(): {}", dspParameters.serializeToHex());
         log.info("directorySpendParams.scriptHash(): {}", directorySpendParams.scriptHash());
 
@@ -81,7 +81,7 @@ public class Cip171Test extends AbstractPreviewTest {
                 .map(this::parseScript)
                 .get();
 
-        var programmableLogicGlobalWithdraw = protocolBootstrapService.getProtocolContract("programmable_logic_global.programmable_logic_global.withdraw")
+        var programmableLogicGlobalWithdraw = protocolBootstrapService.getProtocolContract("transfer.transfer.withdraw")
                 .map(this::parseScript)
                 .get();
 

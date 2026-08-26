@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import type { StepComponentProps, SignSubmitResult } from '@/types/registration';
 import { useToast } from '@/components/ui/use-toast';
+import { logError } from '@/lib/utils/error-message';
 
 interface SignSubmitStepProps extends StepComponentProps<Record<string, unknown>, SignSubmitResult> {
   /** Unsigned transaction CBOR hex */
@@ -102,7 +103,7 @@ export function SignSubmitStep({
     } catch (error) {
       setStatus('error');
       isSubmittingRef.current = false; // Allow retry on error
-      const message = error instanceof Error ? error.message : 'Failed to sign or submit transaction';
+      const message = logError('sign/submit', error);
       setErrorMessage(message);
 
       // Check for user rejection
