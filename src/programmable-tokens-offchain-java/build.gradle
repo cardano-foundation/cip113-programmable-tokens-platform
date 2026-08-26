@@ -90,19 +90,11 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
-	// The upstream-pin tests hash vendored contract trees that live OUTSIDE this
-	// Gradle project and are therefore not among the test task's implicit inputs.
-	// Without these declarations, editing a vendored Aiken file leaves `test`
-	// UP-TO-DATE and the drift guard silently never runs — exactly the failure mode
-	// the pins exist to prevent.
-	inputs.dir(file("$projectDir/../substandards/rwa-token"))
-	      .withPropertyName('vendoredRwaToken')
-	      .withPathSensitivity(PathSensitivity.RELATIVE)
-
-	// Cip113CoreUpstreamPinTest, same reasoning for the CIP-113 core tree.
-	inputs.dir(file("$projectDir/../core-contracts"))
-	      .withPropertyName('vendoredCoreContracts')
-	      .withPathSensitivity(PathSensitivity.RELATIVE)
+	// NOTE: this task used to declare two vendored contract trees (../core-contracts and
+	// ../substandards/rwa-token) as inputs, so that editing an Aiken file invalidated the
+	// test task. Those trees are gone — only the compiled blueprints are shipped now, and
+	// they live in src/main/resources, which is already an implicit input. See
+	// docs/CONTRACTS.md and ContractBlueprintPinTest.
 
 	// Gradle discards the test JVM's stdout/stderr, so log.info and System.out
 	// from a test are invisible by default — including the deployment test's

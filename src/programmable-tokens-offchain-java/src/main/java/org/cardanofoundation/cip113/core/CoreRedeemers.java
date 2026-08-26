@@ -21,7 +21,7 @@ import java.util.List;
  * mis-ordered pair of {@code Int} fields is invisible in review.
  *
  * <p>Constructor indices below are read off
- * {@code src/core-contracts/plutus.json}'s {@code definitions}, and every method names the
+ * {@code src/main/resources/plutus.json}'s {@code definitions}, and every method names the
  * aiken type and constructor it encodes so the two can be checked against each other
  * without a decoder.
  *

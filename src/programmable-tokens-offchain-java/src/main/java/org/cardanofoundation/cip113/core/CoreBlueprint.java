@@ -36,7 +36,7 @@ import java.util.Map;
 @Slf4j
 public class CoreBlueprint {
 
-    /** Classpath location of the core blueprint. Vendored from {@code src/core-contracts}. */
+    /** Classpath location of the core blueprint. Provenance is recorded in {@code contracts-pin.json}; see {@code docs/CONTRACTS.md}. */
     private static final String BLUEPRINT_RESOURCE = "plutus.json";
 
     private final Map<CoreValidator, String> compiledCode = new EnumMap<>(CoreValidator.class);
@@ -88,8 +88,8 @@ public class CoreBlueprint {
             throw new IllegalStateException(
                     "The core blueprint on the classpath does not contain every validator this "
                             + "backend resolves. This means " + BLUEPRINT_RESOURCE + " is not the "
-                            + "revision the code was written against - check src/core-contracts/"
-                            + "UPSTREAM_PIN.json and docs/CORE-UPGRADE-PLAN.md.\n  missing: "
+                            + "revision the code was written against - check src/main/resources/"
+                            + "contracts-pin.json and docs/CONTRACTS.md.\n  missing: "
                             + String.join("\n           ", missing));
         }
         log.info("Core blueprint {} resolved: {} validators", upstreamVersion, compiledCode.size());

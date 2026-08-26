@@ -69,11 +69,11 @@ class CoreBlueprintSurfaceTest {
 
     /**
      * The surface at the pinned revision, {@code 726d757} (see
-     * {@code src/core-contracts/UPSTREAM_PIN.json}).
+     * {@code the core entry in src/main/resources/contracts-pin.json}).
      */
     /**
      * The surface at the vendored revision, {@code 9db7e06} / {@code 0.5.0-alpha.2} (see
-     * {@code src/core-contracts/UPSTREAM_PIN.json}).
+     * {@code the core entry in src/main/resources/contracts-pin.json}).
      *
      * <p>Two entries are worth reading against the previous revision, because they are the
      * changes that would otherwise have been absorbed silently:
@@ -176,7 +176,7 @@ class CoreBlueprintSurfaceTest {
             fail("The core blueprint's surface differs from what the backend is written against.\n"
                     + "If this is a deliberate upgrade, work through each line below — the diff IS the\n"
                     + "migration checklist — then update EXPECTED in this test.\n"
-                    + "See docs/CORE-UPGRADE-PLAN.md.\n\n"
+                    + "See docs/CONTRACTS.md.\n\n"
                     + String.join("\n", problems));
         }
     }

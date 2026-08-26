@@ -133,7 +133,7 @@ public record CoreProtocolParamsDatum(
                             + "protocol's shape. A 5-field datum is the pre-split layout, in which field 2 "
                             + "is unfracking_cred rather than transfer_cred — decoding it positionally "
                             + "would report the unfracking validator as the transfer delegate. That "
-                            + "deployment needs re-deploying, not re-reading; see docs/CORE-UPGRADE-PLAN.md.");
+                            + "deployment needs re-deploying, not re-reading; see docs/CONTRACTS.md.");
         }
         if (!(f.get(0) instanceof BytesPlutusData registryNodeCs)) {
             throw new IllegalArgumentException("protocol-params field 0 (registry_node_cs) is not a bytestring");

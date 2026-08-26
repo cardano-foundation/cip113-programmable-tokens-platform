@@ -135,7 +135,7 @@ public class CoreScriptFactory {
     /**
      * Every core validator's parameter list, in declaration order.
      *
-     * <p>Read this against {@code src/core-contracts/plutus.json}'s
+     * <p>Read this against {@code src/main/resources/plutus.json}'s
      * {@code validators[].parameters} — the two must agree in arity, order AND wrapping.
      */
     private ListPlutusData parametersFor(CoreValidator validator, ProtocolBootstrapParams b) {

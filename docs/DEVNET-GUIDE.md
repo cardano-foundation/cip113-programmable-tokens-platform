@@ -38,8 +38,10 @@ predate this and will be rejected. §4 produces a replacement.
 | [Yaci DevKit](https://github.com/bloxbean/yaci-devkit) | the devnet node + indexer |
 | `aiken` | v1.1.23 — only needed to rebuild contracts, not to run the platform |
 
-The vendored contracts are already compiled: `src/core-contracts/plutus.json` is committed
-and copied to the backend's resources. You do **not** need aiken for a normal bring-up.
+The compiled blueprints are committed under the backend's resources, so you do **not** need
+aiken for a normal bring-up. Their upstream provenance is in
+`src/programmable-tokens-offchain-java/src/main/resources/contracts-pin.json` — see
+[docs/CONTRACTS.md](CONTRACTS.md).
 
 ---
 
@@ -306,24 +308,14 @@ That distinction is why §7 exists at all.
 
 ## Rebuilding the contracts (optional)
 
-The vendored tree is a verbatim copy of upstream at the commit in
-`src/core-contracts/UPSTREAM_PIN.json`, and its blueprint reproduces byte-for-byte from that
-source under aiken v1.1.23. To check that yourself:
+The Aiken source is not vendored here — only the compiled blueprints are. To rebuild or audit
+them, clone the upstream repository at the pinned commit; the commands are in
+[docs/CONTRACTS.md](CONTRACTS.md), which also explains why the rwa-token blueprint is a
+rebuild rather than upstream's committed file.
 
-```bash
-cp -R src/core-contracts /tmp/core-check && cd /tmp/core-check
-aiken build     # rewrites plutus.json
-diff <(jq -S . plutus.json) <(jq -S . /path/to/repo/src/core-contracts/plutus.json)
-```
-
-Do **not** run `aiken build` inside `src/core-contracts` itself — it rewrites the vendored
-blueprint in place, and `Cip113CoreUpstreamPinTest` will then fail on the file hash.
-
-To move to a different upstream revision, edit `commit` in `UPSTREAM_PIN.json` and run
-`./src/core-contracts/verify-upstream-pin.sh --regenerate`. That re-vendors, syncs the
-backend's copy, and rewrites the manifest. `CoreBlueprintSurfaceTest` will then fail with a
-line-by-line account of what changed — hashes, parameter names, parameter types, validators
-added or removed. That diff is the migration checklist; see `docs/CORE-UPGRADE-PLAN.md`.
+To adopt a new upstream revision, follow the checklist in that document. `ContractBlueprintPinTest`
+will flag the byte change and `CoreBlueprintSurfaceTest` will enumerate what moved in the
+contract surface — that diff is the migration checklist.
 
 ---
 
@@ -344,8 +336,8 @@ the old one.
 
 **"The core blueprint on the classpath does not contain every validator"** — `plutus.json`
 and the code disagree. If you re-vendored, work through `CoreBlueprintSurfaceTest`'s output.
-If you did not, the backend's resource copy has drifted from `src/core-contracts`; the pin
-script's `--regenerate` re-syncs it.
+If you did not, the blueprint on the classpath has been edited — `ContractBlueprintPinTest`
+will say which file and how its hash differs. See [docs/CONTRACTS.md](CONTRACTS.md).
 
 **A withdraw-0 fails phase 1** — the delegate's reward account is not registered. §4
 registers all four; if you deployed by hand, check each.

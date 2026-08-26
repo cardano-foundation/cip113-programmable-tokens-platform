@@ -93,7 +93,7 @@ import java.util.Optional;
 
 /** Handler for the "rwa-token" substandard.
  *
- *  <p>The on-chain validators live under {@code src/substandards/rwa-token/}
+ *  <p>The on-chain validators live upstream (see {@code docs/CONTRACTS.md})
  *  and are a <em>verbatim, pinned</em> copy of
  *  {@code easy1staking-com/fn-bafin-cardano-sc} — see {@code UPSTREAM_PIN.json} there
  *  and {@code RwaTokenUpstreamPinTest}. That directory previously held a
@@ -6600,7 +6600,7 @@ public class RwaTokenSubstandardHandler
             }
 
             // BaFin GlobalStateDatum field order — see
-            // src/substandards/rwa-token/lib/types/global_state.ak.
+            // lib/types/global_state.ak in the rwa-token upstream (contracts-pin.json).
             boolean transfersPaused = boolFromConstr(fields.get(GS_IDX_TRANSFERS_PAUSED));
             long mintableAmount = intFrom(fields.get(GS_IDX_MINTABLE_AMOUNT));
             String adminCredentialHash = bytesHexFrom(fields.get(GS_IDX_ADMIN_CREDENTIAL_HASH));
