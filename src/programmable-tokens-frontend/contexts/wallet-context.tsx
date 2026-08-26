@@ -16,6 +16,7 @@ import {
 
 import { addressHexToBech32, evoClient, preprodChain, previewChain, mainnetChain, EvoTransactionWitnessSet } from "@easy1staking/cip113-sdk-ts";
 import { CBOR as EvoCBOR } from "@evolution-sdk/evolution";
+import { getCardanoNetwork } from "@/lib/utils/network";
 import * as cbor from "cbor";
 
 /**
@@ -426,7 +427,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         // Use Evolution SDK's native CIP-103 signTxs — it probes
         // api.cip103.signTxs, api.experimental.signTxs, and falls back
         // to sequential api.signTx automatically.
-        const network = process.env.NEXT_PUBLIC_NETWORK || "preprod";
+        // Was `|| "preprod"` while the protocol builder defaulted to "preview": with
+        // NEXT_PUBLIC_NETWORK unset, transactions were built for one chain and signed
+        // through an Evolution client on another. Both now read one source.
+        const network = getCardanoNetwork();
         const chain = network === "mainnet" ? mainnetChain
           : network === "preview" ? previewChain
           : preprodChain;

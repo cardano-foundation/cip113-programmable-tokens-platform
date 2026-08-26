@@ -46,6 +46,7 @@ import {
 import { apiGet, apiPost } from "@/lib/api/client";
 import { assertValidCip68Metadata } from "@/lib/utils/cip68";
 import type { ProtocolBootstrapParams } from "@/types/protocol";
+import { getCardanoNetwork } from "@/lib/utils/network";
 
 // ---------------------------------------------------------------------------
 // Context
@@ -234,15 +235,18 @@ function substandardToSdkBlueprint(bp: { id: string; validators: Array<{ title: 
 // ---------------------------------------------------------------------------
 
 export function CIP113Provider({ children }: { children: ReactNode }) {
-  const network = (process.env.NEXT_PUBLIC_NETWORK || "preview") as "preview" | "preprod" | "mainnet";
+  const network = getCardanoNetwork();
   const blockfrostKey = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
   const blockfrostUrl = process.env.NEXT_PUBLIC_BLOCKFROST_URL || "";
-  const { selectedVersion } = useProtocolVersion();
+  const { selectedVersion, isLoading: versionsLoading } = useProtocolVersion();
 
   const protocolRef = useRef<CIP113Protocol | null>(null);
   const initPromiseRef = useRef<Promise<CIP113Protocol> | null>(null);
   const registeredFESTokens = useRef<Set<string>>(new Set());
   const fesBlueprintRef = useRef<PlutusBlueprint | null>(null);
+  /** Which protocol version the cached instance above was built for.
+   *  `undefined` = nothing cached; `null` = cached against the backend's default record. */
+  const cachedVersionRef = useRef<string | null | undefined>(undefined);
 
   // The SDK path is available again, against cip113-sdk-ts 0.4.0.
   //
@@ -280,6 +284,42 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
   }, [network]);
 
   const getProtocol = useCallback(async (): Promise<CIP113Protocol> => {
+    // Refuse to initialise before the version list has resolved.
+    //
+    // `selectedVersion` is null until /protocol/versions returns, so an early call would
+    // fetch /protocol/bootstrap with NO txHash — the backend's default record — and cache
+    // it for the lifetime of the page, even when the user's stored selection names a
+    // different deployment. Failing here is recoverable; caching the wrong deployment
+    // silently is not.
+    if (versionsLoading) {
+      throw new Error(
+        "CIP-113 SDK not ready: the protocol version list is still loading. Retry once it resolves."
+      );
+    }
+
+    // Invalidate the cache when the selected protocol version changes.
+    //
+    // Without this the ref short-circuits below before `selectedVersion` is ever read, so
+    // switching version in the picker leaves the SDK bound to the deployment it first saw
+    // while the backend path follows the picker. The toggle would then decide WHICH
+    // DEPLOYMENT a transaction targets rather than which builder assembles it — the SDK
+    // becoming a second source of truth about the protocol, which is the one thing this
+    // integration must not do.
+    //
+    // Done lazily here rather than in an effect: an effect races the next getProtocol()
+    // call, and this cannot.
+    const wantedVersion = selectedVersion?.txHash ?? null;
+    if (cachedVersionRef.current !== undefined && cachedVersionRef.current !== wantedVersion) {
+      console.log(
+        `[CIP-113] Protocol version changed (${cachedVersionRef.current ?? "default"} -> ${wantedVersion ?? "default"}); discarding cached SDK instance`
+      );
+      protocolRef.current = null;
+      initPromiseRef.current = null;
+      fesBlueprintRef.current = null;
+      registeredFESTokens.current.clear();
+      cachedVersionRef.current = undefined;
+    }
+
     if (protocolRef.current) return protocolRef.current;
     if (initPromiseRef.current) return initPromiseRef.current;
 
@@ -323,6 +363,9 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
 
       console.log("[CIP-113] SDK initialized. Substandards:", protocol.listSubstandards());
       protocolRef.current = protocol;
+      // Stamp which version this instance was built for, so the guard above can detect a
+      // later switch. Set only on success — a failed init must not claim the cache is warm.
+      cachedVersionRef.current = wantedVersion;
       return protocol;
     })();
 
@@ -334,7 +377,7 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
       initPromiseRef.current = null;
       throw e;
     }
-  }, [blockfrostKey, blockfrostUrl, network, selectedVersion?.txHash, getChain]);
+  }, [blockfrostKey, blockfrostUrl, network, selectedVersion?.txHash, versionsLoading, getChain]);
 
   const ensureSubstandard = useCallback(async (policyId: string, assetName: string): Promise<string> => {
     const tokenCtx = await getTokenContext(policyId);
