@@ -20,9 +20,9 @@ public abstract class AbstractPreviewTest {
     protected static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     /** Devnet override: unset means preview, so existing preview tests are unchanged. */
-    private static final String BACKEND_URL = System.getenv().getOrDefault("CARDANO_BACKEND_URL", BLOCKFROST_PREVIEW_URL);
+    protected static final String BACKEND_URL = System.getenv().getOrDefault("CARDANO_BACKEND_URL", BLOCKFROST_PREVIEW_URL);
 
-    private static final String BACKEND_KEY = System.getenv().getOrDefault("CARDANO_BACKEND_KEY",
+    protected static final String BACKEND_KEY = System.getenv().getOrDefault("CARDANO_BACKEND_KEY",
             BLOCKFROST_KEY_PREVIEW == null ? "dummy" : BLOCKFROST_KEY_PREVIEW);
 
     protected static final Network network = System.getenv("CARDANO_NETWORK_MAGIC") == null
