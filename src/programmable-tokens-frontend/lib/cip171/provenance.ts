@@ -49,8 +49,8 @@
  */
 import fesPin from "@easy1staking/cip113-sdk-ts/blueprints/substandards/freeze-and-seize/v0.1.0/UPSTREAM_PIN.json";
 import fesBlueprint from "@easy1staking/cip113-sdk-ts/blueprints/substandards/freeze-and-seize/v0.1.0/plutus.json";
-import type { UpstreamPin } from "@easy1staking/cip113-sdk-ts";
-import type { PlutusBlueprint } from "@easy1staking/cip113-sdk-ts";
+import { buildCip171RecordFromPin } from "@easy1staking/cip113-sdk-ts";
+import type { UpstreamPin, PlutusBlueprint, Cip171Record, ParameterizedScript } from "@easy1staking/cip113-sdk-ts";
 import type { SubstandardValidator } from "@/types/protocol";
 
 /** Bundled provenance sources, by substandard id. */
@@ -133,45 +133,86 @@ export function getCip171Source(
 }
 
 /**
- * ⛔ THE REMAINING BLOCKER, and it is no longer about provenance.
+ * Expected number of scripts a freeze-and-seize registration record must cover.
  *
- * Provenance is now obtainable — the pin and the bundled blueprint are both here and the
- * equivalence check above proves they describe the deployed scripts. What is missing is the
- * OTHER half of the record: which arguments were applied to which raw script.
+ * The plugin's register path parameterises four FES scripts — `issuerAdmin`, `transfer`,
+ * `blacklistMint`, `blacklistSpend`. It also parameterises `issuanceMint`, which is legitimately
+ * ABSENT from this record: that validator lives in the STANDARD blueprint, not the FES one, so it
+ * cannot appear in a record whose `sourceUrl` and commit are FES's. `buildCip171RecordFromPin`
+ * refuses any script absent from the pinned blueprint, so the gate enforces this rather than
+ * relying on anyone remembering it.
  *
- * That must be DERIVED from the calls that actually parameterised, never transcribed beside
- * them. `createFESScripts(blueprint, onParameterize)` reports exactly that — but
- * `freezeAndSeizeSubstandard({ blueprint, deployment })` does not accept a recorder and calls
- * `createFESScripts(config.blueprint)` internally with none, so the registration path's
- * parameterisations are unobservable from here.
- *
- * Its register path parameterises FIVE scripts — `issuerAdmin`, `transfer`, `blacklistMint`,
- * `blacklistSpend`, and `issuanceMint` from the standard scripts. This app separately calls
- * `createFESScripts` to pre-compute the blacklist policy id, so driving that call with a
- * recorder would capture ONE of the five and silently under-report the rest.
- *
- * ⚠ A record covering 1 of 5 is not a partial success. It encodes, publishes and VERIFIES —
- * against scripts whose parameters were never stated. The SDK's own docs warn that
- * freeze-and-seize once shipped covering 3 of 4 because a fixture missed `blacklist_spend`, and
- * that reconstructing the list by hand agrees with the deployment right up until it does not.
- *
- * ⇒ Unblocked by one additive change in cip113-sdk-ts: forward an optional `onParameterize`
- * from `freezeAndSeizeSubstandard(config)` into its `createFESScripts` call. Then this returns
- * true and the record is derived rather than assembled.
+ * ⚠ **Pinned deliberately, so a human decides when it moves.** A record covering fewer scripts
+ * than the deployment parameterised still encodes, still publishes and still VERIFIES — against
+ * scripts whose parameters were never stated. That failure is invisible downstream, so a silent
+ * drop from four to one must be impossible rather than merely unlikely.
  */
-export const CIP171_RECORDER_UNAVAILABLE =
-  "The registration path's parameterisations cannot be observed: freezeAndSeizeSubstandard does "
-  + "not forward an onParameterize recorder to createFESScripts, so only one of its five "
-  + "parameterised scripts would be captured. A record covering one of five still verifies, "
-  + "against scripts whose parameters were never stated.";
+export const FES_EXPECTED_COVERAGE = 4;
 
 /**
- * Whether the CIP-171 option can be offered as usable at all for this substandard.
+ * Whether the CIP-171 option can be offered as usable for this substandard.
  *
- * ⚠ Deliberately false while the recorder is unavailable, even though provenance now resolves.
- * Enabling on provenance alone would produce a checkbox that ticks, submits, and attaches an
- * under-covered record — the silently-wrong outcome this whole module exists to prevent.
+ * ⚠ **The predicate is "can we build the WHOLE record?", not "can we make the provenance claim?"**
+ * Those came apart once already: provenance became resolvable while the parameterisation half was
+ * still unobservable, and a gate testing only provenance would have flipped to true and shipped a
+ * checkbox that attached a one-of-five record. A guard is only as good as the condition it tests.
+ *
+ * Currently false: capturing the parameterisations needs `freezeAndSeizeSubstandard` to forward an
+ * `onParameterize` recorder, which is committed upstream but not yet in a published version. Flip
+ * this when the dependency is bumped — and note the coverage assertion in `buildFesCip171Record`
+ * is the real protection: even enabled early, a short record cannot be emitted.
  */
 export function isCip171Available(_substandardId: string): boolean {
   return false;
+}
+
+export const CIP171_RECORDER_UNAVAILABLE =
+  "Attaching provenance needs the SDK to report which arguments were applied to which script "
+  + "during registration. That recorder is committed upstream but not in a published version yet, "
+  + "so a record built now would cover one of the four parameterised scripts — and a short record "
+  + "still verifies, against scripts whose parameters were never stated.";
+
+/**
+ * Assemble the record for a freeze-and-seize registration, or refuse.
+ *
+ * `recorded` must come from the SDK's `onParameterize` callback — DERIVED from the calls that
+ * actually parameterised, never transcribed beside them. The map is keyed by the unapplied hash
+ * and its values are in application order; both are properties of those calls and of nothing
+ * else, so a hand-maintained second list agrees with the deployment right up until it does not.
+ *
+ * ⚠ Returns null rather than a partial record. Every refusal here is a case where emitting
+ * something would produce a permanent public claim that verifies while being wrong.
+ */
+export function buildFesCip171Record(
+  substandardId: string,
+  servedValidators: readonly SubstandardValidator[] | null | undefined,
+  recorded: readonly ParameterizedScript[]
+): { record: Cip171Record } | { record: null; reason: string } {
+  const source = getCip171Source(substandardId, servedValidators);
+  if (!source.available) return { record: null, reason: source.reason };
+
+  // The coverage assertion. This is what makes a silent one-of-four impossible: if the SDK in use
+  // does not forward the recorder, or a future change stops parameterising one of them, we refuse
+  // instead of publishing a record that omits it without saying so.
+  if (recorded.length !== FES_EXPECTED_COVERAGE) {
+    return {
+      record: null,
+      reason:
+        `Expected ${FES_EXPECTED_COVERAGE} parameterised scripts for a freeze-and-seize `
+        + `registration, recorded ${recorded.length}. A record covering fewer still verifies, `
+        + `against scripts whose parameters were never stated, so it is not emitted.`,
+    };
+  }
+
+  const distinct = new Set(recorded.map((r) => r.rawScriptHash)).size;
+  if (distinct !== recorded.length) {
+    return {
+      record: null,
+      reason:
+        `Recorded ${recorded.length} parameterisations but only ${distinct} distinct raw script `
+        + `hashes. Grouping by hash would collapse two genuinely different scripts.`,
+    };
+  }
+
+  return { record: buildCip171RecordFromPin(source.blueprint, source.pin, recorded) };
 }
