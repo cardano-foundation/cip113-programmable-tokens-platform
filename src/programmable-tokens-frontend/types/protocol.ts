@@ -119,6 +119,14 @@ export interface TokenContext {
   /** RWA-token only: whether the on-chain validator requires the recipient
    *  to be in the allowlist. `null` for substandards that don't carry this flag. */
   requiresReceiverKyc?: boolean | null;
+  /** RWA-token only: whether the on-chain validator requires the SENDER to be in
+   *  the allowlist. INDEPENDENT of {@link TokenContext.requiresReceiverKyc} —
+   *  `transfer_logic_script.ak:123` reads `requires_sender_kyc` for the per-sender
+   *  loop and `:157` reads `requires_receiver_kyc` for the per-destination loop.
+   *  The backend has always returned this field; dropping it from this type is
+   *  what made the transfer form demand sender KYC on a token that has it off.
+   *  `null` for substandards that don't carry this flag. */
+  requiresSenderKyc?: boolean | null;
   /** RWA-token only: whether on-chain transfers are currently paused (set
    *  via the GlobalState {@code PauseTransfers} admin action). When true, the
    *  TransferModal disables Send and surfaces a notice. `null` for substandards

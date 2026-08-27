@@ -78,6 +78,10 @@ export function TransferModal({
   /** RWA-token only: per-token toggle from the global-state datum. Defaults to true
    *  (the safer regulatory-compliance posture) until the token context resolves. */
   const [rwaTokenRequiresReceiverKyc, setRwaTokenRequiresReceiverKyc] = useState(true);
+  /** RWA-token only: per-token toggle from the global-state datum, INDEPENDENT of
+   *  {@link rwaTokenRequiresReceiverKyc}. Defaults to true until the token context
+   *  resolves, so we never let a send through un-gated on a stale default. */
+  const [rwaTokenRequiresSenderKyc, setRwaTokenRequiresSenderKyc] = useState(true);
   /** RWA-token only: live `transfers_paused` flag from the global-state datum.
    *  When true, the on-chain transfer_logic validator rejects every transfer — we
    *  surface a banner and disable the Send button so the user doesn't burn fees
@@ -116,8 +120,22 @@ export function TransferModal({
   // validator until the new root is published. So gate STRICTLY on on-chain
   // membership for rwa-token. For kyc-extended, the cookie is an accepted
   // fallback (the validator filters senders out of receiver_witnesses).
+  /** The sender's own change output is a DESTINATION on chain: the validator's
+   *  per-destination loop (gated on `requires_receiver_kyc`) runs over every output's
+   *  stake credential, the sender's change included. So a token with
+   *  `requires_sender_kyc = false` but `requires_receiver_kyc = true` still needs the
+   *  sender enrolled — unless the transfer leaves no change, or is a self-send (the
+   *  builder emits no destination actions at all for those). */
+  const sendsChangeBack = (() => {
+    const qty = Number(quantity);
+    return Number.isFinite(qty) && qty > 0 && qty < Number(asset.amount);
+  })();
+  const rwaTokenSenderProofRequired =
+    rwaTokenRequiresSenderKyc
+    || (rwaTokenRequiresReceiverKyc && sendsChangeBack && recipientCheckStatus.kind !== "self");
+
   const senderReady = isRwaTokenToken
-    ? senderMpfReady
+    ? !rwaTokenSenderProofRequired || senderMpfReady
     : isKycExtendedToken
       ? senderMpfReady || !!kycProof
       : isKycToken
@@ -145,6 +163,7 @@ export function TransferModal({
       setIsKycExtendedToken(false);
       setIsRwaTokenToken(false);
       setRwaTokenRequiresReceiverKyc(true);
+      setRwaTokenRequiresSenderKyc(true);
       setRwaTokenTransfersPaused(false);
 
       getTokenContext(policyId)
@@ -162,6 +181,7 @@ export function TransferModal({
             setIsKycToken(true);
             setIsRwaTokenToken(true);
             setRwaTokenRequiresReceiverKyc(ctx.requiresReceiverKyc ?? true);
+            setRwaTokenRequiresSenderKyc(ctx.requiresSenderKyc ?? true);
             setRwaTokenTransfersPaused(ctx.transfersPaused ?? false);
             const cachedProof = getKycProof(policyId, senderAddress);
             if (cachedProof) setKycProofState(cachedProof);
@@ -317,9 +337,16 @@ export function TransferModal({
           } else if (kycProof) {
             request.kycPayload = kycProof.payloadHex;
             request.kycSignature = kycProof.signatureHex;
-          } else {
+          } else if (!isRwaTokenToken || rwaTokenRequiresSenderKyc) {
             throw new Error("Please complete KYC verification before sending");
+          } else if (rwaTokenSenderProofRequired) {
+            throw new Error(
+              "This token has requires_sender_kyc off but requires_receiver_kyc on, and "
+              + "the change coming back to you counts as a receiving address. Send your "
+              + "full balance, or complete KYC to enroll.");
           }
+          // Otherwise the sender loop is off on chain and no change comes back:
+          // the validator never inspects a sender proof, so we send none.
 
           // Receiver proof: required for kyc-extended (always) and for rwa-token
           // when `requires_receiver_kyc` is true. Self-sends skip the proof either way.
@@ -527,11 +554,20 @@ export function TransferModal({
                       {isKycExtendedToken && senderMembership.status.kind === "verified" && !senderMembership.status.onChainSynced && (
                         <p className="text-[10px] text-warning-400 leading-tight mt-0.5">Allowlist sync pending…</p>
                       )}
-                      {/* rwa-token: surface sender's on-chain membership status.
-                          Sender MUST be in the on-chain tree to send (BaFin transfer_logic
-                          verifies a membership proof for every input's stake credential). */}
+                      {/* rwa-token: surface the sender's on-chain membership status.
+                          Whether it BLOCKS the send is `rwaTokenSenderProofRequired`, not
+                          this status: the transfer_logic sender loop only runs when
+                          `requires_sender_kyc` is on, and the sender's change output is
+                          only checked when `requires_receiver_kyc` is on. */}
                       {isRwaTokenToken && (() => {
                         const s = rwaTokenSenderMembership.status;
+                        if (!rwaTokenSenderProofRequired) return (
+                          <p className="text-[10px] text-dark-400 leading-tight mt-0.5 break-words">
+                            {s.kind === "verified" && s.onChainSynced
+                              ? "In allowlist (on-chain)"
+                              : "Not required for this token \u2014 requires_sender_kyc is off on chain"}
+                          </p>
+                        );
                         if (s.kind === "loading") return (
                           <p className="text-[10px] text-dark-400 leading-tight mt-0.5">Checking allowlist…</p>
                         );
@@ -563,6 +599,8 @@ export function TransferModal({
                   {isRwaTokenToken ? (
                     rwaTokenSenderMembership.status.kind === "verified" && rwaTokenSenderMembership.status.onChainSynced ? (
                       <Badge variant="success" size="sm">Verified</Badge>
+                    ) : !rwaTokenSenderProofRequired ? (
+                      <Badge variant="default" size="sm">Not required</Badge>
                     ) : rwaTokenSenderMembership.status.kind === "loading" ? (
                       <Loader2 className="h-4 w-4 text-dark-400 animate-spin" />
                     ) : (
