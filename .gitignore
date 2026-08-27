@@ -16,6 +16,14 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+# Per-environment env files carrying live credentials. `.env.*.local` does NOT match
+# `.env.preview` — the middle segment is the environment, not the literal word "local" —
+# so these need naming explicitly. This repo already has three `.env` variants tracked on
+# a public origin because a pattern did not match the filename someone actually used.
+.env.preview
+.env.preprod
+.env.mainnet
+.env.devnet
 
 # Logs
 *.log
