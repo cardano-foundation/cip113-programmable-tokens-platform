@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
 import { supportsCIP68, CIP68_FIELD_MAX_LENGTHS, validateCip68Metadata } from '@/lib/utils/cip68';
-import { isCip171Available, CIP171_UNAVAILABLE_REASON } from '@/lib/cip171/provenance';
+import { isCip171Available, CIP171_RECORDER_UNAVAILABLE } from '@/lib/cip171/provenance';
 
 interface TokenDetailsStepProps extends StepComponentProps<TokenDetailsData, TokenDetailsData> {}
 
@@ -271,7 +271,7 @@ export function TokenDetailsStep({
       <div className="border-t border-dark-700 pt-4">
         <label
           className={cip171Available ? "flex items-center gap-3 cursor-pointer" : "flex items-center gap-3 cursor-help"}
-          title={cip171Available ? undefined : CIP171_UNAVAILABLE_REASON}
+          title={cip171Available ? undefined : CIP171_RECORDER_UNAVAILABLE}
         >
           <input
             type="checkbox"
@@ -294,7 +294,7 @@ export function TokenDetailsStep({
             </p>
             {!cip171Available && (
               <p id="cip171-unavailable" className="text-xs text-amber-400/70 mt-1">
-                {CIP171_UNAVAILABLE_REASON}
+                {CIP171_RECORDER_UNAVAILABLE}
               </p>
             )}
           </div>
