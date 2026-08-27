@@ -49,7 +49,7 @@
  */
 import fesPin from "@easy1staking/cip113-sdk-ts/blueprints/substandards/freeze-and-seize/v0.1.0/UPSTREAM_PIN.json";
 import fesBlueprint from "@easy1staking/cip113-sdk-ts/blueprints/substandards/freeze-and-seize/v0.1.0/plutus.json";
-import { buildCip171RecordFromPin } from "@easy1staking/cip113-sdk-ts";
+import { buildCip171RecordFromPin, parameterizeScript, computeScriptHash } from "@easy1staking/cip113-sdk-ts";
 import type { UpstreamPin, PlutusBlueprint, Cip171Record, ParameterizedScript } from "@easy1staking/cip113-sdk-ts";
 import type { SubstandardValidator } from "@/types/protocol";
 
@@ -186,33 +186,91 @@ export const CIP171_RECORDER_UNAVAILABLE =
 export function buildFesCip171Record(
   substandardId: string,
   servedValidators: readonly SubstandardValidator[] | null | undefined,
-  recorded: readonly ParameterizedScript[]
+  recorded: readonly ParameterizedScript[],
+  /**
+   * The blacklist mint policy id this registration will actually deploy, computed by the caller
+   * through its own `createFESScripts` call — a DIFFERENT code path from the recorder. Supplying
+   * it turns the recomputation below from a tautology into a real comparison.
+   */
+  deployedBlacklistPolicyId: string
 ): { record: Cip171Record } | { record: null; reason: string } {
   const source = getCip171Source(substandardId, servedValidators);
   if (!source.available) return { record: null, reason: source.reason };
 
-  // The coverage assertion. This is what makes a silent one-of-four impossible: if the SDK in use
-  // does not forward the recorder, or a future change stops parameterising one of them, we refuse
-  // instead of publishing a record that omits it without saying so.
-  if (recorded.length !== FES_EXPECTED_COVERAGE) {
+  // Deduplicate by raw script hash BEFORE counting.
+  //
+  // The recorder fires once per PARAMETERISATION, not once per distinct script, and
+  // `createFESScripts` runs inside the plugin's `init`. So a second init — a React re-render, or
+  // `CIP113.init` alongside a direct `fes.init` — appends a whole second set: 8 events, still 4
+  // distinct scripts. Counting the raw array would refuse a perfectly correct record the second
+  // time a component mounts, and the failure would present as a coverage bug when it is a
+  // lifecycle one.
+  //
+  // ⚠ First occurrence is kept deliberately. The stream carries APPLICATION ORDER, which the
+  // record depends on — the map is keyed on the unapplied hash and its values are ordered, and a
+  // wrong order yields a valid-looking record that verifies to the wrong hash. So this dedupes
+  // WITHOUT reordering, and never touches the `params` array inside an entry.
+  const seen = new Set<string>();
+  const unique: ParameterizedScript[] = [];
+  for (const r of recorded) {
+    const key = r.rawScriptHash.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(r);
+  }
+
+  // The coverage assertion: what makes silent under-coverage impossible. If the SDK in use does
+  // not forward the recorder, or a future change stops parameterising one of them, refuse rather
+  // than publish a record that omits it without saying so.
+  //
+  // ⚠ If FES's blueprint ever gains a fifth script this fails LOUDLY. That is intended, not a
+  // bug — a human should decide the new number rather than someone raising it to clear a red.
+  if (unique.length !== FES_EXPECTED_COVERAGE) {
     return {
       record: null,
       reason:
-        `Expected ${FES_EXPECTED_COVERAGE} parameterised scripts for a freeze-and-seize `
-        + `registration, recorded ${recorded.length}. A record covering fewer still verifies, `
-        + `against scripts whose parameters were never stated, so it is not emitted.`,
+        `Expected ${FES_EXPECTED_COVERAGE} distinct parameterised scripts for a freeze-and-seize `
+        + `registration, recorded ${unique.length} (from ${recorded.length} events). A record `
+        + `covering fewer still verifies, against scripts whose parameters were never stated, so `
+        + `it is not emitted.`,
     };
   }
 
-  const distinct = new Set(recorded.map((r) => r.rawScriptHash)).size;
-  if (distinct !== recorded.length) {
+  // ── Offline recomputation, 1-of-4 ────────────────────────────────────────────────────────
+  //
+  // The strongest offline check there is: re-apply the recorded arguments to the unapplied script
+  // and confirm the hash matches what is actually being deployed. It catches a wrong application
+  // ORDER, which produces a well-formed record that verifies to the wrong hash and is otherwise
+  // undetectable until a verifier rebuilds from source.
+  //
+  // ⚠ ONE of four, and the limit is structural rather than laziness: `ParameterizationEvent`
+  // carries no applied hash, and the plugin computes the other three internally without exposing
+  // them — so there is no second operand to compare against. Comparing a recomputation to its own
+  // recomputation would be circular, and a check that cannot fail is not a check. The blacklist
+  // mint is the one the caller derives independently, and it is the load-bearing one: its policy
+  // id is baked into the FES deployment params.
+  const mint = unique.find((r) => {
+    const v = source.blueprint.validators.find(
+      (x) => computeScriptHash(x.compiledCode).toLowerCase() === r.rawScriptHash.toLowerCase()
+    );
+    return v?.title.includes("blacklist_mint") ?? false;
+  });
+  if (!mint) {
+    return { record: null, reason: "No blacklist_mint parameterisation was recorded." };
+  }
+  const rawMint = source.blueprint.validators.find(
+    (x) => computeScriptHash(x.compiledCode).toLowerCase() === mint.rawScriptHash.toLowerCase()
+  )!;
+  const recomputed = parameterizeScript(rawMint.compiledCode, mint.params).hash;
+  if (recomputed.toLowerCase() !== deployedBlacklistPolicyId.toLowerCase()) {
     return {
       record: null,
       reason:
-        `Recorded ${recorded.length} parameterisations but only ${distinct} distinct raw script `
-        + `hashes. Grouping by hash would collapse two genuinely different scripts.`,
+        `Recomputation failed: re-applying the recorded arguments to blacklist_mint yields `
+        + `${recomputed}, but this registration deploys ${deployedBlacklistPolicyId}. The record `
+        + `would name parameters that do not produce the deployed script.`,
     };
   }
 
-  return { record: buildCip171RecordFromPin(source.blueprint, source.pin, recorded) };
+  return { record: buildCip171RecordFromPin(source.blueprint, source.pin, unique) };
 }
