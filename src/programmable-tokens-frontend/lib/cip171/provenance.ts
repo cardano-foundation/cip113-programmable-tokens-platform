@@ -51,7 +51,6 @@ import fesPin from "@easy1staking/cip113-sdk-ts/blueprints/substandards/freeze-a
 import fesBlueprint from "@easy1staking/cip113-sdk-ts/blueprints/substandards/freeze-and-seize/v0.1.0/plutus.json";
 import { buildCip171RecordFromPin, parameterizeScript, computeScriptHash } from "@easy1staking/cip113-sdk-ts";
 import type { UpstreamPin, PlutusBlueprint, Cip171Record, ParameterizedScript } from "@easy1staking/cip113-sdk-ts";
-import type { SubstandardValidator } from "@/types/protocol";
 
 /** Bundled provenance sources, by substandard id. */
 const BUNDLED: Record<string, { blueprint: unknown; pin: unknown } | undefined> = {
@@ -84,7 +83,7 @@ function reason(detail: string): { available: false; reason: string } {
  */
 export function getCip171Source(
   substandardId: string,
-  servedValidators: readonly SubstandardValidator[] | null | undefined
+  deployed: PlutusBlueprint | null | undefined
 ): Cip171SourceResult {
   const bundled = BUNDLED[substandardId];
   if (!bundled) {
@@ -102,9 +101,10 @@ export function getCip171Source(
     return reason(`Its bundled pin is "${pin.provenance}", not VERIFIED.`);
   }
 
-  if (!servedValidators || servedValidators.length === 0) {
+  if (!deployed || deployed.validators.length === 0) {
     return reason("The deployed blueprint has not been loaded yet.");
   }
+  const servedValidators = deployed.validators;
 
   // Prove the bundled artefact IS the deployed one. Without this the record would be
   // well-formed, verifiable, and about the wrong scripts — the worst outcome in this area,
@@ -121,7 +121,7 @@ export function getCip171Source(
     if (!b) {
       return reason(`The bundled blueprint has no validator titled "${served.title}".`);
     }
-    if (b.compiledCode !== served.script_bytes || b.hash !== served.script_hash) {
+    if (b.compiledCode !== served.compiledCode || b.hash !== served.hash) {
       return reason(
         `Validator "${served.title}" differs between the deployed and bundled blueprints; the `
           + `bundled provenance describes a different build.`
@@ -162,8 +162,32 @@ export const FES_EXPECTED_COVERAGE = 4;
  * this when the dependency is bumped — and note the coverage assertion in `buildFesCip171Record`
  * is the real protection: even enabled early, a short record cannot be emitted.
  */
-export function isCip171Available(_substandardId: string): boolean {
-  return false;
+/**
+ * Whether the installed SDK forwards a parameterisation recorder from the FES plugin.
+ *
+ * ⚠ Tied to the DEPENDENCY, and it must move in the same commit as the pin. Without the recorder
+ * `freezeAndSeizeSubstandard` ignores `onParameterize`, no events are collected, the coverage
+ * assertion refuses, and the record is omitted — so a ticked checkbox would attach nothing while
+ * appearing to work. That is the silently-inert control this module exists to prevent, and it is
+ * not made safe by the fact that the omission is logged.
+ *
+ * Verified working against a local 0.7.0 build: 4/4 scripts recorded, record built, recomputation
+ * matched. Flip to true when `package.json` moves to a published version that carries it.
+ */
+const SDK_FORWARDS_RECORDER = true;
+
+/**
+ * Whether the CIP-171 option can be offered as usable for this substandard.
+ *
+ * ⚠ **The predicate is "can we build the WHOLE record?", not "can we make the provenance claim?"**
+ * Those came apart once already: provenance became resolvable while the parameterisations were
+ * still unobservable, and a gate testing only provenance would have flipped true and shipped a
+ * one-of-four record. Both halves are tested here, deliberately.
+ */
+export function isCip171Available(substandardId: string): boolean {
+  return SDK_FORWARDS_RECORDER
+    && BUNDLED[substandardId] !== undefined
+    && (BUNDLED[substandardId]!.pin as UpstreamPin).provenance === "VERIFIED";
 }
 
 export const CIP171_RECORDER_UNAVAILABLE =
@@ -185,7 +209,7 @@ export const CIP171_RECORDER_UNAVAILABLE =
  */
 export function buildFesCip171Record(
   substandardId: string,
-  servedValidators: readonly SubstandardValidator[] | null | undefined,
+  deployed: PlutusBlueprint | null | undefined,
   recorded: readonly ParameterizedScript[],
   /**
    * The blacklist mint policy id this registration will actually deploy, computed by the caller
@@ -194,7 +218,7 @@ export function buildFesCip171Record(
    */
   deployedBlacklistPolicyId: string
 ): { record: Cip171Record } | { record: null; reason: string } {
-  const source = getCip171Source(substandardId, servedValidators);
+  const source = getCip171Source(substandardId, deployed);
   if (!source.available) return { record: null, reason: source.reason };
 
   // Deduplicate by raw script hash BEFORE counting.

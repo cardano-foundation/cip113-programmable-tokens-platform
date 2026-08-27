@@ -47,6 +47,11 @@ import { apiGet, apiPost } from "@/lib/api/client";
 import { assertValidCip68Metadata } from "@/lib/utils/cip68";
 import type { ProtocolBootstrapParams } from "@/types/protocol";
 import { getCardanoNetwork } from "@/lib/utils/network";
+import { buildFesCip171Record } from "@/lib/cip171/provenance";
+// NOTE: `ParameterizationEvent` — the callback's own parameter type — is not exported from the
+// package root, so it cannot be named by a consumer. `ParameterizedScript` is exported and is
+// structurally what the record needs (rawScriptHash + params), so it is used instead.
+import type { ParameterizedScript } from "@easy1staking/cip113-sdk-ts";
 
 // ---------------------------------------------------------------------------
 // Context
@@ -74,6 +79,8 @@ interface CIP113ContextValue {
     recipientAddress?: string;
     /** Raw CIP-30 API from wallet.enable() — needed for SigningClient with chainResult */
     rawWalletApi?: unknown;
+    /** Attach a CIP-171 provenance record to the registration transaction. */
+    cip171Enabled?: boolean;
     /** Optional CIP-68 metadata for on-chain reference token */
     cip68Metadata?: {
       name: string;
@@ -432,6 +439,8 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
     quantity: string;
     recipientAddress?: string;
     rawWalletApi?: unknown;
+    /** Attach a CIP-171 provenance record to the registration transaction. */
+    cip171Enabled?: boolean;
     cip68Metadata?: {
       name: string;
       description?: string;
@@ -498,6 +507,11 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
     console.log("[CIP-113] Pre-computed blacklistNodePolicyId:", blacklistNodePolicyId);
 
     // Create a FES substandard with the CORRECT blacklistNodePolicyId
+    // Record what gets parameterised, so a CIP-171 record can be DERIVED from the calls that
+    // actually happened rather than transcribed beside them. Collected even when the checkbox is
+    // off — the cost is four pushes and it keeps the enabled and disabled paths identical up to
+    // the point where the record is built.
+    const paramEvents: ParameterizedScript[] = [];
     const fes = freezeAndSeizeSubstandard({
       blueprint: fesBlueprintRef.current,
       deployment: {
@@ -506,6 +520,7 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
         blacklistNodePolicyId,
         blacklistInitTxInput,
       },
+      onParameterize: (e) => paramEvents.push(e),
     });
 
     fes.init({
@@ -543,7 +558,27 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
     console.log("[CIP-113] Building registration tx...");
     console.log("[CIP-113] Chaining with", initResult.chainAvailable?.length ?? 0, "available UTxOs from init");
     try {
+      // Build the record AFTER init() — that is when the plugin parameterises, so the events
+      // exist by now. Refusal is a correct outcome and is logged rather than thrown: a failed
+      // provenance record must not fail a registration the user asked for.
+      let cip171Record;
+      if (params.cip171Enabled) {
+        const built = buildFesCip171Record(
+          "freeze-and-seize",
+          fesBlueprintRef.current,
+          paramEvents,
+          blacklistNodePolicyId
+        );
+        if (built.record) {
+          cip171Record = built.record;
+          console.log(`[CIP-113] CIP-171 record built: ${built.record.scripts.length} scripts`);
+        } else {
+          console.warn(`[CIP-113] CIP-171 record NOT attached: ${built.reason}`);
+        }
+      }
+
       const regResult = await fes.register({
+        cip171Record,
         feePayerAddress: params.adminAddress,
         assetName: params.assetName,
         quantity: BigInt(params.quantity),

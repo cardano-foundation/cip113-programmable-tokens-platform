@@ -169,6 +169,9 @@ export function CombinedBuildSignSubmitStep({
           recipientAddress: tokenDetails.recipientAddress,
           rawWalletApi: rawApi,
           cip68Metadata: cip68Wire,
+          // The checkbox from token details. `?? false` rather than a truthy read: step data can
+          // be restored from an earlier session, and an absent field must mean off.
+          cip171Enabled: tokenDetails.cip171Provenance?.enabled ?? false,
         });
 
         setBlacklistNodePolicyId(sdkResult.blacklistNodePolicyId);
