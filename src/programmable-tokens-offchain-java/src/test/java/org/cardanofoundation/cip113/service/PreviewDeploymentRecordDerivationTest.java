@@ -138,6 +138,35 @@ class PreviewDeploymentRecordDerivationTest {
                         + "dispatch arms into one, silently");
     }
 
+    /**
+     * <strong>{@code upgradeMultisigParams} is a parameterisation input, NOT the live upgrade
+     * authority.</strong> The two are independent, neither derives from the other, and
+     * conflating them has already cost one round of analysis — so it is written down here
+     * rather than left to be re-derived.
+     *
+     * <ul>
+     *   <li>{@code signers} holds a <em>payment</em> key hash ({@code ae0e5854…}), because
+     *       {@code upgrade_multisig} checks its signers against {@code extra_signatories}.
+     *       That is what this assertion proves: applying it yields the deployed
+     *       {@code c7cb1ac4…}. Upstream deploys this script as a reference artefact and
+     *       deliberately does not install it as the authority.</li>
+     *   <li>The <em>live</em> authority is {@code upgrade_cred}, field 5 of the on-chain
+     *       protocol-params datum — not part of this record at all, and read from the chain by
+     *       {@link org.cardanofoundation.cip113.core.CoreProtocolParamsDatum}. On this
+     *       deployment it is a KEY credential holding a <em>stake</em> key hash
+     *       ({@code 219ad130…}), and that is correct for that field: {@code coordination_spend}
+     *       checks it against the transaction's {@code withdrawals}, whose map is keyed by
+     *       stake credentials. A payment key hash there is unsatisfiable forever, and the
+     *       symptom appears only at an upgrade.</li>
+     * </ul>
+     *
+     * <p>Note what this test can and cannot do, since the distinction is the whole reason the
+     * paragraph above is necessary. Re-deriving a hash proves that two values <em>relate</em> —
+     * that these parameters produce that script. It cannot prove a field <em>means</em> what
+     * its name suggests. A record that put the right hash under the wrong concept would pass
+     * every assertion in this class. Only reading the validator, or the on-chain datum, settles
+     * meaning.
+     */
     @Test
     void upgradeMultisig() throws Exception {
         assertDerives(CoreValidator.UPGRADE_MULTISIG, params.upgradeMultisigParams().scriptHash());
