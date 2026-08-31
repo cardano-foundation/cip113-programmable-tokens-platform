@@ -127,7 +127,20 @@ network: preview
 wallet:
   mnemonic: ""
 
-# programmable.token.default.txHash: "7fab961bbf52d95c475b3ff8b994dcc9334ef3fb4d752b875c0d426eeb391cc8"
+# The deployment this profile transacts against, selected EXPLICITLY rather than by
+# position. protocol-bootstraps-preview.json is an append-only history and
+# ProtocolBootstrapService falls back to the first USABLE record when no default is named —
+# which, now that the file holds more than one schema-2 record, is the SUPERSEDED 2026-05
+# deployment (a432339c…), not this one. Without this line the backend boots green and
+# transacts against the wrong protocol.
+#
+# Note the camel-cased leaf: the equivalent env var (PROGRAMMABLE_TOKEN_DEFAULT_TXHASH) does
+# not reliably bind through relaxed matching, which is why this is pinned here rather than
+# left to the run recipe. See README / CLAUDE.md.
+programmable:
+  token:
+    default:
+      txHash: "e466d078444a4d750ccb99f4ebc1d22957772ff49bb53a0228e0ce45f5c6e479"
 
 blockfrost:
   url: https://cardano-preview.blockfrost.io/api/v0/
@@ -135,13 +148,33 @@ blockfrost:
 koios:
   url: ${KOIOS_URL:https://preview.koios.rest/api/v1/}
 
+# Off by default on preview: KERI is only needed by the kyc substandards, both of which are
+# in substandards.disabled, and its client otherwise dials localhost:3901 on every boot of a
+# laptop that is not running a KERI agent. Still overridable via KERI_ENABLED=true.
+keri:
+  enabled: ${KERI_ENABLED:false}
+
 store:
   cardano:
-    host: ""
-    port: 0
+    # A real sync target. This was host:"" / port:0, which is not "sync from genesis" — it is
+    # no peer at all, and it is why running the preview profile directly never indexed
+    # anything. preview-node.play.dev.cardano.org is the public preview relay
+    # (preview-node.world.dev.cardano.org is a CNAME onto it); there is no CF-operated
+    # preview backbone to match the mainnet default above.
+    host: ${STORE_CARDANO_HOST:preview-node.play.dev.cardano.org}
+    port: ${STORE_CARDANO_PORT:3001}
     protocol-magic: 2
-    sync-start-blockhash: ""
-    sync-start-slot: 0
+    # Intersect at the block immediately BEFORE the one carrying this deployment's seed
+    # transaction (62d062ca…, block 4608706 / slot 121181083), so the first block applied is
+    # the first one that matters. Preview's chain starts in 2022; syncing it from genesis for
+    # a deployment made in epoch 1402 costs hours and indexes nothing anyone asked for.
+    #
+    # These two MUST stay set. The unprofiled document at the top of this file carries a
+    # MAINNET sync start, and Spring merges it into every profile — so clearing these does not
+    # mean "from genesis", it means "from a mainnet block hash under protocol magic 2", which
+    # yaci-store's InitService rejects with "Shelley start point is not configured properly".
+    sync-start-blockhash: ${STORE_SYNC_START_BLOCKHASH:8c32fa9e0d00ba2647c2abe0db5200eb021808461501e5563f21b69429c85790}
+    sync-start-slot: ${STORE_SYNC_START_SLOT:121181002}
 
 ---
 spring:
