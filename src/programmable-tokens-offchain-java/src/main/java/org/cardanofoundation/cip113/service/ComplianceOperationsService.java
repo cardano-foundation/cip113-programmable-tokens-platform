@@ -41,6 +41,8 @@ public class ComplianceOperationsService {
     private final SubstandardHandlerFactory handlerFactory;
     private final ProtocolBootstrapService protocolBootstrapService;
 
+    private final ProtocolDeploymentResolver protocolDeploymentResolver;
+
     // ========== Blacklist Operations ==========
 
     /**
@@ -379,12 +381,7 @@ public class ComplianceOperationsService {
      * Resolve protocol bootstrap params from tx hash or use default.
      */
     private ProtocolBootstrapParams resolveProtocolParams(String protocolTxHash) {
-        if (protocolTxHash != null && !protocolTxHash.isEmpty()) {
-            return protocolBootstrapService.getProtocolBootstrapParamsByTxHash(protocolTxHash)
-                    .orElseThrow(() -> new IllegalArgumentException(
-                            "Protocol version not found: " + protocolTxHash));
-        }
-        return protocolBootstrapService.getProtocolBootstrapParams();
+        return protocolDeploymentResolver.resolve(protocolTxHash);
     }
 
     /**

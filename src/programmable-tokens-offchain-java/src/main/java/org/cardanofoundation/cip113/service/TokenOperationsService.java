@@ -45,6 +45,8 @@ public class TokenOperationsService {
 
     private final ProtocolBootstrapService protocolBootstrapService;
 
+    private final ProtocolDeploymentResolver protocolDeploymentResolver;
+
     private final RegistryService registryService;
 
     private final BlacklistInitRepository blacklistInitRepository;
@@ -562,12 +564,7 @@ public class TokenOperationsService {
      * Resolve protocol bootstrap params from tx hash or use default
      */
     private ProtocolBootstrapParams resolveProtocolParams(String protocolTxHash) {
-        if (protocolTxHash != null && !protocolTxHash.isEmpty()) {
-            return protocolBootstrapService.getProtocolBootstrapParamsByTxHash(protocolTxHash)
-                    .orElseThrow(() -> new IllegalArgumentException(
-                            "Protocol version not found: " + protocolTxHash));
-        }
-        return protocolBootstrapService.getProtocolBootstrapParams();
+        return protocolDeploymentResolver.resolve(protocolTxHash);
     }
 
     /**
