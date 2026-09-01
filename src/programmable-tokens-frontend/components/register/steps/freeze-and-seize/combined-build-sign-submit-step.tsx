@@ -114,17 +114,37 @@ export function CombinedBuildSignSubmitStep({
     return (detailsState?.data || {}) as Partial<TokenDetailsData>;
   }, [wizardState.stepStates]);
 
-  // CIP-68 forces the backend builder.
+  // CIP-68 no longer forces the backend builder. Ruled by Giovanni: the SDK supports CIP-68, so
+  // the choice is offered for ANY combination of CIP-68 and CIP-171.
   //
-  // The LABEL itself no longer diverges: freeze-and-seize caps no lifetime supply, so the backend
-  // now applies (333) unconditionally — exactly what cip113-sdk-ts@0.3.1 hardcodes. What is still
-  // unverified is whether the two produce byte-identical reference-token datums, min-UTxO sizing
-  // and output ordering. The labelled name is a script parameter of `issuer_admin` and
-  // `issuance_mint` is parameterized by that script, so ANY divergence yields two different token
-  // policy ids for one wizard input — a silent, unrecoverable split. Until the two builders are
-  // compared directly, the toggle stays disabled while CIP-68 is on rather than left as a trap.
-  const cip68Enabled = !!tokenDetails.cip68Metadata?.enabled;
-  const effectiveUseSDK = useSDK && !cip68Enabled;
+  // This gate used to disable the SDK while CIP-68 was on, because it was unverified whether the
+  // two builders produced the same token. They were then compared directly, offline —
+  // Cip68BuilderEquivalenceTest in the Java backend:
+  //
+  //   IDENTITY — IDENTICAL. Both sides label (333) and (100) byte for byte and the backend picks
+  //   the fungible label unconditionally. The labelled name is the only CIP-68 input reaching
+  //   `issuer_admin`, so the policy id is the same either way. The "silent, unrecoverable split"
+  //   this gate was written against does not exist.
+  //
+  //   REFERENCE DATUM — same six entries and values; different CBOR only (backend canonical
+  //   definite-length, SDK insertion-order indefinite). It feeds no script parameter, so it
+  //   cannot move identity.
+  //
+  // ⚠ ONE CAVEAT REMAINS, and it is the SDK's, not this component's. The SDK pays a flat 3 ADA on
+  // the (100) reference output where the backend sizes it from protocol params. Ordinary metadata
+  // needs 2 ADA, so the constant is generous — but metadata is user-supplied, and at the edge of
+  // the backend's 512-byte datum budget (name 64, ticker 16, url 128, logo 128, description 16 —
+  // all within their caps) the ledger wants 4 ADA. An SDK-built registration with near-limit
+  // metadata can therefore under-fund by up to 1 ADA. Whether that surfaces as a submission
+  // failure depends on whether Evolution tops up the output, which was NOT established.
+  //
+  // The closer is an SDK fix — compute the (100) output's min-ADA instead of hardcoding it; the
+  // backend's `Cip68.referenceOutputCoin` is the reference implementation. When it lands, the
+  // tripwire in Cip68BuilderEquivalenceTest#worstCaseLedgerRequirementAcrossAllAcceptableMetadata
+  // flips, and this paragraph can come out with it.
+  // Kept as an alias rather than inlined: `effectiveUseSDK` is read in eight places, and the name
+  // still says what it means — the builder actually in effect. It no longer suppresses anything.
+  const effectiveUseSDK = useSDK;
 
   // ---- BUILD BOTH TRANSACTIONS ----
   const handleBuild = useCallback(async () => {
@@ -625,14 +645,12 @@ export function CombinedBuildSignSubmitStep({
                 </button>
                 <button
                   onClick={() => setUseSDK(true)}
-                  disabled={!sdkAvailable || cip68Enabled}
-                  title={!sdkAvailable ? sdkUnavailableReason : cip68Enabled
-                    ? 'CIP-68 is enabled, so the transaction is built server-side.'
-                    : undefined}
+                  disabled={!sdkAvailable}
+                  title={!sdkAvailable ? sdkUnavailableReason : undefined}
                   aria-label={!sdkAvailable ? sdkUnavailableReason : undefined}
                   className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
                     effectiveUseSDK ? 'bg-primary-500 text-white' : 'bg-dark-700 text-dark-400 hover:text-white'
-                  } ${!sdkAvailable || cip68Enabled ? 'opacity-50 cursor-not-allowed line-through' : ''}`}
+                  } ${!sdkAvailable ? 'opacity-50 cursor-not-allowed line-through' : ''}`}
                 >
                   SDK (Evolution)
                 </button>
@@ -641,8 +659,6 @@ export function CombinedBuildSignSubmitStep({
             <p className="text-xs text-dark-500">
               {!sdkAvailable
                 ? sdkUnavailableReason
-                : cip68Enabled
-                ? 'CIP-68 is enabled, so transactions are built server-side. Both builders label the user token (333), but whether they produce byte-identical datums, min-UTxO sizing and output ordering is unverified — and freeze-and-seize bakes the asset name into issuer_admin, so any divergence would yield a different token policy id.'
                 : effectiveUseSDK
                 ? 'Building transactions client-side with CIP-113 SDK + Evolution SDK'
                 : 'Building transactions server-side with Java backend'}
