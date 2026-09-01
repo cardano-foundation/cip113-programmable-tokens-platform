@@ -136,7 +136,7 @@
     "protocolParamsPolicyId" : "9f31ef6fbb3022473e04aae691028e7eced81b20e697a4aaf0a916c2",
     "scriptHash" : "873eb302ea0489b15943e5332460e03f181cde1446cbe1d7219c68d1"
   },
-  "maxInlineDatumBytes" : 2048,
+  "maxInlineDatumBytes" : 1024,
   "programmableBaseRefInput" : {
     "txHash" : "e466d078444a4d750ccb99f4ebc1d22957772ff49bb53a0228e0ce45f5c6e479",
     "outputIndex" : 0
