@@ -51,9 +51,29 @@ export interface DelegateParams {
  * checks before it will transact against a record: anything below the current version
  * describes a protocol whose programmable-token addresses this build cannot spend from.
  */
+/** `coordination_spend` as deployed. The nonce is carried so the lock target baked into
+ *  `protocol_params_mint`'s 2nd parameter can be RE-DERIVED and asserted rather than trusted. */
+export interface CoordinationParams {
+  nonce: string;
+  scriptHash: string;
+  address: string;
+}
+
+/** `upgrade_multisig` as deployed — upstream's REFERENCE upgrade authority.
+ *  ⚠ Not necessarily the ACTIVE authority: that lives in the coordination datum's field 5,
+ *  which the backend does not currently serve. See `toDeploymentParams`. */
+export interface UpgradeMultisigParams {
+  signers: string[];
+  threshold: number;
+  scriptHash: string;
+  rewardAddress: string;
+}
+
 export interface ProtocolBootstrapParams {
   schemaVersion: number;
   protocolParams: ProtocolParams;
+  coordinationParams: CoordinationParams;
+  upgradeMultisigParams: UpgradeMultisigParams;
   transferParams: DelegateParams;
   thirdPartyParams: DelegateParams;
   unfrackingParams: DelegateParams;

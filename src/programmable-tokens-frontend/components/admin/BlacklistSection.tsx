@@ -31,7 +31,12 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
   const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
-  const [txBuilder, setTxBuilder] = useState<TransactionBuilder>(sdkAvailable ? "sdk" : "backend");
+  // Default to the backend builder even when the SDK is available. Parity means the SDK
+  // CAN build a transaction, not that it becomes the default route (PLAN.md A-5) — the
+  // SDK path is opt-in per operation via the toggle until T-018 has verified all seven
+  // operations against a live deployment. Deriving this from `sdkAvailable` would flip
+  // every user onto an unverified path the moment the capability was re-enabled.
+  const [txBuilder, setTxBuilder] = useState<TransactionBuilder>("backend");
   const network = process.env.NEXT_PUBLIC_NETWORK || "preview";
 
   // Per-page capability gate. Show:
@@ -101,6 +106,12 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
         await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
         const protocol = await getProtocol();
         const params = {
+          // Route explicitly. 0.4.0 made this REQUIRED rather than falling back to
+          // trying every registered substandard: freeze/unfreeze are administrative
+          // operations over someone else's tokens, and a try-all reports "no
+          // substandard can handle this" when the truth is "it was handled and the
+          // chain refused". Passing the token's own id keeps that distinction.
+          substandardId: selectedToken.substandardId,
           feePayerAddress: adminAddress,
           tokenPolicyId: selectedToken.policyId,
           assetName: selectedToken.assetName,

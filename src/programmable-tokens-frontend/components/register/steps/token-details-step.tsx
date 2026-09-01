@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { StepComponentProps, TokenDetailsData } from '@/types/registration';
 import { supportsCIP68, CIP68_FIELD_MAX_LENGTHS, validateCip68Metadata } from '@/lib/utils/cip68';
+import { isCip171Available, CIP171_RECORDER_UNAVAILABLE } from '@/lib/cip171/provenance';
 
 interface TokenDetailsStepProps extends StepComponentProps<TokenDetailsData, TokenDetailsData> {}
 
@@ -27,6 +28,13 @@ export function TokenDetailsStep({
   // rest the form is not rendered at all — collecting metadata that goes nowhere is exactly the
   // bug this gate exists to prevent.
   const cip68Supported = supportsCIP68(wizardState?.flowId);
+  // CIP-171 provenance is offered for every substandard, but is only usable once the record's
+  // fields can actually be sourced. The option is rendered either way: hiding it would make the
+  // capability indistinguishable from one that was never built.
+  const cip171Available = isCip171Available(wizardState?.flowId ?? '');
+  const [cip171Enabled, setCip171Enabled] = useState(
+    (stepData.cip171Provenance?.enabled ?? false) && cip171Available
+  );
   const [assetName, setAssetName] = useState(stepData.assetName || '');
   const [quantity, setQuantity] = useState(stepData.quantity || '');
   const [recipientAddress, setRecipientAddress] = useState(stepData.recipientAddress || '');
@@ -168,15 +176,20 @@ export function TokenDetailsStep({
     if (!validateForm()) return;
 
     const cip68Metadata = buildCip68Data();
+    // Never carry `enabled: true` forward when provenance is unavailable. The checkbox cannot be
+    // ticked in that state, but step data can be restored from an earlier session, and a stale
+    // `true` would silently request a record nothing can build.
+    const cip171Provenance = { enabled: cip171Enabled && cip171Available };
     const data: TokenDetailsData = {
       assetName: assetName.trim(),
       quantity: quantity.trim(),
       recipientAddress: recipientAddress.trim() || undefined,
       cip68Metadata,
+      cip171Provenance,
     };
 
     // Ensure step data includes CIP-68 metadata before completing
-    onDataChange({ cip68Metadata });
+    onDataChange({ cip68Metadata, cip171Provenance });
 
     onComplete({
       stepId: 'token-details',
@@ -249,6 +262,44 @@ export function TokenDetailsStep({
           </label>
         </div>
       )}
+
+      {/* CIP-171 provenance — offered for every substandard, usable only when the record's
+          fields can be sourced. Rendered disabled-with-a-reason rather than hidden, the same
+          way the tx-builder toggle handles an unavailable SDK: an option that vanishes is
+          indistinguishable from one that was never built, and the reason is what someone
+          debugging this in three months actually needs. */}
+      <div className="border-t border-dark-700 pt-4">
+        <label
+          className={cip171Available ? "flex items-center gap-3 cursor-pointer" : "flex items-center gap-3 cursor-help"}
+          title={cip171Available ? undefined : CIP171_RECORDER_UNAVAILABLE}
+        >
+          <input
+            type="checkbox"
+            checked={cip171Enabled}
+            onChange={(e) => cip171Available && setCip171Enabled(e.target.checked)}
+            disabled={isProcessing || !cip171Available}
+            aria-describedby={cip171Available ? undefined : "cip171-unavailable"}
+            className="w-4 h-4 rounded border-dark-600 bg-dark-800 text-primary-500 focus:ring-primary-500 disabled:cursor-not-allowed"
+          />
+          <div>
+            <span className={cip171Available ? "text-sm font-medium text-white" : "text-sm font-medium text-dark-500"}>
+              Attach CIP-171 provenance
+            </span>
+            {!cip171Available && (
+              <span className="ml-2 text-[10px] uppercase tracking-wide text-amber-400/80">unavailable</span>
+            )}
+            <p className="text-xs text-dark-400">
+              Publish which source commit and compiler produced this token&apos;s validators, so
+              anyone can rebuild them and check the on-chain script hashes match.
+            </p>
+            {!cip171Available && (
+              <p id="cip171-unavailable" className="text-xs text-amber-400/70 mt-1">
+                {CIP171_RECORDER_UNAVAILABLE}
+              </p>
+            )}
+          </div>
+        </label>
+      </div>
 
       {cip68Supported && cip68Enabled && (
         <div className="space-y-4 p-4 bg-dark-800/50 rounded-lg border border-dark-700">

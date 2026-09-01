@@ -25,6 +25,7 @@ import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryReposito
 import org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
 import org.cardanofoundation.cip113.service.ProtocolBootstrapService;
+import org.cardanofoundation.cip113.service.ProtocolDeploymentResolver;
 import org.cardanofoundation.cip113.service.UtxoProvider;
 import org.cardanofoundation.cip113.util.BalanceValueHelper;
 import org.springframework.http.ResponseEntity;
@@ -52,6 +53,8 @@ public class AdminController {
     private final RwaTokenPowerUserRepository rwaTokenPowerUserRepo;
     private final BlacklistInitRepository blacklistInitRepo;
     private final ProtocolBootstrapService protocolBootstrapService;
+
+    private final ProtocolDeploymentResolver protocolDeploymentResolver;
     private final ProgrammableTokenRegistryRepository programmableTokenRepo;
     private final UtxoProvider utxoProvider;
     private final AppConfig.Network network;
@@ -357,13 +360,10 @@ public class AdminController {
 
         var assetToBurn = new AssetType(policyId, assetName);
 
-        ProtocolBootstrapParams protocolBootstrapParams;
-        if (protocolTxHash == null) {
-            protocolBootstrapParams = protocolBootstrapService.getProtocolBootstrapParams();
-        } else {
-            protocolBootstrapParams = protocolBootstrapService.getProtocolBootstrapParamsByTxHash(protocolTxHash)
-                    .orElseThrow();
-        }
+        // Accepts either a deployment record's publish hash or an indexed params-version hash
+        // — the frontend's version selector holds the latter. The bare orElseThrow() this
+        // replaces also threw NoSuchElementException with no message at all.
+        ProtocolBootstrapParams protocolBootstrapParams = protocolDeploymentResolver.resolve(protocolTxHash);
 
         log.info("protocolBootstrapParams: {}", protocolBootstrapParams);
         try {

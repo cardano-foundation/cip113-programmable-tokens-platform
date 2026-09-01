@@ -279,11 +279,24 @@ export interface CIP68MetadataFormData {
 /**
  * Data for token details step
  */
+/**
+ * Whether to attach a CIP-171 provenance record to the registration transaction.
+ *
+ * Only `enabled` — unlike CIP-68, none of the record's content is user-supplied. Every field is
+ * derived: the parameterisation arguments come from the SDK's own callback, and the compiler,
+ * repo and commit come from the artefact's provenance. A user typing any of it would be
+ * asserting something they cannot know. See `lib/cip171/provenance.ts`.
+ */
+export interface CIP171ProvenanceFormData {
+  enabled: boolean;
+}
+
 export interface TokenDetailsData {
   assetName: string;
   quantity: string;
   recipientAddress?: string;
   cip68Metadata?: CIP68MetadataFormData;
+  cip171Provenance?: CIP171ProvenanceFormData;
 }
 
 /**
