@@ -10,6 +10,7 @@ import org.cardanofoundation.cip113.model.MintTokenRequest;
 import org.cardanofoundation.cip113.model.RegisterTokenRequest;
 import org.cardanofoundation.cip113.model.RegisterTokenResponse;
 import org.cardanofoundation.cip113.service.TokenOperationsService;
+import org.cardanofoundation.cip113.service.UnknownProtocolVersionException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -41,6 +42,11 @@ public class IssueTokenController {
             } else {
                 return ResponseEntity.badRequest().body(txContext.error());
             }
+        } catch (UnknownProtocolVersionException e) {
+            // A bad protocolTxHash is a CLIENT error. Rethrown so
+            // ProtocolExceptionHandler answers 400; the catch below would
+            // flatten it into a 500 and put it in front of alerting.
+            throw e;
         } catch (Exception e) {
             log.warn("error", e);
             return ResponseEntity.internalServerError().body(e.getMessage());
@@ -76,6 +82,11 @@ public class IssueTokenController {
             byte[] signedBytes;
             try {
                 signedBytes = HexUtil.decodeHexString(cborHex);
+            } catch (UnknownProtocolVersionException e) {
+                // A bad protocolTxHash is a CLIENT error. Rethrown so
+                // ProtocolExceptionHandler answers 400; the catch below would
+                // flatten it into a 500 and put it in front of alerting.
+                throw e;
             } catch (Exception e) {
                 return ResponseEntity.badRequest().body(Map.of(
                         "txHashes", txHashes,
@@ -86,6 +97,11 @@ public class IssueTokenController {
             String expectedHash;
             try {
                 expectedHash = TransactionUtil.getTxHash(signedBytes);
+            } catch (UnknownProtocolVersionException e) {
+                // A bad protocolTxHash is a CLIENT error. Rethrown so
+                // ProtocolExceptionHandler answers 400; the catch below would
+                // flatten it into a 500 and put it in front of alerting.
+                throw e;
             } catch (Exception e) {
                 return ResponseEntity.badRequest().body(Map.of(
                         "txHashes", txHashes,
@@ -113,6 +129,11 @@ public class IssueTokenController {
                 }
                 txHashes.add(expectedHash);
                 log.info("submit-chain: submitted tx {}/{} hash={}", i + 1, signedCborHexes.size(), expectedHash);
+            } catch (UnknownProtocolVersionException e) {
+                // A bad protocolTxHash is a CLIENT error. Rethrown so
+                // ProtocolExceptionHandler answers 400; the catch below would
+                // flatten it into a 500 and put it in front of alerting.
+                throw e;
             } catch (Exception e) {
                 log.error("submit-chain: exception submitting tx {} (index {})", expectedHash, i, e);
                 return ResponseEntity.badRequest().body(Map.of(
@@ -143,6 +164,11 @@ public class IssueTokenController {
                 return ResponseEntity.badRequest().body(result.error());
             }
 
+        } catch (UnknownProtocolVersionException e) {
+            // A bad protocolTxHash is a CLIENT error. Rethrown so
+            // ProtocolExceptionHandler answers 400; the catch below would
+            // flatten it into a 500 and put it in front of alerting.
+            throw e;
         } catch (Exception e) {
             log.warn("error", e);
             return ResponseEntity.internalServerError().build();
@@ -165,6 +191,11 @@ public class IssueTokenController {
             }
 
 
+        } catch (UnknownProtocolVersionException e) {
+            // A bad protocolTxHash is a CLIENT error. Rethrown so
+            // ProtocolExceptionHandler answers 400; the catch below would
+            // flatten it into a 500 and put it in front of alerting.
+            throw e;
         } catch (Exception e) {
             log.warn("error", e);
             return ResponseEntity.internalServerError().body(e.getMessage());
@@ -192,6 +223,11 @@ public class IssueTokenController {
             log.info("Burn transaction built successfully");
             return ResponseEntity.ok(txContext.unsignedCborTx());
 
+        } catch (UnknownProtocolVersionException e) {
+            // A bad protocolTxHash is a CLIENT error. Rethrown so
+            // ProtocolExceptionHandler answers 400; the catch below would
+            // flatten it into a 500 and put it in front of alerting.
+            throw e;
         } catch (Exception e) {
             log.error("Failed to build burn transaction", e);
             return ResponseEntity.internalServerError()

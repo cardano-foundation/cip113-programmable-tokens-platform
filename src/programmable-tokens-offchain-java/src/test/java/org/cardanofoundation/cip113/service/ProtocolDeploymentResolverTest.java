@@ -2,14 +2,22 @@ package org.cardanofoundation.cip113.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.entity.ProtocolParamsEntity;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
+import org.cardanofoundation.cip113.repository.ProtocolParamsRepository;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.ResponseStatus;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -40,6 +48,10 @@ class ProtocolDeploymentResolverTest {
 
     private static final String PROG_LOGIC =
             "5f9ee621c098be5d3a8d7bf8579267cc949c197ece726daa0e8a446f";
+
+    /** The superseded 2026-05 deployment. */
+    private static final String LEGACY_TX =
+            "a432339cbd7318222c8c51ed4fb52ee4c68f676037622aa7361dd45d897324a4";
 
     private static List<ProtocolBootstrapParams> deployments;
 
@@ -116,8 +128,7 @@ class ProtocolDeploymentResolverTest {
     @Test
     void theSupersededDeploymentStillResolves() {
         var legacy = deployments.stream()
-                .filter(d -> "a432339cbd7318222c8c51ed4fb52ee4c68f676037622aa7361dd45d897324a4"
-                        .equals(d.txHash()))
+                .filter(d -> LEGACY_TX.equals(d.txHash()))
                 .findFirst()
                 .orElseThrow();
 
@@ -128,5 +139,103 @@ class ProtocolDeploymentResolverTest {
 
         assertTrue(match.isPresent());
         assertEquals(legacy.txHash(), match.get().txHash());
+    }
+
+    // ── resolve() end to end, offline ────────────────────────────────────────
+    //
+    // Built with the real ProtocolBootstrapService (it loads the committed records off the
+    // classpath, no network) and a ProtocolParamsService over a mocked repository, so the
+    // indexed-version side can be posed exactly.
+
+    private static ProtocolDeploymentResolver resolverOver(List<ProtocolParamsEntity> indexed)
+            throws Exception {
+        var bootstrapService = new ProtocolBootstrapService(new ObjectMapper(),
+                new AppConfig.Network("preview"));
+        bootstrapService.init();
+
+        var repo = Mockito.mock(ProtocolParamsRepository.class);
+        Mockito.when(repo.findAllByOrderBySlotAsc()).thenReturn(indexed);
+        var paramsService = new ProtocolParamsService(repo);
+        paramsService.init();
+
+        return new ProtocolDeploymentResolver(bootstrapService, paramsService);
+    }
+
+    /**
+     * The reported defect: a bad hash answered 500. It must be a typed client error, because
+     * only the type distinguishes "the caller sent nonsense" from "the server broke" — and on a
+     * monitored deployment a 500 is what pages someone.
+     */
+    @Test
+    void anUnresolvableHashThrowsATypedClientError() throws Exception {
+        var resolver = resolverOver(List.of());
+
+        var thrown = assertThrows(UnknownProtocolVersionException.class,
+                () -> resolver.resolve("ab".repeat(32)));
+
+        assertTrue(thrown.getMessage().contains("ab".repeat(32)),
+                "the message must name the hash that failed");
+        assertInstanceOf(IllegalArgumentException.class, thrown,
+                "must stay an IllegalArgumentException: controllers that already catch that type "
+                        + "answer 400 today, and narrowing the hierarchy would silently regress them");
+    }
+
+    /** The 400 has to come from somewhere; on the propagating path it is this annotation. */
+    @Test
+    void theTypedErrorCarriesBadRequest() {
+        var status = UnknownProtocolVersionException.class.getAnnotation(ResponseStatus.class);
+
+        assertNotNull(status, "UnknownProtocolVersionException must carry @ResponseStatus");
+        assertEquals(HttpStatus.BAD_REQUEST, status.value());
+    }
+
+    @Test
+    void aKnownPublishHashResolvesWithoutTouchingTheIndex() throws Exception {
+        var resolver = resolverOver(List.of());
+
+        assertEquals(PUBLISH_TX, resolver.resolve(PUBLISH_TX).txHash());
+    }
+
+    @Test
+    void anIndexedVersionHashResolvesThroughTheIndex() throws Exception {
+        var resolver = resolverOver(List.of(version(BOOTSTRAP_TX, REGISTRY_POLICY, PROG_LOGIC)));
+
+        assertEquals(PUBLISH_TX, resolver.resolve(BOOTSTRAP_TX).txHash());
+    }
+
+    /**
+     * The steward's control from the cluster verification, adopted here: it separates "resolves
+     * correctly" from "accepts anything and quietly serves the default". A hash belonging to the
+     * SUPERSEDED deployment must resolve to that deployment — not to the live one, and not to
+     * whatever happens to be first.
+     */
+    @Test
+    void asupersededHashResolvesToItsOwnDeploymentNotTheLiveOne() throws Exception {
+        var legacy = deployments.stream()
+                .filter(d -> LEGACY_TX.equals(d.txHash()))
+                .findFirst()
+                .orElseThrow();
+        var resolver = resolverOver(List.of(version("legacyVersionTx",
+                legacy.directoryMintParams().scriptHash(),
+                legacy.programmableLogicBaseParams().scriptHash())));
+
+        var resolved = resolver.resolve("legacyVersionTx");
+
+        assertEquals(LEGACY_TX, resolved.txHash());
+        assertTrue(!PUBLISH_TX.equals(resolved.txHash()),
+                "resolving a superseded version must NOT hand back the live deployment — that is "
+                        + "the difference between resolving and merely accepting");
+    }
+
+    /** Indexed, but from a protocol with no committed record: a distinct, nameable state. */
+    @Test
+    void anIndexedVersionWithNoMatchingRecordSaysSo() throws Exception {
+        var resolver = resolverOver(List.of(version("orphanTx", "11".repeat(28), "22".repeat(28))));
+
+        var thrown = assertThrows(UnknownProtocolVersionException.class,
+                () -> resolver.resolve("orphanTx"));
+
+        assertTrue(thrown.getMessage().contains("is indexed"),
+                "an indexed-but-unmatched version must not be reported as simply not found");
     }
 }

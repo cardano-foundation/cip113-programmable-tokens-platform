@@ -34,6 +34,7 @@ import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeCo
 import org.cardanofoundation.cip113.service.substandard.context.KycContext;
 import org.cardanofoundation.cip113.service.substandard.context.KycExtendedContext;
 import org.cardanofoundation.cip113.service.substandard.context.SubstandardContext;
+import org.cardanofoundation.cip113.service.UnknownProtocolVersionException;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -302,6 +303,11 @@ public class ComplianceController {
                     "frozen", false,
                     "error", "Blockchain query implementation pending"
             ));
+        } catch (UnknownProtocolVersionException e) {
+            // A bad protocolTxHash is a CLIENT error. Rethrown so
+            // ProtocolExceptionHandler answers 400; the catch below would
+            // flatten it into a 500 and put it in front of alerting.
+            throw e;
         } catch (Exception e) {
             log.error("Error checking blacklist status", e);
             return ResponseEntity.internalServerError()
@@ -636,6 +642,11 @@ public class ComplianceController {
 
             return ResponseEntity.ok(result.get());
 
+        } catch (UnknownProtocolVersionException e) {
+            // A bad protocolTxHash is a CLIENT error. Rethrown so
+            // ProtocolExceptionHandler answers 400; the catch below would
+            // flatten it into a 500 and put it in front of alerting.
+            throw e;
         } catch (Exception e) {
             log.error("Error reading global state for policyId={}", policyId, e);
             return ResponseEntity.internalServerError().body(e.getMessage());

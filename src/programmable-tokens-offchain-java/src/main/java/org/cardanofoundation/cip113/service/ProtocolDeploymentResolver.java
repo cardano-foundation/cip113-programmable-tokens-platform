@@ -55,7 +55,7 @@ public class ProtocolDeploymentResolver {
      * @param protocolTxHash either a deployment record's publish hash, or an indexed
      *                       protocol-params version hash. Null or empty selects the configured
      *                       default deployment.
-     * @throws IllegalArgumentException if it is neither, naming both things that were tried
+     * @throws UnknownProtocolVersionException if it is neither, naming both things that were tried
      */
     public ProtocolBootstrapParams resolve(String protocolTxHash) {
         if (protocolTxHash == null || protocolTxHash.isEmpty()) {
@@ -78,7 +78,7 @@ public class ProtocolDeploymentResolver {
             }
             // Indexed, but from a deployment this build has no record of — a real state, not a
             // typo, and worth saying so rather than repeating "not found".
-            throw new IllegalArgumentException(
+            throw new UnknownProtocolVersionException(
                     "Protocol version " + protocolTxHash + " is indexed (registryNodePolicyId="
                             + version.get().getRegistryNodePolicyId() + ", progLogic="
                             + version.get().getProgLogicScriptHash() + ") but no deployment record "
@@ -86,7 +86,7 @@ public class ProtocolDeploymentResolver {
                             + "deployment is missing or describes a different protocol.");
         }
 
-        throw new IllegalArgumentException(
+        throw new UnknownProtocolVersionException(
                 "Protocol version not found: " + protocolTxHash
                         + " (matched neither a deployment record in protocol-bootstraps-<network>.json "
                         + "nor an indexed protocol-params version). If it is a params transaction, it may "
