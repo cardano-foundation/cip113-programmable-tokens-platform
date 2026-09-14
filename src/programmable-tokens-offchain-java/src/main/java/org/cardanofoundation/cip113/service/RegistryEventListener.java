@@ -32,6 +32,11 @@ public class RegistryEventListener {
     private final SubstandardResolver substandardResolver;
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
+    private static final int POLICY_ID_HEX_LENGTH = 56;
+
+    /** CIP-67 label 100 — the reference token, which holds metadata rather than value. */
+    private static final String CIP67_REFERENCE_LABEL = "000643b0";
+
     @EventListener
     public void processEvent(AddressUtxoEvent addressUtxoEvent) {
         log.debug("Processing AddressUtxoEvent for registry nodes");
@@ -64,12 +69,18 @@ public class RegistryEventListener {
         // Registration mints the token and writes its registry node in ONE transaction, so the
         // asset name is available here without a second lookup. Collected per transaction
         // because the event may carry several.
+        // OUTPUTS only. TxInputOutput.getInputs() is a List<TxInput> -- a (txHash, index)
+        // reference with no amounts -- so an input's policies are not visible from this event
+        // without resolving each one against the utxo store. Whatever the registering
+        // transaction produced is all we get to see here.
         Map<String, List<String>> unitsByTxHash = addressUtxoEvent.getTxInputOutputs().stream()
                 .collect(Collectors.toMap(
                         txIo -> txIo.getTxHash(),
                         txIo -> txIo.getOutputs().stream()
+                                .filter(o -> o.getAmounts() != null)
                                 .flatMap(o -> o.getAmounts().stream())
                                 .map(a -> a.getUnit())
+                                .filter(u -> u != null)
                                 .distinct()
                                 .toList(),
                         (a, b) -> a));
@@ -173,10 +184,19 @@ public class RegistryEventListener {
             return;
         }
 
+        // Every policy the transaction touched, as candidate second-parameters for a substandard
+        // whose registry node carries no global state of its own.
+        var candidatePolicyIds = unitsInTx.stream()
+                .filter(unit -> unit.length() >= POLICY_ID_HEX_LENGTH)
+                .map(unit -> unit.substring(0, POLICY_ID_HEX_LENGTH))
+                .distinct()
+                .toList();
+
         var substandardId = substandardResolver.resolve(
                 protocolParams.getProgLogicScriptHash(),
                 node.getGlobalStatePolicyId(),
-                node.getTransferLogicScript());
+                node.getTransferLogicScript(),
+                candidatePolicyIds);
 
         if (substandardId.isEmpty()) {
             log.info("Registry node {} indexed, but no substandard reproduces its transfer logic "
@@ -188,10 +208,20 @@ public class RegistryEventListener {
         }
 
         // The asset name as the chain carries it: the unit is policyId || assetNameHex.
-        var assetNameHex = unitsInTx.stream()
+        //
+        // A CIP-68 registration mints TWO assets under one policy: the (100) reference token
+        // holding the metadata, and the (222) user token holding the value. Taking whichever
+        // appeared first stored the reference name roughly half the time, which is not the name
+        // anybody means by "the token". Prefer anything that is not the reference token.
+        var ownAssetNames = unitsInTx.stream()
                 .filter(unit -> unit.length() > policyId.length() && unit.startsWith(policyId))
                 .map(unit -> unit.substring(policyId.length()))
+                .distinct()
+                .toList();
+        var assetNameHex = ownAssetNames.stream()
+                .filter(name -> !name.toLowerCase().startsWith(CIP67_REFERENCE_LABEL))
                 .findFirst()
+                .or(() -> ownAssetNames.stream().findFirst())
                 .orElse("");
 
         programmableTokenRegistryRepository.save(ProgrammableTokenRegistryEntity.builder()

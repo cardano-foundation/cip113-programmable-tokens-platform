@@ -6,7 +6,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.BiFunction;
@@ -68,6 +70,24 @@ public class SubstandardResolver {
     public Optional<String> resolve(String progLogicBaseScriptHash,
                                     String globalStatePolicyId,
                                     String observedTransferLogicHash) {
+        return resolve(progLogicBaseScriptHash, globalStatePolicyId, observedTransferLogicHash,
+                List.of());
+    }
+
+    /**
+     * @param candidatePolicyIds policy ids seen elsewhere in the registering transaction, used
+     *                           when the registry node carries no global state of its own.
+     *                           freeze-and-seize is the case that needs this: it never writes
+     *                           {@code global_state_cs}, so its blacklist policy — the second
+     *                           parameter of its transfer logic — appears nowhere in the node.
+     *                           Trying each observed policy is a bounded search whose result is
+     *                           PROVEN rather than guessed: a candidate is accepted only when it
+     *                           reproduces the exact hash the chain reported.
+     */
+    public Optional<String> resolve(String progLogicBaseScriptHash,
+                                    String globalStatePolicyId,
+                                    String observedTransferLogicHash,
+                                    Collection<String> candidatePolicyIds) {
 
         if (observedTransferLogicHash == null || observedTransferLogicHash.isBlank()) {
             return Optional.empty();
@@ -89,15 +109,39 @@ public class SubstandardResolver {
             return Optional.of("dummy");
         }
 
-        if (globalStatePolicyId == null || globalStatePolicyId.isBlank()) {
-            // Every remaining candidate is parameterised by it, so there is nothing to try.
-            return Optional.empty();
+        // The node's own global state first, when it has one (kyc, kyc-extended).
+        if (globalStatePolicyId != null && !globalStatePolicyId.isBlank()) {
+            var byOwnState = matchAgainst(progLogicBaseScriptHash, globalStatePolicyId,
+                    observedTransferLogicHash);
+            if (byOwnState.isPresent()) {
+                return byOwnState;
+            }
         }
 
+        // Otherwise fall back to policies observed in the same transaction. This is what
+        // recovers freeze-and-seize, whose blacklist policy the registry node never records.
+        for (String candidate : candidatePolicyIds) {
+            if (candidate == null || candidate.isBlank() || candidate.equals(globalStatePolicyId)) {
+                continue;
+            }
+            var match = matchAgainst(progLogicBaseScriptHash, candidate, observedTransferLogicHash);
+            if (match.isPresent()) {
+                log.debug("resolved {} via transaction policy {}", match.get(), candidate);
+                return match;
+            }
+        }
+
+        return Optional.empty();
+    }
+
+    /** Try every parameterised substandard against one candidate second-parameter. */
+    private Optional<String> matchAgainst(String progLogicBaseScriptHash,
+                                          String secondParameter,
+                                          String observedTransferLogicHash) {
         for (var candidate : parameterisedCandidates().entrySet()) {
             try {
                 PlutusScript script = candidate.getValue()
-                        .apply(progLogicBaseScriptHash, globalStatePolicyId);
+                        .apply(progLogicBaseScriptHash, secondParameter);
                 String derived = HexUtil.encodeHexString(script.getScriptHash());
                 if (observedTransferLogicHash.equalsIgnoreCase(derived)) {
                     return Optional.of(candidate.getKey());
@@ -108,7 +152,6 @@ public class SubstandardResolver {
                         candidate.getKey(), e.getMessage());
             }
         }
-
         return Optional.empty();
     }
 }
