@@ -2,6 +2,7 @@ package org.cardanofoundation.cip113.service;
 
 import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
 import com.bloxbean.cardano.client.util.HexUtil;
+import org.cardanofoundation.cip113.cip171.UplcLinkClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -48,6 +49,7 @@ import java.util.function.BiFunction;
 public class SubstandardResolver {
 
     private final SubstandardService substandardService;
+    private final UplcLinkClient uplcLinkClient;
     private final FreezeAndSeizeScriptBuilderService freezeAndSeizeScriptBuilder;
     private final KycScriptBuilderService kycScriptBuilder;
     private final KycExtendedScriptBuilderService kycExtendedScriptBuilder;
@@ -131,7 +133,45 @@ public class SubstandardResolver {
             }
         }
 
-        return Optional.empty();
+        // Last resort: ask uplc.link what this script was built from. Local derivation cannot
+        // identify freeze-and-seize, whose transfer logic is parameterised on a blacklist policy
+        // recorded neither in the registry node nor in the registering transaction. A published
+        // CIP-171 record does carry it.
+        return resolveViaCip171(observedTransferLogicHash);
+    }
+
+    /**
+     * Map a CIP-171 record's {@code sourcePath} onto a substandard this backend actually ships.
+     *
+     * <p>The registry is permissionless: anyone may publish a record naming any source path. So
+     * the answer is treated as a HINT that must land on a substandard already loaded here —
+     * {@code src/substandards/freeze-and-seize} resolves only because freeze-and-seize is one of
+     * ours. An unrecognised path resolves to empty rather than inventing a substandard id from a
+     * third party's string.
+     */
+    private Optional<String> resolveViaCip171(String observedTransferLogicHash) {
+        return uplcLinkClient.byHash(observedTransferLogicHash)
+                .map(record -> record.path("sourcePath").asText(""))
+                .flatMap(SubstandardResolver::substandardIdFromSourcePath)
+                .filter(id -> substandardService.getSubstandardById(id).isPresent())
+                .map(id -> {
+                    log.info("resolved substandard {} for transfer logic {} via uplc.link CIP-171 record",
+                            id, observedTransferLogicHash);
+                    return id;
+                });
+    }
+
+    /** {@code src/substandards/freeze-and-seize} -> {@code freeze-and-seize}. */
+    static Optional<String> substandardIdFromSourcePath(String sourcePath) {
+        if (sourcePath == null || sourcePath.isBlank()) {
+            return Optional.empty();
+        }
+        var trimmed = sourcePath.endsWith("/")
+                ? sourcePath.substring(0, sourcePath.length() - 1)
+                : sourcePath;
+        var slash = trimmed.lastIndexOf('/');
+        var candidate = slash >= 0 ? trimmed.substring(slash + 1) : trimmed;
+        return candidate.isBlank() ? Optional.empty() : Optional.of(candidate);
     }
 
     /** Try every parameterised substandard against one candidate second-parameter. */

@@ -1,7 +1,12 @@
 package org.cardanofoundation.cip113.service;
 
 import com.bloxbean.cardano.client.util.HexUtil;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.cardanofoundation.cip113.cip171.UplcLinkClient;
+import org.springframework.web.reactive.function.client.WebClient;
+
+import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -42,7 +47,7 @@ class SubstandardResolverTest {
         fes = new FreezeAndSeizeScriptBuilderService(substandardService);
         kyc = new KycScriptBuilderService(substandardService);
         kycExtended = new KycExtendedScriptBuilderService(substandardService);
-        resolver = new SubstandardResolver(substandardService, fes, kyc, kycExtended);
+        resolver = new SubstandardResolver(substandardService, disabledUplcLink(), fes, kyc, kycExtended);
     }
 
     private static String hashOf(com.bloxbean.cardano.client.plutus.spec.PlutusScript s) {
@@ -113,5 +118,92 @@ class SubstandardResolverTest {
         var otherGlobalState = "0000000000000000000000000000000000000000000000000000cafe";
         assertTrue(resolver.resolve(PLB, otherGlobalState, observed).isEmpty(),
                 "resolved against a global state that did not produce the hash");
+    }
+
+    // ---------------------------------------------------------------------
+    // CIP-171 fallback (uplc.link)
+    // ---------------------------------------------------------------------
+
+    /** A client that answers nothing, so the local-derivation tests above stay offline. */
+    private static UplcLinkClient disabledUplcLink() {
+        return new UplcLinkClient(WebClient.builder(), "", false, 1000);
+    }
+
+    /** A client that answers with one canned record, whatever it is asked. */
+    private static UplcLinkClient stubbedWith(String json) {
+        return new UplcLinkClient(WebClient.builder(), "", false, 1000) {
+            @Override
+            public Optional<JsonNode> byHash(String scriptHash) {
+                try {
+                    return Optional.of(new ObjectMapper().readTree(json));
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        };
+    }
+
+    /**
+     * Trimmed from a real preview.uplc.link response for the freeze-and-seize transfer logic —
+     * the field names are the service's, not invented.
+     */
+    private static final String REAL_FES_RECORD = """
+            {
+              "txHash": "2d62d6d7981d30e0a20abc0d9562060db09ea225e6d3722ac7feab1716946f4e",
+              "sourceUrl": "https://github.com/cardano-foundation/cip113-programmable-tokens-platform",
+              "commitHash": "12637c7c8c7b2bbd08b59100bf7ff714401618da",
+              "sourcePath": "src/substandards/freeze-and-seize",
+              "compilerType": "AIKEN",
+              "compilerVersion": "v1.1.21+42babe5",
+              "status": "VERIFIED",
+              "scripts": [
+                {
+                  "scriptName": "example_transfer_logic.transfer",
+                  "rawHash": "d95bf16fdd1ce4260100f158d042a91801ca753339d57d97078075c8",
+                  "finalHash": "278ecd35897748c372e39a6c60210a734813eb6622e8234264692f0d",
+                  "parameterizationStatus": "COMPLETE"
+                }
+              ]
+            }
+            """;
+
+    @Test
+    @DisplayName("freeze-and-seize resolves from a CIP-171 record when local derivation cannot")
+    void resolvesFreezeAndSeizeViaCip171() {
+        // FES's transfer logic is parameterised on a blacklist policy that appears in neither the
+        // registry node nor the registering transaction, so nothing local can reproduce this hash.
+        var unreachableLocally = "278ecd35897748c372e39a6c60210a734813eb6622e8234264692f0d";
+        assertTrue(resolver.resolve(PLB, "", unreachableLocally).isEmpty(),
+                "precondition: this must NOT be resolvable without the registry");
+
+        var withRegistry = new SubstandardResolver(
+                substandardService, stubbedWith(REAL_FES_RECORD), fes, kyc, kycExtended);
+        assertEquals("freeze-and-seize",
+                withRegistry.resolve(PLB, "", unreachableLocally).orElse(null));
+    }
+
+    @Test
+    @DisplayName("a record naming a substandard we do not ship is refused, not trusted")
+    void refusesUnknownSubstandardFromRegistry() {
+        var hostile = REAL_FES_RECORD.replace(
+                "src/substandards/freeze-and-seize", "src/substandards/not-a-substandard-we-have");
+        var withRegistry = new SubstandardResolver(
+                substandardService, stubbedWith(hostile), fes, kyc, kycExtended);
+        assertTrue(withRegistry.resolve(PLB, "", "278ecd35897748c372e39a6c60210a734813eb6622e8234264692f0d").isEmpty(),
+                "the registry is permissionless; an unrecognised sourcePath must not become a substandard id");
+    }
+
+    @Test
+    @DisplayName("sourcePath maps to a substandard id, and degenerate paths map to nothing")
+    void sourcePathMapping() {
+        assertEquals("freeze-and-seize",
+                SubstandardResolver.substandardIdFromSourcePath("src/substandards/freeze-and-seize").orElse(null));
+        assertEquals("freeze-and-seize",
+                SubstandardResolver.substandardIdFromSourcePath("src/substandards/freeze-and-seize/").orElse(null));
+        assertEquals("dummy", SubstandardResolver.substandardIdFromSourcePath("dummy").orElse(null));
+        assertTrue(SubstandardResolver.substandardIdFromSourcePath("").isEmpty());
+        assertTrue(SubstandardResolver.substandardIdFromSourcePath(null).isEmpty());
+        // A root-level record (the core protocol) names no substandard.
+        assertTrue(SubstandardResolver.substandardIdFromSourcePath("/").isEmpty());
     }
 }
