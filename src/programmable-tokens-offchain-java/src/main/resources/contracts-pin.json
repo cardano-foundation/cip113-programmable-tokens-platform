@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Provenance for the two compiled contract blueprints this backend ships.",
+    "Provenance for every compiled contract blueprint this backend ships: the CIP-113 core, the rwa-token substandard, and the four in-repo substandards.",
     "",
     "The Aiken SOURCE for both used to be vendored into this repository (src/core-contracts",
     "and src/substandards/rwa-token). It no longer is: the backend consumes only plutus.json,",
@@ -40,6 +40,46 @@
       "verbatim_from_upstream": false,
       "upstream_committed_sha256": "301b2d9f67b09aee84e3ce76555b35eda4c32e97c06ab8e9852bd509cbaae291",
       "note": "NOT upstream's committed plutus.json. Upstream's is STALE: at this commit it does not reproduce from its own source -- global_state.global_state_spend_validator is committed as 57e2c6d5ca432b24871d113a1f0f4664ca4ea574d8ce892537356f49 (4901 bytes) where the source compiles to e720eb536b26eb8c639e96a17de4404ab4dbf18224ae9cc2242e13a9 (4698 bytes). plutus.json and validators/global_state.ak were last touched by the SAME commit, so the blueprint was committed without being regenerated after a final source edit. We ship the REBUILD, because the script that goes on chain must be the source that gets audited. Reproduce it by rebuilding upstream at this commit -- see docs/CONTRACTS.md. upstream_committed_sha256 records the stale bytes so it stays possible to tell whether upstream has since regenerated."
+    },
+    {
+      "name": "dummy",
+      "resource": "substandards/dummy/plutus.json",
+      "repository": "https://github.com/cardano-foundation/cip113-programmable-tokens-platform",
+      "commit": "e63fa0af433ee39b2069521c2dd7579e1c919f89",
+      "aiken_compiler": "v1.1.21+42babe5",
+      "sha256": "c75e41f6ff3f71c278ac4765741ea6cf1e222fa24d5601d85e5e3a25bb15ed0f",
+      "verbatim_from_upstream": true,
+      "note": "In-repo substandard: these bytes are the committed artifact of src/substandards/dummy/ at the pinned commit, byte for byte. `repository`/`commit` therefore name THIS repository rather than an upstream one -- the substandard's source lives here, so the revision that identifies the artifact is a commit of this repo. Rebuild with the pinned aiken_compiler; a different compiler yields different script hashes and a non-interoperable deployment."
+    },
+    {
+      "name": "freeze-and-seize",
+      "resource": "substandards/freeze-and-seize/plutus.json",
+      "repository": "https://github.com/cardano-foundation/cip113-programmable-tokens-platform",
+      "commit": "12637c7c8c7b2bbd08b59100bf7ff714401618da",
+      "aiken_compiler": "v1.1.21+42babe5",
+      "sha256": "9514852e32ad2181595b6c8e65349ce5636cb3a11d0acd2e47dec55ca9f21c8f",
+      "verbatim_from_upstream": true,
+      "note": "In-repo substandard: these bytes are the committed artifact of src/substandards/freeze-and-seize/ at the pinned commit, byte for byte. `repository`/`commit` therefore name THIS repository rather than an upstream one -- the substandard's source lives here, so the revision that identifies the artifact is a commit of this repo. Rebuild with the pinned aiken_compiler; a different compiler yields different script hashes and a non-interoperable deployment."
+    },
+    {
+      "name": "kyc",
+      "resource": "substandards/kyc/plutus.json",
+      "repository": "https://github.com/cardano-foundation/cip113-programmable-tokens-platform",
+      "commit": "2f1e259983b3771ba840f8e30cb9096689a2c03f",
+      "aiken_compiler": "v1.1.21+42babe5",
+      "sha256": "dd18ab7d09e50dbca93e90cc5b604a28b6d3615fd42d535b156834663fda9e52",
+      "verbatim_from_upstream": true,
+      "note": "In-repo substandard: these bytes are the committed artifact of src/substandards/kyc/ at the pinned commit, byte for byte. `repository`/`commit` therefore name THIS repository rather than an upstream one -- the substandard's source lives here, so the revision that identifies the artifact is a commit of this repo. Rebuild with the pinned aiken_compiler; a different compiler yields different script hashes and a non-interoperable deployment."
+    },
+    {
+      "name": "kyc-extended",
+      "resource": "substandards/kyc-extended/plutus.json",
+      "repository": "https://github.com/cardano-foundation/cip113-programmable-tokens-platform",
+      "commit": "8b480839441b0510b5cc471b0d8a8df582e245ad",
+      "aiken_compiler": "v1.1.21+42babe5",
+      "sha256": "1fe2bafca14bd7cebdb63a22513ee7cac166709ab4db6a855456a61b3a880e2e",
+      "verbatim_from_upstream": true,
+      "note": "In-repo substandard: these bytes are the committed artifact of src/substandards/kyc-extended/ at the pinned commit, byte for byte. `repository`/`commit` therefore name THIS repository rather than an upstream one -- the substandard's source lives here, so the revision that identifies the artifact is a commit of this repo. Rebuild with the pinned aiken_compiler; a different compiler yields different script hashes and a non-interoperable deployment."
     }
   ]
 }
