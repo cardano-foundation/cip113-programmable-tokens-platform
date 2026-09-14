@@ -157,10 +157,19 @@ store:
     host: ${STORE_CARDANO_HOST:preview-node.play.dev.cardano.org}
     port: ${STORE_CARDANO_PORT:3001}
     protocol-magic: 2
-    # Intersect at the block immediately BEFORE the one carrying this deployment's seed
-    # transaction (62d062ca…, block 4608706 / slot 121181083), so the first block applied is
-    # the first one that matters. Preview's chain starts in 2022; syncing it from genesis for
-    # a deployment made in epoch 1402 costs hours and indexes nothing anyone asked for.
+    # Intersect at the block immediately BEFORE the earliest transaction of THIS deployment,
+    # so the first block applied is the first one that matters. The alpha.4 Preview deployment's
+    # four anchors, measured on chain: seed ad5ae742… (block 4654021 / slot 122504666), upgrade
+    # multisig UTxO 81350dcf… (4654022), bootstrap/params 8314e59f… (4654024) and the reference
+    # scripts 9da25ead… (4654027), all epoch 1417. Block 4654020 precedes all four.
+    #
+    # This block and its comment previously described an EARLIER deployment, seeded in block
+    # 4608706 / epoch 1402 -- 45,315 blocks and fifteen epochs before alpha.4. That was wasteful
+    # rather than wrong (it still reached the deployment) but it is the kind of stale value that
+    # reads as deliberate. Err EARLY if this must be changed again: too early costs only sync
+    # time, while too late means the params UTxO is never indexed, no deployment resolves, and
+    # every operation fails with a message that points at configuration rather than at the
+    # sync window. Preview's chain starts in 2022, so genesis is hours of indexing nothing.
     #
     # These two MUST stay set. The unprofiled document at the top of this file carries a
     # MAINNET sync start, and Spring merges it into every profile — so clearing these does not

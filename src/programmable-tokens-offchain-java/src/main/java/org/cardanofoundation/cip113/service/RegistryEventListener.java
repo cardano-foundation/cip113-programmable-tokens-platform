@@ -5,10 +5,12 @@ import com.easy1staking.cardano.model.AssetType;
 import com.easy1staking.util.Pair;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.entity.ProgrammableTokenRegistryEntity;
 import org.cardanofoundation.cip113.entity.ProtocolParamsEntity;
 import org.cardanofoundation.cip113.entity.RegistryNodeEntity;
 import org.cardanofoundation.cip113.model.onchain.PlutusCredentialCodec;
 import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
+import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
@@ -27,6 +29,8 @@ public class RegistryEventListener {
     private final RegistryService registryService;
     private final RegistryNodeParser registryNodeParser;
     private final ProtocolParamsService protocolParamsService;
+    private final SubstandardResolver substandardResolver;
+    private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
     @EventListener
     public void processEvent(AddressUtxoEvent addressUtxoEvent) {
@@ -56,6 +60,19 @@ public class RegistryEventListener {
 
         var slot = addressUtxoEvent.getEventMetadata().getSlot();
         var blockHeight = addressUtxoEvent.getEventMetadata().getBlock();
+
+        // Registration mints the token and writes its registry node in ONE transaction, so the
+        // asset name is available here without a second lookup. Collected per transaction
+        // because the event may carry several.
+        Map<String, List<String>> unitsByTxHash = addressUtxoEvent.getTxInputOutputs().stream()
+                .collect(Collectors.toMap(
+                        txIo -> txIo.getTxHash(),
+                        txIo -> txIo.getOutputs().stream()
+                                .flatMap(o -> o.getAmounts().stream())
+                                .map(a -> a.getUnit())
+                                .distinct()
+                                .toList(),
+                        (a, b) -> a));
 
         // Process each transaction's outputs
         addressUtxoEvent.getTxInputOutputs()
@@ -118,9 +135,72 @@ public class RegistryEventListener {
                                                 blockHeight,
                                                 txHash
                                         );
+
+                                        indexProgrammableToken(entity, protocolParams,
+                                                unitsByTxHash.getOrDefault(txHash, List.of()));
                                     },
                                     () -> log.error("Failed to parse registry node from txHash={}", txHash)
                             );
                 });
+    }
+
+    /**
+     * Index the token itself, so it is discoverable without the registration callback.
+     *
+     * <p>{@code programmable_token_registry} is what {@code GET /token-context/{policyId}}
+     * answers from, and it used to be written ONLY by {@code POST /token-context/register} --
+     * a callback the registering frontend makes to whichever backend it was pointed at. A token
+     * minted against one deployment was therefore invisible to every other, including the public
+     * indexer, and no amount of re-syncing helped because the row was never derived from chain
+     * in the first place.
+     *
+     * <p>It is derived here instead. The callback is left in place: it still arrives first for
+     * locally-built registrations, and it carries the freeze-and-seize init details that no
+     * registry node holds. This is the backstop that makes a wiped database rebuild the answer
+     * from the chain rather than from whoever happened to call.
+     *
+     * <p>Writes nothing when the substandard cannot be identified. A row with an unknown
+     * substandard would turn an honest 404 into a 200 the SDK cannot route.
+     */
+    private void indexProgrammableToken(RegistryNodeEntity node,
+                                        ProtocolParamsEntity protocolParams,
+                                        List<String> unitsInTx) {
+        var policyId = node.getKey();
+        if (policyId == null || policyId.isBlank()) {
+            return;
+        }
+        if (programmableTokenRegistryRepository.existsByPolicyId(policyId)) {
+            return;
+        }
+
+        var substandardId = substandardResolver.resolve(
+                protocolParams.getProgLogicScriptHash(),
+                node.getGlobalStatePolicyId(),
+                node.getTransferLogicScript());
+
+        if (substandardId.isEmpty()) {
+            log.info("Registry node {} indexed, but no substandard reproduces its transfer logic "
+                            + "{} (globalState={}) -- not adding a token-context row. rwa-token is "
+                            + "expected here: its transfer logic takes a denylist hash no registry "
+                            + "node carries.",
+                    policyId, node.getTransferLogicScript(), node.getGlobalStatePolicyId());
+            return;
+        }
+
+        // The asset name as the chain carries it: the unit is policyId || assetNameHex.
+        var assetNameHex = unitsInTx.stream()
+                .filter(unit -> unit.length() > policyId.length() && unit.startsWith(policyId))
+                .map(unit -> unit.substring(policyId.length()))
+                .findFirst()
+                .orElse("");
+
+        programmableTokenRegistryRepository.save(ProgrammableTokenRegistryEntity.builder()
+                .policyId(policyId)
+                .substandardId(substandardId.get())
+                .assetName(assetNameHex)
+                .build());
+
+        log.info("Indexed programmable token from chain: policyId={}, substandardId={}, assetName={}",
+                policyId, substandardId.get(), assetNameHex.isEmpty() ? "(not in this tx)" : assetNameHex);
     }
 }

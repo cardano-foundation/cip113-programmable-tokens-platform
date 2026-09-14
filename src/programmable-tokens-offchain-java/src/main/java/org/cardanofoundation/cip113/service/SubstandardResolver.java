@@ -1,0 +1,114 @@
+package org.cardanofoundation.cip113.service;
+
+import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
+import com.bloxbean.cardano.client.util.HexUtil;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.BiFunction;
+
+/**
+ * Works out which substandard a registered token belongs to, from chain data alone.
+ *
+ * <h2>Why this can be derived rather than remembered</h2>
+ *
+ * A registry node records the token's transfer-logic script HASH, and a hash cannot be
+ * un-applied. But every substandard's transfer logic is parameterised from a base this
+ * backend already ships, over inputs that are themselves on chain:
+ *
+ * <ul>
+ *   <li>{@code freeze-and-seize}, {@code kyc}, {@code kyc-extended} — parameterised by
+ *       (programmable-logic-base hash, global-state policy). The first comes from the
+ *       deployment record; the second is a field of the registry node datum.</li>
+ *   <li>{@code dummy} — not parameterised at all. Its transfer validator is protocol-global,
+ *       so the blueprint's own hash is the answer.</li>
+ * </ul>
+ *
+ * So each candidate can be RECOMPUTED and compared against what the chain reported. Exactly
+ * one should match, and the comparison is self-checking: a wrong assumption about the inputs
+ * produces no match rather than a confident wrong answer.
+ *
+ * <h2>What is deliberately not covered</h2>
+ *
+ * {@code rwa-token}'s transfer logic takes four parameters including a {@code denylistScriptHash}
+ * that no registry node carries, so it cannot be recomputed from chain data. It is left out
+ * rather than guessed at; tokens of that substandard resolve to empty and are not indexed by
+ * this path. They still arrive through the registration callback, which knows the answer
+ * because it was there when the token was made.
+ */
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class SubstandardResolver {
+
+    private final SubstandardService substandardService;
+    private final FreezeAndSeizeScriptBuilderService freezeAndSeizeScriptBuilder;
+    private final KycScriptBuilderService kycScriptBuilder;
+    private final KycExtendedScriptBuilderService kycExtendedScriptBuilder;
+
+    /** Substandards whose transfer logic is (plbHash, globalStatePolicyId). */
+    private Map<String, BiFunction<String, String, PlutusScript>> parameterisedCandidates() {
+        var map = new LinkedHashMap<String, BiFunction<String, String, PlutusScript>>();
+        map.put("freeze-and-seize", freezeAndSeizeScriptBuilder::buildTransferScript);
+        map.put("kyc", kycScriptBuilder::buildTransferScript);
+        map.put("kyc-extended", kycExtendedScriptBuilder::buildTransferScript);
+        return map;
+    }
+
+    /**
+     * @param progLogicBaseScriptHash   the deployment's programmable-logic-base hash
+     * @param globalStatePolicyId       the registry node's global-state policy ({@code ""} when none)
+     * @param observedTransferLogicHash the transfer-logic hash the registry node actually carries
+     * @return the substandard id, or empty when nothing reproduces the observed hash
+     */
+    public Optional<String> resolve(String progLogicBaseScriptHash,
+                                    String globalStatePolicyId,
+                                    String observedTransferLogicHash) {
+
+        if (observedTransferLogicHash == null || observedTransferLogicHash.isBlank()) {
+            return Optional.empty();
+        }
+
+        // Every candidate is tried, including substandards listed in `substandards.disabled`.
+        // That property governs which substandards the issuance wizard OFFERS, not which ones
+        // this deployment can recognise: SubstandardService keeps disabled ones loaded and
+        // resolvable precisely because already-issued tokens still need serving. Filtering here
+        // would make an existing kyc token unindexable on a deployment that has stopped offering
+        // kyc, which is the opposite of what the property means.
+
+        // dummy first: unparameterised, so it is a straight blueprint lookup and cannot be
+        // confused with a parameterised one.
+        var dummyTransfer = substandardService
+                .getSubstandardValidator("dummy", "transfer.transfer.withdraw");
+        if (dummyTransfer.isPresent()
+                && observedTransferLogicHash.equalsIgnoreCase(dummyTransfer.get().scriptHash())) {
+            return Optional.of("dummy");
+        }
+
+        if (globalStatePolicyId == null || globalStatePolicyId.isBlank()) {
+            // Every remaining candidate is parameterised by it, so there is nothing to try.
+            return Optional.empty();
+        }
+
+        for (var candidate : parameterisedCandidates().entrySet()) {
+            try {
+                PlutusScript script = candidate.getValue()
+                        .apply(progLogicBaseScriptHash, globalStatePolicyId);
+                String derived = HexUtil.encodeHexString(script.getScriptHash());
+                if (observedTransferLogicHash.equalsIgnoreCase(derived)) {
+                    return Optional.of(candidate.getKey());
+                }
+            } catch (Exception e) {
+                // A candidate that cannot be built is not a match; it must not stop the others.
+                log.debug("substandard candidate {} could not be parameterised: {}",
+                        candidate.getKey(), e.getMessage());
+            }
+        }
+
+        return Optional.empty();
+    }
+}
