@@ -21,5 +21,15 @@ public record TokenContextResponse(
          *  (set via the GlobalState {@code PauseTransfers} admin action). The FE
          *  uses this to disable the Send button + surface a notice. Null for
          *  substandards that don't carry this flag. */
-        Boolean transfersPaused
+        Boolean transfersPaused,
+
+        /**
+         * The token's transfer-logic script hash, as the registry node records it.
+         *
+         * <p>Exposed so a client can ask a CIP-171 registry what this script was built from.
+         * Null — not absent, not "" — when the registry node has not been indexed: a client
+         * must be able to tell "no provenance published" from "we have not seen this token",
+         * and an empty string would collapse the two.
+         */
+        String transferLogicScript
 ) {}

@@ -10,6 +10,7 @@ import org.cardanofoundation.cip113.model.TokenRegistrationRequest;
 import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
+import org.cardanofoundation.cip113.repository.RegistryNodeRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
 import org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler;
 import org.springframework.beans.factory.ObjectProvider;
@@ -24,6 +25,7 @@ import org.springframework.web.bind.annotation.*;
 public class TokenContextController {
 
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
+    private final RegistryNodeRepository registryNodeRepository;
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeTokenRegistrationRepository;
     private final BlacklistInitRepository blacklistInitRepository;
 
@@ -101,6 +103,13 @@ public class TokenContextController {
             }
         }
 
+        // The registry node is keyed by the token's policy id. Null when we have not indexed it,
+        // which a client must be able to distinguish from "indexed, no provenance published".
+        var transferLogicScript = registryNodeRepository.findByKey(policyId)
+                .map(node -> node.getTransferLogicScript())
+                .filter(hash -> hash != null && !hash.isBlank())
+                .orElse(null);
+
         return ResponseEntity.ok(new TokenContextResponse(
                 policyId,
                 substandardId,
@@ -111,7 +120,8 @@ public class TokenContextController {
                 blacklistInitOutputIndex,
                 requiresReceiverKyc,
                 requiresSenderKyc,
-                transfersPaused
+                transfersPaused,
+                transferLogicScript
         ));
     }
 

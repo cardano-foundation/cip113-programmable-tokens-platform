@@ -50,6 +50,10 @@ export interface TokenContext {
   policyId: string;
   substandardId: string;
   assetName?: string;
+  /** The token's transfer-logic script hash, as the registry node records it. Absent when the
+   *  registry node has not been indexed — which is different from "indexed, no provenance
+   *  published", and the CIP-171 badge must not conflate the two. */
+  transferLogicScript?: string | null;
   blacklistNodePolicyId?: string;
   issuerAdminPkh?: string;
   blacklistInitTxHash?: string;

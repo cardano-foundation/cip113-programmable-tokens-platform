@@ -11,6 +11,7 @@ import { truncateAddress, formatADAWithSymbol, getNetworkDisplayName } from "@/l
 import { useToast } from "@/components/ui/toast";
 import { getWalletBalance, parseWalletBalance } from "@/lib/api";
 import { ParsedBalance, ParsedAsset } from "@/types/api";
+import { Cip171ProvenanceBadge } from "@/components/cip171/provenance-badge";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { TransferModal } from "@/components/transfer/TransferModal";
 import { TokenSendAction } from "@/components/portfolio/TokenSendAction";
@@ -275,7 +276,9 @@ export function WalletInfo() {
                         <div key={`${asset.unit}-${index}`} className="px-3 py-2 bg-dark-900 rounded">
                           <div className="flex items-start justify-between gap-2">
                             <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 mb-1">
+                              {/* flex-wrap so the CIP-171 panel, which is w-full, drops onto
+                                  its own line instead of being squeezed beside the badges. */}
+                              <div className="flex items-center gap-2 mb-1 flex-wrap">
                                 <p className="text-sm font-medium text-white truncate">
                                   <TokenName assetNameHex={asset.assetNameHex} assetName={asset.assetName} />
                                 </p>
@@ -284,6 +287,9 @@ export function WalletInfo() {
                                 )}
                                 {asset.isBlacklisted && (
                                   <Badge variant="error" size="sm">Frozen</Badge>
+                                )}
+                                {asset.isProgrammable && (
+                                  <Cip171ProvenanceBadge policyId={asset.policyId} />
                                 )}
                               </div>
                               <p className="text-xs text-dark-400 truncate" title={asset.policyId}>

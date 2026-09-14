@@ -15,7 +15,7 @@ spring:
 
 network: mainnet
 uplc-link:
-  base-url: ${UPLC_LINK_BASE_URL:https://uplc.link}
+  base-url: ${UPLC_LINK_BASE_URL:https://api.uplc.link}
 
 wallet:
   mnemonic: ""
@@ -110,7 +110,7 @@ spring:
 
 network: preprod
 uplc-link:
-  base-url: ${UPLC_LINK_BASE_URL:https://preprod.uplc.link}
+  base-url: ${UPLC_LINK_BASE_URL:https://preprod-api.uplc.link}
 
 wallet:
   mnemonic: ""
@@ -137,7 +137,7 @@ spring:
 
 network: preview
 uplc-link:
-  base-url: ${UPLC_LINK_BASE_URL:https://preview.uplc.link}
+  base-url: ${UPLC_LINK_BASE_URL:https://preview-api.uplc.link}
 
 wallet:
   mnemonic: ""

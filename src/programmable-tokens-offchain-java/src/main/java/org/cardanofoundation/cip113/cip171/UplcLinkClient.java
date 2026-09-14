@@ -31,11 +31,19 @@ import java.util.concurrent.ConcurrentHashMap;
  * trade for now; if the answer ever becomes load-bearing for something that moves value,
  * re-derive it here instead. It is only ever used to LABEL a token, never to authorise anything.
  *
- * <h2>Network scoping</h2>
+ * <h2>Network scoping, and the host that is NOT the API</h2>
  *
- * The registry is scoped by domain, not by a parameter: preview lives at
- * {@code preview.uplc.link} and mainnet at {@code uplc.link}. A lookup against the wrong host
- * silently answers 404, so the base URL follows the active network profile.
+ * The registry is scoped by domain rather than by a parameter, and the SITE is not the API.
+ * {@code preview.uplc.link} is a Next.js app whose {@code /api/registry?action=byHash} is an
+ * internal proxy; the API it proxies onto is {@code preview-api.uplc.link}, route
+ * {@code /api/v1/scripts/by-hash/{hash}}. Measured across networks: mainnet
+ * {@code api.uplc.link}, preview {@code preview-api.uplc.link}, preprod
+ * {@code preprod-api.uplc.link}; {@code mainnet-api.uplc.link} does not resolve.
+ *
+ * <p>This class was first written against the site's proxy path on the site's host, which
+ * answers 404 for every lookup — indistinguishable from "no record published". Hence the
+ * explicit path constant and a test that pins it: a wrong URL here fails silently and looks
+ * exactly like an empty registry.
  */
 @Component
 @Slf4j
@@ -44,6 +52,11 @@ public class UplcLinkClient {
     private final WebClient webClient;
     private final boolean enabled;
     private final Duration timeout;
+
+    /** The API route. {@code /api/registry?action=byHash} is the SITE's proxy, not this. */
+    static String byHashPath(String scriptHash) {
+        return "/api/v1/scripts/by-hash/" + scriptHash;
+    }
 
     /** Answers already seen, negatives included: a 404 is stable and worth not re-asking. */
     private final Map<String, Optional<JsonNode>> cache = new ConcurrentHashMap<>();
@@ -74,10 +87,7 @@ public class UplcLinkClient {
         return cache.computeIfAbsent(scriptHash.toLowerCase(), hash -> {
             try {
                 JsonNode body = webClient.get()
-                        .uri(uriBuilder -> uriBuilder.path("/api/registry")
-                                .queryParam("action", "byHash")
-                                .queryParam("hash", hash)
-                                .build())
+                        .uri(byHashPath(hash))
                         .retrieve()
                         .bodyToMono(JsonNode.class)
                         .timeout(timeout)
