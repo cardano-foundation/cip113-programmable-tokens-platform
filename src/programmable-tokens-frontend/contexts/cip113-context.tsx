@@ -452,6 +452,17 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
       },
     });
 
+    // The SDK decodes this with AssetName.FromHex, so a raw name fails deep inside Effect's
+    // schema as `AssetName.FromHex -> Uint8ArrayFromHex -> Invalid input`, which names neither
+    // the field nor the caller. Every call site in this app hex-encodes with stringToHex; one
+    // did not, and this is the cheap way to make the next omission say so.
+    if (!/^[0-9a-fA-F]*$/.test(params.assetName) || params.assetName.length % 2 !== 0) {
+      throw new Error(
+        `assetName must be HEX-encoded, got ${JSON.stringify(params.assetName)}. ` +
+          "Wrap the wizard's raw token name with stringToHex() before calling buildFESRegistration.",
+      );
+    }
+
     // Step 1: Build blacklist init tx
     console.log("[CIP-113] Building blacklist init tx...");
     const initResult = await fes.initCompliance!({

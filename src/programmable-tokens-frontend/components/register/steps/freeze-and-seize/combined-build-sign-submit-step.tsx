@@ -184,7 +184,11 @@ export function CombinedBuildSignSubmitStep({
 
         const sdkResult = await buildFESRegistration({
           adminAddress,
-          assetName: tokenDetails.assetName,
+          // HEX, like every other call site. `tokenDetails.assetName` is the raw name the
+          // wizard collected (token-details-step stores `assetName.trim()`), and the backend
+          // branch twenty lines below hex-encodes it. This branch did not, so the SDK received
+          // a human-readable name where it decodes with AssetName.FromHex.
+          assetName: stringToHex(tokenDetails.assetName),
           quantity: tokenDetails.quantity,
           recipientAddress: tokenDetails.recipientAddress,
           rawWalletApi: rawApi,
