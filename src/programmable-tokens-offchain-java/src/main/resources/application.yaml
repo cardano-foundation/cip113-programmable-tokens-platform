@@ -166,8 +166,8 @@ store:
     # MAINNET sync start, and Spring merges it into every profile — so clearing these does not
     # mean "from genesis", it means "from a mainnet block hash under protocol magic 2", which
     # yaci-store's InitService rejects with "Shelley start point is not configured properly".
-    sync-start-blockhash: ${STORE_SYNC_START_BLOCKHASH:8c32fa9e0d00ba2647c2abe0db5200eb021808461501e5563f21b69429c85790}
-    sync-start-slot: ${STORE_SYNC_START_SLOT:121181002}
+    sync-start-blockhash: ${STORE_SYNC_START_BLOCKHASH:d5568035360998efe792f6415750096b6fdc02836747e6d16ceee7714c3f584a}
+    sync-start-slot: ${STORE_SYNC_START_SLOT:122504546}
 
 ---
 spring:
