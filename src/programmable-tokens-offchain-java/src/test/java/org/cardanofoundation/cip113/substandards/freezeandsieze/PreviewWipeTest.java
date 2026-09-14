@@ -140,7 +140,7 @@ public class PreviewWipeTest extends AbstractPreviewTest {
 
         var payeeAddress = aliceAccount.getBaseAddress();
 
-        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 payeeAddress.getDelegationCredential().get(),
                 network);
 

@@ -16,7 +16,7 @@ import org.springframework.stereotype.Service;
  * {@code Optional} unwrap and its own try/catch around a debug log. All of that now lives
  * in {@link CoreScriptFactory}, where the parameter lists sit together in one switch and
  * can be read against the blueprint as a table. What remains here is the vocabulary:
- * {@code getParameterizedDirectoryMintScript} and friends are called from every
+ * {@code getParameterizedRegistryScript} and friends are called from every
  * substandard handler, and renaming them is a separate change from moving the knowledge
  * out of them.
  *
@@ -37,14 +37,9 @@ public class ProtocolScriptBuilderService {
 
     private final CoreScriptFactory coreScripts;
 
-    /** {@code registry_mint} — the registry-node NFT policy. */
-    public PlutusScript getParameterizedDirectoryMintScript(ProtocolBootstrapParams protocolParams) {
-        return coreScripts.script(CoreValidator.REGISTRY_MINT, protocolParams);
-    }
-
-    /** {@code registry_spend} — spends registry nodes (insert, in-place update). */
-    public PlutusScript getParameterizedDirectorySpendScript(ProtocolBootstrapParams protocolParams) {
-        return coreScripts.script(CoreValidator.REGISTRY_SPEND, protocolParams);
+    /** {@code registry} — one script serving as both node-NFT policy and node address. */
+    public PlutusScript getParameterizedRegistryScript(ProtocolBootstrapParams protocolParams) {
+        return coreScripts.script(CoreValidator.REGISTRY, protocolParams);
     }
 
     /**
@@ -88,14 +83,28 @@ public class ProtocolScriptBuilderService {
         return coreScripts.script(CoreValidator.UNFRACKING, protocolParams);
     }
 
+    /** {@code programmable_logic_global} — dispatcher invoked before a delegate. */
+    public PlutusScript getParameterizedProgrammableLogicGlobalScript(ProtocolBootstrapParams protocolParams) {
+        return coreScripts.script(CoreValidator.PROGRAMMABLE_LOGIC_GLOBAL, protocolParams);
+    }
+
+    /** {@code issuance_logic} — replaceable issuance checks used by every mint and burn. */
+    public PlutusScript getParameterizedIssuanceLogicScript(ProtocolBootstrapParams protocolParams) {
+        return coreScripts.script(CoreValidator.ISSUANCE_LOGIC, protocolParams);
+    }
+
+    public PlutusScript getParameterizedUpgradeMultisigScript(ProtocolBootstrapParams protocolParams) {
+        return coreScripts.script(CoreValidator.UPGRADE_MULTISIG, protocolParams);
+    }
+
     /** {@code always_fail} under a caller-chosen nonce. */
     public PlutusScript getParameterizedAlwaysFailScript(String nonce) {
         return coreScripts.alwaysFail(nonce);
     }
 
-    /** {@code protocol_params_mint} — the one-shot protocol-params NFT policy. */
-    public PlutusScript getParameterizedProtocolParamsMintScript(ProtocolBootstrapParams protocolParams) {
-        return coreScripts.script(CoreValidator.PROTOCOL_PARAMS_MINT, protocolParams);
+    /** {@code protocol_params} — one script serving as both params-NFT policy and address. */
+    public PlutusScript getParameterizedProtocolParamsScript(ProtocolBootstrapParams protocolParams) {
+        return coreScripts.script(CoreValidator.PROTOCOL_PARAMS, protocolParams);
     }
 
     /** {@code issuance_cbor_hex_mint} — the one-shot NFT carrying the issuance template bytes. */

@@ -1,5 +1,8 @@
 # Contracts: where they come from
 
+The platform targets CIP-113 `0.5.0-alpha.4` exclusively. Historical contract
+surfaces are not transaction-buildable compatibility modes.
+
 This repository ships **compiled blueprints only**. The Aiken source for the CIP-113 core and
 for the rwa-token substandard is not vendored here — it lives upstream, and this document is
 how you get back to it.
@@ -54,13 +57,13 @@ Requires `aiken` at the version in `contracts-pin.json` (`v1.1.23+8949565` for b
 
 ```bash
 git clone https://github.com/cardano-foundation/cip113-programmable-tokens /tmp/cip113
-cd /tmp/cip113 && git checkout 9db7e0629a1509cc9d41d069f0ef0ed251601173
+cd /tmp/cip113 && git checkout 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4
 
 # our bytes ARE upstream's committed bytes
 shasum -a 256 plutus.json
-# -> bd297f36e9e955d814fb3a67fbc7e51c2344b54d952d38b03ef9f32c1d43b9ad
+# -> 5ff5d6d2990d815973e4edcf6d46e7c3d0ff4bf3cb7c17a3e672e091b7ea0b46
 
-# and they reproduce from source: all 27 validator entries come back identical
+# and they reproduce from source: all 34 validator entries come back identical
 aiken build && shasum -a 256 plutus.json
 ```
 

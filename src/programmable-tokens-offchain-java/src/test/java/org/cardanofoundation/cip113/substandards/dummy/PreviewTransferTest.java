@@ -98,7 +98,7 @@ public class PreviewTransferTest extends AbstractPreviewTest implements PreviewF
         var amountToTransfer = BigInteger.valueOf(10_000L);
 
         // Directory SPEND parameterization
-        var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+        var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
         log.info("registrySpendContract: {}", HexUtil.encodeHexString(registrySpendContract.getScriptHash()));
 
         var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network);
@@ -130,12 +130,12 @@ public class PreviewTransferTest extends AbstractPreviewTest implements PreviewF
         log.info("protocolParamsUtxo: {}", protocolParamsUtxo);
 
         var senderAddress = senderAccount.getBaseAddress();
-        var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 senderAddress.getDelegationCredential().get(),
                 network);
 
         var recipientAddress = new Address(receiverAccount.baseAddress());
-        var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 recipientAddress.getDelegationCredential().get(),
                 network);
 
@@ -146,7 +146,7 @@ public class PreviewTransferTest extends AbstractPreviewTest implements PreviewF
         var programmableLogicGlobal = protocolScriptBuilderService.getParameterizedTransferScript(protocolBootstrapParams);
         var programmableLogicGlobalAddress = AddressProvider.getRewardAddress(programmableLogicGlobal, network);
         log.info("programmableLogicGlobalAddress policy: {}", programmableLogicGlobalAddress.getAddress());
-        log.info("protocolBootstrapParams.transferParams().scriptHash(): {}", protocolBootstrapParams.transferParams().scriptHash());
+        log.info("protocolBootstrapParams.transfer().scriptHash(): {}", protocolBootstrapParams.transfer().scriptHash());
 //
 ////            // Programmable Logic Base parameterization
         var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolBootstrapParams);

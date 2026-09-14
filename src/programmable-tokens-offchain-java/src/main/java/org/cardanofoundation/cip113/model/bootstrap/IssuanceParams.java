@@ -1,5 +1,4 @@
 package org.cardanofoundation.cip113.model.bootstrap;
 
-public record IssuanceParams(TxInput txInput, String scriptHash, String alwaysFailScriptHash) {
-
+public record IssuanceParams(TxInput txInput, String policyId, String alwaysFailScriptHash) {
 }

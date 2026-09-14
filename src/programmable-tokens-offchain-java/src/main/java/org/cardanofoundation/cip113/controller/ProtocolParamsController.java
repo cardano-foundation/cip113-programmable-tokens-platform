@@ -130,8 +130,8 @@ public class ProtocolParamsController {
 
         try {
             var bootstrap = protocolBootstrapService.getProtocolBootstrapParams();
-            var defaultRegistryNodePolicyId = bootstrap.directoryMintParams().scriptHash();
-            var defaultProgLogicScriptHash = bootstrap.programmableLogicBaseParams().scriptHash();
+            var defaultRegistryNodePolicyId = bootstrap.registry().scriptHash();
+            var defaultProgLogicScriptHash = bootstrap.programmableLogicBase().scriptHash();
 
             // Already ordered by slot ascending.
             List<ProtocolParamsEntity> allParams = protocolParamsService.getAll();

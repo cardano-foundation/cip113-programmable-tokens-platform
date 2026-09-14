@@ -118,7 +118,7 @@ public class PreviewMintTest extends AbstractPreviewTest {
         // RefInput { index } = Constr 0 [Int], and the tx MUST actually carry that
         // reference input: issuance_mint resolves it with
         // `list.at(self.reference_inputs, index)`. Sole reference input ⇒ index 0.
-        var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+        var directorySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
         var registryAddress = AddressProvider.getEntAddress(directorySpendContract, network);
         var progTokenRegistry = utxoProvider.findUtxos(registryAddress.getAddress()).stream()
                 .filter(utxo -> registryNodeParser.parse(utxo.getInlineDatum())
@@ -152,7 +152,7 @@ public class PreviewMintTest extends AbstractPreviewTest {
 
         var payeeAddress = aliceAccount.getBaseAddress();
 
-        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 payeeAddress.getDelegationCredential().get(),
                 network);
 

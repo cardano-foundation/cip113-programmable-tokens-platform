@@ -74,20 +74,24 @@ public class OfflineCip68EvalTest {
         Assertions.assertNotNull(boot.registryOriginUtxo(), "registry origin node utxo must exist");
         Assertions.assertNotNull(boot.issuanceCborHexUtxo(), "issuance template utxo must exist");
 
-        // Every handler resolves the protocol by INDEX — findProtocolAndIssuanceUtxos and the
-        // dummy handler both hardcode bootstrapTxHash:0 and :2 — so the offline bootstrap's
-        // output ordering has to match the real deployment's, not merely contain the right UTxOs.
-        Assertions.assertEquals(0, boot.coordinationUtxo().getOutputIndex(),
-                "handlers read the coordination UTxO at bootstrapTxHash:0");
+        // Schema v3 records protocol state explicitly; consumers must follow this coordinate
+        // instead of assuming a bootstrap output position.
+        Assertions.assertEquals(boot.coordinationUtxo().getTxHash(),
+                boot.params().protocolParams().utxo().txHash());
+        Assertions.assertEquals(boot.coordinationUtxo().getOutputIndex(),
+                boot.params().protocolParams().utxo().outputIndex());
         Assertions.assertEquals(2, boot.issuanceCborHexUtxo().getOutputIndex(),
-                "handlers read the issuance template at bootstrapTxHash:2");
+                "the SDK alpha.4 state transaction emits issuance CBOR after params and registry");
+
+        Assertions.assertNotEquals(boot.params().protocolParams().txInput(),
+                boot.params().upgradeMultisig().txInput(),
+                "protocol params and upgrade multisig require distinct one-shot inputs");
+        Assertions.assertNotNull(boot.plgRefUtxo());
+        Assertions.assertNotNull(boot.issuanceLogicRefUtxo());
+        Assertions.assertNotNull(boot.upgradeMultisigRefUtxo());
 
         var adminUtxos = chain.utxosAt(BootstrapFixture.ADMIN.baseAddress());
-        Assertions.assertFalse(adminUtxos.isEmpty(), "admin must still hold change + re-fragmented outputs");
-        for (var u : adminUtxos) {
-            Assertions.assertEquals(boot.params().txHash(), u.getTxHash(),
-                    "every admin utxo must now come from the bootstrap tx (seeds were spent)");
-        }
+        Assertions.assertFalse(adminUtxos.isEmpty(), "admin must retain change across the split bootstrap");
     }
 
     // ------------------------------------------------------------------ dummy substandard
@@ -964,7 +968,7 @@ public class OfflineCip68EvalTest {
         // still use it, because the reference NFT is a token of this policy and CIP-113
         // confines those to the base — so the assertion below is now pinning OUR choice
         // rather than the substandard's requirement.)
-        var plb = boot.params().programmableLogicBaseParams().scriptHash();
+        var plb = boot.params().programmableLogicBase().scriptHash();
         var adminCredentialHash = HexUtil.encodeHexString(
                 new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
                         .getPaymentCredentialHash().orElseThrow());
@@ -1317,7 +1321,7 @@ public class OfflineCip68EvalTest {
                 policyId, metadata != null, quantity);
 
         return new FesResult(attempt.chain(), tx, policyId,
-                attempt.boot().params().programmableLogicBaseParams().scriptHash(),
+                attempt.boot().params().programmableLogicBase().scriptHash(),
                 attempt.handler(), attempt.boot().params());
     }
 
@@ -1346,6 +1350,8 @@ public class OfflineCip68EvalTest {
         Mockito.when(utxoProvider.findUtxo(Mockito.anyString(), Mockito.anyInt()))
                 .thenAnswer(inv -> chain.utxoSupplier()
                         .getTxOutput(inv.getArgument(0), inv.getArgument(1)));
+        Mockito.when(utxoProvider.findIssuanceCborHexUtxo(Mockito.any()))
+                .thenReturn(java.util.Optional.of(boot.issuanceCborHexUtxo()));
         Mockito.when(utxoProvider.findUtxos(Mockito.anyString()))
                 .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
 
@@ -1641,10 +1647,12 @@ public class OfflineCip68EvalTest {
      * failure mode — which is precisely why the H3 test re-stubs it.
      */
     private static org.cardanofoundation.cip113.service.UtxoProvider rwaTokenUtxoProvider(
-            OfflineChain chain) {
+            OfflineChain chain, BootstrapFixture.Bootstrapped boot) {
         var utxoProvider = Mockito.mock(org.cardanofoundation.cip113.service.UtxoProvider.class);
         Mockito.when(utxoProvider.findUtxo(Mockito.anyString(), Mockito.anyInt()))
                 .thenAnswer(inv -> chain.utxoSupplier().getTxOutput(inv.getArgument(0), inv.getArgument(1)));
+        Mockito.when(utxoProvider.findIssuanceCborHexUtxo(Mockito.any()))
+                .thenReturn(java.util.Optional.of(boot.issuanceCborHexUtxo()));
         Mockito.when(utxoProvider.findUtxos(Mockito.anyString()))
                 .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
         // Linked-list anchors (denylist, power users) are found BY POLICY, not by unit —
@@ -1743,7 +1751,7 @@ public class OfflineCip68EvalTest {
         var registrations = new java.util.HashMap<String,
                 org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity>();
 
-        var utxoProvider = rwaTokenUtxoProvider(chain);
+        var utxoProvider = rwaTokenUtxoProvider(chain, boot);
         var registrationRepository = rwaTokenRegistrationRepository(registrations);
 
         // The chain orchestrator builds genesis → AddPowerUser → registration back-to-back with
@@ -1911,10 +1919,14 @@ public class OfflineCip68EvalTest {
             throws Exception {
         var registrySpendHash = HexUtil.encodeHexString(boot.registrySpend().getScriptHash());
         var registryAddress = boot.registryOriginUtxo().getAddress();
+        var issuanceUtxoProvider = Mockito.mock(org.cardanofoundation.cip113.service.UtxoProvider.class);
+        Mockito.when(issuanceUtxoProvider.findIssuanceCborHexUtxo(Mockito.any()))
+                .thenReturn(java.util.Optional.of(boot.issuanceCborHexUtxo()));
         return new DummySubstandardHandler(
                 HandlerFixtures.OBJECT_MAPPER,
                 HandlerFixtures.NETWORK,
                 HandlerFixtures.utxoRepository(chain, registryAddress, registrySpendHash),
+                issuanceUtxoProvider,
                 new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
                 Mockito.mock(AccountService.class),
                 HandlerFixtures.substandardService(),
@@ -2096,6 +2108,6 @@ public class OfflineCip68EvalTest {
                 policyId, metadata != null, quantity);
 
         return new DummyResult(chain, tx, policyId,
-                boot.params().programmableLogicBaseParams().scriptHash());
+                boot.params().programmableLogicBase().scriptHash());
     }
 }

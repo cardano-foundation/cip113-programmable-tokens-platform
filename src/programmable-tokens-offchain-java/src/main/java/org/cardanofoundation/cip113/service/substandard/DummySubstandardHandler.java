@@ -47,6 +47,7 @@ import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryReposito
 import org.cardanofoundation.cip113.service.AccountService;
 import org.cardanofoundation.cip113.service.ProtocolScriptBuilderService;
 import org.cardanofoundation.cip113.service.SubstandardService;
+import org.cardanofoundation.cip113.service.UtxoProvider;
 import org.cardanofoundation.cip113.service.substandard.capabilities.BasicOperations;
 import org.cardanofoundation.cip113.util.Cip68;
 import com.bloxbean.cardano.client.api.ProtocolParamsSupplier;
@@ -80,6 +81,8 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
     private final AppConfig.Network network;
 
     private final UtxoRepository utxoRepository;
+
+    private final UtxoProvider utxoProvider;
 
     private final RegistryNodeParser registryNodeParser;
 
@@ -198,13 +201,13 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
 
         try {
 
-            var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+            var directorySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
 
             var bootstrapTxHash = protocolBootstrapParams.txHash();
 
             var protocolParamsUtxoOpt = utxoRepository.findById(UtxoId.builder()
-                    .txHash(bootstrapTxHash)
-                    .outputIndex(0)
+                    .txHash(protocolBootstrapParams.protocolParams().utxo().txHash())
+                    .outputIndex(protocolBootstrapParams.protocolParams().utxo().outputIndex())
                     .build());
 
             if (protocolParamsUtxoOpt.isEmpty()) {
@@ -216,10 +219,10 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             var directorySpendContractAddress = AddressProvider.getEntAddress(directorySpendContract, network.getCardanoNetwork());
             log.info("directorySpendContractAddress: {}", directorySpendContractAddress.getAddress());
 
-            var directoryMintContract = protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolBootstrapParams);
+            var directoryMintContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
             var directoryMintPolicyId = directoryMintContract.getPolicyId();
 
-            var issuanceUtxoOpt = utxoRepository.findById(UtxoId.builder().txHash(bootstrapTxHash).outputIndex(2).build());
+            var issuanceUtxoOpt = utxoProvider.findIssuanceCborHexUtxo(protocolBootstrapParams);
             if (issuanceUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve issuance params");
             }
@@ -360,7 +363,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                         Credential.fromScript(substandardIssueContract.getScriptHash()),
                         Credential.fromScript(substandardTransferContract.getScriptHash()),
                         Credential.fromScript(thirdPartyScriptHash.isEmpty()
-                                ? protocolBootstrapParams.issuanceParams().alwaysFailScriptHash()
+                                ? protocolBootstrapParams.issuance().alwaysFailScriptHash()
                                 : thirdPartyScriptHash),
                         RegistryNode.EMPTY_VKEY,
                         "");
@@ -428,7 +431,22 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 // look at shifts from 2 to 3. Getting this wrong makes issuance_mint read the
                 // wrong output and trap, which is why it is derived rather than written twice.
                 var registryNodeOutputIndex = cip68Metadata == null ? 2 : 3;
-                var issuanceRedeemer = CoreRedeemers.mintProofOutputIndex(registryNodeOutputIndex);
+                var paramsRefInput = TransactionInput.builder()
+                        .transactionId(protocolParamsUtxo.getTxHash()).index(protocolParamsUtxo.getOutputIndex()).build();
+                var issuanceCborRefInput = TransactionInput.builder()
+                        .transactionId(issuanceUtxo.getTxHash()).index(issuanceUtxo.getOutputIndex()).build();
+                var issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolBootstrapParams);
+                var issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
+                var issuanceLogicAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
+                var substandardIssueCredential = Credential.fromScript(substandardIssueContract.getScriptHash());
+                var issuanceLayout = CoreLayout.builder()
+                        .referenceInput(paramsRefInput).referenceInput(issuanceCborRefInput)
+                        .withdrawal(issuanceLogicCredential).withdrawal(substandardIssueCredential).build();
+                var registryProof = CoreRedeemers.mintProofOutputIndex(registryNodeOutputIndex);
+                var issuanceRedeemer = CoreRedeemers.issuanceRedeemer(
+                        issuanceLayout.referenceInputIndex(paramsRefInput));
+                var issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                        new CoreRedeemers.IssuanceEntry(issuanceContract.getPolicyId(), registryProof)));
 
                 // Programmable Token Mint
                 var programmableToken = Asset.builder()
@@ -451,7 +469,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
 
                 var payeeAddress = new Address(payee);
 
-                var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+                var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                         payeeAddress.getDelegationCredential().get(),
                         network.getCardanoNetwork());
 
@@ -466,7 +484,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                             .build();
                     var issuerAddress = new Address(registerTokenRequest.getFeePayerAddress());
                     referenceTokenAddress = AddressProvider.getBaseAddress(
-                            Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+                            Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                             issuerAddress.getDelegationCredential().orElseThrow(() -> new IllegalArgumentException(
                                     "CIP-68 needs the issuer's stake credential to place the reference token — "
                                     + "feePayerAddress must be a base address")),
@@ -494,7 +512,6 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                 var tx = new Tx()
                         .collectFrom(registrarUtxos)
                         .collectFrom(directoryUtxo, CoreRedeemers.registrySpend())
-                        .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(100))
                         // Mint Token
                         .mintAsset(issuanceContract, mintedAssets, issuanceRedeemer)
                         // Redeemer is DirectoryInit (constr(0))
@@ -513,17 +530,18 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                         .payToContract(directorySpendContractAddress.getAddress(), ValueUtil.toAmountList(directorySpendValue), directorySpendDatum.toPlutusData())
                         // Directory Params
                         .payToContract(directorySpendContractAddress.getAddress(), ValueUtil.toAmountList(directoryMintValue), directoryMintDatum.toPlutusData())
-                        .readFrom(TransactionInput.builder()
-                                        .transactionId(protocolParamsUtxo.getTxHash())
-                                        .index(protocolParamsUtxo.getOutputIndex())
-                                        .build(),
-                                TransactionInput.builder()
-                                        .transactionId(issuanceUtxo.getTxHash())
-                                        .index(issuanceUtxo.getOutputIndex())
-                                        .build())
+                        .readFrom(issuanceLayout.referenceInputs().toArray(new TransactionInput[0]))
                         .attachSpendingValidator(directorySpendContract)
+                        .attachRewardValidator(issuanceLogic)
                         .attachRewardValidator(substandardIssueContract)
                         .withChangeAddress(registerTokenRequest.getFeePayerAddress());
+
+                for (var withdrawal : issuanceLayout.inWithdrawalOrder(List.of(
+                        new CoreWithdrawal(substandardIssueCredential, substandardIssueAddress.getAddress(), BigIntPlutusData.of(100)),
+                        new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(), issuanceLogicRedeemer)),
+                        CoreWithdrawal::credential)) {
+                    tx.withdraw(withdrawal.rewardAddress(), BigInteger.ZERO, withdrawal.redeemer());
+                }
 
                 var transaction = quickTxBuilder.compose(tx)
 //                    .withSigner(SignerProviders.signerFrom(adminAccount))
@@ -700,7 +718,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             }
 
             // Find the registry node for this token (must exist for subsequent mint)
-            var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+            var directorySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
             var registryEntries = utxoRepository.findUnspentByOwnerPaymentCredential(directorySpendContract.getPolicyId(), Pageable.unpaged());
             var progTokenRegistryOpt = registryEntries.stream()
                     .flatMap(Collection::stream)
@@ -723,11 +741,27 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             // will present them -- not the order they were added here. CoreLayout owns that
             // ordering; see its javadoc for why it cannot be computed locally once the
             // transaction carries more than one reference input.
+            var paramsUtxoOpt = utxoRepository.findById(UtxoId.builder()
+                    .txHash(protocolBootstrapParams.protocolParams().utxo().txHash())
+                    .outputIndex(protocolBootstrapParams.protocolParams().utxo().outputIndex()).build());
+            if (paramsUtxoOpt.isEmpty()) {
+                return TransactionContext.typedError("could not resolve protocol params UTxO");
+            }
+            var paramsUtxo = UtxoUtil.toUtxo(paramsUtxoOpt.get());
+            var paramsRefInput = TransactionInput.builder()
+                    .transactionId(paramsUtxo.getTxHash()).index(paramsUtxo.getOutputIndex()).build();
+            var issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolBootstrapParams);
+            var issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
+            var issuanceLogicAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
+            var substandardIssueCredential = Credential.fromScript(substandardIssueContract.getScriptHash());
             var layout = CoreLayout.builder()
-                    .referenceInput(registryRefInput)
-                    .build();
+                    .referenceInput(paramsRefInput).referenceInput(registryRefInput)
+                    .withdrawal(issuanceLogicCredential).withdrawal(substandardIssueCredential).build();
 
-            var issuanceRedeemer = CoreRedeemers.mintProofRefInput(layout.referenceInputIndex(registryRefInput));
+            var registryProof = CoreRedeemers.mintProofRefInput(layout.referenceInputIndex(registryRefInput));
+            var issuanceRedeemer = CoreRedeemers.issuanceRedeemer(layout.referenceInputIndex(paramsRefInput));
+            var issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                    new CoreRedeemers.IssuanceEntry(issuanceContract.getPolicyId(), registryProof)));
 
             // Programmable Token Mint
             var programmableToken = Asset.builder()
@@ -750,18 +784,24 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
 
             var recipientAddress = new Address(recipient);
 
-            var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+            var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                     recipientAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
             var tx = new Tx()
                     .collectFrom(feePayerUtxos)
-                    .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(100))
                     .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
                     .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(progammableTokenValue), CoreDatums.programmableTokenDatum())
-                    .readFrom(registryRefInput)
+                    .readFrom(layout.referenceInputs().toArray(new TransactionInput[0]))
+                    .attachRewardValidator(issuanceLogic)
                     .attachRewardValidator(substandardIssueContract)
                     .withChangeAddress(mintTokenRequest.feePayerAddress());
+
+            layout.inWithdrawalOrder(List.of(
+                            new CoreWithdrawal(substandardIssueCredential, substandardIssueAddress.getAddress(), BigIntPlutusData.of(100)),
+                            new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(), issuanceLogicRedeemer)),
+                            CoreWithdrawal::credential)
+                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
 
             var transaction = quickTxBuilder.compose(tx)
                     .feePayer(mintTokenRequest.feePayerAddress())
@@ -826,7 +866,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             }
 
             // Directory SPEND parameterization
-            var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+            var directorySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
             log.info("directorySpendContract: {}", HexUtil.encodeHexString(directorySpendContract.getScriptHash()));
 
             var registryEntries = utxoRepository.findUnspentByOwnerPaymentCredential(directorySpendContract.getPolicyId(), Pageable.unpaged());
@@ -847,8 +887,8 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             var progTokenRegistry = progTokenRegistryOpt.get();
 
             var protocolParamsUtxoOpt = utxoRepository.findById(UtxoId.builder()
-                    .txHash(bootstrapTxHash)
-                    .outputIndex(0)
+                    .txHash(protocolBootstrapParams.protocolParams().utxo().txHash())
+                    .outputIndex(protocolBootstrapParams.protocolParams().utxo().outputIndex())
                     .build());
 
             if (protocolParamsUtxoOpt.isEmpty()) {
@@ -859,12 +899,12 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             log.info("protocolParamsUtxo: {}", protocolParamsUtxo);
 
             var senderAddress = new Address(transferTokenRequest.senderAddress());
-            var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+            var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                     senderAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
             var recipientAddress = new Address(transferTokenRequest.recipientAddress());
-            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                     recipientAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
@@ -895,6 +935,10 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             var coreTransfer = protocolScriptBuilderService.getParameterizedTransferScript(protocolBootstrapParams);
             var coreTransferAddress = AddressProvider.getRewardAddress(coreTransfer, network.getCardanoNetwork());
             var coreTransferCredential = Credential.fromScript(coreTransfer.getScriptHash());
+
+            var dispatcher = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolBootstrapParams);
+            var dispatcherAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
+            var dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
 
 //            // Programmable Logic Base parameterization
             var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolBootstrapParams);
@@ -946,6 +990,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                     .referenceInput(protocolParamsRefInput)
                     .referenceInput(progTokenRegistryRefInput)
                     .withdrawal(coreTransferCredential)
+                    .withdrawal(dispatcherCredential)
                     .withdrawal(substandardTransferCredential)
                     .build();
 
@@ -954,13 +999,13 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             // programmable_logic_base runs once per spent programmable input. Its redeemer picks
             // the delegate arm and witnesses where that delegate sits in the withdrawal map, so
             // PLB can resolve it by index instead of scanning -- a cost paid per input.
-            var baseSpendRedeemer = CoreRedeemers.spendViaTransfer(
-                    paramsIdx, layout.withdrawalIndex(coreTransferCredential));
+            var baseSpendRedeemer = CoreRedeemers.baseSpend(
+                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
 
             // One registry proof per distinct spent policy, ascending by policy. This transfer
             // moves a single policy, so there is exactly one -- but the shape is a list because
             // the validator walks spent policies and proofs in lockstep.
-            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(paramsIdx, List.of(
+            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(List.of(
                     CoreRedeemers.tokenExists(layout.referenceInputIndex(progTokenRegistryRefInput))));
 
             var inputUtxos = senderProgTokensUtxos.stream()
@@ -993,6 +1038,8 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
             layout.inWithdrawalOrder(
                             List.of(new CoreWithdrawal(substandardTransferCredential, substandardTransferAddress.getAddress(),
                                             BigIntPlutusData.of(200)),
+                                    new CoreWithdrawal(dispatcherCredential, dispatcherAddress.getAddress(),
+                                            CoreRedeemers.dispatchTransfer()),
                                     new CoreWithdrawal(coreTransferCredential, coreTransferAddress.getAddress(),
                                             coreTransferRedeemer)),
                             CoreWithdrawal::credential)
@@ -1008,6 +1055,7 @@ public class DummySubstandardHandler implements SubstandardHandler, BasicOperati
                             .index(progTokenRegistry.getOutputIndex())
                             .build())
                     .attachRewardValidator(coreTransfer)
+                    .attachRewardValidator(dispatcher)
                     .attachRewardValidator(substandardTransferContract)
                     .attachSpendingValidator(programmableLogicBase) // base
                     .withChangeAddress(senderAddress.getAddress());

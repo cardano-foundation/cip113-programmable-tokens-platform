@@ -6,12 +6,14 @@ import com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService;
 import com.bloxbean.cardano.yaci.store.utxo.storage.impl.model.UtxoId;
 import com.bloxbean.cardano.yaci.store.utxo.storage.impl.repository.UtxoRepository;
 import com.easy1staking.cardano.util.UtxoUtil;
+import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import jakarta.annotation.Nullable;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -71,6 +73,28 @@ public class UtxoProvider {
                     .map(UtxoUtil::toUtxo);
         }
 
+    }
+
+    /** Locate the alpha.4 IssuanceCborHex state by its one-shot NFT, not by an
+     * unverified output position in the bootstrap transaction. */
+    public Optional<Utxo> findIssuanceCborHexUtxo(ProtocolBootstrapParams deployment) {
+        String assetNameHex = com.bloxbean.cardano.client.util.HexUtil.encodeHexString(
+                "IssuanceCborHex".getBytes(StandardCharsets.UTF_8));
+        String unit = deployment.issuance().policyId() + assetNameHex;
+
+        Optional<Utxo> indexed = findUtxoByAsset(deployment.issuance().policyId(), assetNameHex);
+        if (indexed.isPresent()) {
+            return indexed;
+        }
+
+        // Yaci Store currently exposes the UTxO itself but can return an empty result from
+        // /assets/{unit}/addresses. Alpha.4's bootstrap topology records the state transaction
+        // and emits IssuanceCborHex at output 2, so use that as a discovery fallback only after
+        // verifying the NFT identity. This is deliberately not a blind positional lookup.
+        return findUtxo(deployment.txHash(), 2)
+                .filter(utxo -> utxo.getAmount().stream()
+                        .anyMatch(amount -> unit.equalsIgnoreCase(amount.getUnit())
+                                && amount.getQuantity().signum() > 0));
     }
 
     public List<Utxo> findUtxos(String address) {

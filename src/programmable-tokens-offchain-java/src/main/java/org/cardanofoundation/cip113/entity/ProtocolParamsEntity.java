@@ -49,10 +49,19 @@ public class ProtocolParamsEntity {
     private String thirdPartyCred;
 
     @Column(length = 56)
+    private String programmableLogicGlobalCred;
+
+    @Column(length = 56)
+    private String issuanceLogicCred;
+
+    @Column(length = 56)
     private String unfrackingCred;
 
     @Column(length = 56)
     private String upgradeCred;
+
+    @Column(length = 56)
+    private String pendingUpgradeCred;
 
     /** Field 6: the bound on inline datums of holder-created programmable outputs. */
     @Column

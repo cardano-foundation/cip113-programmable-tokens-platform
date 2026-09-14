@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 
@@ -63,7 +64,9 @@ public class DevnetRwaTokenPathsTest {
     private static final String BOOTSTRAP_TXHASH = System.getenv("CIP113_BOOTSTRAP_TXHASH");
 
     private static final String BASE_ASSET_NAME_HEX =
-            HexUtil.encodeHexString("DevnetRwa".getBytes());
+            HexUtil.encodeHexString(("DevnetRwa"
+                    + System.getenv().getOrDefault("CIP113_DEVNET_RUN_ID", ""))
+                    .getBytes(StandardCharsets.UTF_8));
 
     private static final org.cardanofoundation.cip113.model.Cip68Metadata METADATA =
             new org.cardanofoundation.cip113.model.Cip68Metadata(

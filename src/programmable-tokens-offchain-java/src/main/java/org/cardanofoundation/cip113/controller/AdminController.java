@@ -369,7 +369,7 @@ public class AdminController {
         try {
 
             var userAddress = new Address(address);
-            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                     userAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 

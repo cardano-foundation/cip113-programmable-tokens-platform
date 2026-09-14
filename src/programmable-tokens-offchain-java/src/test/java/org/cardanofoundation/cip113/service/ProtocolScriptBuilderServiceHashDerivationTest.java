@@ -58,14 +58,14 @@ class ProtocolScriptBuilderServiceHashDerivationTest {
     void programmableLogicBaseHashMatchesDeploymentRecord() throws Exception {
         var script = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(params);
 
-        assertEquals(params.programmableLogicBaseParams().scriptHash(), script.getPolicyId());
+        assertEquals(params.programmableLogicBase().scriptHash(), script.getPolicyId());
     }
 
     @Test
     void transferDelegateHashMatchesDeploymentRecord() throws Exception {
         var script = protocolScriptBuilderService.getParameterizedTransferScript(params);
 
-        assertEquals(params.transferParams().scriptHash(), script.getPolicyId());
+        assertEquals(params.transfer().scriptHash(), script.getPolicyId());
     }
 
     /**
@@ -78,42 +78,42 @@ class ProtocolScriptBuilderServiceHashDerivationTest {
     void thirdPartyDelegateHashMatchesDeploymentRecord() throws Exception {
         var script = protocolScriptBuilderService.getParameterizedThirdPartyScript(params);
 
-        assertEquals(params.thirdPartyParams().scriptHash(), script.getPolicyId());
+        assertEquals(params.thirdParty().scriptHash(), script.getPolicyId());
     }
 
     @Test
     void unfrackingDelegateHashMatchesDeploymentRecord() throws Exception {
         var script = protocolScriptBuilderService.getParameterizedUnfrackingScript(params);
 
-        assertEquals(params.unfrackingParams().scriptHash(), script.getPolicyId());
+        assertEquals(params.unfracking().scriptHash(), script.getPolicyId());
     }
 
     @Test
     void registryMintHashMatchesDeploymentRecord() throws Exception {
-        var script = protocolScriptBuilderService.getParameterizedDirectoryMintScript(params);
+        var script = protocolScriptBuilderService.getParameterizedRegistryScript(params);
 
-        assertEquals(params.directoryMintParams().scriptHash(), script.getPolicyId());
+        assertEquals(params.registry().scriptHash(), script.getPolicyId());
     }
 
     @Test
     void registrySpendHashMatchesDeploymentRecord() throws Exception {
-        var script = protocolScriptBuilderService.getParameterizedDirectorySpendScript(params);
+        var script = protocolScriptBuilderService.getParameterizedRegistryScript(params);
 
-        assertEquals(params.directorySpendParams().scriptHash(), script.getPolicyId());
+        assertEquals(params.registry().scriptHash(), script.getPolicyId());
     }
 
     @Test
     void issuanceCborHexMintHashMatchesDeploymentRecord() throws Exception {
         var script = protocolScriptBuilderService.getParameterizedIssuanceCborHexMintScript(params);
 
-        assertEquals(params.issuanceParams().scriptHash(), script.getPolicyId());
+        assertEquals(params.issuance().policyId(), script.getPolicyId());
     }
 
     @Test
     void protocolParamsMintHashMatchesDeploymentRecord() throws Exception {
-        var script = protocolScriptBuilderService.getParameterizedProtocolParamsMintScript(params);
+        var script = protocolScriptBuilderService.getParameterizedProtocolParamsScript(params);
 
-        assertEquals(params.protocolParams().scriptHash(), script.getPolicyId());
+        assertEquals(params.protocolParams().policyId(), script.getPolicyId());
     }
 
     /**
@@ -139,7 +139,7 @@ class ProtocolScriptBuilderServiceHashDerivationTest {
      * {@code registry_mint} refuses for every registration made against it.
      */
     @Test
-    void issuanceMintAppliesFourParametersInOrder() throws Exception {
+    void issuanceMintAppliesTwoParametersInOrder() throws Exception {
         var substandardIssueScript = protocolScriptBuilderService.getParameterizedAlwaysFailScript("deadbeef");
 
         var script = protocolScriptBuilderService.getParameterizedIssuanceMintScript(params, substandardIssueScript);
@@ -150,13 +150,7 @@ class ProtocolScriptBuilderServiceHashDerivationTest {
 
         assertEquals(2, parts.length,
                 "substandard credential must appear exactly once in the applied issuance_mint body");
-        assertTrue(parts[1].contains(params.protocolParams().scriptHash()),
-                "params_policy (the protocol-params NFT policy) must be applied after "
-                        + "minting_logic_cred — its bytes should appear in the postfix following "
-                        + "the substandard credential");
-        assertTrue(!parts[1].contains(params.transferParams().scriptHash()),
-                "the 4th parameter must be the params policy, NOT the transfer delegate's "
-                        + "credential — that is the pre-split shape, and applying it still yields a "
-                        + "valid script under a policy id no registration can match");
+        assertTrue(parts[1].contains(params.protocolParams().policyId()),
+                "alpha.4 params_policy must follow the minting_logic_cred");
     }
 }

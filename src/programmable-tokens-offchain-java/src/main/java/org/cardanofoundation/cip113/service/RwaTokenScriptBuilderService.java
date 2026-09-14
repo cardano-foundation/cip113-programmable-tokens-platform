@@ -158,7 +158,7 @@ public class RwaTokenScriptBuilderService {
                                                String powerUsersPolicyId,
                                                String denylistPolicyId,
                                                ProtocolBootstrapParams protocolParams) {
-        String registryPolicyId = protocolParams.directoryMintParams().scriptHash();
+        String registryPolicyId = protocolParams.registry().scriptHash();
         // programmable_logic_base's hash is deliberately NOT read here any more. The
         // 2026-08-21 upstream dropped it from all three validators that took it: CIP-113's
         // base layer already confines the token to that credential, so re-asserting it in

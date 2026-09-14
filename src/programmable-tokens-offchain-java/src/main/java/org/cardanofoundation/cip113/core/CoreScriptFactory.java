@@ -97,33 +97,12 @@ public class CoreScriptFactory {
             // failing to hash it means that blueprint is malformed, not that this call is wrong.
             throw new IllegalStateException("could not hash the substandard minting-logic script", e);
         }
+        // alpha.4 moved the programmable-logic and registry checks into issuance_logic.
+        // issuance_mint now dispatches to the datum-selected issuance credential and needs
+        // only the per-token minting logic plus the protocol-params policy.
         var params = ListPlutusData.of(
-                // programmable_logic_base: Credential — PLB's hash, the payment credential
-                // every programmable-token UTxO lives at.
-                scriptCredential(bootstrap.programmableLogicBaseParams().scriptHash()),
-                // registry_node_cs: PolicyId — the registry_mint policy, i.e. the NFT policy
-                // that authenticates registry nodes.
-                policyId(bootstrap.directoryMintParams().scriptHash()),
-                // minting_logic_cred: Credential — the substandard's withdraw-0 minting logic.
-                // This is what binds a token's policy id to its substandard: registry_mint
-                // re-derives this policy id from the template and refuses a registration whose
-                // declared minting_logic_script does not reproduce it.
                 scriptCredential(mintingLogicHash),
-                // params_policy: PolicyId — the protocol-params NFT policy, BARE, not wrapped
-                // as a Credential.
-                //
-                // This parameter used to be `plg_stake_cred: Credential`, the coordinator's
-                // credential. Same position, same arity, different type: the old form wrapped the
-                // hash in Constr1 and this one does not. Applying the old shape to the new
-                // validator would have compiled, run, and produced a working script under a
-                // DIFFERENT policy id — mints would succeed and then fail registry checks for
-                // reasons pointing nowhere near here. CoreBlueprintSurfaceTest asserts the
-                // declared parameter TYPES for exactly this case.
-                //
-                // The change also follows the same logic as PLB's: anchoring on the params NFT
-                // instead of a delegate's hash is what lets delegates be swapped in place.
-                policyId(bootstrap.protocolParams().scriptHash())
-        );
+                policyId(bootstrap.protocolParams().policyId()));
         return apply(CoreValidator.ISSUANCE_MINT, params);
     }
 
@@ -146,36 +125,26 @@ public class CoreScriptFactory {
             // which is what makes delegates swappable without moving PLB's hash (and with it
             // every programmable token address).
             case PROGRAMMABLE_LOGIC_BASE -> ListPlutusData.of(
-                    policyId(b.programmableLogicBaseParams().protocolParamsPolicyId()));
+                    policyId(b.protocolParams().policyId()));
 
             // params_policy: PolicyId. Same anchor as PLB, for all three delegates.
             //
-            // That they take the same parameter is why the deployment must check they end up
-            // with DIFFERENT hashes: PLB's dispatch is only meaningful while transfer_cred,
-            // third_party_cred and unfracking_cred are pairwise distinct, and neither
-            // protocol_params_mint nor coordination_spend enforces that on chain. They differ
-            // here because their source differs, but a deployment that wired the same script
-            // into two fields would collapse two dispatch arms into one silently.
+            // The deployment checks that the three independently compiled delegates end up
+            // with different hashes; otherwise two dispatcher arms would collapse.
             case TRANSFER, THIRD_PARTY, UNFRACKING -> ListPlutusData.of(
-                    policyId(b.protocolParams().scriptHash()));
+                    scriptCredential(b.programmableLogicBase().scriptHash()),
+                    policyId(b.registry().scriptHash()),
+                    BigIntPlutusData.of(b.maxInlineDatumBytes()));
 
-            // utxo_ref: OutputReference, always_fail_hash: ByteArray.
-            //
-            // The second parameter is now declared `coordination_addr_hash` (it was
-            // `always_fail_hash`, a name left over from when the params NFT was locked at an
-            // unspendable script). Only the NAME moved: since the upgradability work the NFT
-            // has been locked at coordination_spend so it can be spent to rewrite the live
-            // wiring, and the bootstrap record's `alwaysFailScriptHash` field already holds
-            // that coordination hash. The field name in the bootstrap JSON is the stale one
-            // now; renaming it is a deployment-record migration, not a contract change.
-            case PROTOCOL_PARAMS_MINT -> ListPlutusData.of(
-                    outputReference(b.protocolParams().txInput()),
-                    BytesPlutusData.of(HexUtil.decodeHexString(b.protocolParams().alwaysFailScriptHash())));
+            // utxo_ref: OutputReference. The merged validator is both the one-shot policy and
+            // the spend credential holding the live six-field protocol-params datum.
+            case PROTOCOL_PARAMS -> ListPlutusData.of(
+                    outputReference(b.protocolParams().txInput()));
 
             // utxo_ref: OutputReference, always_fail_hash: ByteArray.
             case ISSUANCE_CBOR_HEX_MINT -> ListPlutusData.of(
-                    outputReference(b.issuanceParams().txInput()),
-                    BytesPlutusData.of(HexUtil.decodeHexString(b.issuanceParams().alwaysFailScriptHash())));
+                    outputReference(b.issuance().txInput()),
+                    BytesPlutusData.of(HexUtil.decodeHexString(b.issuance().alwaysFailScriptHash())));
 
             // utxo_ref: OutputReference, issuance_cbor_hex_cs: PolicyId, registry_spend_cred: Credential.
             //
@@ -186,25 +155,23 @@ public class CoreScriptFactory {
             // issuanceParams.scriptHash, and ProtocolScriptBuilderServiceHashDerivationTest
             // pins that value as issuance_cbor_hex_mint's own policy id, which is what makes
             // this reading provable rather than inferred.
-            case REGISTRY_MINT -> ListPlutusData.of(
-                    outputReference(b.directoryMintParams().txInput()),
-                    policyId(b.directoryMintParams().issuanceScriptHash()),
-                    scriptCredential(b.directorySpendParams().scriptHash()));
+            case REGISTRY -> ListPlutusData.of(
+                    outputReference(b.registry().txInput()),
+                    policyId(b.registry().issuanceScriptHash()));
 
-            // protocol_params_cs: PolicyId.
-            case REGISTRY_SPEND -> ListPlutusData.of(
-                    policyId(b.protocolParams().scriptHash()));
+            case PROGRAMMABLE_LOGIC_GLOBAL -> ListPlutusData.of(
+                    policyId(b.transfer().scriptHash()),
+                    policyId(b.thirdParty().scriptHash()),
+                    policyId(b.unfracking().scriptHash()));
 
-            // nonce: ByteArray — gives each deployment its own coordination address.
-            case COORDINATION_SPEND -> ListPlutusData.of(
-                    BytesPlutusData.of(HexUtil.decodeHexString(b.coordinationParams().nonce())));
+            case ISSUANCE_LOGIC -> ListPlutusData.of(
+                    scriptCredential(b.programmableLogicBase().scriptHash()),
+                    policyId(b.registry().scriptHash()),
+                    policyId(b.protocolParams().policyId()),
+                    BigIntPlutusData.of(b.maxInlineDatumBytes()));
 
-            // signers: List<VerificationKeyHash>, threshold: Int.
             case UPGRADE_MULTISIG -> ListPlutusData.of(
-                    ListPlutusData.of(b.upgradeMultisigParams().signers().stream()
-                            .map(s -> (PlutusData) BytesPlutusData.of(HexUtil.decodeHexString(s)))
-                            .toArray(PlutusData[]::new)),
-                    BigIntPlutusData.of(b.upgradeMultisigParams().threshold()));
+                    outputReference(b.upgradeMultisig().txInput()));
 
             case ISSUANCE_MINT, ALWAYS_FAIL -> throw new IllegalStateException(
                     "handled by dedicated methods: " + validator);

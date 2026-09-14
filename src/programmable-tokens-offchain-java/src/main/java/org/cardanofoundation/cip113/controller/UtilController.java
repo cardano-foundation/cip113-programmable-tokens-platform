@@ -35,7 +35,7 @@ public class UtilController {
 
         var protocolBootstrapParams = protocolBootstrapService.getProtocolBootstrapParams();
 
-        var registryPaymentScriptHash = protocolBootstrapParams.directorySpendParams().scriptHash();
+        var registryPaymentScriptHash = protocolBootstrapParams.registry().scriptHash();
         var registryUtxos = utxoProvider.findUtxosByPaymentPkh(registryPaymentScriptHash);
         registryUtxos.forEach(utxo -> log.info("registry utxo: {}", utxo));
 
@@ -45,7 +45,7 @@ public class UtilController {
                 .filter(key -> !"".equals(key))
                 .toList();
 
-        var programmableLogicBaseScriptHash = protocolBootstrapParams.programmableLogicBaseParams().scriptHash();
+        var programmableLogicBaseScriptHash = protocolBootstrapParams.programmableLogicBase().scriptHash();
 
         var allProgTokensUtxos = utxoProvider.findUtxosByPaymentPkh(programmableLogicBaseScriptHash);
         allProgTokensUtxos.forEach(utxo -> log.info("prog token utxo: {}", utxo));

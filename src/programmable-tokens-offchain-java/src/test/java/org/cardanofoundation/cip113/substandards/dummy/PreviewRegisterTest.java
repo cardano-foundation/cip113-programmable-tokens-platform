@@ -120,7 +120,7 @@ public class PreviewRegisterTest extends AbstractPreviewTest {
 
         var bootstrapTxHash = protocolBootstrapParams.txHash();
 
-        var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+        var directorySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
 
         var protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
         if (protocolParamsUtxoOpt.isEmpty()) {
@@ -190,7 +190,7 @@ public class PreviewRegisterTest extends AbstractPreviewTest {
         var existingRegistryNodeDatum = existingRegistryNodeDatumOpt.get();
 
         // Directory MINT - NFT, address, datum and value
-        var directoryMintContract = protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolBootstrapParams);
+        var directoryMintContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
         var directoryMintPolicyId = directoryMintContract.getPolicyId();
 
         // types.RegistryInsert { key: ByteArray, minting_logic_script: Credential }.
@@ -237,7 +237,7 @@ public class PreviewRegisterTest extends AbstractPreviewTest {
                 existingRegistryNodeDatum.next(),
                 Credential.fromScript(substandardIssueContract.getScriptHash()),
                 Credential.fromScript(substandardTransferContract.getScriptHash()),
-                Credential.fromScript(protocolBootstrapParams.issuanceParams().alwaysFailScriptHash()),
+                Credential.fromScript(protocolBootstrapParams.issuance().alwaysFailScriptHash()),
                 RegistryNode.EMPTY_VKEY,
                 "");
         log.info("directoryMintDatum: {}", directoryMintDatum);
@@ -290,7 +290,7 @@ public class PreviewRegisterTest extends AbstractPreviewTest {
 
         var payeeAddress = new Address(payee);
 
-        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 payeeAddress.getDelegationCredential().get(),
                 network);
 
@@ -389,7 +389,7 @@ public class PreviewRegisterTest extends AbstractPreviewTest {
         var issuanceContract = protocolScriptBuilderService.getParameterizedIssuanceMintScript(protocolBootstrapParams, substandardIssueContract);
         final var progTokenPolicyId = issuanceContract.getPolicyId();
 
-        var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+        var directorySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
         var registryAddress = AddressProvider.getEntAddress(directorySpendContract, network);
         var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
 
@@ -425,7 +425,7 @@ public class PreviewRegisterTest extends AbstractPreviewTest {
 
         var payeeAddress = new Address(issuerAccount.baseAddress());
         var targetAddress = AddressProvider.getBaseAddress(
-                Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+                Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 payeeAddress.getDelegationCredential().get(),
                 network);
 

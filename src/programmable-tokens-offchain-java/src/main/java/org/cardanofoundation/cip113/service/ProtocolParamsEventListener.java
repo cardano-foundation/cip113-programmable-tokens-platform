@@ -19,6 +19,7 @@ public class ProtocolParamsEventListener {
     private final ProtocolParamsService protocolParamsService;
     private final ProtocolParamsParser protocolParamsParser;
     private final AppConfig.ProtocolParamsConfig protocolParamsConfig;
+    private final ProtocolBootstrapService protocolBootstrapService;
 
     @EventListener
     @Transactional
@@ -43,15 +44,19 @@ public class ProtocolParamsEventListener {
                     // Parse inline datum
                     protocolParamsParser.parse(addressUtxo.getInlineDatum())
                             .ifPresentOrElse(protocolParams -> {
+                                        var deployment = protocolBootstrapService.getProtocolBootstrapParams();
                                         // Create entity and save
                                         ProtocolParamsEntity entity = ProtocolParamsEntity.builder()
-                                                .registryNodePolicyId(protocolParams.registryNodePolicyId())
-                                                .progLogicScriptHash(protocolParams.progLogicCredHex())
+                                                .registryNodePolicyId(deployment.registry().scriptHash())
+                                                .progLogicScriptHash(deployment.programmableLogicBase().scriptHash())
+                                                .programmableLogicGlobalCred(protocolParams.plgCredHex())
+                                                .issuanceLogicCred(protocolParams.issuanceLogicCredHex())
                                                 .transferCred(protocolParams.transferCredHex())
                                                 .thirdPartyCred(protocolParams.thirdPartyCredHex())
-                                                .unfrackingCred(protocolParams.unfrackingCredHex())
+                                                .unfrackingCred(deployment.unfracking().scriptHash())
                                                 .upgradeCred(protocolParams.upgradeCredHex())
-                                                .maxInlineDatumBytes(protocolParams.maxInlineDatumBytes())
+                                                .pendingUpgradeCred(protocolParams.pendingUpgradeCredHex())
+                                                .maxInlineDatumBytes(deployment.maxInlineDatumBytes())
                                                 .txHash(addressUtxo.getTxHash())
                                                 .slot(slot)
                                                 .blockHeight(blockHeight)

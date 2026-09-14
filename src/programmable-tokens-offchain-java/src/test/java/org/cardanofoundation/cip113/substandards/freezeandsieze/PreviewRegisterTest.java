@@ -100,7 +100,7 @@ public class PreviewRegisterTest extends AbstractPreviewTest implements PreviewF
 
         var bootstrapTxHash = protocolBootstrapParams.txHash();
 
-        var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+        var directorySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
 
         var protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
         if (protocolParamsUtxoOpt.isEmpty()) {
@@ -137,7 +137,7 @@ public class PreviewRegisterTest extends AbstractPreviewTest implements PreviewF
         var transferContractOpt = substandardService.getSubstandardValidator(substandardName, "example_transfer_logic.transfer.withdraw");
         var transferContract = transferContractOpt.get();
 
-        var transferContractInitParams = ListPlutusData.of(serialize(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash())),
+        var transferContractInitParams = ListPlutusData.of(serialize(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash())),
                 BytesPlutusData.of(HexUtil.decodeHexString(blacklistBoostrap.blacklistMintBootstrap().scriptHash()))
         );
 
@@ -182,7 +182,7 @@ public class PreviewRegisterTest extends AbstractPreviewTest implements PreviewF
         var existingRegistryNodeDatum = existingRegistryNodeDatumOpt.get();
 
         // Directory MINT - NFT, address, datum and value
-        var directoryMintContract = protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolBootstrapParams);
+        var directoryMintContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
         var directoryMintPolicyId = directoryMintContract.getPolicyId();
 
         // types.RegistryInsert { key: ByteArray, minting_logic_script: Credential }.
@@ -280,7 +280,7 @@ public class PreviewRegisterTest extends AbstractPreviewTest implements PreviewF
 
         var payeeAddress = new Address(payee);
 
-        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 payeeAddress.getDelegationCredential().get(),
                 network);
 

@@ -184,7 +184,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     substandardIssueContract, network.getCardanoNetwork());
 
             var substandardTransferContract = fesScriptBuilder.buildTransferScript(
-                    protocolParams.programmableLogicBaseParams().scriptHash(),
+                    protocolParams.programmableLogicBase().scriptHash(),
                     request.getBlacklistNodePolicyId());
             var substandardTransferAddress = AddressProvider.getRewardAddress(
                     substandardTransferContract, network.getCardanoNetwork());
@@ -278,9 +278,9 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
 
             var bootstrapTxHash = protocolParams.txHash();
 
-            var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+            var directorySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
 
-            var protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
+            var protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
             if (protocolParamsUtxoOpt.isEmpty()) {
                 TransactionContext.error("could not resolve protocol params");
             }
@@ -290,7 +290,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var directorySpendContractAddress = AddressProvider.getEntAddress(directorySpendContract, network.getCardanoNetwork());
             log.info("directorySpendContractAddress: {}", directorySpendContractAddress.getAddress());
 
-            var issuanceUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 2);
+            var issuanceUtxoOpt = utxoProvider.findIssuanceCborHexUtxo(protocolParams);
             if (issuanceUtxoOpt.isEmpty()) {
                 TransactionContext.error("could not resolve issuance params");
             }
@@ -367,7 +367,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
 
             // Transfer contract
             var substandardTransferContract = fesScriptBuilder.buildTransferScript(
-                    protocolParams.programmableLogicBaseParams().scriptHash(),
+                    protocolParams.programmableLogicBase().scriptHash(),
                     blacklistNodePolicyId
             );
             var substandardTransferAddress = AddressProvider.getRewardAddress(substandardTransferContract, network.getCardanoNetwork());
@@ -409,7 +409,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var existingRegistryNodeDatum = existingRegistryNodeDatumOpt.get();
 
             // Directory MINT - NFT, address, datum and value
-            var directoryMintContract = protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolParams);
+            var directoryMintContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             var directoryMintPolicyId = directoryMintContract.getPolicyId();
 
             // types.RegistryInsert { key: ByteArray, minting_logic_script: Credential }.
@@ -490,7 +490,22 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             // The registry node is the LAST output, and CIP-68 inserts the reference-token output
             // ahead of the two node outputs — so the index issuance_mint reads shifts 2 -> 3.
             var registryNodeOutputIndex = cip68Metadata == null ? 2 : 3;
-            var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(registryNodeOutputIndex)); // OutputIndex { index }
+            var paramsRefInput = TransactionInput.builder()
+                    .transactionId(protocolParamsUtxo.getTxHash()).index(protocolParamsUtxo.getOutputIndex()).build();
+            var issuanceCborRefInput = TransactionInput.builder()
+                    .transactionId(issuanceUtxo.getTxHash()).index(issuanceUtxo.getOutputIndex()).build();
+            var issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
+            var issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
+            var issuanceLogicAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
+            var substandardIssueCredential = Credential.fromScript(substandardIssueContract.getScriptHash());
+            var issuanceLayout = CoreLayout.builder()
+                    .referenceInput(paramsRefInput).referenceInput(issuanceCborRefInput)
+                    .withdrawal(issuanceLogicCredential).withdrawal(substandardIssueCredential).build();
+            var registryProof = CoreRedeemers.mintProofOutputIndex(registryNodeOutputIndex);
+            var issuanceRedeemer = CoreRedeemers.issuanceRedeemer(
+                    issuanceLayout.referenceInputIndex(paramsRefInput));
+            var issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                    new CoreRedeemers.IssuanceEntry(issuanceContract.getPolicyId(), registryProof)));
 
             // Programmable Token Mint
             var programmableToken = Asset.builder()
@@ -511,7 +526,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             log.info("request.getRecipientAddress(): {}", request.getRecipientAddress());
             var payeeAddress = new Address(request.getRecipientAddress());
 
-            var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+            var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     payeeAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
@@ -529,7 +544,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                         .build();
                 var issuerAddress = new Address(request.getFeePayerAddress());
                 referenceTokenAddress = AddressProvider.getBaseAddress(
-                        Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                        Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                         issuerAddress.getDelegationCredential().orElseThrow(() -> new IllegalArgumentException(
                                 "CIP-68 needs the issuer's stake credential to place the reference token — "
                                 + "feePayerAddress must be a base address")),
@@ -557,8 +572,6 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var tx = new Tx()
                     .collectFrom(feePayerUtxos)
                     .collectFrom(directoryUtxo, ConstrPlutusData.of(0))
-                    // No redeemer for substandard
-                    .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, ConstrPlutusData.of(0))
                     // Mint Token
                     .mintAsset(issuanceContract, mintedAssets, issuanceRedeemer)
                     // Redeemer is DirectoryInit (constr(0))
@@ -577,17 +590,18 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .payToContract(directorySpendContractAddress.getAddress(), ValueUtil.toAmountList(directorySpendValue), directorySpendDatum.toPlutusData())
                     // Directory Params
                     .payToContract(directorySpendContractAddress.getAddress(), ValueUtil.toAmountList(directoryMintValue), directoryMintDatum.toPlutusData())
-                    .readFrom(TransactionInput.builder()
-                                    .transactionId(protocolParamsUtxo.getTxHash())
-                                    .index(protocolParamsUtxo.getOutputIndex())
-                                    .build(),
-                            TransactionInput.builder()
-                                    .transactionId(issuanceUtxo.getTxHash())
-                                    .index(issuanceUtxo.getOutputIndex())
-                                    .build())
+                    .readFrom(issuanceLayout.referenceInputs().toArray(new TransactionInput[0]))
                     .attachSpendingValidator(directorySpendContract)
+                    .attachRewardValidator(issuanceLogic)
                     .attachRewardValidator(substandardIssueContract)
                     .withChangeAddress(request.getFeePayerAddress());
+
+            for (var withdrawal : issuanceLayout.inWithdrawalOrder(List.of(
+                    new CoreWithdrawal(substandardIssueCredential, substandardIssueAddress.getAddress(), ConstrPlutusData.of(0)),
+                    new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(), issuanceLogicRedeemer)),
+                    CoreWithdrawal::credential)) {
+                tx.withdraw(withdrawal.rewardAddress(), BigInteger.ZERO, withdrawal.redeemer());
+            }
 
             var firstUtxo = feePayerUtxos.getFirst();
             var transaction = quickTxBuilder.compose(tx)
@@ -684,7 +698,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
 
             var bootstrapTxHash = protocolParams.txHash();
 
-            var issuanceUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 2);
+            var issuanceUtxoOpt = utxoProvider.findIssuanceCborHexUtxo(protocolParams);
             if (issuanceUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve issuance params");
             }
@@ -705,7 +719,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             log.info("issuanceContract: {}", issuanceContract.getPolicyId());
 
             // Find the registry node for this token (must exist for subsequent mint)
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
             var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
             final var progTokenPolicyId = issuanceContract.getPolicyId();
@@ -723,16 +737,29 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .transactionId(progTokenRegistry.getTxHash())
                     .index(progTokenRegistry.getOutputIndex())
                     .build();
-            // Sole reference input, so the index is trivially 0 -- taken through CoreLayout
-            // anyway, because `indexOf` returns -1 for anything it cannot find and -1 inside a
-            // redeemer is an out-of-range read the validator reports as an unrelated failure.
-            // CoreLayout throws instead, and adding a second reference input here later will
-            // then be a change that keeps working rather than one that silently renumbers.
-            var mintLayout = CoreLayout.builder().referenceInput(registryRefInput).build();
+            var paramsUtxoOpt = utxoProvider.findUtxo(
+                    protocolParams.protocolParams().utxo().txHash(),
+                    protocolParams.protocolParams().utxo().outputIndex());
+            if (paramsUtxoOpt.isEmpty()) {
+                return TransactionContext.typedError("could not resolve protocol params UTxO");
+            }
+            var paramsUtxo = paramsUtxoOpt.get();
+            var paramsRefInput = TransactionInput.builder()
+                    .transactionId(paramsUtxo.getTxHash()).index(paramsUtxo.getOutputIndex()).build();
+            var issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
+            var issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
+            var issuanceLogicAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
+            var substandardIssueCredential = Credential.fromScript(substandardIssueContract.getScriptHash());
+            var mintLayout = CoreLayout.builder()
+                    .referenceInput(paramsRefInput).referenceInput(registryRefInput)
+                    .withdrawal(issuanceLogicCredential).withdrawal(substandardIssueCredential).build();
             var registryRefInputIndex = mintLayout.referenceInputIndex(registryRefInput);
 
-            // types.MintingRegistryProof directly (no SmartTokenMintingAction wrapper in v0.4.0).
-            var issuanceRedeemer = CoreRedeemers.mintProofRefInput(registryRefInputIndex);
+            var registryProof = CoreRedeemers.mintProofRefInput(registryRefInputIndex);
+            var issuanceRedeemer = CoreRedeemers.issuanceRedeemer(
+                    mintLayout.referenceInputIndex(paramsRefInput));
+            var issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                    new CoreRedeemers.IssuanceEntry(issuanceContract.getPolicyId(), registryProof)));
 
             // Programmable Token Mint
             var programmableToken = Asset.builder()
@@ -753,19 +780,25 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             log.info("request.getRecipientAddress(): {}", request.recipientAddress());
             var payeeAddress = new Address(request.recipientAddress());
 
-            var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+            var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     payeeAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
 
             var tx = new Tx()
                     .collectFrom(adminUtxos)
-                    .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, ConstrPlutusData.of(0))
                     .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
                     .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue), ConstrPlutusData.of(0))
-                    .readFrom(registryRefInput)
+                    .readFrom(mintLayout.referenceInputs().toArray(new TransactionInput[0]))
+                    .attachRewardValidator(issuanceLogic)
                     .attachRewardValidator(substandardIssueContract)
                     .withChangeAddress(request.feePayerAddress());
+
+            mintLayout.inWithdrawalOrder(List.of(
+                            new CoreWithdrawal(substandardIssueCredential, substandardIssueAddress.getAddress(), ConstrPlutusData.of(0)),
+                            new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(), issuanceLogicRedeemer)),
+                            CoreWithdrawal::credential)
+                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
 
             var transaction = quickTxBuilder.compose(tx)
                     .withRequiredSigners(adminPkh.getBytes())
@@ -864,9 +897,15 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var coreThirdParty = protocolScriptBuilderService.getParameterizedThirdPartyScript(protocolParams);
             var coreThirdPartyAddress = AddressProvider.getRewardAddress(coreThirdParty, network.getCardanoNetwork());
             var coreThirdPartyCredential = Credential.fromScript(coreThirdParty.getScriptHash());
+            var dispatcher = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
+            var dispatcherAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
+            var dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
+            var issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
+            var issuanceLogicAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
+            var issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
 
             // Directory SPEND parameterization
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             log.info("registrySpendContract: {}", HexUtil.encodeHexString(registrySpendContract.getScriptHash()));
 
             var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
@@ -894,7 +933,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
 
             var bootstrapTxHash = protocolParams.txHash();
 
-            var protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
+            var protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
 
             if (protocolParamsUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve protocol params");
@@ -917,6 +956,8 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .referenceInput(protocolParamsRefInput)
                     .referenceInput(registryRefInput)
                     .withdrawal(coreThirdPartyCredential)
+                    .withdrawal(dispatcherCredential)
+                    .withdrawal(issuanceLogicCredential)
                     .withdrawal(substandardIssueCredential)
                     .build();
             var sortedReferenceInputs = layout.referenceInputs();
@@ -924,16 +965,19 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var registryRefInputInex = layout.referenceInputIndex(registryRefInput);
 
             // Burn of an already-registered policy: the registry node is a reference input.
-            var issuanceRedeemer = CoreRedeemers.mintProofRefInput(registryRefInputInex);
+            var registryProof = CoreRedeemers.mintProofRefInput(registryRefInputInex);
+            var issuanceRedeemer = CoreRedeemers.issuanceRedeemer(paramsIdx);
+            var issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                    new CoreRedeemers.IssuanceEntry(assetTypeToBurn.policyId(), registryProof)));
 
             var seizeInputIndex = sortedInputUtxos.indexOf(utxoToBurn);
             log.info("seizeInputIndex: {}", seizeInputIndex);
 
             // outputs_start_idx = 0: the burned UTxO's continuation is the first output.
-            var coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(paramsIdx, registryRefInputInex, 0);
+            var coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(registryRefInputInex, 0);
 
-            var baseSpendRedeemer = CoreRedeemers.spendViaThirdParty(
-                    paramsIdx, layout.withdrawalIndex(coreThirdPartyCredential));
+            var baseSpendRedeemer = CoreRedeemers.baseSpend(
+                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
 
             var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
             log.info("programmableLogicBase policy: {}", programmableLogicBase.getPolicyId());
@@ -959,6 +1003,8 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .readFrom(sortedReferenceInputs.toArray(new TransactionInput[0]))
                     .attachSpendingValidator(programmableLogicBase)
                     .attachRewardValidator(coreThirdParty)
+                    .attachRewardValidator(dispatcher)
+                    .attachRewardValidator(issuanceLogic)
                     .attachRewardValidator(substandardIssueContract)
                     .withChangeAddress(request.feePayerAddress());
 
@@ -967,6 +1013,10 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             layout.inWithdrawalOrder(
                             List.of(new CoreWithdrawal(substandardIssueCredential, substandardIssueAddress.getAddress(),
                                             ConstrPlutusData.of(0)),
+                                    new CoreWithdrawal(dispatcherCredential, dispatcherAddress.getAddress(),
+                                            CoreRedeemers.dispatchThirdParty()),
+                                    new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(),
+                                            issuanceLogicRedeemer),
                                     new CoreWithdrawal(coreThirdPartyCredential, coreThirdPartyAddress.getAddress(),
                                             coreThirdPartyRedeemer)),
                             CoreWithdrawal::credential)
@@ -1030,7 +1080,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var amountToTransfer = new BigInteger(request.quantity());
 
             // Directory SPEND parameterization
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             log.info("registrySpendContract: {}", HexUtil.encodeHexString(registrySpendContract.getScriptHash()));
 
             var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
@@ -1054,7 +1104,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
 
             var bootstrapTxHash = protocolParams.txHash();
 
-            var protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
+            var protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
 
             if (protocolParamsUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve protocol params");
@@ -1064,11 +1114,11 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             log.info("protocolParamsUtxo: {}", protocolParamsUtxo);
 
 
-            var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+            var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     senderAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
-            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     receiverAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
@@ -1080,13 +1130,16 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var coreTransfer = protocolScriptBuilderService.getParameterizedTransferScript(protocolParams);
             var coreTransferAddress = AddressProvider.getRewardAddress(coreTransfer, network.getCardanoNetwork());
             var coreTransferCredential = Credential.fromScript(coreTransfer.getScriptHash());
+            var dispatcher = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
+            var dispatcherAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
+            var dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
 
             var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
             log.info("programmableLogicBase policy: {}", programmableLogicBase.getPolicyId());
 
             // FIXME:
             var parameterisedSubstandardTransferContract = fesScriptBuilder.buildTransferScript(
-                    protocolParams.programmableLogicBaseParams().scriptHash(),
+                    protocolParams.programmableLogicBase().scriptHash(),
                     blacklistNodePolicyId
             );
 
@@ -1160,7 +1213,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .toList();
 
             var proofs = new ArrayList<Pair<Utxo, Utxo>>();
-            var progTokenBaseScriptHash = protocolParams.programmableLogicBaseParams().scriptHash();
+            var progTokenBaseScriptHash = protocolParams.programmableLogicBase().scriptHash();
             for (Utxo utxo : sortedInputUtxos) {
                 var address = new Address(utxo.getAddress());
                 var addressPkh = address.getPaymentCredentialHash().map(HexUtil::encodeHexString).get();
@@ -1206,6 +1259,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     Credential.fromScript(parameterisedSubstandardTransferContract.getScriptHash());
             var layoutBuilder = CoreLayout.builder()
                     .withdrawal(coreTransferCredential)
+                    .withdrawal(dispatcherCredential)
                     .withdrawal(substandardTransferCredential);
             sortedReferenceInputs.forEach(layoutBuilder::referenceInput);
             var layout = layoutBuilder.build();
@@ -1221,11 +1275,11 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var freezeAndSeizeRedeemer = ListPlutusData.of();
             proofList.forEach(freezeAndSeizeRedeemer::add);
 
-            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(paramsIdx, List.of(
+            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(List.of(
                     CoreRedeemers.tokenExists(layout.referenceInputIndex(registryRefInput))));
 
-            var baseSpendRedeemer = CoreRedeemers.spendViaTransfer(
-                    paramsIdx, layout.withdrawalIndex(coreTransferCredential));
+            var baseSpendRedeemer = CoreRedeemers.baseSpend(
+                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
 
             var tx = new Tx()
                     .collectFrom(adminUtxos);
@@ -1237,6 +1291,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             // re-indexing them afterwards.
             layout.inWithdrawalOrder(
                             List.of(new CoreWithdrawal(substandardTransferCredential, substandardTransferAddress.getAddress(), freezeAndSeizeRedeemer),
+                                    new CoreWithdrawal(dispatcherCredential, dispatcherAddress.getAddress(), CoreRedeemers.dispatchTransfer()),
                                     new CoreWithdrawal(coreTransferCredential, coreTransferAddress.getAddress(), coreTransferRedeemer)),
                             CoreWithdrawal::credential)
                     .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
@@ -1247,6 +1302,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             sortedReferenceInputs.forEach(tx::readFrom);
 
             tx.attachRewardValidator(coreTransfer)
+                    .attachRewardValidator(dispatcher)
                     .attachRewardValidator(parameterisedSubstandardTransferContract)
                     .attachSpendingValidator(programmableLogicBase) // base
                     .withChangeAddress(senderAddress.getAddress());
@@ -1373,7 +1429,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             log.info("substandardIssueAddress: {}", substandardIssueAddress.getAddress());
 
             var substandardTransferContract = fesScriptBuilder.buildTransferScript(
-                    protocolParams.programmableLogicBaseParams().scriptHash(),
+                    protocolParams.programmableLogicBase().scriptHash(),
                     parameterisedBlacklistMintingScript.getPolicyId()
             );
             var substandardTransferAddress = AddressProvider.getRewardAddress(substandardTransferContract, network.getCardanoNetwork());
@@ -1740,7 +1796,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             }
 
             // Directory SPEND parameterization
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             log.info("registrySpendContract: {}", HexUtil.encodeHexString(registrySpendContract.getScriptHash()));
 
             var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
@@ -1770,7 +1826,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var registry = registryOpt.get();
             log.info("registry: {}", registry);
 
-            var protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
+            var protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
 
             if (protocolParamsUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve protocol params");
@@ -1788,12 +1844,12 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var utxoToSeize = utxoOpt.get();
 
 //            var seizedAddress = aliceAccount.getBaseAddress();
-//            var seizedProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+//            var seizedProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
 //                    seizedAddress.getDelegationCredential().get(),
 //                    network);
 
             var recipientAddress = new Address(request.destinationAddress());
-            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     recipientAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
@@ -1804,6 +1860,9 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             var coreThirdParty = protocolScriptBuilderService.getParameterizedThirdPartyScript(protocolParams);
             var coreThirdPartyAddress = AddressProvider.getRewardAddress(coreThirdParty, network.getCardanoNetwork());
             var coreThirdPartyCredential = Credential.fromScript(coreThirdParty.getScriptHash());
+            var dispatcher = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
+            var dispatcherAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
+            var dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
 
             var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
             log.info("programmableLogicBase policy: {}", programmableLogicBase.getPolicyId());
@@ -1876,6 +1935,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .referenceInput(protocolParamsRefInput)
                     .referenceInput(registryRefInput)
                     .withdrawal(coreThirdPartyCredential)
+                    .withdrawal(dispatcherCredential)
                     .withdrawal(substandardIssueAdminCredential)
                     .build();
             var sortedReferenceInputs = layout.referenceInputs();
@@ -1886,10 +1946,10 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             // CONTINUING output paired with the seized input. third_party pairs every acted-on
             // PLB input positionally from this offset, and each pair must agree byte-for-byte on
             // address, datum and reference script -- a seizure moves tokens, not ownership.
-            var coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(paramsIdx, registryRefInputInex, 1);
+            var coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(registryRefInputInex, 1);
 
-            var baseSpendRedeemer = CoreRedeemers.spendViaThirdParty(
-                    paramsIdx, layout.withdrawalIndex(coreThirdPartyCredential));
+            var baseSpendRedeemer = CoreRedeemers.baseSpend(
+                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
 
             var tx = new Tx()
                     .collectFrom(adminUtxos)
@@ -1899,6 +1959,7 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
                     .payToContract(utxoToSeize.getAddress(), ValueUtil.toAmountList(utxoToSeize.toValue().subtract(tokenAssetToSeize)), continuingDatum)
                     .readFrom(sortedReferenceInputs.toArray(new TransactionInput[0]))
                     .attachRewardValidator(coreThirdParty)
+                    .attachRewardValidator(dispatcher)
                     .attachRewardValidator(substandardIssueAdminContract)
                     .attachSpendingValidator(programmableLogicBase)
                     .withChangeAddress(feePayerAddress.getAddress());
@@ -1908,6 +1969,8 @@ public class FreezeAndSeizeHandler implements SubstandardHandler, BasicOperation
             layout.inWithdrawalOrder(
                             List.of(new CoreWithdrawal(substandardIssueAdminCredential,
                                             substandardIssueAdminAddress.getAddress(), ConstrPlutusData.of(0)),
+                                    new CoreWithdrawal(dispatcherCredential, dispatcherAddress.getAddress(),
+                                            CoreRedeemers.dispatchThirdParty()),
                                     new CoreWithdrawal(coreThirdPartyCredential,
                                             coreThirdPartyAddress.getAddress(), coreThirdPartyRedeemer)),
                             CoreWithdrawal::credential)

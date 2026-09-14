@@ -105,7 +105,7 @@ public class PreviewTransferTest extends AbstractPreviewTest implements PreviewF
         var amountToTransfer = BigInteger.valueOf(10_000_000L);
 
         // Directory SPEND parameterization
-        var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+        var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
         log.info("registrySpendContract: {}", HexUtil.encodeHexString(registrySpendContract.getScriptHash()));
 
         var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network);
@@ -137,12 +137,12 @@ public class PreviewTransferTest extends AbstractPreviewTest implements PreviewF
         log.info("protocolParamsUtxo: {}", protocolParamsUtxo);
 
         var senderAddress = aliceAccount.getBaseAddress();
-        var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 senderAddress.getDelegationCredential().get(),
                 network);
 
         var recipientAddress = new Address(bobAccount.baseAddress());
-        var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 recipientAddress.getDelegationCredential().get(),
                 network);
 
@@ -153,7 +153,7 @@ public class PreviewTransferTest extends AbstractPreviewTest implements PreviewF
         var programmableLogicGlobal = protocolScriptBuilderService.getParameterizedTransferScript(protocolBootstrapParams);
         var programmableLogicGlobalAddress = AddressProvider.getRewardAddress(programmableLogicGlobal, network);
         log.info("programmableLogicGlobalAddress policy: {}", programmableLogicGlobalAddress.getAddress());
-        log.info("protocolBootstrapParams.transferParams().scriptHash(): {}", protocolBootstrapParams.transferParams().scriptHash());
+        log.info("protocolBootstrapParams.transfer().scriptHash(): {}", protocolBootstrapParams.transfer().scriptHash());
 //
 ////            // Programmable Logic Base parameterization
         var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolBootstrapParams);
@@ -168,7 +168,7 @@ public class PreviewTransferTest extends AbstractPreviewTest implements PreviewF
 
         var substandardTransferContract1 = substandardTransferContractOpt.get();
 
-        var transferContractInitParams = ListPlutusData.of(serialize(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash())),
+        var transferContractInitParams = ListPlutusData.of(serialize(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash())),
                 BytesPlutusData.of(HexUtil.decodeHexString(blacklistBoostrap.blacklistMintBootstrap().scriptHash()))
         );
 
@@ -239,7 +239,7 @@ public class PreviewTransferTest extends AbstractPreviewTest implements PreviewF
                 .toList();
 
         var proofs = new ArrayList<Pair<Utxo, Utxo>>();
-        var progTokenBaseScriptHash = protocolBootstrapParams.programmableLogicBaseParams().scriptHash();
+        var progTokenBaseScriptHash = protocolBootstrapParams.programmableLogicBase().scriptHash();
         for (Utxo utxo : sortedInputUtxos) {
             var address = new Address(utxo.getAddress());
             var addressPkh = address.getPaymentCredentialHash().map(HexUtil::encodeHexString).get();

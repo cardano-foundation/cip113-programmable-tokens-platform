@@ -478,18 +478,17 @@ public class RwaTokenSubstandardHandler
             }
 
             // 2. CIP-113 protocol bookkeeping (mirrors kyc-extended).
-            String bootstrapTxHash = protocolParams.txHash();
-            Optional<Utxo> protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
-            Optional<Utxo> issuanceUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 2);
+            Optional<Utxo> protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
+            Optional<Utxo> issuanceUtxoOpt = utxoProvider.findIssuanceCborHexUtxo(protocolParams);
             if (protocolParamsUtxoOpt.isEmpty() || issuanceUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve protocol or issuance params UTxOs");
             }
             Utxo protocolParamsUtxo = protocolParamsUtxoOpt.get();
             Utxo issuanceUtxo = issuanceUtxoOpt.get();
 
-            PlutusScript directorySpendScript = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+            PlutusScript directorySpendScript = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             Address directorySpendAddress = AddressProvider.getEntAddress(directorySpendScript, network.getCardanoNetwork());
-            PlutusScript directoryMintScript = protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolParams);
+            PlutusScript directoryMintScript = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             String directoryMintPolicyId = directoryMintScript.getPolicyId();
 
             // 3. Linked-list slot lookup for the directory insert.
@@ -532,7 +531,9 @@ public class RwaTokenSubstandardHandler
             // Constr 1 [Int]: this is a fresh registration, with the new directory entry at
             // output index 2 (preserved-slot=output 1, new-slot=output 2 per kyc-extended
             // convention).
-            ConstrPlutusData issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2));
+            PlutusData registryProof = CoreRedeemers.mintProofOutputIndex(2);
+            PlutusData issuanceRedeemer = null;
+            PlutusData issuanceLogicRedeemer = null;
             // types.RegistryInsert { key: ByteArray, minting_logic_script: Credential }.
             // v0.4.0: the 2nd field is a Credential, not a bare hash — Script(hash) is
             // Constr 1 [bytes].
@@ -701,7 +702,7 @@ public class RwaTokenSubstandardHandler
                     : request.getRecipientAddress();
             Address recipientAddress = new Address(recipient);
             Address targetAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     recipientAddress.getDelegationCredential().orElseThrow(() ->
                             new IllegalArgumentException("recipient must be a base address (need stake credential)")),
                     network.getCardanoNetwork());
@@ -888,7 +889,7 @@ public class RwaTokenSubstandardHandler
                     // it at the programmable-logic base is still right: the reference NFT is a
                     // token of this policy, and CIP-113 confines those there.
                     regReferenceTokenAddress = AddressProvider.getBaseAddress(
-                            Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                            Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                             Credential.fromKey(regAdminCredentialHash),
                             network.getCardanoNetwork());
                     regReferenceTokenDatum = Cip68.buildDatum(metadata);
@@ -955,6 +956,24 @@ public class RwaTokenSubstandardHandler
                 }
                 refScriptUtxosInUse.add(publishedRefScripts.globalStateSpendRefUtxo());
                 refScriptsInUse.add(publishedRefScripts.globalStateSpendScript());
+            }
+
+            // issuance_mint indexes protocol params across the complete final reference set.
+            // Compute it only after optional substandard reference scripts are known.
+            if (willMint) {
+                var plannedIssuanceRefs = CoreLayout.builder()
+                        .referenceInput(txInputOf(protocolParamsUtxo))
+                        .referenceInput(txInputOf(issuanceUtxo))
+                        .referenceInput(txInputOf(mintPuNode))
+                        .referenceInput(txInputOf(mintDenylistNode))
+                        .referenceInput(protocolParams.issuanceLogicRefInput().txHash(),
+                                protocolParams.issuanceLogicRefInput().outputIndex());
+                refScriptUtxosInUse.forEach(u -> plannedIssuanceRefs.referenceInput(txInputOf(u)));
+                var plannedLayout = plannedIssuanceRefs.build();
+                issuanceRedeemer = CoreRedeemers.issuanceRedeemer(
+                        plannedLayout.referenceInputIndex(txInputOf(protocolParamsUtxo)));
+                issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                        new CoreRedeemers.IssuanceEntry(progTokenPolicyId, registryProof)));
             }
 
             Tx tx = new Tx()
@@ -1037,6 +1056,9 @@ public class RwaTokenSubstandardHandler
             if (willMint) {
                 regRefInputs.add(txInputOf(mintPuNode));
                 regRefInputs.add(txInputOf(mintDenylistNode));
+                regRefInputs.add(TransactionInput.builder()
+                        .transactionId(protocolParams.issuanceLogicRefInput().txHash())
+                        .index(protocolParams.issuanceLogicRefInput().outputIndex()).build());
             } else {
                 regRefInputs.add(txInputOf(gsUtxoForRegistration));
             }
@@ -1049,6 +1071,14 @@ public class RwaTokenSubstandardHandler
             }
             var regLayoutBuilder = CoreLayout.builder();
             regRefInputs.forEach(regLayoutBuilder::referenceInput);
+            Credential proxyCredential = Credential.fromScript(mintingLogicScript.getScriptHash());
+            Credential authorityCredential = Credential.fromScript(mintingAuthorityScript.getScriptHash());
+            regLayoutBuilder.withdrawal(proxyCredential).withdrawal(authorityCredential);
+            PlutusScript issuanceLogic = willMint
+                    ? protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams) : null;
+            Credential issuanceLogicCredential = issuanceLogic == null
+                    ? null : Credential.fromScript(issuanceLogic.getScriptHash());
+            if (issuanceLogicCredential != null) regLayoutBuilder.withdrawal(issuanceLogicCredential);
             var regResolved = regLayoutBuilder.build();
             List<TransactionInput> regRefInputsSorted = regResolved.referenceInputs();
             int gsRefIdxForRegistration = willMint
@@ -1057,6 +1087,10 @@ public class RwaTokenSubstandardHandler
             if (willMint) {
                 puNodeRefIdx = regResolved.referenceInputIndex(txInputOf(mintPuNode));
                 denylistRefIdx = regResolved.referenceInputIndex(txInputOf(mintDenylistNode));
+                issuanceRedeemer = CoreRedeemers.issuanceRedeemer(
+                        regResolved.referenceInputIndex(txInputOf(protocolParamsUtxo)));
+                issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                        new CoreRedeemers.IssuanceEntry(progTokenPolicyId, registryProof)));
             }
 
             // TWO withdrawals, not one. The old single four-field RegisterToken redeemer
@@ -1105,14 +1139,24 @@ public class RwaTokenSubstandardHandler
                                 BigIntPlutusData.of(BigInteger.valueOf(gsRefIdxForRegistration))));
             }
 
-            tx = tx
-                    .withdraw(mintingLogicRewardAddress.getAddress(), BigInteger.ZERO, proxyRedeemer)
-                    .withdraw(mintingAuthorityRewardAddress.getAddress(), BigInteger.ZERO, authorityRedeemer)
-                    .readFrom(regRefInputsSorted.toArray(new TransactionInput[0]))
+            tx = tx.readFrom(regRefInputsSorted.toArray(new TransactionInput[0]))
                     .attachSpendingValidator(directorySpendScript)
                     .attachRewardValidator(mintingLogicScript)
                     .attachRewardValidator(mintingAuthorityScript)
                     .withChangeAddress(request.getFeePayerAddress());
+            List<CoreWithdrawal> registrationWithdrawals = new ArrayList<>(List.of(
+                    new CoreWithdrawal(proxyCredential, mintingLogicRewardAddress.getAddress(), proxyRedeemer),
+                    new CoreWithdrawal(authorityCredential, mintingAuthorityRewardAddress.getAddress(), authorityRedeemer)));
+            if (willMint) {
+                Address issuanceLogicRewardAddress = AddressProvider.getRewardAddress(
+                        issuanceLogic, network.getCardanoNetwork());
+                registrationWithdrawals.add(new CoreWithdrawal(issuanceLogicCredential,
+                        issuanceLogicRewardAddress.getAddress(), issuanceLogicRedeemer));
+            }
+            for (CoreWithdrawal withdrawal : regResolved.inWithdrawalOrder(
+                    registrationWithdrawals, CoreWithdrawal::credential)) {
+                tx = tx.withdraw(withdrawal.rewardAddress(), BigInteger.ZERO, withdrawal.redeemer());
+            }
             if (willMint) {
                 tx = tx.attachSpendingValidator(mintGsSpendScript);
             }
@@ -1147,6 +1191,10 @@ public class RwaTokenSubstandardHandler
                         }
                     })
                     .ignoreScriptCostEvaluationError(false);
+            if (willMint) {
+                // The alpha.4 issuance logic is also supplied by a protocol reference input.
+                refScriptsInUse.add(issuanceLogic);
+            }
             if (!refScriptsInUse.isEmpty()) {
                 // The validators are still ATTACHED above, because attaching is how
                 // cardano-client binds a redeemer to a script. This pair then moves them
@@ -1378,7 +1426,7 @@ public class RwaTokenSubstandardHandler
                     .orElseThrow(() -> new BuildPreconditionException(
                             "recipient must be a base address with a stake credential: " + recipient));
             Address targetAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     recipientAddress.getDelegationCredential().orElseThrow(() ->
                             new IllegalArgumentException("recipient must be a base address (need stake credential)")),
                     network.getCardanoNetwork());
@@ -1450,19 +1498,27 @@ public class RwaTokenSubstandardHandler
             TransactionInput mintGsSpendRefInput = TransactionInput.builder()
                     .transactionId(reg.getRefScriptsTxHash())
                     .index(reg.getGsSpendRefIndex()).build();
-
-            List<TransactionInput> mintRefInputsSorted = java.util.stream.Stream.of(
-                            txInputOf(directoryEntry), txInputOf(puNode),
-                            txInputOf(protocolParamsUtxo), txInputOf(issuanceUtxo),
-                            txInputOf(denylistCoveringNode),
-                            mintAuthorityRefInput, mintGsSpendRefInput)
-                    .sorted(java.util.Comparator
-                            .comparing(TransactionInput::getTransactionId)
-                            .thenComparingInt(TransactionInput::getIndex))
-                    .toList();
-            int directoryRefIdx = mintRefInputsSorted.indexOf(txInputOf(directoryEntry));
-            int puNodeRefIdx = mintRefInputsSorted.indexOf(txInputOf(puNode));
-            int denylistRefIdx = mintRefInputsSorted.indexOf(txInputOf(denylistCoveringNode));
+            TransactionInput issuanceLogicRefInput = TransactionInput.builder()
+                    .transactionId(protocolParams.issuanceLogicRefInput().txHash())
+                    .index(protocolParams.issuanceLogicRefInput().outputIndex()).build();
+            PlutusScript issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
+            Credential issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
+            Address issuanceLogicRewardAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
+            Credential proxyCredential = Credential.fromScript(s.mintingLogic().getScriptHash());
+            Credential authorityCredential = Credential.fromScript(s.mintingAuthority().getScriptHash());
+            CoreLayout issuanceLayout = CoreLayout.builder()
+                    .referenceInput(txInputOf(directoryEntry)).referenceInput(txInputOf(puNode))
+                    .referenceInput(txInputOf(protocolParamsUtxo)).referenceInput(txInputOf(issuanceUtxo))
+                    .referenceInput(txInputOf(denylistCoveringNode))
+                    .referenceInput(mintAuthorityRefInput).referenceInput(mintGsSpendRefInput)
+                    .referenceInput(issuanceLogicRefInput)
+                    .withdrawal(proxyCredential).withdrawal(authorityCredential)
+                    .withdrawal(issuanceLogicCredential).build();
+            List<TransactionInput> mintRefInputsSorted = issuanceLayout.referenceInputs();
+            int directoryRefIdx = issuanceLayout.referenceInputIndex(txInputOf(directoryEntry));
+            int paramsRefIdx = issuanceLayout.referenceInputIndex(txInputOf(protocolParamsUtxo));
+            int puNodeRefIdx = issuanceLayout.referenceInputIndex(txInputOf(puNode));
+            int denylistRefIdx = issuanceLayout.referenceInputIndex(txInputOf(denylistCoveringNode));
             // Tx has 1 Spend (GS), 1 Mint (issuance) and now 2 Rewards (the minting proxy
             // and the authority). Redeemers are sorted by tag (Spend → Mint → Cert →
             // Reward), so the second Reward APPENDS and shifts nothing: the issuance Mint
@@ -1474,8 +1530,10 @@ public class RwaTokenSubstandardHandler
             // redeemer IS types.MintingRegistryProof: Constr 0 [directoryRefIdx] =
             // RefInput { index }, telling the issuance contract to FIND the directory entry
             // as a ref input (vs Constr 1 = OutputIndex, which is the registration flow).
-            PlutusData issuanceRedeemer =
-                    ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx)));
+            PlutusData registryProof = CoreRedeemers.mintProofRefInput(directoryRefIdx);
+            PlutusData issuanceRedeemer = CoreRedeemers.issuanceRedeemer(paramsRefIdx);
+            PlutusData issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                    new CoreRedeemers.IssuanceEntry(request.tokenPolicyId(), registryProof)));
             // mintingLogic.withdraw, MintBurn (constructor 0):
             //   { registry_node_ref_input_index, global_state_input_index,
             //     power_user_node_ref_input_index, minted_amount, destination_actions }
@@ -1574,8 +1632,6 @@ public class RwaTokenSubstandardHandler
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
                     .collectFrom(gsUtxo, gsSpendRedeemer)
-                    .withdraw(s.mintingLogicRewardAddress().getAddress(), BigInteger.ZERO, proxyRedeemer)
-                    .withdraw(s.mintingAuthorityRewardAddress().getAddress(), BigInteger.ZERO, authorityRedeemer)
                     .mintAsset(s.issuanceContract(), mintedAssets, issuanceRedeemer)
                     .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue),
                             ConstrPlutusData.of(0))                                                 // output 0
@@ -1601,6 +1657,14 @@ public class RwaTokenSubstandardHandler
                     .readFrom(mintRefInputsSorted.toArray(new TransactionInput[0]))
                     .attachRewardValidator(s.mintingLogic())
                     .withChangeAddress(request.feePayerAddress());
+
+            for (CoreWithdrawal withdrawal : issuanceLayout.inWithdrawalOrder(List.of(
+                    new CoreWithdrawal(proxyCredential, s.mintingLogicRewardAddress().getAddress(), proxyRedeemer),
+                    new CoreWithdrawal(authorityCredential, s.mintingAuthorityRewardAddress().getAddress(), authorityRedeemer),
+                    new CoreWithdrawal(issuanceLogicCredential, issuanceLogicRewardAddress.getAddress(), issuanceLogicRedeemer)),
+                    CoreWithdrawal::credential)) {
+                tx = tx.withdraw(withdrawal.rewardAddress(), BigInteger.ZERO, withdrawal.redeemer());
+            }
 
             // Finite validity upper bound (D1). verify_membership_proof
             // (lib/kyc/verify.ak:137-142) returns False unless
@@ -1629,7 +1693,7 @@ public class RwaTokenSubstandardHandler
                     // removeDuplicateScriptWitnesses then drops exactly those hashes from the
                     // witness set. Without the second flag both copies ship — over
                     // max-tx-size, and rejected as ExtraneousScriptWitnessesUTXOW.
-                    .withReferenceScripts(s.mintingAuthority(), s.gsSpend())
+                    .withReferenceScripts(s.mintingAuthority(), s.gsSpend(), issuanceLogic)
                     .removeDuplicateScriptWitnesses(true)
                     .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
                     .ignoreScriptCostEvaluationError(false)
@@ -1733,15 +1797,20 @@ public class RwaTokenSubstandardHandler
             Address coreTransferRewardAddress = AddressProvider.getRewardAddress(
                     coreTransfer, network.getCardanoNetwork());
             Credential coreTransferCredential = Credential.fromScript(coreTransfer.getScriptHash());
+            PlutusScript dispatcher = protocolScriptBuilderService
+                    .getParameterizedProgrammableLogicGlobalScript(protocolParams);
+            Address dispatcherRewardAddress = AddressProvider.getRewardAddress(
+                    dispatcher, network.getCardanoNetwork());
+            Credential dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
 
             // Per-stake prog-token addresses (payment = prog-logic-base script,
             // stake = the user's delegation credential).
             Address senderProgTokenAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     senderAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
             Address recipientProgTokenAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     recipientAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
@@ -1857,7 +1926,7 @@ public class RwaTokenSubstandardHandler
             // UTxOs at the directory-spend address and filtering by parsed
             // RegistryNode.key().
             PlutusScript directorySpendContract = protocolScriptBuilderService
-                    .getParameterizedDirectorySpendScript(protocolParams);
+                    .getParameterizedRegistryScript(protocolParams);
             Address directorySpendAddress = AddressProvider.getEntAddress(
                     directorySpendContract, network.getCardanoNetwork());
             List<Utxo> registryEntries = utxoProvider.findUtxos(directorySpendAddress.getAddress());
@@ -1871,9 +1940,8 @@ public class RwaTokenSubstandardHandler
                         "directory entry not found for prog-token policy " + policyId);
             }
 
-            String bootstrapTxHash = protocolParams.txHash();
-            Optional<Utxo> protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
-            Optional<Utxo> issuanceUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 2);
+            Optional<Utxo> protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
+            Optional<Utxo> issuanceUtxoOpt = utxoProvider.findIssuanceCborHexUtxo(protocolParams);
             if (protocolParamsUtxoOpt.isEmpty() || issuanceUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve protocol or issuance params UTxOs");
             }
@@ -1890,6 +1958,9 @@ public class RwaTokenSubstandardHandler
             TransactionInput tiTransferRef = TransactionInput.builder()
                     .transactionId(protocolParams.transferRefInput().txHash())
                     .index(protocolParams.transferRefInput().outputIndex()).build();
+            TransactionInput tiDispatcherRef = TransactionInput.builder()
+                    .transactionId(protocolParams.programmableLogicGlobalRefInput().txHash())
+                    .index(protocolParams.programmableLogicGlobalRefInput().outputIndex()).build();
 
             // Declared together, before any index is taken. The substandard's transfer-logic
             // withdrawal belongs in here too: wdrl_idx is a position over the WHOLE withdrawal
@@ -1904,7 +1975,9 @@ public class RwaTokenSubstandardHandler
                     .referenceInput(tiIssuance)
                     .referenceInput(tiProgBaseRef)
                     .referenceInput(tiTransferRef)
+                    .referenceInput(tiDispatcherRef)
                     .withdrawal(coreTransferCredential)
+                    .withdrawal(dispatcherCredential)
                     .withdrawal(transferLogicCredential)
                     .build();
             List<TransactionInput> refInputsSorted = layout.referenceInputs();
@@ -2004,14 +2077,13 @@ public class RwaTokenSubstandardHandler
                     sourceActions,
                     destinationActions);
 
-            PlutusData coreTransferRedeemer = CoreRedeemers.transferRedeemer(
-                    paramsIdx, List.of(CoreRedeemers.tokenExists(directoryRefIdx)));
+            PlutusData coreTransferRedeemer = CoreRedeemers.transferRedeemer(List.of(CoreRedeemers.tokenExists(directoryRefIdx)));
 
             // programmable_logic_base runs once per spent programmable input. Its redeemer is no
             // longer a passthrough: it picks the delegate arm and witnesses where that delegate
             // sits in the withdrawal map.
-            PlutusData spendPassthrough = CoreRedeemers.spendViaTransfer(
-                    paramsIdx, layout.withdrawalIndex(coreTransferCredential));
+            PlutusData spendPassthrough = CoreRedeemers.baseSpend(
+                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
 
             // ── 7. Build outputs ───────────────────────────────────────────
             Asset transferAsset = Asset.builder()
@@ -2063,6 +2135,8 @@ public class RwaTokenSubstandardHandler
             for (CoreWithdrawal w : layout.inWithdrawalOrder(
                     List.of(new CoreWithdrawal(transferLogicCredential,
                                     transferLogicRewardAddress.getAddress(), transferRedeemer),
+                            new CoreWithdrawal(dispatcherCredential,
+                                    dispatcherRewardAddress.getAddress(), CoreRedeemers.dispatchTransfer()),
                             new CoreWithdrawal(coreTransferCredential,
                                     coreTransferRewardAddress.getAddress(), coreTransferRedeemer)),
                     CoreWithdrawal::credential)) {
@@ -2468,7 +2542,7 @@ public class RwaTokenSubstandardHandler
             //     replaceable later via RotateMintingScript without touching the registry.
             PlutusScript mintingAuthorityScript = scriptBuilder.buildMintingAuthorityScript(
                     securityAssetNameHex, globalStatePolicyId,
-                    protocolParams.directoryMintParams().scriptHash(), powerUsersPolicyId,
+                    protocolParams.registry().scriptHash(), powerUsersPolicyId,
                     HexUtil.encodeHexString(mintingLogicScript.getScriptHash()),
                     issuancePolicyId,
                     // plb_script_hash was dropped upstream on 2026-08-21 — nine parameters
@@ -4741,6 +4815,12 @@ public class RwaTokenSubstandardHandler
             TransactionInput coreThirdPartyRefInput = TransactionInput.builder()
                     .transactionId(protocolParams.thirdPartyRefInput().txHash())
                     .index(protocolParams.thirdPartyRefInput().outputIndex()).build();
+            TransactionInput progGlobalRefInput = TransactionInput.builder()
+                    .transactionId(protocolParams.programmableLogicGlobalRefInput().txHash())
+                    .index(protocolParams.programmableLogicGlobalRefInput().outputIndex()).build();
+            TransactionInput issuanceLogicRefInput = TransactionInput.builder()
+                    .transactionId(protocolParams.issuanceLogicRefInput().txHash())
+                    .index(protocolParams.issuanceLogicRefInput().outputIndex()).build();
             // ── Reference scripts ──────────────────────────────────────────
             // The five validators this transaction needs come to 21 499 bytes inline:
             //   8117 minting_authority + 6658 third_party_transfer_logic
@@ -4804,9 +4884,18 @@ public class RwaTokenSubstandardHandler
             // describes. indexOf() re-derives them, so nothing here needs hand-adjusting.
             PlutusScript coreThirdParty = protocolScriptBuilderService
                     .getParameterizedThirdPartyScript(protocolParams);
+            PlutusScript programmableLogicBase = protocolScriptBuilderService
+                    .getParameterizedProgrammableLogicBaseScript(protocolParams);
             Address coreThirdPartyRewardAddress = AddressProvider.getRewardAddress(
                     coreThirdParty, network.getCardanoNetwork());
             Credential coreThirdPartyCredential = Credential.fromScript(coreThirdParty.getScriptHash());
+            PlutusScript dispatcher = protocolScriptBuilderService
+                    .getParameterizedProgrammableLogicGlobalScript(protocolParams);
+            Address dispatcherRewardAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
+            Credential dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
+            PlutusScript issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
+            Address issuanceLogicRewardAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
+            Credential issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
 
             // Every withdrawal the transaction carries has to be declared here, not just the
             // framework's: wdrl_idx is a position over the whole map, and this burn carries four.
@@ -4826,10 +4915,14 @@ public class RwaTokenSubstandardHandler
                     .referenceInput(txInputOf(denylistCoveringNodeForBurn))
                     .referenceInput(progBaseRefInput)
                     .referenceInput(coreThirdPartyRefInput)
+                    .referenceInput(progGlobalRefInput)
+                    .referenceInput(issuanceLogicRefInput)
                     .referenceInput(mintingAuthorityRefInput)
                     .referenceInput(gsSpendRefInput)
                     .referenceInput(thirdPartyRefInput)
                     .withdrawal(coreThirdPartyCredential)
+                    .withdrawal(dispatcherCredential)
+                    .withdrawal(issuanceLogicCredential)
                     .withdrawal(Credential.fromScript(s.mintingLogic().getScriptHash()))
                     .withdrawal(Credential.fromScript(s.mintingAuthority().getScriptHash()))
                     .withdrawal(Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()))
@@ -4849,8 +4942,10 @@ public class RwaTokenSubstandardHandler
             // ── 6. Build redeemers ─────────────────────────────────────────
             // types.MintingRegistryProof directly (no SmartTokenMintingAction wrapper in v0.4.0):
             // RefInput { index } = Constr 0 [Int].
-            PlutusData issuanceRedeemer =
-                    ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(directoryRefIdx)));
+            PlutusData registryProof = CoreRedeemers.mintProofRefInput(directoryRefIdx);
+            PlutusData issuanceRedeemer = CoreRedeemers.issuanceRedeemer(paramsIdx);
+            PlutusData issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                    new CoreRedeemers.IssuanceEntry(request.tokenPolicyId(), registryProof)));
             // Proxy: GlobalState is SPENT (MintSecurity credits the burned supply back to
             // mintable_amount), so the proxy is pointed at the input index.
             PlutusData proxyRedeemer = ConstrPlutusData.of(GS_LOCATION_SPENT,
@@ -4891,8 +4986,8 @@ public class RwaTokenSubstandardHandler
             // Token UTxO spend redeemer — passthrough. The prog-logic-base
             // validator running against this input delegates authorisation to
             // prog-logic-global's withdraw-0 below.
-            PlutusData tokenSpendRedeemer = CoreRedeemers.spendViaThirdParty(
-                    paramsIdx, layout.withdrawalIndex(coreThirdPartyCredential));
+            PlutusData tokenSpendRedeemer = CoreRedeemers.baseSpend(
+                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
             // prog-logic-global — invoked via withdraw-0 to authorise the
             // prog-token spend. Burns use the ThirdPartyAct branch (Constr 1)
             // rather than TransferAct (Constr 0): the latter requires per-token
@@ -4902,8 +4997,7 @@ public class RwaTokenSubstandardHandler
             // continuation outputs begin (so it can verify the burned policy
             // has been removed from them). See FreezeAndSeizeHandler.buildBurn
             // for the same pattern.
-            PlutusData coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(
-                    paramsIdx, directoryRefIdx, continuationOutputIdx);
+            PlutusData coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(directoryRefIdx, continuationOutputIdx);
 
             // ThirdPartyAct requires a withdrawal keyed on whatever registry-node slot 4
             // names. Commit 0ec401a put mintingLogic there, so the withdrawal the burn
@@ -5080,6 +5174,10 @@ public class RwaTokenSubstandardHandler
                                     s.mintingAuthorityRewardAddress().getAddress(), authorityRedeemer),
                             new CoreWithdrawal(Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()),
                                     thirdPartyRewardAddress.getAddress(), thirdPartyRedeemer),
+                            new CoreWithdrawal(dispatcherCredential, dispatcherRewardAddress.getAddress(),
+                                    CoreRedeemers.dispatchThirdParty()),
+                            new CoreWithdrawal(issuanceLogicCredential, issuanceLogicRewardAddress.getAddress(),
+                                    issuanceLogicRedeemer),
                             new CoreWithdrawal(coreThirdPartyCredential,
                                     coreThirdPartyRewardAddress.getAddress(), coreThirdPartyRedeemer)),
                     CoreWithdrawal::credential)) {
@@ -5123,7 +5221,9 @@ public class RwaTokenSubstandardHandler
                     // referencing the authority made removeDuplicateScriptWitnesses strip the
                     // PROXY from the witness set even though nothing referenced it, so its
                     // withdrawal had no script at all.
-                    .withReferenceScripts(s.mintingAuthority(), s.gsSpend(), thirdPartyTransferLogicScript)
+                    .withReferenceScripts(s.mintingAuthority(), s.gsSpend(),
+                            thirdPartyTransferLogicScript, programmableLogicBase,
+                            coreThirdParty, dispatcher, issuanceLogic)
                     .removeDuplicateScriptWitnesses(true)
                     .feePayer(feePayerAddress)
                     .mergeOutputs(false)
@@ -7224,7 +7324,7 @@ public class RwaTokenSubstandardHandler
                     .build();
 
             PlutusScript directorySpendScript =
-                    protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+                    protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             Address directorySpendAddress =
                     AddressProvider.getEntAddress(directorySpendScript, network.getCardanoNetwork());
 
@@ -7304,7 +7404,7 @@ public class RwaTokenSubstandardHandler
 
     private Utxo findDirectoryEntry(String tokenPolicyId, ProtocolBootstrapParams protocolParams) {
         PlutusScript directorySpendContract = protocolScriptBuilderService
-                .getParameterizedDirectorySpendScript(protocolParams);
+                .getParameterizedRegistryScript(protocolParams);
         Address directorySpendAddress = AddressProvider.getEntAddress(
                 directorySpendContract, network.getCardanoNetwork());
         List<Utxo> registryEntries = utxoProvider.findUtxos(directorySpendAddress.getAddress());
@@ -7321,12 +7421,13 @@ public class RwaTokenSubstandardHandler
      *  bootstrap tx. Returns them in stable order: [protocolParams, issuance]. */
     private List<Utxo> findProtocolAndIssuanceUtxos(ProtocolBootstrapParams protocolParams) {
         String bootstrapTxHash = protocolParams.txHash();
-        Utxo protocolParamsUtxo = utxoProvider.findUtxo(bootstrapTxHash, 0)
+        Utxo protocolParamsUtxo = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex())
                 .orElseThrow(() -> new BuildPreconditionException(
                         "could not resolve protocol params UTxO at " + bootstrapTxHash + ":0"));
-        Utxo issuanceUtxo = utxoProvider.findUtxo(bootstrapTxHash, 2)
+        Utxo issuanceUtxo = utxoProvider.findIssuanceCborHexUtxo(protocolParams)
                 .orElseThrow(() -> new BuildPreconditionException(
-                        "could not resolve issuance params UTxO at " + bootstrapTxHash + ":2"));
+                        "could not resolve IssuanceCborHex NFT under policy "
+                                + protocolParams.issuance().policyId()));
         return List.of(protocolParamsUtxo, issuanceUtxo);
     }
 
@@ -7587,7 +7688,7 @@ public class RwaTokenSubstandardHandler
                     .orElseThrow(() -> new BuildPreconditionException(
                             "destinationAddress has no delegation credential hash"));
             Address destProgAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     destDelegation,
                     network.getCardanoNetwork());
 
@@ -7677,6 +7778,13 @@ public class RwaTokenSubstandardHandler
             TransactionInput coreThirdPartyRefInput = TransactionInput.builder()
                     .transactionId(protocolParams.thirdPartyRefInput().txHash())
                     .index(protocolParams.thirdPartyRefInput().outputIndex()).build();
+            TransactionInput dispatcherRefInput = TransactionInput.builder()
+                    .transactionId(protocolParams.programmableLogicGlobalRefInput().txHash())
+                    .index(protocolParams.programmableLogicGlobalRefInput().outputIndex()).build();
+            PlutusScript dispatcher = protocolScriptBuilderService
+                    .getParameterizedProgrammableLogicGlobalScript(protocolParams);
+            Address dispatcherRewardAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
+            Credential dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
             CoreLayout layout = CoreLayout.builder()
                     .referenceInput(txInputOf(directoryEntry))
                     .referenceInput(txInputOf(puNode))
@@ -7686,8 +7794,10 @@ public class RwaTokenSubstandardHandler
                     .referenceInput(txInputOf(denylistCoveringNode))
                     .referenceInput(progBaseRefInput)
                     .referenceInput(coreThirdPartyRefInput)
+                    .referenceInput(dispatcherRefInput)
                     .referenceInput(thirdPartyRefInput)
                     .withdrawal(coreThirdPartyCredential)
+                    .withdrawal(dispatcherCredential)
                     .withdrawal(Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()))
                     .build();
             List<TransactionInput> refInputsSorted = layout.referenceInputs();
@@ -7725,8 +7835,7 @@ public class RwaTokenSubstandardHandler
             // ThirdPartyAct { registry_node_ref_input_index, outputs_start_idx }. Output 0
             // is the destination and output 1 the continuation, so the scan starts at 1 —
             // the same shape the freeze-and-seize substandard uses.
-            PlutusData coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(
-                    paramsIdx, directoryRefIdx, 1);
+            PlutusData coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(directoryRefIdx, 1);
 
             // ── Outputs ────────────────────────────────────────────────────
             Value seizedValue = Value.from(policyId, "0x" + assetNameHex, seizedQuantity);
@@ -7734,8 +7843,8 @@ public class RwaTokenSubstandardHandler
 
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
-                    .collectFrom(tokenUtxo, CoreRedeemers.spendViaThirdParty(
-                            paramsIdx, layout.withdrawalIndex(coreThirdPartyCredential)))
+                    .collectFrom(tokenUtxo, CoreRedeemers.baseSpend(
+                            paramsIdx, layout.withdrawalIndex(dispatcherCredential)))
                     .payToContract(destProgAddress.getAddress(),
                             ValueUtil.toAmountList(seizedValue), CoreDatums.programmableTokenDatum())   // output 0
                     .payToContract(tokenUtxo.getAddress(),
@@ -7750,7 +7859,9 @@ public class RwaTokenSubstandardHandler
                     List.of(new CoreWithdrawal(Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()),
                                     thirdPartyRewardAddress.getAddress(), thirdPartyRedeemer),
                             new CoreWithdrawal(coreThirdPartyCredential,
-                                    coreThirdPartyRewardAddress.getAddress(), coreThirdPartyRedeemer)),
+                                    coreThirdPartyRewardAddress.getAddress(), coreThirdPartyRedeemer),
+                            new CoreWithdrawal(dispatcherCredential,
+                                    dispatcherRewardAddress.getAddress(), CoreRedeemers.dispatchThirdParty())),
                     CoreWithdrawal::credential)) {
                 tx = tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer());
             }
@@ -7769,7 +7880,8 @@ public class RwaTokenSubstandardHandler
                     // its redeemer, then moved into the reference inputs here — attached it
                     // would put 6 658 bytes in the witness set on top of the two protocol
                     // scripts.
-                    .withReferenceScripts(thirdPartyTransferLogicScript)
+                    .withReferenceScripts(thirdPartyTransferLogicScript,
+                            programmableLogicBase, coreThirdParty, dispatcher)
                     .removeDuplicateScriptWitnesses(true)
                     .feePayer(request.feePayerAddress())
                     .mergeOutputs(false)

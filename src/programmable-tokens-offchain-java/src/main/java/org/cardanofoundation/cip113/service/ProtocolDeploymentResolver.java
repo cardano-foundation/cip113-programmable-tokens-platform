@@ -102,10 +102,10 @@ public class ProtocolDeploymentResolver {
     static Optional<ProtocolBootstrapParams> matchDeployment(
             Collection<ProtocolBootstrapParams> deployments, ProtocolParamsEntity version) {
         return deployments.stream()
-                .filter(d -> d.directoryMintParams() != null
-                        && d.programmableLogicBaseParams() != null
-                        && d.directoryMintParams().scriptHash().equals(version.getRegistryNodePolicyId())
-                        && d.programmableLogicBaseParams().scriptHash().equals(version.getProgLogicScriptHash()))
+                .filter(d -> d.registry() != null
+                        && d.programmableLogicBase() != null
+                        && d.registry().scriptHash().equals(version.getRegistryNodePolicyId())
+                        && d.programmableLogicBase().scriptHash().equals(version.getProgLogicScriptHash()))
                 .findFirst();
     }
 }

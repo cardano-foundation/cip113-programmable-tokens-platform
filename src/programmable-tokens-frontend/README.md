@@ -8,7 +8,7 @@ Part of the [CIP-113 platform repository](../../README.md). The on-chain Aiken i
 
 - 🔐 Wallet connection (Nami, Eternl, Lace, Flint)
 - 🌐 Multi-network support (Preview, Preprod, Mainnet)
-- 🚀 Protocol deployment
+- 🔗 Protocol discovery through the backend's schema-3 deployment record
 - 💎 Token minting with configurable validation logic
 - 📤 Token transfers with automatic validation
 - 🚫 Blacklist management for regulated tokens
@@ -16,7 +16,7 @@ Part of the [CIP-113 platform repository](../../README.md). The on-chain Aiken i
 ## Tech Stack
 
 - **Next.js 15** with TypeScript
-- **Mesh SDK** for Cardano transactions
+- **CIP-113 TypeScript SDK** for alpha.4 script derivation and transaction building
 - **Tailwind CSS** with Forest Night theme
 - **React Hook Form** + Zod for form validation
 - **Blockfrost API** for blockchain queries
@@ -88,7 +88,6 @@ programmable-tokens-frontend/
 │   └── ui/                 # Reusable UI components
 ├── config/
 │   ├── cip113-blueprint.json
-│   ├── protocol-bootstrap.example.json
 │   └── substandards/
 ├── contexts/
 ├── hooks/
@@ -110,7 +109,8 @@ Core CIP-113 contract blueprints live in `config/cip113-blueprint.json`.
 
 ### Protocol Bootstrap
 
-After deploying the protocol, a `protocol-bootstrap.json` file is generated with deployment details.
+The frontend obtains the active schema-3 deployment from the backend. It validates that record
+with the CIP-113 SDK and uses it directly; legacy deployment adapters are intentionally absent.
 
 ### Substandards
 
@@ -120,7 +120,8 @@ Transfer-logic configurations live in `config/substandards/`. For the on-chain s
 
 ```bash
 npm run lint
-# add test runner commands here as tests are introduced
+npm run test:parameterization
+npm run build
 ```
 
 ## Related

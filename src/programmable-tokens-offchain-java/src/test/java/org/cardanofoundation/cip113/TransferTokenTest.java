@@ -98,7 +98,7 @@ public class TransferTokenTest extends AbstractPreviewTest {
 
 
         // Programmable Logic Global parameterization
-        var programmableLogicGlobalParameters = ListPlutusData.of(BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.protocolParams().scriptHash())));
+        var programmableLogicGlobalParameters = ListPlutusData.of(BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.protocolParams().policyId())));
         var programmableLogicGlobalContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(programmableLogicGlobalParameters, PROGRAMMABLE_LOGIC_GLOBAL_CONTRACT), PlutusVersion.v3);
         log.info("programmableLogicGlobalContract policy: {}", programmableLogicGlobalContract.getPolicyId());
         var programmableLogicGlobalAddress = AddressProvider.getRewardAddress(programmableLogicGlobalContract, network);
@@ -122,7 +122,7 @@ public class TransferTokenTest extends AbstractPreviewTest {
 
         // Directory SPEND parameterization
         var directorySpendParameters = ListPlutusData.of(
-                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.protocolParams().scriptHash()))
+                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.protocolParams().policyId()))
         );
         var directorySpendContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(directorySpendParameters, DIRECTORY_SPEND_CONTRACT), PlutusVersion.v3);
         var directorySpendContractAddress = AddressProvider.getEntAddress(Credential.fromScript(directorySpendContract.getScriptHash()), network);
@@ -149,7 +149,7 @@ public class TransferTokenTest extends AbstractPreviewTest {
         log.info("directoryUtxo: {}", directoryUtxo);
 
 
-        var aliceAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var aliceAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 aliceAccount.getBaseAddress().getDelegationCredential().get(),
                 network);
         log.info("aliceAddress: {}", aliceAddress);
@@ -158,7 +158,7 @@ public class TransferTokenTest extends AbstractPreviewTest {
             Assertions.fail("not progBaseAddresses");
         }
 
-        var bobAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var bobAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 bobAccount.getBaseAddress().getDelegationCredential().get(),
                 network);
         log.info("bobAddress: {}", bobAddress);

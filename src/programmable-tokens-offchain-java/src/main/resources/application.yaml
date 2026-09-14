@@ -127,20 +127,13 @@ network: preview
 wallet:
   mnemonic: ""
 
-# The deployment this profile transacts against, selected EXPLICITLY rather than by
-# position. protocol-bootstraps-preview.json is an append-only history and
-# ProtocolBootstrapService falls back to the first USABLE record when no default is named —
-# which, now that the file holds more than one schema-2 record, is the SUPERSEDED 2026-05
-# deployment (a432339c…), not this one. Without this line the backend boots green and
-# transacts against the wrong protocol.
-#
-# Note the camel-cased leaf: the equivalent env var (PROGRAMMABLE_TOKEN_DEFAULT_TXHASH) does
-# not reliably bind through relaxed matching, which is why this is pinned here rather than
-# left to the run recipe. See README / CLAUDE.md.
+# Sole supported Preview deployment: CIP-113 0.5.0-alpha.4 / bootstrap schema 3.
+# The explicit pin prevents an operator typo or stale environment value from silently
+# selecting a different protocol instance.
 programmable:
   token:
     default:
-      txHash: "e466d078444a4d750ccb99f4ebc1d22957772ff49bb53a0228e0ce45f5c6e479"
+      txHash: "8314e59f3e240ba89fb7f7037cf3094307132ede0ac3a1d2515a09a9cc333bc8"
 
 blockfrost:
   url: https://cardano-preview.blockfrost.io/api/v0/

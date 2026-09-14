@@ -172,9 +172,9 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
 
             var bootstrapTxHash = protocolParams.txHash();
 
-            var directorySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+            var directorySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
 
-            var protocolParamsUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 0);
+            var protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
             if (protocolParamsUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve protocol params");
             }
@@ -182,7 +182,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
 
             var directorySpendContractAddress = AddressProvider.getEntAddress(directorySpendContract, network.getCardanoNetwork());
 
-            var issuanceUtxoOpt = utxoProvider.findUtxo(bootstrapTxHash, 2);
+            var issuanceUtxoOpt = utxoProvider.findIssuanceCborHexUtxo(protocolParams);
             if (issuanceUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve issuance params");
             }
@@ -194,7 +194,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             log.info("KYC substandardIssueAddress: {}", substandardIssueAddress.getAddress());
 
             var substandardTransferContract = kycScriptBuilder.buildTransferScript(
-                    protocolParams.programmableLogicBaseParams().scriptHash(),
+                    protocolParams.programmableLogicBase().scriptHash(),
                     globalStatePolicyId
             );
             var substandardTransferAddress = AddressProvider.getRewardAddress(substandardTransferContract, network.getCardanoNetwork());
@@ -229,7 +229,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             var existingRegistryNodeDatum = existingRegistryNodeDatumOpt.get();
 
             // Directory MINT
-            var directoryMintContract = protocolScriptBuilderService.getParameterizedDirectoryMintScript(protocolParams);
+            var directoryMintContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             var directoryMintPolicyId = directoryMintContract.getPolicyId();
 
             // types.RegistryInsert { key: ByteArray, minting_logic_script: Credential }.
@@ -285,7 +285,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
                     existingRegistryNodeDatum.next(),
                     Credential.fromScript(substandardIssueContract.getScriptHash()),
                     Credential.fromScript(substandardTransferContract.getScriptHash()),
-                    Credential.fromScript(protocolParams.issuanceParams().alwaysFailScriptHash()),
+                    Credential.fromScript(protocolParams.issuance().alwaysFailScriptHash()),
                     RegistryNode.EMPTY_VKEY,
                     globalStatePolicyId);
 
@@ -313,7 +313,21 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             // SmartTokenMintingAction { minting_logic_cred, minting_registry_proof } wrapper is
             // gone (the credential is now the validator's compile-time parameter).
             // Registry node output is at index 2: [0] PLB, [1] updated covering node, [2] new registry node
-            var issuanceRedeemer = CoreRedeemers.mintProofOutputIndex(2);
+            var paramsRefInput = TransactionInput.builder()
+                    .transactionId(protocolParamsUtxo.getTxHash()).index(protocolParamsUtxo.getOutputIndex()).build();
+            var issuanceCborRefInput = TransactionInput.builder()
+                    .transactionId(issuanceUtxo.getTxHash()).index(issuanceUtxo.getOutputIndex()).build();
+            var issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
+            var issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
+            var issuanceLogicAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
+            var substandardIssueCredential = Credential.fromScript(substandardIssueContract.getScriptHash());
+            var issuanceLayout = CoreLayout.builder()
+                    .referenceInput(paramsRefInput).referenceInput(issuanceCborRefInput)
+                    .withdrawal(issuanceLogicCredential).withdrawal(substandardIssueCredential).build();
+            var registryProof = CoreRedeemers.mintProofOutputIndex(2);
+            var issuanceRedeemer = CoreRedeemers.issuanceRedeemer(issuanceLayout.referenceInputIndex(paramsRefInput));
+            var issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                    new CoreRedeemers.IssuanceEntry(issuanceContract.getPolicyId(), registryProof)));
 
             var programmableToken = Asset.builder()
                     .name("0x" + request.getAssetName())
@@ -332,7 +346,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
 
             var payeeAddress = new Address(request.getRecipientAddress());
             var targetAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     payeeAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
@@ -354,23 +368,23 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             var tx = new Tx()
                     .collectFrom(feePayerUtxos)
                     .collectFrom(directoryUtxo, CoreRedeemers.registrySpend())
-                    .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, ConstrPlutusData.of(0))
                     .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
                     .mintAsset(directoryMintContract, directoryMintNft, directoryMintRedeemer)
                     .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue), ConstrPlutusData.of(0))
                     .payToContract(directorySpendContractAddress.getAddress(), ValueUtil.toAmountList(directorySpendValue), directorySpendDatum.toPlutusData())
                     .payToContract(directorySpendContractAddress.getAddress(), ValueUtil.toAmountList(directoryMintValue), directoryMintDatum.toPlutusData())
-                    .readFrom(TransactionInput.builder()
-                                    .transactionId(protocolParamsUtxo.getTxHash())
-                                    .index(protocolParamsUtxo.getOutputIndex())
-                                    .build(),
-                            TransactionInput.builder()
-                                    .transactionId(issuanceUtxo.getTxHash())
-                                    .index(issuanceUtxo.getOutputIndex())
-                                    .build())
+                    .readFrom(issuanceLayout.referenceInputs().toArray(new TransactionInput[0]))
                     .attachSpendingValidator(directorySpendContract)
+                    .attachRewardValidator(issuanceLogic)
                     .attachRewardValidator(substandardIssueContract)
                     .withChangeAddress(request.getFeePayerAddress());
+
+            for (var withdrawal : issuanceLayout.inWithdrawalOrder(List.of(
+                    new CoreWithdrawal(substandardIssueCredential, substandardIssueAddress.getAddress(), ConstrPlutusData.of(0)),
+                    new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(), issuanceLogicRedeemer)),
+                    CoreWithdrawal::credential)) {
+                tx.withdraw(withdrawal.rewardAddress(), BigInteger.ZERO, withdrawal.redeemer());
+            }
 
             // Attach CIP-170 ATTEST metadata if attestation data is present
             if (request.getAttestation() != null) {
@@ -460,7 +474,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
 
             var adminUtxos = accountService.findAdaOnlyUtxo(request.feePayerAddress(), 10_000_000L);
 
-            var issuanceUtxoOpt = utxoProvider.findUtxo(protocolParams.txHash(), 2);
+            var issuanceUtxoOpt = utxoProvider.findIssuanceCborHexUtxo(protocolParams);
             if (issuanceUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve issuance params");
             }
@@ -475,7 +489,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             // Subsequent mint (registry node already exists): include the registry node UTxO as a
             // reference input so issuance_mint.ak can verify the token via RefInput. In v0.4.0 the
             // redeemer IS types.MintingRegistryProof — RefInput { index } = Constr 0 [Int].
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
             var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
             final var progTokenPolicyId = issuanceContract.getPolicyId();
@@ -496,10 +510,24 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             // redeemer is an out-of-range read the validator reports as an unrelated failure.
             // CoreLayout throws instead, and adding a second reference input here later will
             // then be a change that keeps working rather than one that silently renumbers.
-            var mintLayout = CoreLayout.builder().referenceInput(registryRefInput).build();
+            var paramsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(),
+                    protocolParams.protocolParams().utxo().outputIndex());
+            if (paramsUtxoOpt.isEmpty()) return TransactionContext.typedError("could not resolve protocol params UTxO");
+            var paramsUtxo = paramsUtxoOpt.get();
+            var paramsRefInput = TransactionInput.builder()
+                    .transactionId(paramsUtxo.getTxHash()).index(paramsUtxo.getOutputIndex()).build();
+            var issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
+            var issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
+            var issuanceLogicAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
+            var substandardIssueCredential = Credential.fromScript(substandardIssueContract.getScriptHash());
+            var mintLayout = CoreLayout.builder().referenceInput(paramsRefInput).referenceInput(registryRefInput)
+                    .withdrawal(issuanceLogicCredential).withdrawal(substandardIssueCredential).build();
             var registryRefInputIndex = mintLayout.referenceInputIndex(registryRefInput);
 
-            var issuanceRedeemer = CoreRedeemers.mintProofRefInput(registryRefInputIndex);
+            var registryProof = CoreRedeemers.mintProofRefInput(registryRefInputIndex);
+            var issuanceRedeemer = CoreRedeemers.issuanceRedeemer(mintLayout.referenceInputIndex(paramsRefInput));
+            var issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
+                    new CoreRedeemers.IssuanceEntry(issuanceContract.getPolicyId(), registryProof)));
 
             var programmableToken = Asset.builder()
                     .name("0x" + request.assetName())
@@ -520,18 +548,24 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             var recipientAddress = new Address(recipient);
 
             var targetAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     recipientAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
             var tx = new Tx()
                     .collectFrom(adminUtxos)
-                    .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, ConstrPlutusData.of(0))
                     .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
                     .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue), ConstrPlutusData.of(0))
-                    .readFrom(registryRefInput)
+                    .readFrom(mintLayout.referenceInputs().toArray(new TransactionInput[0]))
+                    .attachRewardValidator(issuanceLogic)
                     .attachRewardValidator(substandardIssueContract)
                     .withChangeAddress(request.feePayerAddress());
+
+            mintLayout.inWithdrawalOrder(List.of(
+                            new CoreWithdrawal(substandardIssueCredential, substandardIssueAddress.getAddress(), ConstrPlutusData.of(0)),
+                            new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(), issuanceLogicRedeemer)),
+                            CoreWithdrawal::credential)
+                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
 
             // Attach CIP-170 ATTEST metadata if attestation data is present
             if (request.attestation() != null) {
@@ -599,7 +633,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             var amountToTransfer = new BigInteger(request.quantity());
 
             // Registry lookup
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolParams);
+            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
             var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
             var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
 
@@ -613,7 +647,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             }
             var progTokenRegistry = progTokenRegistryOpt.get();
 
-            var protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.txHash(), 0);
+            var protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
             if (protocolParamsUtxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not resolve protocol params");
             }
@@ -621,12 +655,12 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
 
             // Sender/recipient programmable token addresses
             var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     senderAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
             var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBaseParams().scriptHash()),
+                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     receiverAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
@@ -637,11 +671,14 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             var coreTransfer = protocolScriptBuilderService.getParameterizedTransferScript(protocolParams);
             var coreTransferAddress = AddressProvider.getRewardAddress(coreTransfer, network.getCardanoNetwork());
             var coreTransferCredential = Credential.fromScript(coreTransfer.getScriptHash());
+            var dispatcher = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
+            var dispatcherAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
+            var dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
             var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
 
             // KYC transfer script
             var parameterisedTransferContract = kycScriptBuilder.buildTransferScript(
-                    protocolParams.programmableLogicBaseParams().scriptHash(),
+                    protocolParams.programmableLogicBase().scriptHash(),
                     globalStatePolicyId
             );
             var substandardTransferAddress = AddressProvider.getRewardAddress(parameterisedTransferContract, network.getCardanoNetwork());
@@ -741,6 +778,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
                     .referenceInput(protocolParamsRefInput)
                     .referenceInput(registryRefInput)
                     .withdrawal(coreTransferCredential)
+                    .withdrawal(dispatcherCredential)
                     .withdrawal(substandardTransferCredential)
                     .build();
             var sortedReferenceInputs = layout.referenceInputs();
@@ -750,7 +788,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             // One proof per programmable-base input (sender credential)
             var globalStateIdx = layout.referenceInputIndex(globalStateRefInput);
             var vkeyIdx = request.kycVkeyIndex() != null ? request.kycVkeyIndex() : 0;
-            var progTokenBaseScriptHash = protocolParams.programmableLogicBaseParams().scriptHash();
+            var progTokenBaseScriptHash = protocolParams.programmableLogicBase().scriptHash();
 
             var kycProofList = ListPlutusData.of();
             for (Utxo utxo : sortedInputUtxos) {
@@ -768,11 +806,11 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
                 }
             }
 
-            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(paramsIdx, List.of(
+            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(List.of(
                     CoreRedeemers.tokenExists(layout.referenceInputIndex(registryRefInput))));
 
-            var baseSpendRedeemer = CoreRedeemers.spendViaTransfer(
-                    paramsIdx, layout.withdrawalIndex(coreTransferCredential));
+            var baseSpendRedeemer = CoreRedeemers.baseSpend(
+                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
 
             // Build the transaction
             var tx = new Tx()
@@ -785,6 +823,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             // serialiser re-indexing them afterwards.
             layout.inWithdrawalOrder(
                             List.of(new CoreWithdrawal(substandardTransferCredential, substandardTransferAddress.getAddress(), kycProofList),
+                                    new CoreWithdrawal(dispatcherCredential, dispatcherAddress.getAddress(), CoreRedeemers.dispatchTransfer()),
                                     new CoreWithdrawal(coreTransferCredential, coreTransferAddress.getAddress(), coreTransferRedeemer)),
                             CoreWithdrawal::credential)
                     .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
@@ -795,6 +834,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             sortedReferenceInputs.forEach(tx::readFrom);
 
             tx.attachRewardValidator(coreTransfer)
+                    .attachRewardValidator(dispatcher)
                     .attachRewardValidator(parameterisedTransferContract)
                     .attachSpendingValidator(programmableLogicBase)
                     .withChangeAddress(senderAddress.getAddress());
@@ -915,7 +955,7 @@ public class KycSubstandardHandler implements SubstandardHandler, BasicOperation
             var substandardIssueAddress = AddressProvider.getRewardAddress(substandardIssueContract, network.getCardanoNetwork());
 
             var substandardTransferContract = kycScriptBuilder.buildTransferScript(
-                    protocolParams.programmableLogicBaseParams().scriptHash(), globalStatePolicyId);
+                    protocolParams.programmableLogicBase().scriptHash(), globalStatePolicyId);
             var substandardTransferAddress = AddressProvider.getRewardAddress(substandardTransferContract, network.getCardanoNetwork());
 
             // Register stake addresses for issue and transfer scripts

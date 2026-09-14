@@ -85,7 +85,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var issuance = OBJECT_MAPPER.writeValueAsString(issuanceData);
         log.info("issuance: {}", issuance);
 
-        var programmableLogicBaseScriptHash = protocolBootstrapParams.programmableLogicBaseParams().scriptHash();
+        var programmableLogicBaseScriptHash = protocolBootstrapParams.programmableLogicBase().scriptHash();
 
         var utxosOpt = bfBackendService.getUtxoService().getUtxos(adminAccount.baseAddress(), 100, 1);
         if (!utxosOpt.isSuccessful() || utxosOpt.getValue().isEmpty()) {
@@ -133,13 +133,13 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicBaseScriptHash))
                 ),
-                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().scriptHash())),
+                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().scriptHash())),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(substandardIssueContract.getScriptHash())
                 ),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(
-                                protocolBootstrapParams.transferParams().scriptHash()))
+                                protocolBootstrapParams.transfer().scriptHash()))
                 )
         );
         var issuanceContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(issuanceParameters, ISSUANCE_MINT), PlutusVersion.v3);
@@ -151,19 +151,19 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2));
 
         // Directory MINT parameterization
-        log.info("protocolBootstrapParams.directoryMintParams(): {}", protocolBootstrapParams.directoryMintParams());
+        log.info("protocolBootstrapParams.registry(): {}", protocolBootstrapParams.registry());
         var directoryMintParameters = ListPlutusData.of(
                 ConstrPlutusData.of(0,
-                        BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().txInput().txHash())),
-                        BigIntPlutusData.of(protocolBootstrapParams.directoryMintParams().txInput().outputIndex())),
-                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().issuanceScriptHash()))
+                        BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().txInput().txHash())),
+                        BigIntPlutusData.of(protocolBootstrapParams.registry().txInput().outputIndex())),
+                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().issuanceScriptHash()))
         );
         var directoryMintContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(directoryMintParameters, DIRECTORY_MINT_CONTRACT), PlutusVersion.v3);
         log.info("directoryMintContract: {}", directoryMintContract.getPolicyId());
 
         // Directory SPEND parameterization
         var directorySpendParameters = ListPlutusData.of(
-                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.protocolParams().scriptHash()))
+                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.protocolParams().policyId()))
         );
         var directorySpendContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(directorySpendParameters, DIRECTORY_SPEND_CONTRACT), PlutusVersion.v3);
         log.info("directorySpendContract, policy: {}", directorySpendContract.getPolicyId());
@@ -258,7 +258,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ))
                 .build();
 
-        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 aliceAccount.getBaseAddress().getDelegationCredential().get(),
                 network);
 
@@ -356,7 +356,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var issuance = OBJECT_MAPPER.writeValueAsString(issuanceData);
         log.info("issuance: {}", issuance);
 
-        var programmableLogicBaseScriptHash = protocolBootstrapParams.programmableLogicBaseParams().scriptHash();
+        var programmableLogicBaseScriptHash = protocolBootstrapParams.programmableLogicBase().scriptHash();
 
         var utxosOpt = bfBackendService.getUtxoService().getUtxos(adminAccount.baseAddress(), 100, 1);
         if (!utxosOpt.isSuccessful() || utxosOpt.getValue().isEmpty()) {
@@ -393,32 +393,32 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicBaseScriptHash))
                 ),
-                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().scriptHash())),
+                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().scriptHash())),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(substandardIssueContract.getScriptHash())
                 ),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(
-                                protocolBootstrapParams.transferParams().scriptHash()))
+                                protocolBootstrapParams.transfer().scriptHash()))
                 )
         );
         var issuanceContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(issuanceParameters, ISSUANCE_MINT), PlutusVersion.v3);
         log.info("issuanceContract: {}", issuanceContract.getPolicyId());
 
         // Directory MINT parameterization
-        log.info("protocolBootstrapParams.directoryMintParams(): {}", protocolBootstrapParams.directoryMintParams());
+        log.info("protocolBootstrapParams.registry(): {}", protocolBootstrapParams.registry());
         var directoryMintParameters = ListPlutusData.of(
                 ConstrPlutusData.of(0,
-                        BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().txInput().txHash())),
-                        BigIntPlutusData.of(protocolBootstrapParams.directoryMintParams().txInput().outputIndex())),
-                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().issuanceScriptHash()))
+                        BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().txInput().txHash())),
+                        BigIntPlutusData.of(protocolBootstrapParams.registry().txInput().outputIndex())),
+                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().issuanceScriptHash()))
         );
         var directoryMintContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(directoryMintParameters, DIRECTORY_MINT_CONTRACT), PlutusVersion.v3);
         log.info("directoryMintContract: {}", directoryMintContract.getPolicyId());
 
         // Directory SPEND parameterization
         var directorySpendParameters = ListPlutusData.of(
-                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.protocolParams().scriptHash()))
+                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.protocolParams().policyId()))
         );
         var directorySpendContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(directorySpendParameters, DIRECTORY_SPEND_CONTRACT), PlutusVersion.v3);
         log.info("directorySpendContract, policy: {}", directorySpendContract.getPolicyId());
@@ -469,7 +469,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ))
                 .build();
 
-        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 aliceAccount.getBaseAddress().getDelegationCredential().get(),
                 network);
 
@@ -575,7 +575,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var issuance = OBJECT_MAPPER.writeValueAsString(issuanceData);
         log.info("issuance: {}", issuance);
 
-        var programmableLogicBaseScriptHash = protocolBootstrapParams.programmableLogicBaseParams().scriptHash();
+        var programmableLogicBaseScriptHash = protocolBootstrapParams.programmableLogicBase().scriptHash();
 
         var utxosOpt = bfBackendService.getUtxoService().getUtxos(adminAccount.baseAddress(), 100, 1);
         if (!utxosOpt.isSuccessful() || utxosOpt.getValue().isEmpty()) {
@@ -623,13 +623,13 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(programmableLogicBaseScriptHash))
                 ),
-                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().scriptHash())),
+                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().scriptHash())),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(substandardIssueContract.getScriptHash())
                 ),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(
-                                protocolBootstrapParams.transferParams().scriptHash()))
+                                protocolBootstrapParams.transfer().scriptHash()))
                 )
         );
         var issuanceContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(issuanceParameters, ISSUANCE_MINT), PlutusVersion.v3);
@@ -641,19 +641,19 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var issuanceRedeemer = ConstrPlutusData.of(1, BigIntPlutusData.of(2));
 
         // Directory MINT parameterization
-        log.info("protocolBootstrapParams.directoryMintParams(): {}", protocolBootstrapParams.directoryMintParams());
+        log.info("protocolBootstrapParams.registry(): {}", protocolBootstrapParams.registry());
         var directoryMintParameters = ListPlutusData.of(
                 ConstrPlutusData.of(0,
-                        BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().txInput().txHash())),
-                        BigIntPlutusData.of(protocolBootstrapParams.directoryMintParams().txInput().outputIndex())),
-                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.directoryMintParams().issuanceScriptHash()))
+                        BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().txInput().txHash())),
+                        BigIntPlutusData.of(protocolBootstrapParams.registry().txInput().outputIndex())),
+                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().issuanceScriptHash()))
         );
         var directoryMintContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(directoryMintParameters, DIRECTORY_MINT_CONTRACT), PlutusVersion.v3);
         log.info("directoryMintContract: {}", directoryMintContract.getPolicyId());
 
         // Directory SPEND parameterization
         var directorySpendParameters = ListPlutusData.of(
-                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.protocolParams().scriptHash()))
+                BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.protocolParams().policyId()))
         );
         var directorySpendContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(AikenScriptUtil.applyParamToScript(directorySpendParameters, DIRECTORY_SPEND_CONTRACT), PlutusVersion.v3);
         log.info("directorySpendContract, policy: {}", directorySpendContract.getPolicyId());
@@ -748,7 +748,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ))
                 .build();
 
-        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 aliceAccount.getBaseAddress().getDelegationCredential().get(),
                 network);
 

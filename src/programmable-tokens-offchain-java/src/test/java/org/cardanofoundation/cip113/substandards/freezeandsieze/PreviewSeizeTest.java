@@ -100,7 +100,7 @@ public class PreviewSeizeTest extends AbstractPreviewTest implements PreviewFree
         log.info("policy id: {}, asset name: {}", progToken.policyId(), progToken.unsafeHumanAssetName());
 
         // Directory SPEND parameterization
-        var registrySpendContract = protocolScriptBuilderService.getParameterizedDirectorySpendScript(protocolBootstrapParams);
+        var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolBootstrapParams);
         log.info("registrySpendContract: {}", HexUtil.encodeHexString(registrySpendContract.getScriptHash()));
 
         var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network);
@@ -140,12 +140,12 @@ public class PreviewSeizeTest extends AbstractPreviewTest implements PreviewFree
         log.info("protocolParamsUtxo: {}", protocolParamsUtxo);
 
         var seizedAddress = new Address("addr_test1qqxk5ma8qycuwupav8rdqclzas8mw5d4hyc95evnh8p64m2yhv63m63lpr56n4974lm9ldvcjde6guwe3q2kxg4l567qht6pvs");
-        var seizedProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var seizedProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 seizedAddress.getDelegationCredential().get(),
                 network);
 
         var recipientAddress = new Address(feePayerAddress);
-        var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash()),
+        var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
                 recipientAddress.getDelegationCredential().get(),
                 network);
 
@@ -156,7 +156,7 @@ public class PreviewSeizeTest extends AbstractPreviewTest implements PreviewFree
         var programmableLogicGlobal = protocolScriptBuilderService.getParameterizedTransferScript(protocolBootstrapParams);
         var programmableLogicGlobalAddress = AddressProvider.getRewardAddress(programmableLogicGlobal, network);
         log.info("programmableLogicGlobalAddress policy: {}", programmableLogicGlobalAddress.getAddress());
-        log.info("protocolBootstrapParams.transferParams().scriptHash(): {}", protocolBootstrapParams.transferParams().scriptHash());
+        log.info("protocolBootstrapParams.transfer().scriptHash(): {}", protocolBootstrapParams.transfer().scriptHash());
 //
 ////            // Programmable Logic Base parameterization
         var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolBootstrapParams);
@@ -185,7 +185,7 @@ public class PreviewSeizeTest extends AbstractPreviewTest implements PreviewFree
 
         var substandardTransferContract1 = substandardTransferContractOpt.get();
 
-        var transferContractInitParams = ListPlutusData.of(serialize(Credential.fromScript(protocolBootstrapParams.programmableLogicBaseParams().scriptHash())),
+        var transferContractInitParams = ListPlutusData.of(serialize(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash())),
                 BytesPlutusData.of(HexUtil.decodeHexString(blacklistBoostrap.blacklistMintBootstrap().scriptHash()))
         );
 

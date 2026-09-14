@@ -1,93 +1,11 @@
-export interface TxInput {
-  txHash: string;
-  outputIndex: number;
-}
-
-export interface ProtocolParams {
-  txInput: TxInput;
-  scriptHash: string;
-  alwaysFailScriptHash: string;
-}
-
-export interface DirectoryMintParams {
-  txInput: TxInput;
-  issuanceScriptHash: string;
-  scriptHash: string;
-}
-
-export interface ProgrammableLogicBaseParams {
-  scriptHash: string;
-}
-
-export interface ProgrammableLogicGlobalParams {
-  scriptHash: string;
-}
-
-export interface IssuanceParams {
-  txInput: TxInput;
-  scriptHash: string;
-  alwaysFailScriptHash: string;
-}
-
-export interface DirectorySpendParams {
-  scriptHash: string;
-}
-
-/** A deployed withdraw-0 delegate: `transfer`, `third_party` or `unfracking`.
- *  All three are parameterised by the protocol-params NFT policy and deployed the same way,
- *  so the backend models them with one shape. */
-export interface DelegateParams {
-  protocolParamsPolicyId: string;
-  scriptHash: string;
-  rewardAddress: string;
-}
+import type { DeploymentParams } from "@easy1staking/cip113-sdk-ts";
 
 /**
- * One recorded deployment of the CIP-113 core protocol, as served by the backend.
- *
- * The core upgrade dissolved the `programmable_logic_global` coordinator into `transfer`
- * and `third_party`, so `programmableLogicGlobalPrams` / `programmableGlobalRefInput` are
- * gone and three delegates are named individually. `schemaVersion` is what the backend
- * checks before it will transact against a record: anything below the current version
- * describes a protocol whose programmable-token addresses this build cannot spend from.
+ * Backend bootstrap payload. Schema v3 deliberately mirrors SDK 0.9.x
+ * DeploymentParams exactly; the schema marker is the only transport-only field.
  */
-/** `coordination_spend` as deployed. The nonce is carried so the lock target baked into
- *  `protocol_params_mint`'s 2nd parameter can be RE-DERIVED and asserted rather than trusted. */
-export interface CoordinationParams {
-  nonce: string;
-  scriptHash: string;
-  address: string;
-}
-
-/** `upgrade_multisig` as deployed — upstream's REFERENCE upgrade authority.
- *  ⚠ Not necessarily the ACTIVE authority: that lives in the coordination datum's field 5,
- *  which the backend does not currently serve. See `toDeploymentParams`. */
-export interface UpgradeMultisigParams {
-  signers: string[];
-  threshold: number;
-  scriptHash: string;
-  rewardAddress: string;
-}
-
-export interface ProtocolBootstrapParams {
-  schemaVersion: number;
-  protocolParams: ProtocolParams;
-  coordinationParams: CoordinationParams;
-  upgradeMultisigParams: UpgradeMultisigParams;
-  transferParams: DelegateParams;
-  thirdPartyParams: DelegateParams;
-  unfrackingParams: DelegateParams;
-  programmableLogicBaseParams: ProgrammableLogicBaseParams;
-  issuanceParams: IssuanceParams;
-  directoryMintParams: DirectoryMintParams;
-  directorySpendParams: DirectorySpendParams;
-  /** Bound on the inline datum a HOLDER-created programmable output may carry. */
-  maxInlineDatumBytes: number;
-  programmableBaseRefInput: TxInput;
-  transferRefInput: TxInput;
-  thirdPartyRefInput: TxInput;
-  unfrackingRefInput: TxInput;
-  txHash: string;
+export interface ProtocolBootstrapParams extends DeploymentParams {
+  schemaVersion: 3;
 }
 
 export type RegistryDatum = {

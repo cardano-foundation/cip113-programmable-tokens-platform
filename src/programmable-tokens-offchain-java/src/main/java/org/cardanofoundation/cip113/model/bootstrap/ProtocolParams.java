@@ -1,5 +1,5 @@
 package org.cardanofoundation.cip113.model.bootstrap;
 
-public record ProtocolParams(TxInput txInput, String scriptHash, String alwaysFailScriptHash) {
-
+/** The merged protocol-params mint/spend validator: one hash is policy and address. */
+public record ProtocolParams(TxInput txInput, String policyId, TxInput utxo) {
 }

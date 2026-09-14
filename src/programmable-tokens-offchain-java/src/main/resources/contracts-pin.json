@@ -21,13 +21,13 @@
       "name": "cip113-core",
       "resource": "plutus.json",
       "repository": "https://github.com/cardano-foundation/cip113-programmable-tokens",
-      "commit": "9db7e0629a1509cc9d41d069f0ef0ed251601173",
-      "commit_date": "2026-08-24T15:41:08+01:00",
-      "upstream_version": "0.5.0-alpha.2",
+      "commit": "7e8a63198c5b240135f1aa2f043ce5d7c046b2c4",
+      "commit_date": "2026-09-10T14:05:14+01:00",
+      "upstream_version": "0.5.0-alpha.4",
       "aiken_compiler": "v1.1.23+8949565",
-      "sha256": "bd297f36e9e955d814fb3a67fbc7e51c2344b54d952d38b03ef9f32c1d43b9ad",
+      "sha256": "5ff5d6d2990d815973e4edcf6d46e7c3d0ff4bf3cb7c17a3e672e091b7ea0b46",
       "verbatim_from_upstream": true,
-      "note": "Upstream's committed plutus.json, byte for byte. It also reproduces from its own source: rebuilding the tree at this commit with aiken v1.1.23+8949565 yields all 27 validator entries identically, preamble included. Taking upstream's file and rebuilding it are therefore interchangeable."
+      "note": "Upstream's committed plutus.json, byte for byte. It reproduces from source with aiken v1.1.23+8949565: all 34 validator entries and the complete artifact are identical. The SDK pins and operates this exact artifact."
     },
     {
       "name": "rwa-token",

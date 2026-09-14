@@ -8,24 +8,17 @@ Read §0 first if you have an existing deployment: this release cannot transact 
 
 ---
 
-## 0. Whether you need to redeploy — yes
+## 0. Current contract generation
 
-The core contracts moved from `726d757` to upstream `9db7e06`. That upgrade changes
-`programmable_logic_base`'s script hash, and PLB's hash **is** the payment credential of
-every programmable-token address. So every token in an older deployment lives at an address
-this build cannot spend from.
+This branch targets CIP-113 0.5.0-alpha.4 (upstream `7e8a631`) exclusively. Alpha.4
+reintroduced `programmable_logic_global` as a dispatcher, split replaceable
+`issuance_logic` from the permanent issuance policy, merged protocol-params and registry
+mint/spend validators, and changed the protocol-params datum to six fields.
 
-There is no migration. The protocol's in-place upgrade mechanism swaps *delegates*
-(`transfer`, `third_party`, `unfracking`) by rewriting the protocol-params datum; it cannot
-move PLB, which is exactly the point — PLB is the anchor everything else hangs off.
-
-Deployment records are therefore versioned rather than migrated. Each entry in
-`protocol-bootstraps-{network}.json` carries a `schemaVersion`, and the backend refuses to
-start against anything below the current one, naming the record. An older record is not
-half-usable; it describes a different protocol.
-
-The committed `protocol-bootstraps-devnet.json`, `-preview.json` and `-preprod.json` all
-predate this and will be rejected. §4 produces a replacement.
+There is no adapter for older deployments. Script hashes are protocol identity, so an old
+record cannot safely be made current by renaming fields. The committed devnet and Preview
+records use bootstrap schema 3. Preprod intentionally has no deployment in this branch; deploy
+alpha.4 there before using the preprod profile.
 
 ---
 
@@ -161,57 +154,30 @@ addresses and hashes you will want.
 
 ## 4. Deploy the protocol
 
-```bash
-cd src/programmable-tokens-offchain-java
+Protocol deployment belongs to the sibling TypeScript SDK, whose bootstrap harness is the
+canonical alpha.4 implementation. The platform consumes the returned `DeploymentParams`; it
+does not maintain a second Java deployer.
 
-export CARDANO_NETWORK_MAGIC=42
-export CARDANO_BACKEND_URL=http://localhost:8081/api/v1/
+The checked-in record for this host's current Yaci chain is
+`src/programmable-tokens-offchain-java/src/main/resources/protocol-bootstraps-devnet.json`:
 
-# Write straight into the resource the backend reads. The writer APPENDS to the existing
-# array and replaces any entry with the same txHash, so this registers the deployment in
-# place instead of leaving you to splice JSON by hand.
-export BOOTSTRAP_OUT=src/main/resources/protocol-bootstraps-devnet.json
+- state/bootstrap transaction:
+  `e0422cc40c20a9e6fc9fd68d044866a8819447e4d2ddbb3640278d8110accdaa`;
+- reference-script transaction:
+  `9137c9013a4ea541f5ef3e454559568dd104cdfecb360183a6413a91a39620fc`.
 
-./gradlew test --tests '*PreviewProtocolDeploymentMintTest*' -PtestLogs
-```
-
-Despite the name, this class is the protocol deployer for **whatever backend
-`CARDANO_BACKEND_URL` points at** — with the variables above, that is your local devnet.
-
-One transaction deploys the whole protocol:
-
-- mints the **protocol-params NFT** and locks it at `coordination_spend`, carrying the
-  7-field params datum (the live wiring);
-- mints the **registry origin node** and the **issuance-template NFT**;
-- publishes reference scripts for `programmable_logic_base` and all **three** delegates —
-  `transfer`, `third_party`, `unfracking`;
-- registers the stake credential of each delegate plus `upgrade_multisig`, because a
-  withdraw-0 against an unregistered reward account is a phase-1 rejection the scripts never
-  get to see.
-
-Before it builds anything it runs `CoreProtocolParamsDatum.validateForDeployment()`, which
-refuses a datum that would brick the protocol: a credential that is not 28 bytes (nothing
-could ever satisfy it), two delegates sharing a credential (which collapses PLB's dispatch
-so a seizure could be authorised by presenting the transfer validator), or a non-positive
-datum bound. None of this is checked on chain — `protocol_params_mint` only shape-checks the
-datum — so this is the only place it can be caught.
-
-The deployment record lands at `$BOOTSTRAP_OUT`. **Keep it**: it is the deployment's only
-durable output, and without it the addresses are not reconstructible.
+It is schema 3 and records the merged protocol-params and registry validators, the
+`programmable_logic_global` dispatcher, replaceable `issuance_logic`, upgrade multisig, and all
+seven reference inputs. If the Yaci cluster is reset, this record is invalid because the chain
+state is gone. Bootstrap again with `bootstrapProtocol` in the sibling `cip113-sdk-ts` project,
+store the returned object as the sole array element in this resource, and update the devnet
+default transaction hash. `npm run test:devnet` in that SDK is the end-to-end deployment
+reference and must be green against the replacement cluster.
 
 ### Register the deployment
 
-With `BOOTSTRAP_OUT` pointed at the resource, the file is already updated — the writer reads
-the existing array, drops any entry with the same `txHash`, appends the new one and rewrites
-it. Nothing to splice by hand. If you wrote it elsewhere instead, the file it produced is a
-JSON **array**, so merge the element rather than nesting the array inside the resource.
-
-The deployment logs the line you need:
-
-```
-BootstrapParams written to … (N deployment(s) in file)
-Set programmable.token.default.txHash=<txHash> to make this deployment active
-```
+The resource is a JSON array, but this development branch is latest-only: keep exactly the
+current deployment rather than retaining entries from older contract generations.
 
 Set it in `application.yaml`'s `devnet` profile:
 
@@ -222,10 +188,8 @@ programmable:
       txHash: "<the txHash from that log line>"
 ```
 
-Older entries in the file are **not** a problem: the backend skips deployment records it
-cannot use, with a warning naming each, and only fails if none is usable or if the one you
-selected is among the skipped. But leaving `default.txHash` unset makes it pick the first
-*usable* entry, which is not necessarily the one you just deployed — so set it.
+The backend fails startup on an old schema, a missing alpha.4 component, an unknown default, or
+an empty deployment list. That failure is deliberate: old hashes cannot be adapted safely.
 
 ## 5. Start Postgres
 
