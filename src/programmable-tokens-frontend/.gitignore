@@ -46,4 +46,8 @@ next-env.d.ts
 frontend.log
 
 # IDE files
-.vscode/.deploy-build/
+.vscode/
+
+# Output of `npm run test:deployment` — it compiles lib/deployment/derive.ts so a plain
+# node script can import it. Generated, never committed.
+.deploy-build/
