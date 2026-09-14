@@ -49,8 +49,10 @@ import java.util.List;
 import java.util.stream.Stream;
 
 import static org.cardanofoundation.cip113.util.PlutusSerializationHelper.serialize;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 @Slf4j
+@EnabledIfEnvironmentVariable(named = "CARDANO_BACKEND_URL", matches = ".+")
 public class PreviewTransferTest extends AbstractPreviewTest implements PreviewFreezeAndSieze {
 
     private static final String DEFAULT_PROTOCOL = "114adc8ee212b5ded1f895ab53c7741e5521feff735d05aeef2a92dcf05c9ae2";

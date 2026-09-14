@@ -30,8 +30,10 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
 import java.util.List;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 @Slf4j
+@EnabledIfEnvironmentVariable(named = "CARDANO_BACKEND_URL", matches = ".+")
 public class IssueTokenTest extends AbstractPreviewTest {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();

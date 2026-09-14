@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static java.math.BigInteger.ONE;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 /**
  * End-to-end CIP-113 registration + subsequent mint for the {@code dummy} substandard.
@@ -62,6 +63,7 @@ import static java.math.BigInteger.ONE;
  * </ul>
  */
 @Slf4j
+@EnabledIfEnvironmentVariable(named = "CARDANO_BACKEND_URL", matches = ".+")
 public class PreviewRegisterTest extends AbstractPreviewTest {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();

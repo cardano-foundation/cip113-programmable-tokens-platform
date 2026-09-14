@@ -46,8 +46,10 @@ import java.util.Optional;
 
 import static java.math.BigInteger.ONE;
 import static org.cardanofoundation.cip113.util.PlutusSerializationHelper.serialize;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 @Slf4j
+@EnabledIfEnvironmentVariable(named = "CARDANO_BACKEND_URL", matches = ".+")
 public class PreviewRegisterTest extends AbstractPreviewTest implements PreviewFreezeAndSieze {
 
     //    private static final String DEFAULT_PROTOCOL = "0c8e4c5da192e0c814495f685aebf31d27e2eec55a302c08ae56d3f8dd564489";

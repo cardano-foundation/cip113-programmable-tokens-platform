@@ -31,7 +31,6 @@ import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import com.bloxbean.cardano.client.util.HexUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.cardanofoundation.cip113.PreviewConstants;
 import org.cardanofoundation.cip113.core.CoreProtocolParamsDatum;
 import org.cardanofoundation.cip113.model.blueprint.Plutus;
 import org.cardanofoundation.cip113.model.blueprint.Validator;
@@ -61,9 +60,24 @@ public final class BootstrapFixture {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     public static final Network NETWORK = new Network(0b0000, 42);
-    public static final Account ADMIN = Account.createFromMnemonic(NETWORK, PreviewConstants.ADMIN_MNEMONIC);
-    public static final Account REF_INPUT = Account.createFromMnemonic(NETWORK, PreviewConstants.ADMIN_MNEMONIC, 10, 0);
-    public static final Account ALICE = Account.createFromMnemonic(NETWORK, PreviewConstants.ADMIN_MNEMONIC, 1, 0);
+
+    /**
+     * Deterministic mnemonic for OFFLINE derivation only.
+     *
+     * <p>The canonical BIP-39 all-`abandon` 24-word test vector. These fixtures build and
+     * evaluate transactions that are never submitted, so what they need is a stable set of
+     * derived addresses, not a funded wallet. Using {@code PreviewConstants.ADMIN_MNEMONIC}
+     * here would drag a real spending key into the offline path and make every offline test
+     * depend on an environment variable it has no use for.
+     *
+     * <p>This wallet must never be funded on any network.
+     */
+    public static final String OFFLINE_DERIVATION_MNEMONIC =
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+
+    public static final Account ADMIN = Account.createFromMnemonic(NETWORK, OFFLINE_DERIVATION_MNEMONIC);
+    public static final Account REF_INPUT = Account.createFromMnemonic(NETWORK, OFFLINE_DERIVATION_MNEMONIC, 10, 0);
+    public static final Account ALICE = Account.createFromMnemonic(NETWORK, OFFLINE_DERIVATION_MNEMONIC, 1, 0);
 
     private static final String NONCE_ISSUANCE_ALWAYS_FAIL =
             "fa5b084bbdc0336c1e3c086617d99cf6ecff1a190116784a0dd54aeca948e8fe";

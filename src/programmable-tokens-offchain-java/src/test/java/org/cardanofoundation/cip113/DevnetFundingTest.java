@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigInteger;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 /**
  * Funds {@code adminAccount} from the Yaci DevKit genesis account.
@@ -19,6 +20,7 @@ import java.math.BigInteger;
  * Run this after every {@code docker restart reeve-indexing-example-yaci-cli-1}.
  */
 @Slf4j
+@EnabledIfEnvironmentVariable(named = "CARDANO_BACKEND_URL", matches = ".+")
 public class DevnetFundingTest extends AbstractPreviewTest {
 
     /** Well-known Yaci DevKit genesis mnemonic; account 0 / index 0 holds 10 000 ADA. */

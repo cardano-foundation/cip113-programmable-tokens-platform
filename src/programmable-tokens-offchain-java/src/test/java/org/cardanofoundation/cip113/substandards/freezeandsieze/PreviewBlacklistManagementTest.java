@@ -38,8 +38,10 @@ import java.util.stream.Stream;
 
 import static java.math.BigInteger.ONE;
 import static java.math.BigInteger.ZERO;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 @Slf4j
+@EnabledIfEnvironmentVariable(named = "CARDANO_BACKEND_URL", matches = ".+")
 public class PreviewBlacklistManagementTest extends AbstractPreviewTest implements PreviewFreezeAndSieze {
 
     private final Network network = Networks.preview();
