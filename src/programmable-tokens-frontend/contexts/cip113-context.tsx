@@ -131,8 +131,23 @@ function toDeploymentParams(bp: ProtocolBootstrapParams): DeploymentParams {
 // ---------------------------------------------------------------------------
 
 function toSdkBlueprint(bp: { validators: Array<{ title: string; compiledCode: string; hash: string }>; preamble?: { title: string; version: string } }): PlutusBlueprint {
+  // No placeholder. This used to substitute `{title: "unknown", version: "0.0.0"}` when the
+  // backend omitted the preamble, which it always did -- GET /protocol/blueprint served a
+  // record that had no preamble field at all. The substitution did not paper over a rare edge;
+  // it renamed a permanent defect, and the SDK's version gate then reported it as
+  // `Blueprint "unknown v0.0.0" targets an EARLIER CIP-113 protocol version` while confirming
+  // every validator title was present -- an error that points at the contracts when the actual
+  // fault is one missing field at the API boundary.
+  if (!bp.preamble?.version) {
+    throw new Error(
+      "GET /protocol/blueprint returned a blueprint with no preamble, so the protocol version " +
+        "it belongs to is unknown. This is a BACKEND fault, not a contract-version mismatch: " +
+        "the validators may be entirely correct. Check that the backend's Plutus model still " +
+        "carries `preamble` (see BlueprintPreambleSurvivesApiBoundaryTest).",
+    );
+  }
   return {
-    preamble: bp.preamble ?? { title: "unknown", version: "0.0.0" },
+    preamble: bp.preamble,
     validators: bp.validators.map((v) => ({
       title: v.title,
       compiledCode: v.compiledCode,
