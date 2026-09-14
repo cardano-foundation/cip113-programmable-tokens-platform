@@ -11,7 +11,6 @@ import org.cardanofoundation.cip113.model.blueprint.Validator;
 
 import java.util.List;
 
-import static com.bloxbean.cardano.client.backend.blockfrost.common.Constants.BLOCKFROST_PREPROD_URL;
 import static org.cardanofoundation.cip113.PreviewConstants.BLOCKFROST_KEY_PREPROD;
 
 @Slf4j
@@ -38,7 +37,15 @@ public abstract class AbstractPreprodTest {
         log.info("Wipe Address: {}", userWipeAccount.baseAddress());
     }
 
-    protected final BFBackendService bfBackendService = new BFBackendService(BLOCKFROST_PREPROD_URL, BLOCKFROST_KEY_PREPROD);
+    /**
+     * Was hardwired to real Blockfrost PREPROD with no override at all -- worse than a default,
+     * because no environment could point it elsewhere. Nothing extends this class today, so it
+     * was dormant rather than dangerous; it is fixed here so that adding a subclass tomorrow
+     * does not silently acquire a live preprod endpoint.
+     */
+    protected static final String BACKEND_URL = AbstractPreviewTest.requireBackendUrlForPreprod();
+
+    protected final BFBackendService bfBackendService = new BFBackendService(BACKEND_URL, BLOCKFROST_KEY_PREPROD);
 
     protected final QuickTxBuilder quickTxBuilder = new QuickTxBuilder(bfBackendService);
 

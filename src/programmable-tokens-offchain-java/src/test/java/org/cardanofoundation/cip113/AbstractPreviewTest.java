@@ -11,7 +11,6 @@ import org.cardanofoundation.cip113.model.blueprint.Validator;
 
 import java.util.List;
 
-import static com.bloxbean.cardano.client.backend.blockfrost.common.Constants.BLOCKFROST_PREVIEW_URL;
 import static org.cardanofoundation.cip113.PreviewConstants.BLOCKFROST_KEY_PREVIEW;
 
 @Slf4j
@@ -19,9 +18,45 @@ public abstract class AbstractPreviewTest {
 
     protected static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    /** Devnet override: unset means preview, so existing preview tests are unchanged. */
-    protected static final String BACKEND_URL = System.getenv().getOrDefault("CARDANO_BACKEND_URL", BLOCKFROST_PREVIEW_URL);
 
+    /**
+     * The backend every test in this hierarchy talks to. No default, deliberately.
+     *
+     * <p>This used to fall back to real Blockfrost preview, which meant a test that forgot to
+     * say where it was pointing still pointed somewhere real. Combined with a mnemonic that
+     * used to be hardcoded, "forgot to configure" and "submitted to a public testnet" were the
+     * same state. A placeholder default would be the same defect wearing a different value, so
+     * there is none: say where you are pointing, or nothing runs.
+     *
+     * <p>Every subclass is gated on this same variable being set (see
+     * SubmittingTestsAreGatedTest), so in normal use an unset value disables the test rather
+     * than reaching this exception. The throw is the backstop for a subclass that is added
+     * later without a gate.
+     */
+    protected static final String BACKEND_URL = requireBackendUrl();
+
+    static String requireBackendUrlForPreprod() { return requireBackendUrl(); }
+
+    private static String requireBackendUrl() {
+        String url = System.getenv("CARDANO_BACKEND_URL");
+        if (url == null || url.isBlank()) {
+            throw new IllegalStateException("CARDANO_BACKEND_URL is not set, and it has no default.\n"
+                    + "Tests in this hierarchy read from, and may submit to, whatever this names. It "
+                    + "previously defaulted to real Blockfrost preview, so an unconfigured run was a "
+                    + "run against a public testnet.\n"
+                    + "Set it explicitly -- a local Yaci devnet, or a public endpoint you intend to "
+                    + "use -- and set CARDANO_NETWORK_MAGIC to match.");
+        }
+        return url;
+    }
+
+    /**
+     * Unlike the URL, this KEEPS a placeholder, and the asymmetry is deliberate: a local Yaci
+     * devnet ignores the key entirely, so requiring a real one would block the only backend a
+     * contributor can safely run against. The placeholder is harmless now that the URL must be
+     * named explicitly -- it can no longer be the last accidental thing standing between a run
+     * and a public network.
+     */
     protected static final String BACKEND_KEY = System.getenv().getOrDefault("CARDANO_BACKEND_KEY",
             BLOCKFROST_KEY_PREVIEW == null ? "dummy" : BLOCKFROST_KEY_PREVIEW);
 
