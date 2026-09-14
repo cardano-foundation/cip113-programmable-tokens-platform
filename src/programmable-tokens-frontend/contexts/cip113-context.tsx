@@ -309,14 +309,43 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
         fesBlueprintRef.current = substandardToSdkBlueprint(fesBp);
       }
 
+      // Fail on missing FES data instead of substituting "".
+      //
+      // Every field below parameterises a script, and the token's own policy id is DERIVED
+      // from them. Substituting "" for an absent value does not degrade gracefully -- it
+      // builds a different, valid-looking FES instance for a token that does not exist, and
+      // the SDK then rejects the real token with
+      //   "Token policy <real> does not match this FES instance (<derived-from-blanks>)"
+      // which reads as a problem with the token. The token is fine; the deployment record is
+      // empty. These rows live only in freeze_and_seize_token_registration and blacklist_init,
+      // are written by the registration callback, and are NOT reconstructed from chain -- so a
+      // database wipe empties them permanently for tokens registered before it.
+      const missing = [
+        ["issuerAdminPkh", tokenCtx.issuerAdminPkh],
+        ["blacklistNodePolicyId", tokenCtx.blacklistNodePolicyId],
+        ["blacklistInitTxHash", tokenCtx.blacklistInitTxHash],
+        ["assetName", tokenCtx.assetName || assetName],
+      ].filter(([, value]) => !value).map(([field]) => field);
+
+      if (missing.length > 0) {
+        throw new Error(
+          `Token ${policyId} is registered as freeze-and-seize but the backend has no ` +
+            `FES deployment data for it (missing: ${missing.join(", ")}). This is a MISSING ` +
+            `RECORD, not a mismatched token: these rows are written by the registration ` +
+            `callback and are not rebuilt from chain, so a database reset loses them for ` +
+            `tokens registered beforehand. Re-register the token against this backend, or ` +
+            `restore its row.`,
+        );
+      }
+
       const fes = freezeAndSeizeSubstandard({
         blueprint: fesBlueprintRef.current,
         deployment: {
-          adminPkh: tokenCtx.issuerAdminPkh || "",
-          assetName: tokenCtx.assetName || assetName,
-          blacklistNodePolicyId: tokenCtx.blacklistNodePolicyId || "",
+          adminPkh: tokenCtx.issuerAdminPkh!,
+          assetName: (tokenCtx.assetName || assetName)!,
+          blacklistNodePolicyId: tokenCtx.blacklistNodePolicyId!,
           blacklistInitTxInput: {
-            txHash: tokenCtx.blacklistInitTxHash || "",
+            txHash: tokenCtx.blacklistInitTxHash!,
             outputIndex: tokenCtx.blacklistInitOutputIndex ?? 0,
           },
         },
