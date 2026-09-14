@@ -11,6 +11,7 @@ import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.repository.RegistryNodeRepository;
+import org.cardanofoundation.cip113.service.FesProvenanceReconstructor;
 import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
 import org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler;
 import org.springframework.beans.factory.ObjectProvider;
@@ -26,6 +27,7 @@ public class TokenContextController {
 
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
     private final RegistryNodeRepository registryNodeRepository;
+    private final FesProvenanceReconstructor fesProvenanceReconstructor;
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeTokenRegistrationRepository;
     private final BlacklistInitRepository blacklistInitRepository;
 
@@ -55,6 +57,15 @@ public class TokenContextController {
         var entry = registryEntry.get();
         var substandardId = entry.getSubstandardId();
         var assetName = entry.getAssetName();
+
+        // The registry node is keyed by the token's policy id. Null when we have not indexed it,
+        // which a client must be able to distinguish from "indexed, no provenance published".
+        var registryNode = registryNodeRepository.findByKey(policyId);
+        var transferLogicScript = registryNode
+                .map(node -> node.getTransferLogicScript())
+                .filter(hash -> hash != null && !hash.isBlank())
+                .orElse(null);
+
         String blacklistNodePolicyId = null;
         String issuerAdminPkh = null;
         String blacklistInitTxHash = null;
@@ -66,6 +77,19 @@ public class TokenContextController {
         if ("freeze-and-seize".equals(substandardId)) {
             var tokenRegistration = freezeAndSeizeTokenRegistrationRepository
                     .findByProgrammableTokenPolicyId(policyId);
+
+            // These rows are written only by the registration callback and are never derived
+            // from chain, so a database reset loses them for every token registered before it.
+            // The values are recoverable from the token's published CIP-171 provenance, and the
+            // reconstruction verifies both hops against hashes the chain already reports -- so
+            // it either persists a proven record or persists nothing.
+            if (tokenRegistration.isEmpty() && transferLogicScript != null) {
+                tokenRegistration = fesProvenanceReconstructor.reconstruct(
+                        policyId,
+                        transferLogicScript,
+                        registryNode.map(node -> node.getProtocolParams().getProgLogicScriptHash())
+                                .orElse(null));
+            }
 
             if (tokenRegistration.isPresent()) {
                 var fesReg = tokenRegistration.get();
@@ -102,13 +126,6 @@ public class TokenContextController {
                 }
             }
         }
-
-        // The registry node is keyed by the token's policy id. Null when we have not indexed it,
-        // which a client must be able to distinguish from "indexed, no provenance published".
-        var transferLogicScript = registryNodeRepository.findByKey(policyId)
-                .map(node -> node.getTransferLogicScript())
-                .filter(hash -> hash != null && !hash.isBlank())
-                .orElse(null);
 
         return ResponseEntity.ok(new TokenContextResponse(
                 policyId,
