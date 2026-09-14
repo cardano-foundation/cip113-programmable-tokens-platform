@@ -14,8 +14,6 @@ spring:
     password: ${DB_PASSWORD:password}
 
 network: mainnet
-uplc-link:
-  base-url: ${UPLC_LINK_BASE_URL:https://api.uplc.link}
 
 wallet:
   mnemonic: ""
@@ -49,7 +47,11 @@ substandards:
 # profile below sets its own base-url and leaves this default empty (= disabled).
 uplc-link:
   enabled: ${UPLC_LINK_ENABLED:true}
-  base-url: ${UPLC_LINK_BASE_URL:}
+  # The unprofiled document IS mainnet -- `network: mainnet` above, and there is no separate
+  # mainnet profile -- so this default is mainnet's API host. Profiles below override it.
+  # Declared ONCE: a second `uplc-link:` key in this document is not an override, it is a
+  # DuplicateKeyException at startup.
+  base-url: ${UPLC_LINK_BASE_URL:https://api.uplc.link}
   timeout-ms: ${UPLC_LINK_TIMEOUT_MS:4000}
 
 apiPrefix: /api/v1
@@ -200,6 +202,10 @@ spring:
       on-profile: devnet
 
 network: devnet
+# No registry for a local devnet. Empty disables lookups; without this, devnet would inherit
+# mainnet's host from the unprofiled document and quietly ask it about devnet scripts.
+uplc-link:
+  base-url: ${UPLC_LINK_BASE_URL:}
 
 wallet:
   mnemonic: ""
