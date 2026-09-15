@@ -166,6 +166,29 @@ export default function BootstrapProtocolPage() {
         </p>
       </header>
 
+      <section className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
+        <h2 className="text-sm font-semibold text-white">Before you start</h2>
+        <p className="text-xs text-dark-400">
+          A bootstrap is <strong>six transactions</strong>, each signed separately: one to split
+          the funding into three seeds, then the multisig config, the protocol state, the seven
+          reference scripts, a stake registration (which of two forms depends on whether this
+          wallet&apos;s stake key is already registered), and the delegate script registrations.
+          They cannot be combined — a single transaction measured 21,816 bytes against a
+          16,384-byte limit, and a transaction cannot reference a script it is itself creating.
+        </p>
+        <p className="text-xs text-dark-400">
+          Explicit outputs come to about <strong>177 ADA</strong> before any fee — 140 for the
+          seven reference scripts at ~20 each, 20 for the protocol state, ~2 for the multisig
+          config, 15 for the three seeds. <strong>Fund the wallet with at least 400 ADA.</strong>{" "}
+          Running short does not fail as &ldquo;insufficient funds&rdquo;: coin selection runs out
+          partway and the error names whichever output it could not fund.
+        </p>
+        <p className="text-xs text-amber-300">
+          Once a transaction lands it cannot be unwound. Nothing here is submitted until every
+          step has been built and evaluated.
+        </p>
+      </section>
+
       <section className="space-y-4">
         <h2 className="text-lg font-semibold text-white">1. One-shot seeds</h2>
         <p className="text-xs text-dark-400">
@@ -302,10 +325,10 @@ export default function BootstrapProtocolPage() {
 
           <div className="rounded border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-200">
             <strong>Transactions are not built yet.</strong> Everything above is derived and
-            checked offline. Building and submitting the four bootstrap transactions is T-036,
-            and it is waiting on one thing: the reference implementation lives in the SDK&apos;s
-            test tree (<code>test/harness/bootstrap.ts</code>) and is not exported from the
-            published package, so it cannot be imported here yet. Copying it would duplicate
+            checked offline. Building and submitting the bootstrap is T-036, waiting on one
+            thing: the reference implementation lives in the SDK&apos;s test tree
+            (<code>test/harness/bootstrap.ts</code>) and is not exported from the published
+            package, so it cannot be imported here yet. Copying it would duplicate
             protocol-critical logic the SDK owns. Every network is treated the same — this page
             does not care which one it is pointed at.
           </div>
