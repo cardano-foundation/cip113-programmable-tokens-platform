@@ -12,7 +12,7 @@
  */
 import { MULTISIG_MAX_SIZE, multisigScriptDatum } from "@easy1staking/cip113-sdk-ts";
 import type { MultisigScriptTree } from "@easy1staking/cip113-sdk-ts";
-import { Address as EvoAddress } from "@evolution-sdk/evolution";
+import { Address as EvoAddress, Bytes } from "@evolution-sdk/evolution";
 
 const PKH_HEX = /^[0-9a-fA-F]{56}$/;
 
@@ -49,18 +49,32 @@ export function resolveMember(raw: string): ResolvedMember {
     );
   }
 
-  const payment = (details as { paymentCredential?: { hash?: string; type?: string } })
+  /**
+   * ⛔ `_tag` AND `Bytes.toHex`, not `type` and not `.toLowerCase()`.
+   *
+   * Evolution returns `paymentCredential` as a tagged class — `{ _tag: "KeyHash" | "ScriptHash",
+   * hash: Uint8Array }`. Both mistakes were live and only one of them was loud:
+   *
+   *  - `hash.toLowerCase()` is a TypeError on a Uint8Array. Reported from a real deployment
+   *    attempt as "entry 1: payment.hash.toLowerCase is not a function", which reads as a
+   *    problem with the operator's input and is not.
+   *  - reading `payment.type` returns `undefined` for EVERY address, so the script-credential
+   *    guard below was dead code. A script address would have passed the check that exists to
+   *    reject it — and a script cannot sign, so it would have become a member of an authority
+   *    it can never satisfy.
+   */
+  const payment = (details as { paymentCredential?: { hash?: Uint8Array; _tag?: string } })
     ?.paymentCredential;
   if (!payment?.hash) {
     throw new MultisigInputError(`"${value}" has no payment credential`);
   }
-  if (payment.type && payment.type !== "Key" && payment.type !== "KeyHash") {
+  if (payment._tag !== "KeyHash") {
     throw new MultisigInputError(
-      `"${value}" has a SCRIPT payment credential. A multisig member must be a key that can ` +
-        "sign; a script cannot.",
+      `"${value}" has a ${payment._tag === "ScriptHash" ? "SCRIPT" : `"${payment._tag}"`} ` +
+        "payment credential. A multisig member must be a key that can sign; a script cannot.",
     );
   }
-  return { raw: value, keyHash: payment.hash.toLowerCase(), source: "address" };
+  return { raw: value, keyHash: Bytes.toHex(payment.hash).toLowerCase(), source: "address" };
 }
 
 export interface ResolvedMultisig {

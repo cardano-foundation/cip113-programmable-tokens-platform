@@ -112,7 +112,8 @@ async function main() {
   console.log("  OK   bootstrap record is byte-equal to protocol-bootstraps-preview.json\n");
 
   // ---- multisig ------------------------------------------------------------
-  const { resolveMultisig, resolveMember } = await import("./.deploy-build/deployment/multisig.js");
+  const { Address: EvoAddress, Bytes, ScriptHash } = await import("@evolution-sdk/evolution");
+  const { resolveMember, resolveMultisig } = await import("./.deploy-build/deployment/multisig.js");
   const { decodeMultisigScript } = await import("@easy1staking/cip113-sdk-ts");
   const A = "32e7e00eae28502a2aa271cf4202b1b01b94ca8efe642e380c93d5e2";
   const B = "9a20498043c1031c08f70a4df2fe4e43e33768eb5dfe221546150e3f";
@@ -135,6 +136,47 @@ async function main() {
     if (!threw) throw new Error(`multisig accepted ${why}, which the chain would reject`);
   }
   console.log("  OK   multisig refuses duplicates, bad thresholds and malformed entries");
+
+  // ---- a member given as an ADDRESS, which is how an operator actually types one ----
+  //
+  // Both halves of this were live defects, and only one of them was loud. Evolution returns
+  // paymentCredential as { _tag, hash: Uint8Array }: calling .toLowerCase() on that hash threw
+  // "payment.hash.toLowerCase is not a function" during a real deployment attempt, and reading
+  // `.type` (which does not exist) returned undefined for every address, so the guard meant to
+  // reject SCRIPT credentials never fired once.
+  const KEY_ADDR =
+    "addr_test1qzx9hu8j4ah3auytk0mwcupd69hpc52t0cw39a65ndrah86djs784u92a3m5w475w3w35tyd6v3qumkze80j8a6h5tuqq5xe8y";
+  const fromAddress = resolveMember(KEY_ADDR);
+  if (!/^[0-9a-f]{56}$/.test(fromAddress.keyHash)) {
+    throw new Error(`address did not reduce to a 56-hex payment key hash: ${fromAddress.keyHash}`);
+  }
+  if (fromAddress.source !== "address") throw new Error("address member mis-labelled");
+  console.log(`  OK   address reduces to payment key hash ${fromAddress.keyHash.slice(0, 12)}…`);
+
+  // An address and its own key hash are the SAME member, so a multisig naming both is a
+  // duplicate — which only works if the address path produces the identical hex.
+  let dupThrew = false;
+  try { resolveMultisig([KEY_ADDR, fromAddress.keyHash], 1); } catch { dupThrew = true; }
+  if (!dupThrew) {
+    throw new Error("an address and its own key hash were accepted as two distinct members");
+  }
+  console.log("  OK   an address and its own key hash count as one member");
+
+  // A SCRIPT payment credential cannot sign. This is the guard that was dead.
+  const SCRIPT_ADDR = EvoAddress.toBech32(
+    new EvoAddress.Address({
+      networkId: 0,
+      paymentCredential: new ScriptHash.ScriptHash({ hash: Bytes.fromHex("ab".repeat(28)) }),
+      stakingCredential: undefined,
+    }),
+  );
+  let scriptRejected = false;
+  try { resolveMember(SCRIPT_ADDR); } catch (e) { scriptRejected = /SCRIPT/.test(e.message); }
+  if (!scriptRejected) {
+    throw new Error("a script payment credential was accepted as a multisig member");
+  }
+  console.log("  OK   a script payment credential is refused");
+
 
   // ---- CIP-171 provenance --------------------------------------------------
   const { buildCoreCip171Record } = await import("./.deploy-build/deployment/provenance.js");

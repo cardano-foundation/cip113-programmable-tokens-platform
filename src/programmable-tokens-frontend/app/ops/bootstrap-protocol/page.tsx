@@ -48,6 +48,17 @@ interface TxInputForm {
 
 const EMPTY: TxInputForm = { txHash: "", outputIndex: "" };
 
+/**
+ * One style for every editable control on this page.
+ *
+ * These were `bg-dark-900` with no border on a `bg-dark-950` page — a slightly different dark
+ * rectangle, with nothing to say it could be typed into. Reported from a real session: it took
+ * a while to realise the members box was a text area at all. A border and a focus ring are what
+ * distinguish a field from a panel here.
+ */
+const FIELD =
+  "rounded border border-dark-600 bg-dark-900 px-2 py-1.5 font-mono text-xs text-white placeholder:text-dark-500 focus:border-cyan-600 focus:outline-none focus:ring-1 focus:ring-cyan-600/40";
+
 export default function BootstrapProtocolPage() {
   const network = getCardanoNetwork();
 
@@ -416,13 +427,13 @@ export default function BootstrapProtocolPage() {
           <div key={label} className="flex flex-wrap items-center gap-2">
             <span className="w-52 text-sm text-dark-300">{label}</span>
             <input
-              className="flex-1 min-w-[18rem] rounded bg-dark-900 px-2 py-1 font-mono text-xs text-white"
+              className={`flex-1 min-w-[18rem] ${FIELD}`}
               placeholder="transaction hash (64 hex)"
               value={value.txHash}
               onChange={(e) => set({ ...value, txHash: e.target.value })}
             />
             <input
-              className="w-20 rounded bg-dark-900 px-2 py-1 font-mono text-xs text-white"
+              className={`w-20 ${FIELD}`}
               placeholder="index"
               value={value.outputIndex}
               onChange={(e) => set({ ...value, outputIndex: e.target.value })}
@@ -433,20 +444,30 @@ export default function BootstrapProtocolPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-white">2. Upgrade multisig</h2>
+        <label className="block text-xs font-medium text-dark-200" htmlFor="multisig-members">
+          Members — one per line
+        </label>
         <p className="text-xs text-dark-400">
           Payment key hashes or bech32 addresses, one per line. An address is reduced to its
           payment credential; a script credential is refused, because a script cannot sign.
         </p>
         <textarea
-          className="h-28 w-full rounded bg-dark-900 px-2 py-1 font-mono text-xs text-white"
+          id="multisig-members"
+          rows={6}
+          spellCheck={false}
+          className={`w-full ${FIELD}`}
           placeholder={"addr_test1...\n32e7e00eae28502a2aa271cf4202b1b01b94ca8efe642e380c93d5e2"}
           value={membersText}
           onChange={(e) => setMembersText(e.target.value)}
         />
         <div className="flex items-center gap-2 text-sm text-dark-300">
-          <span>Required signatures</span>
+          <label htmlFor="multisig-threshold">Required signatures</label>
           <input
-            className="w-20 rounded bg-dark-900 px-2 py-1 font-mono text-xs text-white"
+            id="multisig-threshold"
+            type="number"
+            min={1}
+            max={memberEntries.length || 1}
+            className={`w-20 ${FIELD}`}
             value={threshold}
             onChange={(e) => setThreshold(e.target.value)}
           />
@@ -456,11 +477,17 @@ export default function BootstrapProtocolPage() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-white">3. Parameters</h2>
+        <p className="text-xs text-dark-400">
+          Keep the nonce. The bootstrap record stores always_fail&apos;s HASH, not the nonce it
+          came from, so it cannot be recovered from the record afterwards. The inline-datum
+          bound is baked into four scripts at compile time and cannot be changed after
+          deployment.
+        </p>
         <div className="flex flex-wrap items-center gap-3 text-sm text-dark-300">
           <label className="flex items-center gap-2">
             <span>always_fail nonce</span>
             <input
-              className="w-64 rounded bg-dark-900 px-2 py-1 font-mono text-xs text-white"
+              className={`w-64 ${FIELD}`}
               placeholder="operator-chosen hex"
               value={nonce}
               onChange={(e) => setNonce(e.target.value)}
@@ -469,7 +496,9 @@ export default function BootstrapProtocolPage() {
           <label className="flex items-center gap-2">
             <span>max inline datum bytes</span>
             <input
-              className="w-24 rounded bg-dark-900 px-2 py-1 font-mono text-xs text-white"
+              type="number"
+              min={1}
+              className={`w-24 ${FIELD}`}
               value={maxInline}
               onChange={(e) => setMaxInline(e.target.value)}
             />
@@ -727,7 +756,7 @@ export default function BootstrapProtocolPage() {
           rows={8}
           spellCheck={false}
           placeholder='{ "protocolParams": { … }, "transfer": { … }, … }'
-          className="w-full rounded border border-dark-700 bg-dark-950 p-2 font-mono text-xs text-white"
+          className={`w-full ${FIELD}`}
         />
         <button
           type="button"
