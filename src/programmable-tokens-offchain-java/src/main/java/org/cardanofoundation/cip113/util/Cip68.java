@@ -435,6 +435,97 @@ public final class Cip68 {
         return exact.add(oneAda).subtract(BigInteger.ONE).divide(oneAda).multiply(oneAda);
     }
 
+
+    /**
+     * Read a reference-token datum back into {@link Cip68Metadata} — the inverse of
+     * {@link #buildDatum(Cip68Metadata)}.
+     *
+     * <p><b>Why the asymmetry with the encoder is deliberate, and where it stops.</b> The encoder
+     * decides what may be WRITTEN and enforces every rule: a non-blank name, per-field length
+     * caps, a datum-size budget. This decides what can be READ, and enforces none of them. A datum
+     * that is already on chain is a fact; refusing to parse one because it breaks a rule we made
+     * up would make this useless at exactly the moment it matters — inspecting a token somebody
+     * else issued, or one issued before a rule existed.
+     *
+     * <p>What it will NOT do is guess. A datum that is not a constr-0 of (map, version, extra)
+     * returns null rather than a half-populated record, because a caller cannot tell a missing
+     * field from a misread one. CIP-68 keys are UTF-8 bytes; anything that is not valid UTF-8 is
+     * left out rather than replaced with substitution characters.
+     *
+     * @return the metadata, or null when this is not a CIP-68 reference datum at all
+     */
+    public static Cip68Metadata parseDatum(PlutusData datum) {
+        if (!(datum instanceof ConstrPlutusData constr) || constr.getAlternative() != 0) {
+            return null;
+        }
+        var fields = constr.getData();
+        if (fields == null || fields.getPlutusDataList() == null
+                || fields.getPlutusDataList().isEmpty()) {
+            return null;
+        }
+        if (!(fields.getPlutusDataList().get(0) instanceof MapPlutusData map)) {
+            return null;
+        }
+
+        String name = null, description = null, ticker = null, url = null, logo = null;
+        Integer decimals = null;
+
+        var entries = map.getMap();
+        if (entries != null) {
+            for (var entry : entries.entrySet()) {
+                String key = asText(entry.getKey());
+                if (key == null) {
+                    continue;
+                }
+                switch (key) {
+                    case "name" -> name = asText(entry.getValue());
+                    case "description" -> description = asText(entry.getValue());
+                    case "ticker" -> ticker = asText(entry.getValue());
+                    case "url" -> url = asText(entry.getValue());
+                    case "logo" -> logo = asText(entry.getValue());
+                    case "decimals" -> decimals = asInt(entry.getValue());
+                    // Unknown keys are ignored, not an error: CIP-68 metadata is an open map and
+                    // an issuer may carry anything else they like in it.
+                    default -> { }
+                }
+            }
+        }
+
+        // A reference datum with no name at all is not metadata anyone can use, and is far more
+        // likely to be a different datum that happens to share this shape.
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        return new Cip68Metadata(name, description, ticker, decimals, url, logo);
+    }
+
+    /** UTF-8 bytes back to text, or null when the value is not bytes or not valid UTF-8. */
+    private static String asText(PlutusData data) {
+        if (!(data instanceof BytesPlutusData bytes) || bytes.getValue() == null) {
+            return null;
+        }
+        var decoder = StandardCharsets.UTF_8.newDecoder();
+        try {
+            // Strict: CharsetDecoder replaces malformed input with U+FFFD by default, which would
+            // turn an unreadable field into a plausible-looking string of question marks.
+            return decoder.decode(java.nio.ByteBuffer.wrap(bytes.getValue())).toString();
+        } catch (java.nio.charset.CharacterCodingException e) {
+            return null;
+        }
+    }
+
+    private static Integer asInt(PlutusData data) {
+        if (!(data instanceof BigIntPlutusData big) || big.getValue() == null) {
+            return null;
+        }
+        try {
+            return big.getValue().intValueExact();
+        } catch (ArithmeticException e) {
+            // A decimals field that does not fit in an int is not a decimals field.
+            return null;
+        }
+    }
+
     private static void putText(MapPlutusData map, String key, String value) {
         if (value != null && !value.isBlank()) {
             map.put(text(key), text(value));

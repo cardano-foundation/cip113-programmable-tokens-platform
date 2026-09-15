@@ -30,6 +30,7 @@ public class TokenContextController {
     private final FesProvenanceReconstructor fesProvenanceReconstructor;
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeTokenRegistrationRepository;
     private final BlacklistInitRepository blacklistInitRepository;
+    private final org.cardanofoundation.cip113.service.Cip68MetadataService cip68MetadataService;
 
     /** Optional — only present when the rwa-token substandard is enabled. */
     @Autowired(required = false)
@@ -74,6 +75,8 @@ public class TokenContextController {
         Boolean requiresSenderKyc = null;
         Boolean transfersPaused = null;
         String blacklistAdminPkh = null;
+        org.cardanofoundation.cip113.model.Cip68Metadata cip68Metadata = null;
+        String cip68Status = null;
 
         if ("freeze-and-seize".equals(substandardId)) {
             var tokenRegistration = freezeAndSeizeTokenRegistrationRepository
@@ -129,6 +132,15 @@ public class TokenContextController {
             }
         }
 
+        // CIP-68 metadata lives in the reference token's datum, not in any row here. Read it back
+        // rather than reporting only the cip68Enabled flag the registration callback stored: a
+        // flag says metadata was INTENDED, which is not the same as metadata being there.
+        if (assetName != null && !assetName.isBlank()) {
+            var cip68 = cip68MetadataService.read(policyId, assetName);
+            cip68Metadata = cip68.metadata();
+            cip68Status = cip68.reason() == null ? null : cip68.reason().name();
+        }
+
         return ResponseEntity.ok(new TokenContextResponse(
                 policyId,
                 substandardId,
@@ -141,7 +153,9 @@ public class TokenContextController {
                 requiresSenderKyc,
                 transfersPaused,
                 transferLogicScript,
-                blacklistAdminPkh
+                blacklistAdminPkh,
+                cip68Metadata,
+                cip68Status
         ));
     }
 
