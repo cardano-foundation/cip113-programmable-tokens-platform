@@ -15,10 +15,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 async function main() {
+  // Compiled from lib/deployment/*.ts by the npm script, which now also pulls in lib/tx
+  // (bootstrap.ts imports MultiTxStep from there), so tsc roots the output at lib/ and the
+  // compiled files sit one directory deeper than the sources' own nesting would suggest.
   // Compiled from lib/deployment/derive.ts by the npm script. Node 20 cannot strip types and
   // this repo has no TS runner; compiling the one file with the TypeScript already present
   // beats adding a dev dependency to a public repo for a single test.
-  const { deriveCoreDeployment: derive } = await import("./.deploy-build/derive.js");
+  const { deriveCoreDeployment: derive } = await import("./.deploy-build/deployment/derive.js");
 
   const backendResources = path.resolve(
     __dirname,
@@ -69,7 +72,7 @@ async function main() {
   console.log("  forward derivation reproduces the live Preview deployment\n");
 
   // ---- the bootstrap record the platform has to be able to load -------------
-  const { buildBootstrapRecord } = await import("./.deploy-build/record.js");
+  const { buildBootstrapRecord } = await import("./.deploy-build/deployment/record.js");
   const refTx = deployment.programmableBaseRefInput.txHash;
   const emitted = buildBootstrapRecord({
     derived,
@@ -109,7 +112,7 @@ async function main() {
   console.log("  OK   bootstrap record is byte-equal to protocol-bootstraps-preview.json\n");
 
   // ---- multisig ------------------------------------------------------------
-  const { resolveMultisig, resolveMember } = await import("./.deploy-build/multisig.js");
+  const { resolveMultisig, resolveMember } = await import("./.deploy-build/deployment/multisig.js");
   const { decodeMultisigScript } = await import("@easy1staking/cip113-sdk-ts");
   const A = "32e7e00eae28502a2aa271cf4202b1b01b94ca8efe642e380c93d5e2";
   const B = "9a20498043c1031c08f70a4df2fe4e43e33768eb5dfe221546150e3f";
@@ -134,7 +137,7 @@ async function main() {
   console.log("  OK   multisig refuses duplicates, bad thresholds and malformed entries");
 
   // ---- CIP-171 provenance --------------------------------------------------
-  const { buildCoreCip171Record } = await import("./.deploy-build/provenance.js");
+  const { buildCoreCip171Record } = await import("./.deploy-build/deployment/provenance.js");
   const pin = JSON.parse(fs.readFileSync(
     path.resolve(__dirname, "node_modules/@easy1staking/cip113-sdk-ts/blueprints/standard/v0.5.0-alpha.4/UPSTREAM_PIN.json"),
     "utf8"));
@@ -148,7 +151,7 @@ async function main() {
   console.log(`  OK   CIP-171 record: ${record.scripts.length} scripts, ${record.sourceUrl.split("/").slice(-1)[0]} @ ${record.commitHash.slice(0, 8)}`);
 
   // ---- verifying a deployment the SDK harness produced ---------------------
-  const { verifyDeployment, toBootstrapRecord } = await import("./.deploy-build/verify.js");
+  const { verifyDeployment, toBootstrapRecord } = await import("./.deploy-build/deployment/verify.js");
 
   // A DeploymentParams is the committed record minus schemaVersion — measured, every other
   // key byte-identical — so the committed file doubles as a real fixture without reaching
@@ -188,6 +191,45 @@ async function main() {
   try { toBootstrapRecord(tampered, bad); } catch { refused = true; }
   if (!refused) throw new Error("emitted a record from a deployment that did not verify");
   console.log("  OK   no record is emitted from a deployment that did not verify");
+  // ---- the issuance_mint CBOR splice, measured against THIS blueprint -------
+  //
+  // The one part of the bootstrap whose correctness is a property of the artefact rather than
+  // of a chain, so it is the one part provable offline. A core deployment stores issuance_mint
+  // as CBOR either side of a placeholder minting-logic hash; the splice is only sound while
+  // that placeholder occurs exactly once AND lands on a byte boundary, and flat UPLC is
+  // BIT-packed, so neither is guaranteed by anything but measurement.
+  const { buildCoreScriptSet } = await import("./.deploy-build/deployment/derive.js");
+  const { splitIssuanceMintCbor } = await import("./.deploy-build/deployment/bootstrap.js");
+
+  const coreSet = buildCoreScriptSet({
+    blueprint,
+    seeds: {
+      paramsSeed: deployment.protocolParams.txInput,
+      issuanceSeed: deployment.issuance.txInput,
+      multisigSeed: deployment.upgradeMultisig.txInput,
+    },
+    alwaysFailHash: deployment.issuance.alwaysFailScriptHash,
+    maxInlineDatumBytes: deployment.maxInlineDatumBytes,
+  });
+  const { cborPre, cborPost } = splitIssuanceMintCbor(coreSet);
+  if (cborPre.length === 0 || cborPost.length === 0) {
+    throw new Error("issuance_mint splice produced an empty half — the placeholder is at an edge");
+  }
+  console.log(
+    `  OK   issuance_mint splice: prefix ${cborPre.length / 2} B, postfix ${cborPost.length / 2} B`,
+  );
+
+  // The splice must be SEALED out of the provenance record. issuance_mint belongs to a
+  // substandard registration, not to this deployment, so publishing it here would attest a
+  // script the deployment does not run.
+  if (coreSet.parameterizations.length !== derived.parameterizations.length) {
+    throw new Error(
+      `parameterising issuance_mint leaked into the CIP-171 record: ` +
+        `${coreSet.parameterizations.length} entries, expected ${derived.parameterizations.length}`,
+    );
+  }
+  console.log("  OK   issuance_mint stays out of the CIP-171 record");
+
 }
 
 main().catch((e) => {

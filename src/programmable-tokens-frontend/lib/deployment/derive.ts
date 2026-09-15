@@ -33,7 +33,7 @@
  * Every parameterisation is recorded, because that record IS the CIP-171 payload.
  */
 import { createStandardScripts } from "@easy1staking/cip113-sdk-ts";
-import type { PlutusBlueprint, TxInput } from "@easy1staking/cip113-sdk-ts";
+import type { PlutusBlueprint, PlutusScript, TxInput, StandardScripts } from "@easy1staking/cip113-sdk-ts";
 
 export interface DeploymentSeeds {
   /** Consumed by protocol_params AND registry. */
@@ -84,7 +84,41 @@ export interface DerivedCoreDeployment {
 
 const hash = (s: { hash: string }) => s.hash;
 
-export function deriveCoreDeployment(input: DeriveCoreDeploymentInput): DerivedCoreDeployment {
+/**
+ * Every core script of a deployment, with bodies — not just hashes.
+ *
+ * Deriving hashes and building the bootstrap transactions are the same derivation asked for
+ * two different projections of one answer, so they run through ONE function. Two functions
+ * that each walked the dependency graph could disagree about the order of `issuanceLogic`'s
+ * two adjacent PolicyIds, and the deployment would then be internally consistent with
+ * whichever one the page happened to display.
+ *
+ * `alwaysFail` is a hash only: the issuance NFT is paid TO its address and never spent from
+ * it, so nothing ever needs its body — and a deployment being reproduced from a bootstrap
+ * record has only the hash to go on.
+ */
+export interface CoreScriptSet {
+  alwaysFailHash: string;
+  issuanceCborHexMint: PlutusScript;
+  registry: PlutusScript;
+  protocolParams: PlutusScript;
+  programmableLogicBase: PlutusScript;
+  transfer: PlutusScript;
+  thirdParty: PlutusScript;
+  unfracking: PlutusScript;
+  issuanceLogic: PlutusScript;
+  programmableLogicGlobal: PlutusScript;
+  upgradeMultisig: PlutusScript;
+  /**
+   * The raw builders, for the one script a CORE deployment does not deploy: `issuance_mint`
+   * is parameterised per minting-logic hash, so the instance a bootstrap needs is a dummy
+   * whose CBOR is split around a placeholder. See `bootstrap.ts`.
+   */
+  builders: StandardScripts;
+  parameterizations: ParameterizationRecord[];
+}
+
+export function buildCoreScriptSet(input: DeriveCoreDeploymentInput): CoreScriptSet {
   const { blueprint, seeds, maxInlineDatumBytes } = input;
 
   if (!input.alwaysFailNonce && !input.alwaysFailHash) {
@@ -96,47 +130,58 @@ export function deriveCoreDeployment(input: DeriveCoreDeploymentInput): DerivedC
   }
 
   const parameterizations: ParameterizationRecord[] = [];
-  const scripts = createStandardScripts(blueprint, (event) =>
+  // Sealed once the CORE set is complete. The CIP-171 record IS this list, and it must
+  // describe the scripts this deployment runs. A caller that later parameterises
+  // `issuance_mint` off the same builders (the bootstrap does, for the CBOR splice) would
+  // otherwise append a script belonging to a substandard registration, not to this
+  // deployment — silently, and only visible as an extra entry in a published record.
+  let sealed = false;
+  const scripts = createStandardScripts(blueprint, (event) => {
+    if (sealed) return;
     parameterizations.push({
       title: event.title,
       rawScriptHash: event.rawScriptHash,
       appliedScriptHash: event.appliedScriptHash,
       params: event.params as unknown[],
-    }),
-  );
+    });
+  });
 
   // always_fail -> issuance_cbor_hex_mint -> registry
   const alwaysFailHash =
     input.alwaysFailHash ?? hash(scripts.alwaysFail(input.alwaysFailNonce!));
-  const issuanceCborHexPolicy = hash(
-    scripts.issuanceCborHexMint(seeds.issuanceSeed, alwaysFailHash),
-  );
-  const registryPolicy = hash(scripts.registry(seeds.paramsSeed, issuanceCborHexPolicy));
+  const issuanceCborHexMint = scripts.issuanceCborHexMint(seeds.issuanceSeed, alwaysFailHash);
+  const registry = scripts.registry(seeds.paramsSeed, issuanceCborHexMint.hash);
 
   // protocol_params -> programmable_logic_base -> the withdraw-0 delegates
-  const paramsPolicy = hash(scripts.protocolParams(seeds.paramsSeed));
-  const programmableLogicBase = hash(scripts.programmableLogicBase(paramsPolicy));
+  const protocolParams = scripts.protocolParams(seeds.paramsSeed);
+  const programmableLogicBase = scripts.programmableLogicBase(protocolParams.hash);
 
-  const transfer = hash(scripts.transfer(programmableLogicBase, registryPolicy, maxInlineDatumBytes));
-  const thirdParty = hash(scripts.thirdParty(programmableLogicBase, registryPolicy, maxInlineDatumBytes));
-  const unfracking = hash(scripts.unfracking(programmableLogicBase, registryPolicy, maxInlineDatumBytes));
+  const transfer = scripts.transfer(programmableLogicBase.hash, registry.hash, maxInlineDatumBytes);
+  const thirdParty = scripts.thirdParty(programmableLogicBase.hash, registry.hash, maxInlineDatumBytes);
+  const unfracking = scripts.unfracking(programmableLogicBase.hash, registry.hash, maxInlineDatumBytes);
 
   // Named arguments, deliberately: registryPolicy then paramsPolicy. See the header.
-  const issuanceLogic = hash(
-    scripts.issuanceLogic(programmableLogicBase, registryPolicy, paramsPolicy, maxInlineDatumBytes),
+  const issuanceLogic = scripts.issuanceLogic(
+    programmableLogicBase.hash,
+    registry.hash,
+    protocolParams.hash,
+    maxInlineDatumBytes,
   );
 
-  const programmableLogicGlobal = hash(
-    scripts.programmableLogicGlobal(transfer, thirdParty, unfracking),
+  const programmableLogicGlobal = scripts.programmableLogicGlobal(
+    transfer.hash,
+    thirdParty.hash,
+    unfracking.hash,
   );
 
-  const upgradeMultisig = hash(scripts.upgradeMultisig(seeds.multisigSeed));
+  const upgradeMultisig = scripts.upgradeMultisig(seeds.multisigSeed);
 
+  sealed = true;
   return {
     alwaysFailHash,
-    issuanceCborHexPolicy,
-    registryPolicy,
-    paramsPolicy,
+    issuanceCborHexMint,
+    registry,
+    protocolParams,
     programmableLogicBase,
     transfer,
     thirdParty,
@@ -144,6 +189,25 @@ export function deriveCoreDeployment(input: DeriveCoreDeploymentInput): DerivedC
     issuanceLogic,
     programmableLogicGlobal,
     upgradeMultisig,
+    builders: scripts,
     parameterizations,
+  };
+}
+
+export function deriveCoreDeployment(input: DeriveCoreDeploymentInput): DerivedCoreDeployment {
+  const s = buildCoreScriptSet(input);
+  return {
+    alwaysFailHash: s.alwaysFailHash,
+    issuanceCborHexPolicy: s.issuanceCborHexMint.hash,
+    registryPolicy: s.registry.hash,
+    paramsPolicy: s.protocolParams.hash,
+    programmableLogicBase: s.programmableLogicBase.hash,
+    transfer: s.transfer.hash,
+    thirdParty: s.thirdParty.hash,
+    unfracking: s.unfracking.hash,
+    issuanceLogic: s.issuanceLogic.hash,
+    programmableLogicGlobal: s.programmableLogicGlobal.hash,
+    upgradeMultisig: s.upgradeMultisig.hash,
+    parameterizations: s.parameterizations,
   };
 }
