@@ -21,9 +21,11 @@ const walk = (dir) => {
     } else if (entry.endsWith(".js")) {
       const before = readFileSync(full, "utf8");
       // Only relative specifiers, and only those that do not already carry an extension.
+      // BOTH quote styles: tsc preserves whatever the source used, and a single-quoted module
+      // silently went unrewritten until a file that used them was compiled through here.
       const after = before.replace(
-        /(from\s+")(\.{1,2}\/[^"]*?)(")/g,
-        (m, a, spec, z) => (/\.[a-z]+$/i.test(spec) ? m : `${a}${spec}.js${z}`),
+        /(from\s+)(["'])(\.{1,2}\/[^"']*?)\2/g,
+        (m, from, q, spec) => (/\.[a-z]+$/i.test(spec) ? m : `${from}${q}${spec}.js${q}`),
       );
       if (after !== before) {
         writeFileSync(full, after);
