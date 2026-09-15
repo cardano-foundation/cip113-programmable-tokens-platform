@@ -20,7 +20,13 @@
  * it catches a field written into the wrong slot, which is the failure the alpha.3 migration
  * actually shipped.
  */
-import { evoClient, previewChain, preprodChain, mainnetChain } from "@easy1staking/cip113-sdk-ts";
+import {
+  evoClient,
+  previewChain,
+  preprodChain,
+  mainnetChain,
+  paymentCredentialHash,
+} from "@easy1staking/cip113-sdk-ts";
 import type { PlutusBlueprint } from "@easy1staking/cip113-sdk-ts";
 
 import { buildBootstrapPlan, type BootstrapPlan } from "./bootstrap";
@@ -89,6 +95,28 @@ export interface PlanDeploymentInput {
   multisig: ResolvedMultisig;
   maxInlineDatumBytes: number;
   alwaysFailNonce: string;
+}
+
+/**
+ * Can the wallet in front of us ever satisfy the authority it is about to install?
+ *
+ * The harness refuses outright unless the config tree is the bootstrapping wallet's own key.
+ * That is the right rule for a test fixture and the WRONG one here: Giovanni's stated scenario
+ * is a designated deployer installing an authority held by other people, so the deployer's key
+ * legitimately may not appear.
+ *
+ * But it is the difference between a deliberate handover and upstream's documented ONE-WAY
+ * BRICK — a transposed hex pair in a member list produces a protocol whose upgrade credential
+ * nobody can satisfy, and NOTHING else catches it: `upgrade_multisig` is parameterised by
+ * `utxo_ref` alone, so the signer tree is not in the script hash and hash verification is blind
+ * to it. So it is surfaced and must be acknowledged, never silently allowed and never refused.
+ */
+export function deployerCanAuthorise(
+  changeAddress: string,
+  members: readonly { keyHash: string }[],
+): boolean {
+  const pkh = paymentCredentialHash(changeAddress).toLowerCase();
+  return members.some((m) => m.keyHash.toLowerCase() === pkh);
 }
 
 export interface DeploymentPlan {

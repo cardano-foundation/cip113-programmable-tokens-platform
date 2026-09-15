@@ -36,8 +36,17 @@
  * `chainResult()` makes that real rather than aspirational: it returns the built transaction's
  * pre-computed hash together with the UTxO set as it will be AFTER that transaction, so step
  * N+1 can be built — and script-evaluated, with the chained UTxOs passed to the evaluator as
- * `additionalUtxos` — against outputs that do not exist on chain yet. Every step is therefore
+ * `additionalUtxos` (which requires `passAdditionalUtxos: true`; it defaults to FALSE, and
+ * without it the evaluator is handed inputs it has no way to resolve) — against outputs that do
+ * not exist on chain yet. Every step is therefore
  * built and evaluated with real execution units before the wallet is asked for a signature.
+ *
+ * ⚠ ONE GAP IN THAT CLAIM, UNRESOLVED AND STATED RATHER THAN GLOSSED. Evolution passes the
+ * evaluator its selected inputs and reference inputs; COLLATERAL is chosen separately and is
+ * not among them. Three of the six steps carry redeemers and therefore collateral, and on a
+ * chained build their collateral candidates are outputs of earlier, unsubmitted transactions.
+ * Whether a provider-side evaluator tolerates that is not something this code can settle
+ * offline — it is the first thing to watch on the preview run (T-044), not a proven property.
  *
  * It is still NOT atomic, and nothing can make it so. Six chained transactions cannot be
  * unwound once the fourth lands. What the pre-flight buys is that the failures which CAN be
@@ -62,6 +71,8 @@ import {
   Data,
   DRep,
   InlineDatum,
+  Transaction as EvoTx,
+  TransactionHash as EvoTransactionHash,
   UPLC,
 } from "@evolution-sdk/evolution";
 import {
@@ -70,6 +81,8 @@ import {
   mintAssetsFromMap,
   outputAssets,
   protocolParamsDatum,
+  decodeMultisigScript,
+  getInlineDatum,
   registryNodeDatum,
   REGISTRY_NODE_MIN_ADA,
   scriptAddress,
@@ -157,8 +170,14 @@ interface ChainResult {
 }
 
 interface BuiltTx {
-  toCBOR?: () => string;
-  toCBORHex?: () => string;
+  /**
+   * ⛔ The ONLY way to the bytes. A built transaction (Evolution's `SignBuilder`) has no
+   * `toCBOR` and no `toCBORHex`; it exposes `toTransaction()`, and it is ASYNC. Audit r1
+   * measured the earlier shape here — two optional methods, neither of which exists — failing
+   * on every step for every wallet on every network. Declaring them optional is what turned a
+   * compile error into a guaranteed runtime one, so this is required and exact.
+   */
+  toTransaction: () => Promise<unknown>;
   chainResult: () => ChainResult;
 }
 
@@ -222,11 +241,13 @@ const outRef = (u: ChainUtxo): TxInput => ({
 });
 
 function txHashHexOf(u: ChainUtxo): string {
-  const id = u.transactionId as { toString?: () => string } | string;
-  if (typeof id === "string") return id;
-  // Evolution models a transaction id as a branded byte array; its hex form is what every
-  // outref in a DeploymentParams is written as.
-  return Bytes.toHex(id as never);
+  // ⛔ `EvoTransactionHash.toHex`, NEVER `Bytes.toHex`. A transaction id is not a Uint8Array —
+  // it is a tagged class wrapping one — so `Bytes.toHex` fails its type-side check and throws
+  // `Uint8ArrayFromHex / Type side transformation failure`, a message naming nothing about
+  // transaction hashes or wallets. Two lines below, `Bytes.toHex` IS correct, because there it
+  // is handed a real byte slice. Audit r1 measured this: it threw on the first wallet UTxO,
+  // before a single transaction was built.
+  return EvoTransactionHash.toHex(u.transactionId as never);
 }
 
 const refKey = (r: { txHash: string; outputIndex: number }) => `${r.txHash}#${r.outputIndex}`;
@@ -269,6 +290,53 @@ function ownSpendable(
   );
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The wallet's UTxOs, once the provider's view has stopped moving.
+ *
+ * A single read cannot tell a settled view from a stale one, and a stale one is not caught by
+ * anything downstream: a build cannot detect that an input is already spent, so the staleness
+ * survives all six builds and all six signatures and surfaces as code 3117, "unknown UTxO
+ * references as inputs", on the FIRST submission — an error that names a UTxO and reads as a
+ * builder bug. Two consecutive identical reads is the harness's proxy for "the indexer has
+ * settled" and is cheap next to discarding six signatures.
+ */
+async function settledUtxos(client: BootstrapClient, address: unknown): Promise<ChainUtxo[]> {
+  const fingerprint = (utxos: ChainUtxo[]) =>
+    utxos.map((u) => refKey(outRef(u))).sort().join(",");
+  let previous = await client.getUtxos(address);
+  for (let i = 0; i < 10; i++) {
+    await sleep(1_000);
+    const current = await client.getUtxos(address);
+    if (fingerprint(current) === fingerprint(previous)) return current;
+    previous = current;
+  }
+  return previous;
+}
+
+/**
+ * Retry a BUILD, never a submission.
+ *
+ * MEASURED by the harness: the transient fires inside Evolution's OWN `getProtocolParameters()`
+ * while building a stake certificate — at `Stake.ts:64`, not at any call site of ours — and it
+ * hit all three stake operations. `build()` is side-effect-free, so retrying it is safe; and in
+ * a chained build a throw at step 5 discards the four transactions already built, so a single
+ * provider blip otherwise costs the whole plan.
+ */
+async function retryBuild<T>(label: string, build: () => Promise<T>): Promise<T> {
+  let last: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await build();
+    } catch (e) {
+      last = e;
+      if (attempt < 3) await sleep(1_000 * attempt);
+    }
+  }
+  throw new Error(`${label} failed after 3 attempts: ${(last as Error)?.message ?? last}`);
+}
+
 /** The PlutusV3 script body hex (inner UPLC, no outer CBOR wrap). */
 function scriptBodyHex(compiledCode: string): string {
   if (UPLC.getCborEncodingLevel(compiledCode) !== "double") return compiledCode;
@@ -292,8 +360,8 @@ function requirePublishHandlers(blueprint: PlutusBlueprint): void {
   }
 }
 
-function cborOf(built: BuiltTx, label: string): string {
-  const hex = built.toCBORHex?.() ?? built.toCBOR?.();
+async function cborOf(built: BuiltTx, label: string): Promise<string> {
+  const hex = EvoTx.toCBORHex((await built.toTransaction()) as never);
   if (typeof hex !== "string" || hex.length === 0) {
     throw new Error(`Built ${label} but could not read its CBOR; nothing can be signed.`);
   }
@@ -346,15 +414,41 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
 
   requirePublishHandlers(blueprint);
 
+  // ⛔ FAIL CLOSED ON THE BOUND. It reaches the page as free text, and `Number("")` is 0 — which
+  // is not a rejected input, it is a DEPLOYED one: transfer, third_party, unfracking and
+  // issuance_logic all parameterised with an inline-datum bound of zero. That builds, hashes,
+  // verifies green (the same value feeds derivation and re-derivation), deploys, and then
+  // rejects every programmable transfer carrying any inline datum, for the life of the protocol.
+  if (!Number.isInteger(maxInlineDatumBytes) || maxInlineDatumBytes <= 0) {
+    throw new Error(
+      `maxInlineDatumBytes must be a positive whole number; got ${JSON.stringify(
+        maxInlineDatumBytes,
+      )}. It is baked into four scripts at compile time and cannot be changed afterwards.`,
+    );
+  }
+
   const changeAddressObj = EvoAddress.fromBech32(changeAddress);
   const buildOpts = (available: ChainUtxo[]) => ({
     changeAddress: changeAddressObj,
     evaluator: input.evaluator,
     availableUtxos: available,
+    // ⛔ REQUIRED, and it DEFAULTS TO FALSE. Without it a provider-based evaluator is asked to
+    // evaluate a transaction whose inputs are outputs of a transaction that has not been
+    // submitted, and is given no way to resolve them. The whole chained pre-flight depends on
+    // this one flag; audit r1 found the claim being made in a comment while the flag was unset.
+    passAdditionalUtxos: true,
   });
 
-  const walletUtxos = await client.getUtxos(changeAddressObj);
-  const walletBalanceLovelace = walletUtxos.reduce((s, u) => s + lovelaceOf(u.assets), 0n);
+  const walletUtxos = await settledUtxos(client, changeAddressObj);
+  // ⛔ THE SAME POPULATION ON BOTH SIDES OF THE SUBTRACTION. `totalCostLovelace` below is
+  // `spendable before - spendable after`, so this must be spendable-only too. Summing ALL
+  // wallet UTxOs here and `ownSpendable` there was measured by audit r1 to overstate the cost
+  // by 20 ADA for every reference-script UTxO the wallet already holds — the harness saw 11 of
+  // them on preview after three deployments, so a ~200 ADA deployment reported ~420. It never
+  // under-states, so it cannot cause an under-funded submission; it causes an operator to
+  // abort a deployment they could afford.
+  const spendableBefore = ownSpendable(walletUtxos, changeAddress);
+  const walletBalanceLovelace = spendableBefore.reduce((s, u) => s + lovelaceOf(u.assets), 0n);
   const { coinsPerUtxoByte } = await client.getProtocolParameters();
 
   const steps: MultiTxStep[] = [];
@@ -372,9 +466,9 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
       assets: outputAssets(SEED_LOVELACE),
     });
   }
-  const fragBuilt: BuiltTx = await fragTx.build(buildOpts(ownSpendable(walletUtxos, changeAddress)));
+  const fragBuilt: BuiltTx = await fragTx.build(buildOpts(spendableBefore));
   const fragChain = fragBuilt.chainResult();
-  steps.push({ label: "1/6 seed UTxOs", unsignedCbor: cborOf(fragBuilt, "the seed transaction") });
+  steps.push({ label: "1/6 seed UTxOs", unsignedCbor: await cborOf(fragBuilt, "the seed transaction") });
 
   const created = fragChain.available
     .filter((u) => txHashHexOf(u) === fragChain.txHash)
@@ -390,12 +484,22 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
   // Positional, so assert the position means what the derivation assumes. A change output
   // landing at index 0 would silently reassign every one-shot policy.
   seedUtxos.forEach((u, i) => {
+    // Evolution appends change after the explicit outputs and does not reorder them, so
+    // `index < 3` already excludes change. These assertions are belt-and-braces against that
+    // ordering ever changing — worth keeping, because if it does change the failure is not an
+    // error, it is three one-shot policies parameterised by the wrong outrefs.
     if (lovelaceOf(u.assets) !== SEED_LOVELACE) {
       throw new Error(
         `Seed output #${i} holds ${lovelaceOf(u.assets)} lovelace, expected exactly ` +
           `${SEED_LOVELACE}. The seed outputs are identified by position, so this is not the ` +
           `output the derivation would be parameterised by.`,
       );
+    }
+    if (EvoAssets.getUnits(u.assets as never).some((unit: string) => unit !== "lovelace")) {
+      throw new Error(`Seed output #${i} carries native assets; a seed must hold lovelace only.`);
+    }
+    if (addressBech32Of(u) !== changeAddress) {
+      throw new Error(`Seed output #${i} is not at the deploying wallet's address.`);
     }
   });
 
@@ -503,44 +607,129 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     // NO `script:` — rail 4 requires `reference_script == None`. It is published in tx 3 like
     // every other one.
   });
+  /**
+   * A DECOY: a second, NFT-FREE output at the multisig address.
+   *
+   * ⛔ THIS IS WHAT MAKES THE GATE BELOW ABLE TO FAIL, and it is not decoration. The multisig
+   * address is derived from a fresh one-shot seed, so without this the only thing there is the
+   * output we just wrote — and a filter applied to a population of one, keyed on a unit this
+   * same function constructed, passes whether or not it is right. The SDK harness measured
+   * exactly that (audit r1, F-2): replacing its filter with "take anything at this address"
+   * changed nothing, while its comment claimed the filter asked the validator's question.
+   *
+   * ⚑ It is also a REAL condition, not an invented one. Anyone may pay to a script address at
+   * any time, and upstream's `upgrade_multisig.spend` contemplates it explicitly.
+   *
+   * ⚠ Safe against `upgrade_multisig.mint`: rail 3 uses `list.expect_find` over outputs, which
+   * SKIPS a non-matching output rather than rejecting it, and rails 1/2/4 constrain the mint,
+   * the token count and `nft_output` only. This output carries no NFT, so `has_nft_strict`
+   * never matches it.
+   *
+   * ⚠ COST, stated because it is real money on mainnet: this output is permanently unspendable
+   * (no datum, so the spend handler's `expect Some(old_tree)` fails) and costs one min-UTxO,
+   * once, per deployment. That is the price of the gate below being a check rather than a
+   * claim.
+   */
+  const decoyLovelace = minUtxoAtLeast(2_000_000n, {
+    address: multisigAddr,
+    assets: outputAssets(0n),
+    coinsPerUtxoByte,
+  });
+  msTx = msTx.payToAddress({
+    address: EvoAddress.fromBech32(multisigAddr),
+    assets: outputAssets(decoyLovelace),
+  });
   msTx = msTx.attachScript({ script: buildEvoScript(core.upgradeMultisig.compiledCode) });
 
   const msBuilt: BuiltTx = await msTx.build(
     buildOpts(ownSpendable(fragChain.available, changeAddress, allSeedRefs)),
   );
   const msChain = msBuilt.chainResult();
-  steps.push({ label: "2/6 upgrade multisig", unsignedCbor: cborOf(msBuilt, "the multisig transaction") });
+  steps.push({ label: "2/6 upgrade multisig", unsignedCbor: await cborOf(msBuilt, "the multisig transaction") });
 
   // ---- The authority must be OPERABLE, not merely named --------------------
   //
-  // The harness reads this UTxO back OFF THE CHAIN before writing the genesis datum that names
-  // it. A pre-flight build cannot: the transaction has not been submitted. So the same question
-  // is asked of the built transaction's own outputs — found STRUCTURALLY, by policy, the way
-  // the validator finds it, rather than by matching the unit string we just constructed. A
-  // lookup keyed on our own construction shares a blind spot with the code that constructed it.
+  // The harness reads this UTxO back OFF THE CHAIN before writing a genesis datum that names
+  // it. A pre-flight build cannot: the transaction has not been submitted. So the same
+  // questions are asked of the built transaction's own outputs.
   //
-  // This is weaker than the harness's check by exactly one thing: it cannot detect a chain
-  // that disagrees with the transaction we built. It is not weaker about the failure that
-  // matters here — a config UTxO that is not where the validator will look for it.
-  const multisigCandidates = msChain.available.filter(
-    (u) =>
-      txHashHexOf(u) === msChain.txHash &&
-      addressBech32Of(u) === multisigAddr &&
-      EvoAssets.getUnits(u.assets as never).some(
-        (unit: string) => unit !== "lovelace" && unit.slice(0, 56) === core.upgradeMultisig.hash,
-      ),
+  // ⛔ WHAT THIS IS AND IS NOT. An earlier version of this block filtered by policy and
+  // asserted the count was 1, with a comment claiming the lookup was therefore "structural,
+  // the way the validator finds it". That was FALSE and both auditors found it: the address is
+  // one-shot, so the population was the single output we had just written, and the policy
+  // clause compared our own construction against itself. It could not fail. The decoy above
+  // restores a population to discriminate within; the datum round-trip below is the part that
+  // can actually catch a wrong authority.
+  const atMultisigAddress = msChain.available.filter(
+    (u) => txHashHexOf(u) === msChain.txHash && addressBech32Of(u) === multisigAddr,
+  );
+  if (atMultisigAddress.length < 2) {
+    throw new Error(
+      `The multisig transaction creates ${atMultisigAddress.length} output(s) at ` +
+        `${multisigAddr}. It is meant to create two — the config UTxO and a decoy beside it — ` +
+        `so that the check below has something to discriminate. With fewer, that check passes ` +
+        `over a population of one and proves nothing.`,
+    );
+  }
+  const multisigCandidates = atMultisigAddress.filter((u) =>
+    EvoAssets.getUnits(u.assets as never).some(
+      (unit: string) => unit !== "lovelace" && unit.slice(0, 56) === core.upgradeMultisig.hash,
+    ),
   );
   if (multisigCandidates.length !== 1) {
     throw new Error(
-      `The multisig transaction creates ${multisigCandidates.length} outputs at ` +
-        `${multisigAddr} carrying an asset of policy ${core.upgradeMultisig.hash}; expected ` +
+      `${multisigCandidates.length} of the ${atMultisigAddress.length} outputs at ` +
+        `${multisigAddr} carry an asset of policy ${core.upgradeMultisig.hash}; expected ` +
         `exactly 1. The NFT is one-shot, so zero means the config output is not where the ` +
-        `validator locks it. Refusing to build a genesis that names an authority whose config ` +
-        `UTxO is not exactly one well-formed output — an unsatisfiable authority is a ` +
-        `permanent brick with no repair path.`,
+        `validator locks it. Refusing to build a genesis naming an authority whose config UTxO ` +
+        `is not exactly one well-formed output — an unsatisfiable authority is a permanent ` +
+        `brick with no repair path.`,
     );
   }
-  const multisigUtxoRef = outRef(multisigCandidates[0]);
+  const configUtxo = multisigCandidates[0];
+
+  // `has_nft_strict` is strict about the WHOLE value: bundling any other asset with the config
+  // NFT means the output is simply NOT FOUND by `list.expect_find`, and the genesis then fails
+  // saying nothing about bundling.
+  const configUnits = EvoAssets.getUnits(configUtxo.assets as never).filter(
+    (unit: string) => unit !== "lovelace",
+  );
+  if (configUnits.length !== 1) {
+    throw new Error(
+      `The config output carries ${configUnits.length} assets besides lovelace; ` +
+        `\`has_nft_strict\` requires exactly one, and an output carrying more is not found at ` +
+        `all rather than rejected with a reason.`,
+    );
+  }
+  if (configUtxo.scriptRef) {
+    throw new Error(
+      "The config output carries a reference script; the mint's fourth rail requires " +
+        "`reference_script == None`. It is published with the others instead.",
+    );
+  }
+
+  // ⛔ THE ROUND TRIP IS THE REAL CHECK. The tree is read back out of the built output with the
+  // DECODER and compared to what the operator asked for. Encoder and decoder are deliberately
+  // asymmetric in the SDK — `multisigScriptDatum` enforces upstream's `well_formed`,
+  // `decodeMultisigScript` enforces none of it — so this is two independent code paths agreeing
+  // on one value, not a value agreeing with itself.
+  const writtenTree = getInlineDatum(configUtxo as never);
+  if (!writtenTree) {
+    throw new Error(
+      "The config output carries no inline datum. The signer tree IS the authority; without " +
+        "it the credential is unsatisfiable and the protocol would be bricked at genesis.",
+    );
+  }
+  const decodedTree = decodeMultisigScript(writtenTree);
+  if (JSON.stringify(decodedTree) !== JSON.stringify(multisig.tree)) {
+    throw new Error(
+      `The authority written into the config output is not the one configured. Wanted ` +
+        `${JSON.stringify(multisig.tree)}, the transaction carries ` +
+        `${JSON.stringify(decodedTree)}. Refusing before the genesis rather than after it.`,
+    );
+  }
+
+  const multisigUtxoRef = outRef(configUtxo);
 
   // ---- Tx 2: the one-shot mints and the protocol state --------------------
   //
@@ -610,10 +799,26 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     buildOpts(ownSpendable(msChain.available, changeAddress, allSeedRefs)),
   );
   const genChain = genBuilt.chainResult();
-  steps.push({ label: "3/6 protocol genesis", unsignedCbor: cborOf(genBuilt, "the genesis transaction") });
+  steps.push({ label: "3/6 protocol genesis", unsignedCbor: await cborOf(genBuilt, "the genesis transaction") });
 
-  // The params UTxO is the FIRST output, and the record is keyed by that position.
-  const PARAMS_OUTPUT_INDEX = 0;
+  // ⛔ LOCATED, NOT ASSUMED. This index goes into `protocolParams.utxo`, the field every
+  // operation resolves the protocol through, so it is found by looking for the output that
+  // actually carries the params NFT at the params address rather than by trusting that
+  // `payToAddress` order maps to output order. It currently does — Evolution appends change
+  // without sorting — but "currently does" is not a property to key a deployment on.
+  const paramsOutputs = genChain.available.filter(
+    (u) =>
+      txHashHexOf(u) === genChain.txHash &&
+      addressBech32Of(u) === paramsAddr &&
+      EvoAssets.getUnits(u.assets as never).some((unit: string) => unit === paramsNftUnit),
+  );
+  if (paramsOutputs.length !== 1) {
+    throw new Error(
+      `The genesis transaction creates ${paramsOutputs.length} outputs carrying the ` +
+        `protocol-params NFT at ${paramsAddr}; expected exactly 1.`,
+    );
+  }
+  const PARAMS_OUTPUT_INDEX = Number(paramsOutputs[0].index);
 
   // ---- Tx 3: publish the seven reference scripts --------------------------
   let refTx = client.newTx();
@@ -637,7 +842,7 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     buildOpts(ownSpendable(genChain.available, changeAddress)),
   );
   const refChain = refBuilt.chainResult();
-  steps.push({ label: "4/6 reference scripts", unsignedCbor: cborOf(refBuilt, "the reference-script transaction") });
+  steps.push({ label: "4/6 reference scripts", unsignedCbor: await cborOf(refBuilt, "the reference-script transaction") });
 
   // ---- Tx 4: the nominee stake key, REGISTERED **AND** DELEGATED ----------
   //
@@ -662,13 +867,13 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     ? nomineeTx.delegateToDRep({ stakeCredential: nomineeCredential, drep })
     : nomineeTx.registerAndDelegateTo({ stakeCredential: nomineeCredential, drep });
 
-  const nomineeBuilt: BuiltTx = await nomineeTx.build(
-    buildOpts(ownSpendable(refChain.available, changeAddress)),
+  const nomineeBuilt: BuiltTx = await retryBuild("Building the nominee transaction", () =>
+    nomineeTx.build(buildOpts(ownSpendable(refChain.available, changeAddress))),
   );
   const nomineeChain = nomineeBuilt.chainResult();
   steps.push({
     label: nomineeAlreadyRegistered ? "5/6 delegate nominee key" : "5/6 register nominee key",
-    unsignedCbor: cborOf(nomineeBuilt, "the nominee transaction"),
+    unsignedCbor: await cborOf(nomineeBuilt, "the nominee transaction"),
   });
 
   // ---- Tx 5: register the six script stake credentials --------------------
@@ -699,11 +904,11 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     });
     regTx = regTx.attachScript({ script: buildEvoScript(delegate.compiledCode) });
   }
-  const regBuilt: BuiltTx = await regTx.build(
-    buildOpts(ownSpendable(nomineeChain.available, changeAddress)),
+  const regBuilt: BuiltTx = await retryBuild("Building the registration transaction", () =>
+    regTx.build(buildOpts(ownSpendable(nomineeChain.available, changeAddress))),
   );
   const regChain = regBuilt.chainResult();
-  steps.push({ label: "6/6 register credentials", unsignedCbor: cborOf(regBuilt, "the registration transaction") });
+  steps.push({ label: "6/6 register credentials", unsignedCbor: await cborOf(regBuilt, "the registration transaction") });
 
   // ---- What it costs ------------------------------------------------------
   //

@@ -121,7 +121,13 @@ export async function signAndSubmitSequence(
               submitted.map((s) => `${s.label} (${s.txHash})`).join(", ") + ". ") +
           (failedStepLanded
             ? "The failing step was submitted but not confirmed — check it before retrying, or it may be submitted twice."
-            : "The failing step was not submitted."),
+            // ⛔ NOT "was not submitted". `submitTx` throwing does not mean nothing was
+            // broadcast: a network timeout, a wallet popup closed after the broadcast, or a
+            // duplicate-transaction response all throw on a transaction that reached the
+            // mempool. Telling an operator it did not land invites them to resubmit against a
+            // chain where it did.
+            : "The wallet reported a submission failure for this step. That is NOT proof it " +
+              "did not reach the chain — check before retrying."),
         { submitted, unsubmitted: failedStepLanded ? remaining() : [label, ...remaining()] },
         { index: i, label },
         cause,

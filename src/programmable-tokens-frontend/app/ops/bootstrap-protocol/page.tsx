@@ -24,7 +24,12 @@ import { verifyBlueprintBytes, type UpstreamPin } from "@/lib/deployment/bluepri
 import { buildCoreCip171Record } from "@/lib/deployment/provenance";
 import { buildBootstrapRecord } from "@/lib/deployment/record";
 import { useWallet } from "@/contexts/wallet-context";
-import { planDeployment, previousBlockOf, type DeploymentPlan } from "@/lib/deployment/deploy";
+import {
+  planDeployment,
+  previousBlockOf,
+  deployerCanAuthorise,
+  type DeploymentPlan,
+} from "@/lib/deployment/deploy";
 import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
 import { waitForTxConfirmation } from "@/lib/utils/tx-confirmation";
 import { buildSyncStart } from "@/lib/deployment/record";
@@ -71,6 +76,16 @@ export default function BootstrapProtocolPage() {
   const [planError, setPlanError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<{ label: string; txHash: string }[] | null>(null);
+  /**
+   * Whether the whole sequence landed. Tracked separately because `submitted` cannot answer it:
+   * a failure at step 1 sets it to `[]`, and `!![]` is `true` — which previously disabled the
+   * submit button permanently while rendering no results, leaving the operator with a dead page
+   * after a failure that put nothing on chain.
+   */
+  const [deployComplete, setDeployComplete] = useState(false);
+  /** Set when the deploying wallet is NOT among the upgrade signers — see below. */
+  const [cannotAuthorise, setCannotAuthorise] = useState(false);
+  const [acceptedNoAuthority, setAcceptedNoAuthority] = useState(false);
   const [syncStart, setSyncStart] = useState<ReturnType<typeof buildSyncStart> | null>(null);
 
   const memberEntries = useMemo(
@@ -217,6 +232,7 @@ export default function BootstrapProtocolPage() {
     setPlanError(null);
     setPlanned(null);
     setSubmitted(null);
+    setDeployComplete(false);
     setSyncStart(null);
     try {
       if (!wallet.connected || !wallet.rawApi) {
@@ -234,6 +250,7 @@ export default function BootstrapProtocolPage() {
       const ms = resolveMultisig(memberEntries, Number(threshold));
       setMultisig(ms);
       const changeAddress = await wallet.wallet.getChangeAddress();
+      setCannotAuthorise(!deployerCanAuthorise(changeAddress, ms.members));
 
       const result = await planDeployment({
         rawWalletApi: wallet.rawApi,
@@ -266,6 +283,7 @@ export default function BootstrapProtocolPage() {
         waitForConfirmation: (txHash) => waitForTxConfirmation(txHash),
       });
       setSubmitted(result.submitted);
+      setDeployComplete(result.submitted.length === planned.plan.steps.length);
       setProgress(null);
       // The indexer has to start BEFORE the genesis, so resolve it from the chain rather than
       // asking the operator to work it out.
@@ -284,8 +302,10 @@ export default function BootstrapProtocolPage() {
         setSubmitted(e.result.submitted);
         setPlanError(
           `${e.message} — ${e.result.submitted.length} transaction(s) ARE on chain and cannot ` +
-            `be unwound; ${e.result.unsubmitted.join(", ") || "none"} never left. Resume from ` +
-            `the failure, not from the start.`,
+            `be unwound; ${e.result.unsubmitted.join(", ") || "none"} never left. ` +
+            `This page cannot resume: the seeds this plan derives from are spent, so pressing ` +
+            `"Build and verify" again derives a DIFFERENT protocol rather than continuing this ` +
+            `one. Record the hashes above before leaving.`,
         );
       } else {
         setPlanError((e as Error).message);
@@ -295,6 +315,12 @@ export default function BootstrapProtocolPage() {
 
   const downloadDeployedRecord = useCallback(() => {
     if (!planned?.verification.ok) return;
+    // ⛔ ONLY FOR A COMPLETE DEPLOYMENT. The record carries every reference input and the
+    // multisig config UTxO, all keyed by transaction hashes the chained build pre-computed —
+    // so after a partial failure it would name transactions that exist only in a discarded
+    // plan, and it would still VERIFY, because verification is derivation from the blueprint
+    // and knows nothing about what was submitted. The platform indexes against this file.
+    if (!deployComplete) return;
     const record = toBootstrapRecord(
       planned.plan.deployment as unknown as Record<string, unknown>,
       planned.verification,
@@ -305,7 +331,7 @@ export default function BootstrapProtocolPage() {
     a.download = `protocol-bootstraps-${network}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-  }, [planned, network]);
+  }, [planned, network, deployComplete]);
 
   const downloadRecord = useCallback(() => {
     if (!derived) return;
@@ -598,12 +624,45 @@ export default function BootstrapProtocolPage() {
               </p>
             )}
 
+            {cannotAuthorise && (
+              <div className="space-y-2 rounded border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-200">
+                <p>
+                  <strong>This wallet is not one of the upgrade signers.</strong> That is normal
+                  when a designated deployer installs an authority other people hold — and it is
+                  indistinguishable, from here, from a mistyped member. Nothing else catches the
+                  mistake: <code>upgrade_multisig</code> is parameterised by its one-shot UTxO
+                  alone, so the signer set is not part of any script hash and the verification
+                  above is blind to it. A wrong member list deploys a protocol whose upgrade
+                  credential nobody can satisfy, permanently and with no repair path.
+                </p>
+                <p>
+                  Signers:{" "}
+                  {multisig?.members.map((m) => m.keyHash.slice(0, 12)).join("…, ")}… —{" "}
+                  {multisig?.required} of {multisig?.members.length} required.
+                </p>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={acceptedNoAuthority}
+                    onChange={(e) => setAcceptedNoAuthority(e.target.checked)}
+                  />
+                  I have checked every key hash above and accept that this wallet cannot
+                  authorise upgrades.
+                </label>
+              </div>
+            )}
+
             {progress && <p className="text-xs text-amber-200">{progress}</p>}
 
             <button
               type="button"
               onClick={submitDeploy}
-              disabled={!planned.verification.ok || !!progress || !!submitted}
+              disabled={
+                !planned.verification.ok ||
+                !!progress ||
+                deployComplete ||
+                (cannotAuthorise && !acceptedNoAuthority)
+              }
               className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
             >
               Sign all six and submit
@@ -629,13 +688,22 @@ export default function BootstrapProtocolPage() {
                 costs sync time.
               </p>
             )}
-            <button
-              type="button"
-              onClick={downloadDeployedRecord}
-              className="rounded border border-green-700 px-3 py-1.5 text-xs text-green-200"
-            >
-              Download bootstrap record
-            </button>
+            {deployComplete ? (
+              <button
+                type="button"
+                onClick={downloadDeployedRecord}
+                className="rounded border border-green-700 px-3 py-1.5 text-xs text-green-200"
+              >
+                Download bootstrap record
+              </button>
+            ) : (
+              <p className="rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-200">
+                Partial deployment — no bootstrap record is offered. The record would name
+                reference inputs and a config UTxO belonging to transactions that were never
+                submitted, and it would still pass verification, because verification re-derives
+                from the blueprint and knows nothing about what reached the chain.
+              </p>
+            )}
           </div>
         )}
       </section>
