@@ -23,6 +23,11 @@ import { resolveMultisig, type ResolvedMultisig } from "@/lib/deployment/multisi
 import { verifyBlueprintBytes, type UpstreamPin } from "@/lib/deployment/blueprint";
 import { buildCoreCip171Record } from "@/lib/deployment/provenance";
 import { buildBootstrapRecord } from "@/lib/deployment/record";
+import { useWallet } from "@/contexts/wallet-context";
+import { planDeployment, previousBlockOf, type DeploymentPlan } from "@/lib/deployment/deploy";
+import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
+import { waitForTxConfirmation } from "@/lib/utils/tx-confirmation";
+import { buildSyncStart } from "@/lib/deployment/record";
 import {
   verifyDeployment,
   toBootstrapRecord,
@@ -59,6 +64,14 @@ export default function BootstrapProtocolPage() {
   const [pastedDeployment, setPastedDeployment] = useState("");
   const [verification, setVerification] = useState<VerificationResult | null>(null);
   const [verifiedParams, setVerifiedParams] = useState<Record<string, unknown> | null>(null);
+
+  const wallet = useWallet();
+  const [planning, setPlanning] = useState(false);
+  const [planned, setPlanned] = useState<DeploymentPlan | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState<{ label: string; txHash: string }[] | null>(null);
+  const [syncStart, setSyncStart] = useState<ReturnType<typeof buildSyncStart> | null>(null);
 
   const memberEntries = useMemo(
     () => membersText.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean),
@@ -190,6 +203,109 @@ export default function BootstrapProtocolPage() {
     a.click();
     URL.revokeObjectURL(a.href);
   }, [verifiedParams, verification, network]);
+
+  /**
+   * Build all six transactions and verify the deployment they would produce.
+   *
+   * Deliberately does NOT reuse the seeds typed into step 1: a live deployment creates its own
+   * three seed UTxOs in its first transaction, so the outrefs every one-shot policy is
+   * parameterised by are only known once that transaction is built. The typed seeds preview a
+   * deployment whose seeds are already known; this plans a new one.
+   */
+  const planDeploy = useCallback(async () => {
+    setPlanning(true);
+    setPlanError(null);
+    setPlanned(null);
+    setSubmitted(null);
+    setSyncStart(null);
+    try {
+      if (!wallet.connected || !wallet.rawApi) {
+        throw new Error("Connect the deploying wallet first.");
+      }
+      if (!nonce.trim()) {
+        throw new Error(
+          "An always_fail nonce is required. It is the root of issuance_cbor_hex_mint and " +
+            "therefore of the registry policy, and it is not recorded in the bootstrap file — " +
+            "so keep whatever you enter here.",
+        );
+      }
+      const { blueprint, pin: loadedPin } = await loadBlueprint();
+      setPin(loadedPin);
+      const ms = resolveMultisig(memberEntries, Number(threshold));
+      setMultisig(ms);
+      const changeAddress = await wallet.wallet.getChangeAddress();
+
+      const result = await planDeployment({
+        rawWalletApi: wallet.rawApi,
+        changeAddress,
+        network,
+        blueprint,
+        pin: loadedPin,
+        multisig: ms,
+        maxInlineDatumBytes: Number(maxInline),
+        alwaysFailNonce: nonce.trim(),
+      });
+      setPlanned(result);
+    } catch (e) {
+      setPlanError((e as Error).message);
+    } finally {
+      setPlanning(false);
+    }
+  }, [wallet, nonce, loadBlueprint, memberEntries, threshold, maxInline, network]);
+
+  const submitDeploy = useCallback(async () => {
+    if (!planned || !planned.verification.ok) return;
+    setPlanError(null);
+    const phaseText = (p: MultiTxPhase) =>
+      p.phase === "signing"
+        ? "Waiting for signatures — every transaction is signed before any is submitted."
+        : `${p.phase} ${p.label}`;
+    try {
+      const result = await signAndSubmitSequence(wallet.wallet, planned.plan.steps, {
+        onPhase: (p) => setProgress(phaseText(p)),
+        waitForConfirmation: (txHash) => waitForTxConfirmation(txHash),
+      });
+      setSubmitted(result.submitted);
+      setProgress(null);
+      // The indexer has to start BEFORE the genesis, so resolve it from the chain rather than
+      // asking the operator to work it out.
+      try {
+        setSyncStart(
+          buildSyncStart(await previousBlockOf(network, planned.plan.deployment.txHash)),
+        );
+      } catch (e) {
+        setPlanError(
+          `Deployed, but the sync-start block could not be resolved: ${(e as Error).message}`,
+        );
+      }
+    } catch (e) {
+      setProgress(null);
+      if (e instanceof MultiTxError) {
+        setSubmitted(e.result.submitted);
+        setPlanError(
+          `${e.message} — ${e.result.submitted.length} transaction(s) ARE on chain and cannot ` +
+            `be unwound; ${e.result.unsubmitted.join(", ") || "none"} never left. Resume from ` +
+            `the failure, not from the start.`,
+        );
+      } else {
+        setPlanError((e as Error).message);
+      }
+    }
+  }, [planned, wallet, network]);
+
+  const downloadDeployedRecord = useCallback(() => {
+    if (!planned?.verification.ok) return;
+    const record = toBootstrapRecord(
+      planned.plan.deployment as unknown as Record<string, unknown>,
+      planned.verification,
+    );
+    const blob = new Blob([JSON.stringify(record, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `protocol-bootstraps-${network}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, [planned, network]);
 
   const downloadRecord = useCallback(() => {
     if (!derived) return;
@@ -393,17 +509,136 @@ export default function BootstrapProtocolPage() {
             Download bootstrap record template
           </button>
 
-          <div className="rounded border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-200">
-            <strong>Transactions are not built yet.</strong> Everything above is derived and
-            checked offline. Building and submitting the bootstrap is T-036, waiting on one
-            thing: the reference implementation lives in the SDK&apos;s test tree
-            (<code>test/harness/bootstrap.ts</code>) and is not exported from the published
-            package, so it cannot be imported here yet. Copying it would duplicate
-            protocol-critical logic the SDK owns. Every network is treated the same — this page
-            does not care which one it is pointed at.
-          </div>
+          <p className="text-xs text-dark-400">
+            This preview derives from the seeds typed above. A live deployment creates its own
+            three seeds in its first transaction, so it derives different hashes — see
+            &ldquo;Deploy&rdquo; below.
+          </p>
         </section>
       )}
+
+
+      <section className="space-y-3 border-t border-dark-800 pt-6">
+        <h2 className="text-lg font-semibold text-white">Deploy</h2>
+        <p className="text-xs text-dark-400">
+          Builds all six transactions and evaluates every one of them — with real execution
+          units, against the outputs the earlier steps will create — before the wallet is asked
+          for a single signature. The complete deployment, transaction hashes included, is known
+          at that point, so it is verified against the pinned blueprint here rather than
+          afterwards. <strong>Nothing is submitted until all of that passes.</strong> It is not
+          atomic and cannot be: six chained transactions cannot be unwound once the fourth lands.
+        </p>
+        <p className="text-xs text-dark-400">
+          The seeds in step 1 are not used here. A deployment creates its own, so every one-shot
+          policy is parameterised by outrefs that do not exist until the first transaction is
+          built. Keep the <strong>always_fail nonce</strong> you enter — the bootstrap record
+          stores its hash, not the nonce, and it cannot be recovered from the record.
+        </p>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={planDeploy}
+            disabled={planning || !wallet.connected}
+            className="rounded border border-dark-600 px-3 py-1.5 text-xs text-white disabled:opacity-40"
+          >
+            {planning ? "Building all six…" : "Build and verify"}
+          </button>
+          {!wallet.connected && (
+            <span className="text-xs text-dark-400">Connect the deploying wallet first.</span>
+          )}
+        </div>
+
+        {planError && (
+          <p className="rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-200">
+            {planError}
+          </p>
+        )}
+
+        {planned && (
+          <div className="space-y-3">
+            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+              <dt className="text-dark-400">Total cost</dt>
+              <dd className="text-white">
+                {(Number(planned.plan.totalCostLovelace) / 1_000_000).toFixed(6)} ADA — outputs,
+                deposits and fees, measured from the wallet balance rather than estimated
+              </dd>
+              <dt className="text-dark-400">Wallet balance</dt>
+              <dd className="text-white">
+                {(Number(planned.plan.walletBalanceLovelace) / 1_000_000).toFixed(6)} ADA
+              </dd>
+              <dt className="text-dark-400">Nominee stake key</dt>
+              <dd className="text-white">
+                {planned.plan.nomineeAlreadyRegistered
+                  ? "already registered — step 5 delegates only"
+                  : "not registered — step 5 registers and delegates"}
+              </dd>
+            </dl>
+
+            <ol className="space-y-1 font-mono text-xs text-dark-300">
+              {planned.plan.steps.map((s) => (
+                <li key={s.label}>
+                  {s.label} — {s.unsignedCbor.length / 2} bytes
+                </li>
+              ))}
+            </ol>
+
+            {planned.verification.ok ? (
+              <p className="text-xs text-green-300">
+                Verified: all {planned.verification.checks.length} script hashes in the
+                deployment this would produce re-derive from the pinned blueprint.
+              </p>
+            ) : (
+              <p className="rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-200">
+                The deployment this would produce does NOT verify
+                {planned.verification.error ? `: ${planned.verification.error}` : ""}
+                {planned.verification.mismatches.length > 0 &&
+                  ` — ${planned.verification.mismatches.map((m) => m.name).join(", ")}`}
+                . Nothing will be signed.
+              </p>
+            )}
+
+            {progress && <p className="text-xs text-amber-200">{progress}</p>}
+
+            <button
+              type="button"
+              onClick={submitDeploy}
+              disabled={!planned.verification.ok || !!progress || !!submitted}
+              className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
+            >
+              Sign all six and submit
+            </button>
+          </div>
+        )}
+
+        {submitted && submitted.length > 0 && (
+          <div className="space-y-2">
+            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-mono text-xs">
+              {submitted.map((s) => (
+                <div key={s.txHash} className="contents">
+                  <dt className="text-dark-400">{s.label}</dt>
+                  <dd className="break-all text-white">{s.txHash}</dd>
+                </div>
+              ))}
+            </dl>
+            {syncStart && (
+              <p className="text-xs text-dark-300">
+                Indexer sync start — <code>STORE_SYNC_START_BLOCKHASH</code>{" "}
+                {syncStart.blockHash}, <code>STORE_SYNC_START_SLOT</code> {syncStart.slot}. The
+                block immediately BEFORE the genesis; err earlier if in doubt, too early only
+                costs sync time.
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={downloadDeployedRecord}
+              className="rounded border border-green-700 px-3 py-1.5 text-xs text-green-200"
+            >
+              Download bootstrap record
+            </button>
+          </div>
+        )}
+      </section>
 
       <section className="space-y-3 border-t border-dark-800 pt-6">
         <h2 className="text-lg font-semibold text-white">
