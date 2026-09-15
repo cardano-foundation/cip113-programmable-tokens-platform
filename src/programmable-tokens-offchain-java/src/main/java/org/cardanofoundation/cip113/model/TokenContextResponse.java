@@ -46,5 +46,21 @@ public record TokenContextResponse(
          * it matches, which is something only a client holding the blueprint can do — so this
          * field is offered as a candidate, never as an answer.
          */
-        String blacklistAdminPkh
+        String blacklistAdminPkh,
+
+        /**
+         * The token's CIP-68 metadata, read back from its reference token, or null.
+         *
+         * <p>Null is not "this token has no metadata" — see {@link #cip68Status}, which says which
+         * of three things happened. A client that renders null as "no metadata" will tell a user
+         * their token published nothing when the truth may be that this backend has not indexed
+         * the reference token yet.
+         */
+        org.cardanofoundation.cip113.model.Cip68Metadata cip68Metadata,
+
+        /**
+         * Why {@link #cip68Metadata} is null, when it is: NOT_CIP68, REFERENCE_TOKEN_NOT_FOUND or
+         * NO_READABLE_DATUM. Null when metadata was found.
+         */
+        String cip68Status
 ) {}

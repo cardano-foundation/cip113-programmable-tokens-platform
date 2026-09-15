@@ -403,18 +403,82 @@ function NodeDetail({ entry }: { entry: RegistryEntry }) {
           <p className="mt-1 text-sm text-white">{label.label}</p>
           <p className="mt-1 text-xs text-dark-400">{label.blurb}</p>
         </div>
-        <div className="rounded border border-dark-700 bg-dark-900 p-3">
-          <p className="font-mono text-[0.66rem] uppercase tracking-wider text-dark-400">
-            CIP-68 metadata
-          </p>
-          <p className="mt-1 text-xs text-dark-400">
-            Name, ticker, logo and decimals live in the reference token&apos;s datum. Reading it
-            back needs a decoder the backend does not have yet — tracked as T-052, not missing data.
-          </p>
-        </div>
+        <Cip68Panel entry={entry} />
       </div>
     </div>
   );
+}
+
+/**
+ * CIP-68 metadata, with the three ways it can be absent kept apart.
+ *
+ * "This token published no metadata" is a fact about the token. "We have not indexed its
+ * reference token" is a fact about this backend. Rendering both as an empty panel tells a user
+ * their token is bare when it may not be.
+ */
+function Cip68Panel({ entry }: { entry: RegistryEntry }) {
+  const meta = entry.context?.cip68Metadata;
+  const status = entry.context?.cip68Status;
+
+  return (
+    <div className="rounded border border-dark-700 bg-dark-900 p-3">
+      <p className="font-mono text-[0.66rem] uppercase tracking-wider text-dark-400">
+        CIP-68 metadata
+      </p>
+      {meta ? (
+        <div className="mt-2 space-y-1.5">
+          <div className="flex items-center gap-2">
+            {meta.logo ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={meta.logo}
+                alt=""
+                className="h-8 w-8 rounded border border-dark-700 object-cover"
+                onError={(e) => {
+                  (e.currentTarget as HTMLImageElement).style.display = "none";
+                }}
+              />
+            ) : null}
+            <div>
+              <p className="text-sm font-medium text-white">{meta.name}</p>
+              {meta.ticker && (
+                <p className="font-mono text-[0.7rem] text-dark-400">{meta.ticker}</p>
+              )}
+            </div>
+          </div>
+          {meta.description && <p className="text-xs text-dark-300">{meta.description}</p>}
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-[0.72rem] text-dark-400">
+            <span>
+              decimals{" "}
+              <span className="font-mono text-dark-200">
+                {meta.decimals ?? "not recorded"}
+              </span>
+            </span>
+            {meta.url && (
+              <a href={meta.url} target="_blank" rel="noopener noreferrer" className="text-primary-400 hover:underline">
+                {meta.url}
+              </a>
+            )}
+          </div>
+        </div>
+      ) : (
+        <p className="mt-1 text-xs text-dark-400">{cip68Absence(status)}</p>
+      )}
+    </div>
+  );
+}
+
+function cip68Absence(status: string | null | undefined): string {
+  switch (status) {
+    case "NOT_CIP68":
+      return "This token is not CIP-68 — its asset name carries no reference label, so there is no metadata to read.";
+    case "REFERENCE_TOKEN_NOT_FOUND":
+      return "No UTxO holds this token's reference token. Either it was burned, or this backend has not indexed it yet — those are different, and this cannot tell which.";
+    case "NO_READABLE_DATUM":
+      return "The reference token exists but carries no datum this can read.";
+    default:
+      return "No metadata reported for this token.";
+  }
 }
 
 function Field({
