@@ -17,6 +17,7 @@ import { useCIP113 } from "@/contexts/cip113-context";
 import { useToast } from "@/components/ui/use-toast";
 import { getExplorerTxUrl } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import { getCardanoNetwork } from "@/lib/utils/network";
 
 interface BlacklistSectionProps {
   tokens: AdminTokenInfo[];
@@ -37,7 +38,7 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
   // operations against a live deployment. Deriving this from `sdkAvailable` would flip
   // every user onto an unverified path the moment the capability was re-enabled.
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>("backend");
-  const network = process.env.NEXT_PUBLIC_NETWORK || "preview";
+  const network = getCardanoNetwork();
 
   // Per-page capability gate. Show:
   //   - tokens where the wallet has BLACKLIST_MANAGER role (legacy F&S)

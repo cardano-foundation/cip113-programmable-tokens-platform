@@ -10,7 +10,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test:parameterization": "node test-parameterization.js"
+    "test:parameterization": "node test-parameterization.js",
+    "test:deployment": "tsc lib/deployment/*.ts --outDir .deploy-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .deploy-build && node test-deployment-derivation.js",
+    "test:upgrade": "tsc lib/upgrade/*.ts lib/tx/*.ts --outDir .upgrade-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-upgrade-witness.js",
+    "test:multitx": "tsc lib/tx/*.ts --outDir .upgrade-build/tx --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-multi-tx.js"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.9.0",

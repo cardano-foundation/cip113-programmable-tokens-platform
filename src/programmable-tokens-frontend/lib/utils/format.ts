@@ -1,4 +1,5 @@
-/**
+
+import { getCardanoNetwork } from "./network";/**
  * Utility functions for formatting Cardano addresses, amounts, and other data
  */
 
@@ -113,7 +114,9 @@ export function formatDate(date: Date): string {
  * @returns Base URL for the block explorer
  */
 export function getExplorerBaseUrl(network?: string): string {
-  const currentNetwork = network || process.env.NEXT_PUBLIC_NETWORK || "preview";
+  // Not a second reading of the env: getCardanoNetwork() is the single source of truth, and
+  // it also rejects an unsupported value instead of passing it through to a URL lookup.
+  const currentNetwork = network || getCardanoNetwork();
 
   const explorerUrls: Record<string, string> = {
     preview: "https://preview.cexplorer.io",

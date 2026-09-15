@@ -9,6 +9,7 @@ import { Settings } from "lucide-react";
 import { getNetworkDisplayName, getNetworkColor } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import { ProPanelModal } from "@/components/pro-panel/pro-panel-modal";
+import { getCardanoNetwork } from "@/lib/utils/network";
 
 const ConnectButton = dynamic(
   () => import("@/components/wallet").then((mod) => ({ default: mod.ConnectButton })),
@@ -28,7 +29,7 @@ const navigation = [
 
 export function Header() {
   const pathname = usePathname();
-  const network = process.env.NEXT_PUBLIC_NETWORK || "preview";
+  const network = getCardanoNetwork();
   const [proPanelOpen, setProPanelOpen] = useState(false);
 
   return (
