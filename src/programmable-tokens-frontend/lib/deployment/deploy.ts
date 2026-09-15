@@ -29,8 +29,18 @@ import {
 } from "@easy1staking/cip113-sdk-ts";
 import type { PlutusBlueprint } from "@easy1staking/cip113-sdk-ts";
 
-import { buildBootstrapPlan, type BootstrapPlan } from "./bootstrap";
+import {
+  buildBootstrapPlan,
+  selectSeedUtxos,
+  type BootstrapPlan,
+  type ChainUtxo,
+} from "./bootstrap";
+import type { DeploymentSeeds } from "./derive";
 import { verifyDeployment, type VerificationResult } from "./verify";
+import { EvoAddress, EvoAssets, EvoTransaction, outputAssets } from "@easy1staking/cip113-sdk-ts";
+
+/** Lovelace parked in each prepared seed. Enough to be a useful input, small enough to be cheap. */
+const SEED_PREP_LOVELACE = 5_000_000n;
 import type { UpstreamPin } from "./blueprint";
 import type { ResolvedMultisig } from "./multisig";
 import type { CardanoNetwork } from "../utils/network";
@@ -84,6 +94,93 @@ async function isStakeRegisteredViaBlockfrost(
   return body.active === true;
 }
 
+/**
+ * An Evolution signing client over the connected CIP-30 wallet.
+ *
+ * Built the same way in every entry point below, because a client built with a different
+ * provider or chain reads a different UTxO set — and these functions hand each other outrefs.
+ */
+function signingClient(network: CardanoNetwork, rawWalletApi: unknown) {
+  const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
+  if (!projectId) {
+    throw new Error(
+      "NEXT_PUBLIC_BLOCKFROST_API_KEY is not set. A deployment has to read the wallet's UTxOs, " +
+        "the protocol parameters and the nominee's registration state before it can build " +
+        "anything.",
+    );
+  }
+  const chain = chainFor(network);
+  return {
+    chain,
+    client: evoClient(chain)
+      .withCip30(rawWalletApi as never)
+      .withBlockfrost({ projectId, baseUrl: blockfrostBaseUrl(network) }),
+  };
+}
+
+export interface WalletSeeds {
+  /** Three distinct UTxOs fit to be one-shot seeds, or null when the wallet has no three. */
+  seeds: DeploymentSeeds | null;
+  /** How many wallet UTxOs could serve as a seed. Below three, the wallet needs preparing. */
+  usableCount: number;
+}
+
+/**
+ * What the connected wallet can offer as one-shot seeds.
+ *
+ * Read rather than asked for. Three specific outrefs are not something an operator should have
+ * to find and transcribe, and a transcription error here is not caught by anything: a wrong
+ * outref is still a valid parameter, it simply parameterises the deployment against a UTxO the
+ * transaction cannot consume, and the failure names an input rather than a typo.
+ */
+export async function findWalletSeeds(
+  network: CardanoNetwork,
+  rawWalletApi: unknown,
+  changeAddress: string,
+): Promise<WalletSeeds> {
+  const { client } = signingClient(network, rawWalletApi);
+  const utxos = (await client.getUtxos(
+    EvoAddress.fromBech32(changeAddress) as never,
+  )) as ChainUtxo[];
+  const seeds = selectSeedUtxos(utxos, changeAddress);
+  const usableCount = utxos.filter(
+    (u) => !u.scriptRef && !EvoAssets.getUnits(u.assets as never).some((x: string) => x !== "lovelace"),
+  ).length;
+  return { seeds, usableCount };
+}
+
+/**
+ * Split the wallet into three seed UTxOs, as one standalone transaction.
+ *
+ * For the wallet that holds a single large UTxO — the normal state of a freshly funded
+ * deployer. Kept SEPARATE from the deployment rather than folded in as its first step: it is
+ * ordinary, reversible housekeeping that can be repeated if it fails, whereas everything in the
+ * plan proper is one-shot. Doing it first also means the deployment's first transaction spends
+ * real confirmed UTxOs instead of predicted ones.
+ */
+export async function prepareSeedUtxos(
+  network: CardanoNetwork,
+  rawWalletApi: unknown,
+  changeAddress: string,
+  wallet: { signTx(tx: string, partial: boolean): Promise<string>; submitTx(tx: string): Promise<string> },
+): Promise<string> {
+  const { client } = signingClient(network, rawWalletApi);
+  const addressObj = EvoAddress.fromBech32(changeAddress);
+  const utxos = (await client.getUtxos(addressObj as never)) as ChainUtxo[];
+
+  let tx = client.newTx();
+  for (let i = 0; i < 3; i++) {
+    tx = tx.payToAddress({ address: addressObj, assets: outputAssets(SEED_PREP_LOVELACE) });
+  }
+  const built = await tx.build({
+    changeAddress: addressObj,
+    availableUtxos: utxos.filter((u) => !u.scriptRef) as never,
+    passAdditionalUtxos: true,
+  });
+  const cbor = EvoTransaction.toCBORHex((await built.toTransaction()) as never);
+  return wallet.submitTx(await wallet.signTx(cbor, true));
+}
+
 export interface PlanDeploymentInput {
   /** The raw CIP-30 API from `wallet.enable()`, as `useWallet().rawApi` provides it. */
   rawWalletApi: unknown;
@@ -95,6 +192,8 @@ export interface PlanDeploymentInput {
   multisig: ResolvedMultisig;
   maxInlineDatumBytes: number;
   alwaysFailNonce: string;
+  /** Three existing wallet UTxOs. Omit and the plan opens by creating them. */
+  seeds?: DeploymentSeeds;
 }
 
 /**
@@ -127,18 +226,7 @@ export interface DeploymentPlan {
 
 export async function planDeployment(input: PlanDeploymentInput): Promise<DeploymentPlan> {
   const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
-  if (!projectId) {
-    throw new Error(
-      "NEXT_PUBLIC_BLOCKFROST_API_KEY is not set. A deployment has to read the wallet's UTxOs, " +
-        "the protocol parameters and the nominee's registration state before it can build " +
-        "anything.",
-    );
-  }
-
-  const chain = chainFor(input.network);
-  const client = evoClient(chain)
-    .withCip30(input.rawWalletApi as never)
-    .withBlockfrost({ projectId, baseUrl: blockfrostBaseUrl(input.network) });
+  const { chain, client } = signingClient(input.network, input.rawWalletApi);
 
   const plan = await buildBootstrapPlan({
     client: client as never,
@@ -149,6 +237,7 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Deploy
     multisig: input.multisig,
     maxInlineDatumBytes: input.maxInlineDatumBytes,
     alwaysFailNonce: input.alwaysFailNonce,
+    seeds: input.seeds,
     isStakeRegistered: (rewardAddress) =>
       isStakeRegisteredViaBlockfrost(input.network, projectId, rewardAddress),
   });

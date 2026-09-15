@@ -15,7 +15,7 @@
  * so the guarantee on offer is "nothing is submitted until everything derives and verifies",
  * not atomicity.
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { getCardanoNetwork } from "@/lib/utils/network";
 import { deriveCoreDeployment, type DerivedCoreDeployment } from "@/lib/deployment/derive";
@@ -28,6 +28,8 @@ import {
   planDeployment,
   previousBlockOf,
   deployerCanAuthorise,
+  findWalletSeeds,
+  prepareSeedUtxos,
   type DeploymentPlan,
 } from "@/lib/deployment/deploy";
 import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
@@ -97,6 +99,21 @@ export default function BootstrapProtocolPage() {
   /** Set when the deploying wallet is NOT among the upgrade signers — see below. */
   const [cannotAuthorise, setCannotAuthorise] = useState(false);
   const [acceptedNoAuthority, setAcceptedNoAuthority] = useState(false);
+
+  /**
+   * Seeds are READ FROM THE WALLET and locked, not typed.
+   *
+   * Three specific outrefs are not something an operator should have to find and transcribe,
+   * and a transcription error is not caught by anything downstream: a wrong outref is still a
+   * valid parameter. It simply parameterises every one-shot policy against a UTxO the
+   * transaction cannot consume, and the failure names a missing input rather than a typo.
+   * Unlocking is available because an operator may have a reason to pick particular UTxOs.
+   */
+  const [seedsLocked, setSeedsLocked] = useState(true);
+  const [seedSource, setSeedSource] = useState<"wallet" | "manual" | "none">("none");
+  const [usableUtxoCount, setUsableUtxoCount] = useState<number | null>(null);
+  const [preparing, setPreparing] = useState(false);
+  const [seedNotice, setSeedNotice] = useState<string | null>(null);
   const [syncStart, setSyncStart] = useState<ReturnType<typeof buildSyncStart> | null>(null);
 
   const memberEntries = useMemo(
@@ -114,6 +131,55 @@ export default function BootstrapProtocolPage() {
     }
     return { txHash: f.txHash.trim().toLowerCase(), outputIndex: idx };
   };
+
+  const loadSeedsFromWallet = useCallback(async () => {
+    if (!wallet.connected || !wallet.rawApi) return;
+    setSeedNotice(null);
+    try {
+      const changeAddress = await wallet.wallet.getChangeAddress();
+      const { seeds, usableCount } = await findWalletSeeds(network, wallet.rawApi, changeAddress);
+      setUsableUtxoCount(usableCount);
+      if (!seeds) {
+        setSeedSource("none");
+        return;
+      }
+      const toForm = (r: { txHash: string; outputIndex: number }) => ({
+        txHash: r.txHash,
+        outputIndex: String(r.outputIndex),
+      });
+      setParamsSeed(toForm(seeds.paramsSeed));
+      setIssuanceSeed(toForm(seeds.issuanceSeed));
+      setMultisigSeed(toForm(seeds.multisigSeed));
+      setSeedSource("wallet");
+    } catch (e) {
+      setSeedNotice((e as Error).message);
+    }
+  }, [wallet, network]);
+
+  useEffect(() => {
+    if (wallet.connected && seedsLocked) void loadSeedsFromWallet();
+  }, [wallet.connected, seedsLocked, loadSeedsFromWallet]);
+
+  const prepareSeeds = useCallback(async () => {
+    setPreparing(true);
+    setSeedNotice(null);
+    try {
+      if (!wallet.connected || !wallet.rawApi) throw new Error("Connect the wallet first.");
+      const changeAddress = await wallet.wallet.getChangeAddress();
+      const txHash = await prepareSeedUtxos(network, wallet.rawApi, changeAddress, wallet.wallet);
+      setSeedNotice(
+        `Seed transaction ${txHash.slice(0, 16)}… submitted. Waiting for it to confirm, then ` +
+          `the three seeds below fill in by themselves.`,
+      );
+      await waitForTxConfirmation(txHash);
+      await loadSeedsFromWallet();
+      setSeedNotice(null);
+    } catch (e) {
+      setSeedNotice((e as Error).message);
+    } finally {
+      setPreparing(false);
+    }
+  }, [wallet, network, loadSeedsFromWallet]);
 
   const derive = useCallback(async () => {
     setStage("deriving");
@@ -263,10 +329,25 @@ export default function BootstrapProtocolPage() {
       const changeAddress = await wallet.wallet.getChangeAddress();
       setCannotAuthorise(!deployerCanAuthorise(changeAddress, ms.members));
 
+      // The seeds shown in step 1 ARE the deployment's seeds when they are filled in. When they
+      // are not, the plan opens with a transaction that creates them — one step longer, and its
+      // outputs do not exist on chain while the rest of the plan is evaluated against them.
+      const seedForms = [paramsSeed, issuanceSeed, multisigSeed];
+      const seedsFilled = seedForms.every(
+        (s) => /^[0-9a-fA-F]{64}$/.test(s.txHash.trim()) && s.outputIndex.trim() !== "",
+      );
+
       const result = await planDeployment({
         rawWalletApi: wallet.rawApi,
         changeAddress,
         network,
+        seeds: seedsFilled
+          ? {
+              paramsSeed: toTxInput(paramsSeed, "protocol-params seed"),
+              issuanceSeed: toTxInput(issuanceSeed, "issuance seed"),
+              multisigSeed: toTxInput(multisigSeed, "upgrade-multisig seed"),
+            }
+          : undefined,
         blueprint,
         pin: loadedPin,
         multisig: ms,
@@ -279,7 +360,18 @@ export default function BootstrapProtocolPage() {
     } finally {
       setPlanning(false);
     }
-  }, [wallet, nonce, loadBlueprint, memberEntries, threshold, maxInline, network]);
+  }, [
+    wallet,
+    nonce,
+    loadBlueprint,
+    memberEntries,
+    threshold,
+    maxInline,
+    network,
+    paramsSeed,
+    issuanceSeed,
+    multisigSeed,
+  ]);
 
   const submitDeploy = useCallback(async () => {
     if (!planned || !planned.verification.ok) return;
@@ -413,12 +505,62 @@ export default function BootstrapProtocolPage() {
       </section>
 
       <section className="space-y-4">
-        <h2 className="text-lg font-semibold text-white">1. One-shot seeds</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-lg font-semibold text-white">1. One-shot seeds</h2>
+          <label className="flex items-center gap-2 text-xs text-dark-300">
+            <input
+              type="checkbox"
+              checked={!seedsLocked}
+              onChange={(e) => {
+                setSeedsLocked(!e.target.checked);
+                if (e.target.checked) setSeedSource("manual");
+              }}
+            />
+            Choose them myself
+          </label>
+        </div>
         <p className="text-xs text-dark-400">
-          Three distinct UTxOs, not one. The live Preview deployment consumes outputs #0, #1 and
-          #2 of a single funding transaction. Sharing one seed across all three produces a
-          different, incompatible protocol.
+          Three <strong>distinct</strong> UTxOs, not one. Sharing a seed across slots produces a
+          different, incompatible protocol — and it would deploy without complaint, because the
+          two same-typed outref fields in the record would then hold one value and the
+          derivation check could not fail. Read from the connected wallet and locked, because a
+          mistyped outref is still a valid parameter: it parameterises every one-shot policy
+          against a UTxO the transaction cannot consume, and the failure names a missing input
+          rather than a typo.
         </p>
+
+        {wallet.connected && seedSource === "wallet" && (
+          <p className="text-xs text-green-300">
+            Filled from the wallet — three distinct UTxOs of the {usableUtxoCount} usable ones.
+            These are spent by the deployment, which is then <strong>five</strong> transactions
+            rather than six.
+          </p>
+        )}
+        {wallet.connected && seedSource === "none" && (
+          <div className="space-y-2 rounded border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-200">
+            <p>
+              This wallet has {usableUtxoCount ?? 0} UTxO(s) usable as a seed and needs three.
+              (A UTxO carrying native assets or a reference script cannot be one.) Splitting is
+              ordinary, repeatable housekeeping — it is kept out of the deployment proper so
+              that a failure here costs nothing.
+            </p>
+            <button
+              type="button"
+              onClick={prepareSeeds}
+              disabled={preparing}
+              className="rounded border border-amber-600 px-3 py-1.5 text-amber-100 disabled:opacity-40"
+            >
+              {preparing ? "Preparing…" : "Prepare seed UTxOs"}
+            </button>
+          </div>
+        )}
+        {!wallet.connected && (
+          <p className="text-xs text-dark-400">
+            Connect the deploying wallet and these fill in by themselves.
+          </p>
+        )}
+        {seedNotice && <p className="text-xs text-amber-200">{seedNotice}</p>}
+
         {([
           ["protocol-params + registry", paramsSeed, setParamsSeed],
           ["issuance", issuanceSeed, setIssuanceSeed],
@@ -427,14 +569,16 @@ export default function BootstrapProtocolPage() {
           <div key={label} className="flex flex-wrap items-center gap-2">
             <span className="w-52 text-sm text-dark-300">{label}</span>
             <input
-              className={`flex-1 min-w-[18rem] ${FIELD}`}
+              className={`flex-1 min-w-[18rem] ${FIELD} ${seedsLocked ? "opacity-70" : ""}`}
               placeholder="transaction hash (64 hex)"
+              readOnly={seedsLocked}
               value={value.txHash}
               onChange={(e) => set({ ...value, txHash: e.target.value })}
             />
             <input
-              className={`w-20 ${FIELD}`}
+              className={`w-20 ${FIELD} ${seedsLocked ? "opacity-70" : ""}`}
               placeholder="index"
+              readOnly={seedsLocked}
               value={value.outputIndex}
               onChange={(e) => set({ ...value, outputIndex: e.target.value })}
             />
@@ -565,9 +709,8 @@ export default function BootstrapProtocolPage() {
           </button>
 
           <p className="text-xs text-dark-400">
-            This preview derives from the seeds typed above. A live deployment creates its own
-            three seeds in its first transaction, so it derives different hashes — see
-            &ldquo;Deploy&rdquo; below.
+            Derived from the seeds in step 1 — the same ones the deployment consumes, so these
+            are the hashes it produces.
           </p>
         </section>
       )}
@@ -584,10 +727,10 @@ export default function BootstrapProtocolPage() {
           atomic and cannot be: six chained transactions cannot be unwound once the fourth lands.
         </p>
         <p className="text-xs text-dark-400">
-          The seeds in step 1 are not used here. A deployment creates its own, so every one-shot
-          policy is parameterised by outrefs that do not exist until the first transaction is
-          built. Keep the <strong>always_fail nonce</strong> you enter — the bootstrap record
-          stores its hash, not the nonce, and it cannot be recovered from the record.
+          Uses the seeds from step 1. With them the plan is <strong>five</strong> transactions;
+          without them it opens by creating three seed UTxOs and is six. Keep the{" "}
+          <strong>always_fail nonce</strong> you enter — the bootstrap record stores its hash,
+          not the nonce, and it cannot be recovered from the record afterwards.
         </p>
 
         <div className="flex flex-wrap items-center gap-3">

@@ -156,7 +156,7 @@ const REQUIRED_PUBLISH_HANDLERS = [
 ] as const;
 
 /** Minimal structural view of an Evolution UTxO, so this module needs no private types. */
-interface ChainUtxo {
+export interface ChainUtxo {
   transactionId: unknown;
   index: number | bigint;
   address: unknown;
@@ -199,6 +199,21 @@ export interface BuildBootstrapInput {
   multisig: ResolvedMultisig;
   maxInlineDatumBytes: number;
   alwaysFailNonce: string;
+  /**
+   * The three one-shot seed UTxOs, when the wallet already holds three that will do.
+   *
+   * Omit and the plan opens with a fragmentation transaction that creates them — one more
+   * transaction, and its outputs do not exist on chain while the rest of the plan is built and
+   * evaluated against them. Supplying real, already-confirmed UTxOs is therefore the better
+   * path whenever it is available: it is one transaction shorter, and the first transaction in
+   * the chain then has real inputs and real collateral candidates rather than predicted ones.
+   *
+   * They must be three DISTINCT UTxOs. `protocolParams.txInput` and `upgradeMultisig.txInput`
+   * are the same type and are not interchangeable — one UTxO in both slots deploys perfectly
+   * well and makes `assertDeploymentScripts` vacuous, because the upgrade-multisig check then
+   * passes whichever of the two fields the verifier happens to read.
+   */
+  seeds?: DeploymentSeeds;
   /**
    * Whether a reward address is already registered on chain. REQUIRED, and deliberately not
    * defaulted.
@@ -337,6 +352,39 @@ async function retryBuild<T>(label: string, build: () => Promise<T>): Promise<T>
   throw new Error(`${label} failed after 3 attempts: ${(last as Error)?.message ?? last}`);
 }
 
+/**
+ * Three wallet UTxOs fit to be one-shot seeds, or null if the wallet has no three.
+ *
+ * "Fit" is narrow on purpose: at the deploying wallet's own address, no reference script, no
+ * native assets, and enough lovelace to be worth spending as an input. Native assets are
+ * excluded because consuming such a UTxO drags its tokens into the genesis transaction, where
+ * they would have to go somewhere — and `has_nft_strict` means "somewhere" cannot be the
+ * config output.
+ *
+ * Largest first, so the seeds also help fund the transactions that consume them.
+ */
+export function selectSeedUtxos(
+  utxos: readonly ChainUtxo[],
+  ownAddress: string,
+  minLovelace = SEED_LOVELACE,
+): DeploymentSeeds | null {
+  const usable = utxos
+    .filter(
+      (u) =>
+        !u.scriptRef &&
+        addressBech32Of(u) === ownAddress &&
+        !EvoAssets.getUnits(u.assets as never).some((unit: string) => unit !== "lovelace") &&
+        lovelaceOf(u.assets) >= minLovelace,
+    )
+    .sort((a, b) => (lovelaceOf(b.assets) > lovelaceOf(a.assets) ? 1 : -1));
+  if (usable.length < 3) return null;
+  return {
+    paramsSeed: outRef(usable[0]),
+    issuanceSeed: outRef(usable[1]),
+    multisigSeed: outRef(usable[2]),
+  };
+}
+
 /** The PlutusV3 script body hex (inner UPLC, no outer CBOR wrap). */
 function scriptBodyHex(compiledCode: string): string {
   if (UPLC.getCborEncodingLevel(compiledCode) !== "double") return compiledCode;
@@ -453,61 +501,107 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
 
   const steps: MultiTxStep[] = [];
 
-  // ---- Tx 0: fragment into three distinct seed UTxOs ----------------------
+  // ---- The three one-shot seeds -------------------------------------------
   //
-  // THREE, and they must be distinct. `protocolParams.txInput` and `upgradeMultisig.txInput`
-  // are the same type and are NOT interchangeable: a deployment that used one UTxO for both
-  // would deploy perfectly well and make `assertDeploymentScripts` vacuous, because the
-  // upgrade-multisig check would pass whichever of the two fields the verifier read.
-  let fragTx = client.newTx();
-  for (let i = 0; i < 3; i++) {
-    fragTx = fragTx.payToAddress({
-      address: changeAddressObj,
-      assets: outputAssets(SEED_LOVELACE),
-    });
-  }
-  const fragBuilt: BuiltTx = await fragTx.build(buildOpts(spendableBefore));
-  const fragChain = fragBuilt.chainResult();
-  steps.push({ label: "1/6 seed UTxOs", unsignedCbor: await cborOf(fragBuilt, "the seed transaction") });
+  // Either the operator's three existing wallet UTxOs, or a fragmentation transaction that
+  // creates them. The first is preferred and is one transaction shorter; the second is what a
+  // freshly funded wallet holding a single UTxO needs.
+  let seeds: DeploymentSeeds;
+  let seedUtxos: ChainUtxo[];
+  let availableAfterSeeds: ChainUtxo[];
 
-  const created = fragChain.available
-    .filter((u) => txHashHexOf(u) === fragChain.txHash)
-    .sort((a, b) => Number(a.index) - Number(b.index));
-  const seedUtxos = created.filter((u) => Number(u.index) < 3);
-  if (seedUtxos.length !== 3) {
-    throw new Error(
-      `The seed transaction produced ${seedUtxos.length} of the 3 expected seed outputs. ` +
-        `Every one-shot policy in the deployment is parameterised by one of them, so there is ` +
-        `nothing to derive from.`,
-    );
-  }
-  // Positional, so assert the position means what the derivation assumes. A change output
-  // landing at index 0 would silently reassign every one-shot policy.
-  seedUtxos.forEach((u, i) => {
-    // Evolution appends change after the explicit outputs and does not reorder them, so
-    // `index < 3` already excludes change. These assertions are belt-and-braces against that
-    // ordering ever changing — worth keeping, because if it does change the failure is not an
-    // error, it is three one-shot policies parameterised by the wrong outrefs.
-    if (lovelaceOf(u.assets) !== SEED_LOVELACE) {
+  if (input.seeds) {
+    seeds = input.seeds;
+    const wanted = [seeds.paramsSeed, seeds.issuanceSeed, seeds.multisigSeed];
+    const distinct = new Set(wanted.map(refKey));
+    if (distinct.size !== 3) {
       throw new Error(
-        `Seed output #${i} holds ${lovelaceOf(u.assets)} lovelace, expected exactly ` +
-          `${SEED_LOVELACE}. The seed outputs are identified by position, so this is not the ` +
-          `output the derivation would be parameterised by.`,
+        "The three seeds must be three DISTINCT UTxOs. Reusing one across two slots deploys " +
+          "without complaint and makes the upgrade-multisig derivation check vacuous, because " +
+          "it would then pass whichever of the two fields a verifier reads.",
       );
     }
-    if (EvoAssets.getUnits(u.assets as never).some((unit: string) => unit !== "lovelace")) {
-      throw new Error(`Seed output #${i} carries native assets; a seed must hold lovelace only.`);
+    const byRef = new Map(walletUtxos.map((u) => [refKey(outRef(u)), u]));
+    seedUtxos = wanted.map((ref) => {
+      const found = byRef.get(refKey(ref));
+      if (!found) {
+        throw new Error(
+          `Seed ${ref.txHash.slice(0, 12)}…#${ref.outputIndex} is not an unspent output of ` +
+            `this wallet. A one-shot policy is parameterised by a UTxO the transaction must ` +
+            `consume, so it has to exist and be spendable now.`,
+        );
+      }
+      if (found.scriptRef) {
+        throw new Error(
+          `Seed ${ref.txHash.slice(0, 12)}…#${ref.outputIndex} carries a reference script. ` +
+            `Spending it would destroy that script and drag its bytes into this transaction.`,
+        );
+      }
+      if (EvoAssets.getUnits(found.assets as never).some((unit: string) => unit !== "lovelace")) {
+        throw new Error(
+          `Seed ${ref.txHash.slice(0, 12)}…#${ref.outputIndex} carries native assets. They ` +
+            `would have to be paid somewhere by the transaction that consumes it, and the ` +
+            `config output cannot take them — \`has_nft_strict\` is strict about the whole value.`,
+        );
+      }
+      return found;
+    });
+    // The seeds stay out of coin selection until the transaction that consumes them.
+    availableAfterSeeds = ownSpendable(walletUtxos, changeAddress, wanted);
+  } else {
+    let fragTx = client.newTx();
+    for (let i = 0; i < 3; i++) {
+      fragTx = fragTx.payToAddress({
+        address: changeAddressObj,
+        assets: outputAssets(SEED_LOVELACE),
+      });
     }
-    if (addressBech32Of(u) !== changeAddress) {
-      throw new Error(`Seed output #${i} is not at the deploying wallet's address.`);
-    }
-  });
+    const fragBuilt: BuiltTx = await fragTx.build(buildOpts(spendableBefore));
+    const fragChain = fragBuilt.chainResult();
+    steps.push({ label: "seed UTxOs", unsignedCbor: await cborOf(fragBuilt, "the seed transaction") });
 
-  const seeds: DeploymentSeeds = {
-    paramsSeed: outRef(seedUtxos[0]),
-    issuanceSeed: outRef(seedUtxos[1]),
-    multisigSeed: outRef(seedUtxos[2]),
-  };
+    const created = fragChain.available
+      .filter((u) => txHashHexOf(u) === fragChain.txHash)
+      .sort((a, b) => Number(a.index) - Number(b.index));
+    seedUtxos = created.filter((u) => Number(u.index) < 3);
+    if (seedUtxos.length !== 3) {
+      throw new Error(
+        `The seed transaction produced ${seedUtxos.length} of the 3 expected seed outputs. ` +
+          `Every one-shot policy in the deployment is parameterised by one of them, so there ` +
+          `is nothing to derive from.`,
+      );
+    }
+    seedUtxos.forEach((u, i) => {
+      // Evolution appends change after the explicit outputs and does not reorder them, so
+      // `index < 3` already excludes change. These assertions are belt-and-braces against that
+      // ordering ever changing — if it does, the failure is not an error, it is three one-shot
+      // policies parameterised by the wrong outrefs.
+      if (lovelaceOf(u.assets) !== SEED_LOVELACE) {
+        throw new Error(
+          `Seed output #${i} holds ${lovelaceOf(u.assets)} lovelace, expected exactly ` +
+            `${SEED_LOVELACE}. The seed outputs are identified by position, so this is not ` +
+            `the output the derivation would be parameterised by.`,
+        );
+      }
+      if (EvoAssets.getUnits(u.assets as never).some((unit: string) => unit !== "lovelace")) {
+        throw new Error(`Seed output #${i} carries native assets; a seed must hold lovelace only.`);
+      }
+      if (addressBech32Of(u) !== changeAddress) {
+        throw new Error(`Seed output #${i} is not at the deploying wallet's address.`);
+      }
+    });
+    seeds = {
+      paramsSeed: outRef(seedUtxos[0]),
+      issuanceSeed: outRef(seedUtxos[1]),
+      multisigSeed: outRef(seedUtxos[2]),
+    };
+    availableAfterSeeds = ownSpendable(fragChain.available, changeAddress, [
+      seeds.paramsSeed,
+      seeds.issuanceSeed,
+      seeds.multisigSeed,
+    ]);
+  }
+
   const allSeedRefs = [seeds.paramsSeed, seeds.issuanceSeed, seeds.multisigSeed];
 
   // ---- Derive every core script from those seeds --------------------------
@@ -641,11 +735,9 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
   });
   msTx = msTx.attachScript({ script: buildEvoScript(core.upgradeMultisig.compiledCode) });
 
-  const msBuilt: BuiltTx = await msTx.build(
-    buildOpts(ownSpendable(fragChain.available, changeAddress, allSeedRefs)),
-  );
+  const msBuilt: BuiltTx = await msTx.build(buildOpts(availableAfterSeeds));
   const msChain = msBuilt.chainResult();
-  steps.push({ label: "2/6 upgrade multisig", unsignedCbor: await cborOf(msBuilt, "the multisig transaction") });
+  steps.push({ label: "upgrade multisig", unsignedCbor: await cborOf(msBuilt, "the multisig transaction") });
 
   // ---- The authority must be OPERABLE, not merely named --------------------
   //
@@ -799,7 +891,7 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     buildOpts(ownSpendable(msChain.available, changeAddress, allSeedRefs)),
   );
   const genChain = genBuilt.chainResult();
-  steps.push({ label: "3/6 protocol genesis", unsignedCbor: await cborOf(genBuilt, "the genesis transaction") });
+  steps.push({ label: "protocol genesis", unsignedCbor: await cborOf(genBuilt, "the genesis transaction") });
 
   // ⛔ LOCATED, NOT ASSUMED. This index goes into `protocolParams.utxo`, the field every
   // operation resolves the protocol through, so it is found by looking for the output that
@@ -842,7 +934,7 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     buildOpts(ownSpendable(genChain.available, changeAddress)),
   );
   const refChain = refBuilt.chainResult();
-  steps.push({ label: "4/6 reference scripts", unsignedCbor: await cborOf(refBuilt, "the reference-script transaction") });
+  steps.push({ label: "reference scripts", unsignedCbor: await cborOf(refBuilt, "the reference-script transaction") });
 
   // ---- Tx 4: the nominee stake key, REGISTERED **AND** DELEGATED ----------
   //
@@ -872,7 +964,7 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
   );
   const nomineeChain = nomineeBuilt.chainResult();
   steps.push({
-    label: nomineeAlreadyRegistered ? "5/6 delegate nominee key" : "5/6 register nominee key",
+    label: nomineeAlreadyRegistered ? "delegate nominee key" : "register nominee key",
     unsignedCbor: await cborOf(nomineeBuilt, "the nominee transaction"),
   });
 
@@ -908,7 +1000,7 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     regTx.build(buildOpts(ownSpendable(nomineeChain.available, changeAddress))),
   );
   const regChain = regBuilt.chainResult();
-  steps.push({ label: "6/6 register credentials", unsignedCbor: await cborOf(regBuilt, "the registration transaction") });
+  steps.push({ label: "register credentials", unsignedCbor: await cborOf(regBuilt, "the registration transaction") });
 
   // ---- What it costs ------------------------------------------------------
   //
@@ -968,8 +1060,13 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     upgradeMultisigRefInput: { txHash: refChain.txHash, outputIndex: refIdx("upgradeMultisig") },
   } as DeploymentParams;
 
+  // Numbered here rather than at each push: the plan is FIVE transactions when the operator
+  // supplies seeds and SIX when it has to make them, so a hardcoded "n/6" would be wrong in
+  // exactly the case that is now the common one.
+  const numbered = steps.map((s, i) => ({ ...s, label: `${i + 1}/${steps.length} ${s.label}` }));
+
   return {
-    steps,
+    steps: numbered,
     deployment,
     seeds,
     totalCostLovelace,
