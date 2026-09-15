@@ -8,14 +8,6 @@ export interface ProtocolBootstrapParams extends DeploymentParams {
   schemaVersion: 3;
 }
 
-export type RegistryDatum = {
-  key: string;
-  next: any;
-  transferScriptHash: string;
-  thirdPartyScriptHash: string;
-  metadata: any;
-};
-
 export interface BlueprintValidator {
   title: string;
   compiledCode: string;
