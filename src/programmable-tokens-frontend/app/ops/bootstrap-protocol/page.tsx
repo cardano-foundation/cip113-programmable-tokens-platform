@@ -23,6 +23,11 @@ import { resolveMultisig, type ResolvedMultisig } from "@/lib/deployment/multisi
 import { verifyBlueprintBytes, type UpstreamPin } from "@/lib/deployment/blueprint";
 import { buildCoreCip171Record } from "@/lib/deployment/provenance";
 import { buildBootstrapRecord } from "@/lib/deployment/record";
+import {
+  verifyDeployment,
+  toBootstrapRecord,
+  type VerificationResult,
+} from "@/lib/deployment/verify";
 
 type Stage = "idle" | "deriving" | "derived" | "error";
 
@@ -50,6 +55,10 @@ export default function BootstrapProtocolPage() {
   const [multisig, setMultisig] = useState<ResolvedMultisig | null>(null);
   const [pin, setPin] = useState<UpstreamPin | null>(null);
   const [blueprintSha, setBlueprintSha] = useState<string | null>(null);
+
+  const [pastedDeployment, setPastedDeployment] = useState("");
+  const [verification, setVerification] = useState<VerificationResult | null>(null);
+  const [verifiedParams, setVerifiedParams] = useState<Record<string, unknown> | null>(null);
 
   const memberEntries = useMemo(
     () => membersText.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean),
@@ -120,6 +129,67 @@ export default function BootstrapProtocolPage() {
       return null;
     }
   }, [derived, pin]);
+
+  /**
+   * Loads and identity-checks the bundled blueprint. Shared by derivation and verification —
+   * verifying against an unpinned blueprint would only prove the paste is self-consistent with
+   * whatever happened to be on disk, which is the failure mode this whole page exists to avoid.
+   */
+  const loadBlueprint = useCallback(async () => {
+    const [rawRes, pinRes] = await Promise.all([
+      fetch("/api/deployment/blueprint"),
+      fetch("/api/deployment/pin"),
+    ]);
+    if (!rawRes.ok || !pinRes.ok) {
+      throw new Error("Could not load the bundled core blueprint.");
+    }
+    const raw = new Uint8Array(await rawRes.arrayBuffer());
+    return verifyBlueprintBytes(raw, (await pinRes.json()) as UpstreamPin);
+  }, []);
+
+  const runVerification = useCallback(async () => {
+    setVerification(null);
+    setVerifiedParams(null);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(pastedDeployment);
+    } catch (e) {
+      setVerification({ ok: false, checks: [], mismatches: [], error: `Not valid JSON: ${(e as Error).message}` });
+      return;
+    }
+    // Accept either a bare DeploymentParams or a one-entry bootstrap record file, because
+    // both are things an operator plausibly has in front of them.
+    if (Array.isArray(parsed)) {
+      if (parsed.length !== 1) {
+        setVerification({
+          ok: false, checks: [], mismatches: [],
+          error: `A bootstrap file with ${parsed.length} entries is ambiguous — paste the one deployment to verify.`,
+        });
+        return;
+      }
+      parsed = parsed[0];
+    }
+    const { schemaVersion: _ignored, ...params } = parsed as Record<string, unknown>;
+    try {
+      const { blueprint } = await loadBlueprint();
+      const result = verifyDeployment(blueprint, params);
+      setVerification(result);
+      if (result.ok) setVerifiedParams(params);
+    } catch (e) {
+      setVerification({ ok: false, checks: [], mismatches: [], error: (e as Error).message });
+    }
+  }, [pastedDeployment, loadBlueprint]);
+
+  const downloadVerifiedRecord = useCallback(() => {
+    if (!verifiedParams || !verification) return;
+    const record = toBootstrapRecord(verifiedParams, verification);
+    const blob = new Blob([JSON.stringify(record, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `protocol-bootstraps-${network}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, [verifiedParams, verification, network]);
 
   const downloadRecord = useCallback(() => {
     if (!derived) return;
@@ -334,6 +404,82 @@ export default function BootstrapProtocolPage() {
           </div>
         </section>
       )}
+
+      <section className="space-y-3 border-t border-dark-800 pt-6">
+        <h2 className="text-lg font-semibold text-white">
+          Verify a deployment made elsewhere
+        </h2>
+        <p className="text-xs text-dark-400">
+          Independent of the steps above. Paste the <code>DeploymentParams</code> produced by a
+          deployment made on another machine — or a one-entry{" "}
+          <code>protocol-bootstraps-{network}.json</code> — and every script hash in it is
+          re-derived from the pinned blueprint and compared. A record is only offered for
+          download once all of them match: the platform indexes against this file, so a hash
+          that was mistyped or copied from another network would point the indexer at scripts
+          that were never deployed.
+        </p>
+        <textarea
+          value={pastedDeployment}
+          onChange={(e) => setPastedDeployment(e.target.value)}
+          rows={8}
+          spellCheck={false}
+          placeholder='{ "protocolParams": { … }, "transfer": { … }, … }'
+          className="w-full rounded border border-dark-700 bg-dark-950 p-2 font-mono text-xs text-white"
+        />
+        <button
+          type="button"
+          onClick={runVerification}
+          disabled={!pastedDeployment.trim()}
+          className="rounded border border-dark-600 px-3 py-1.5 text-xs text-white disabled:opacity-40"
+        >
+          Verify
+        </button>
+
+        {verification && (
+          <div className="space-y-2">
+            {verification.error && (
+              <p className="rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-200">
+                {verification.error}
+              </p>
+            )}
+            {verification.checks.length > 0 && (
+              <dl className="grid grid-cols-[auto_auto_1fr] gap-x-3 gap-y-1 font-mono text-xs">
+                {verification.checks.map((c) => (
+                  <div key={c.name} className="contents">
+                    <dt className={c.matches ? "text-green-400" : "text-red-400"}>
+                      {c.matches ? "match" : "MISMATCH"}
+                    </dt>
+                    <dd className="text-dark-400">{c.name}</dd>
+                    <dd className="break-all text-white">
+                      {c.matches ? c.deployed : `deployed ${c.deployed} — derives to ${c.derived}`}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+            {verification.ok ? (
+              <>
+                <p className="text-xs text-green-300">
+                  All {verification.checks.length} hashes re-derived and matched.
+                </p>
+                <button
+                  type="button"
+                  onClick={downloadVerifiedRecord}
+                  className="rounded border border-green-700 px-3 py-1.5 text-xs text-green-200"
+                >
+                  Download bootstrap record
+                </button>
+              </>
+            ) : (
+              <p className="text-xs text-red-300">
+                Not verified — no bootstrap record is produced.
+                {verification.mismatches.length > 0 &&
+                  ` ${verification.mismatches.length} of ${verification.checks.length} hashes do not derive from this blueprint.`}
+              </p>
+            )}
+          </div>
+        )}
+      </section>
     </main>
   );
 }
