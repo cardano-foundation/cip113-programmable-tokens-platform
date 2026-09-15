@@ -179,7 +179,22 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
 
   const protocolRef = useRef<CIP113Protocol | null>(null);
   const initPromiseRef = useRef<Promise<CIP113Protocol> | null>(null);
-  const registeredFESTokens = useRef<Set<string>>(new Set());
+  /**
+   * The token the CURRENTLY INSTALLED freeze-and-seize plugin belongs to — one value, not a set.
+   *
+   * ⛔ THIS WAS A SET, AND THAT WAS THE BUG. The SDK holds ONE plugin per substandard id
+   * (`substandards.set(plugin.id, plugin)`), so registering FES for a second token REPLACES the
+   * first — registration is not additive. A set recording every token ever registered therefore
+   * answers the wrong question: it says "have we built a plugin for this token before", when
+   * what decides correctness is "is the plugin installed right now the one for this token".
+   *
+   * The failure needed three steps and so survived every single-token test: operate on A
+   * (installs A), operate on B (installs B, evicting A), operate on A again — the set says A is
+   * known, registration is skipped, and the B plugin builds the transaction. The SDK then
+   * refuses with "Token policy <A> does not match this FES instance (<B>)", which reads as a
+   * problem with token A. Token A is fine; the plugin is B's.
+   */
+  const installedFESToken = useRef<string | null>(null);
   const fesBlueprintRef = useRef<PlutusBlueprint | null>(null);
   /** Which protocol version the cached instance above was built for.
    *  `undefined` = nothing cached; `null` = cached against the backend's default record. */
@@ -235,7 +250,7 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
       protocolRef.current = null;
       initPromiseRef.current = null;
       fesBlueprintRef.current = null;
-      registeredFESTokens.current.clear();
+      installedFESToken.current = null;
       cachedVersionRef.current = undefined;
     }
 
@@ -301,7 +316,7 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
   const ensureSubstandard = useCallback(async (policyId: string, assetName: string): Promise<string> => {
     const tokenCtx = await getTokenContext(policyId);
 
-    if (tokenCtx.substandardId === "freeze-and-seize" && !registeredFESTokens.current.has(policyId)) {
+    if (tokenCtx.substandardId === "freeze-and-seize" && installedFESToken.current !== policyId) {
       const protocol = await getProtocol();
 
       if (!fesBlueprintRef.current) {
@@ -338,10 +353,53 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
         );
       }
 
+      const fesScripts = createFESScripts(fesBlueprintRef.current);
+      const derivePolicy = (pkh: string) =>
+        protocol.scripts.buildIssuanceMint(
+          fesScripts.buildIssuerAdmin(pkh, (tokenCtx.assetName || assetName)!).hash,
+        ).hash;
+
+      let adminPkhToUse = tokenCtx.issuerAdminPkh!;
+      if (derivePolicy(adminPkhToUse) !== policyId) {
+        /**
+         * REPAIR A ROW WRITTEN BY THE OLD REGISTRATION BUG, but only against proof.
+         *
+         * Until this was fixed, `issuerAdminPkh` was filled from the wallet's first used
+         * address rather than from the admin address the scripts were built with, while the
+         * CORRECT value was written to `blacklistAdminPkh` — both come from the one `adminPkh`
+         * the build returned. So rows from that period carry the right key hash in the other
+         * column, and the token is recoverable without re-registering it.
+         *
+         * ⛔ ACCEPTED ONLY IF IT DERIVES THIS TOKEN'S POLICY ID. This is not "try the other
+         * field and hope": the policy id is the hash of the issuance_mint parameterised by
+         * (adminPkh, assetName), so a candidate either reproduces the policy the user is
+         * operating on or it does not. Nothing is trusted here that is not first derived.
+         */
+        const fallback = tokenCtx.blacklistAdminPkh;
+        if (fallback && derivePolicy(fallback) === policyId) {
+          console.warn(
+            `[CIP-113] Token ${policyId}: stored issuerAdminPkh does not derive this token's ` +
+              `policy id, but blacklistAdminPkh does — using it. The row predates the fix to ` +
+              `the registration callback, which recorded the wallet's first used address ` +
+              `instead of the admin address the scripts were built with.`,
+          );
+          adminPkhToUse = fallback;
+        } else {
+          throw new Error(
+            `The backend's freeze-and-seize record for ${policyId} does not describe that ` +
+              `token: its admin key hash and asset name derive policy ` +
+              `${derivePolicy(tokenCtx.issuerAdminPkh!)}. The token is not at fault and ` +
+              `neither is the chain — the stored row belongs to a different token, or its ` +
+              `assetName is wrong (raw asset-name HEX, and for CIP-68 the LABELLED name, as ` +
+              `minted). Re-register this token against this backend, or correct the row.`,
+          );
+        }
+      }
+
       const fes = freezeAndSeizeSubstandard({
         blueprint: fesBlueprintRef.current,
         deployment: {
-          adminPkh: tokenCtx.issuerAdminPkh!,
+          adminPkh: adminPkhToUse,
           assetName: (tokenCtx.assetName || assetName)!,
           blacklistNodePolicyId: tokenCtx.blacklistNodePolicyId!,
           blacklistInitTxInput: {
@@ -351,9 +409,29 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
         },
       });
 
+      /**
+       * Does this deployment record actually describe THIS token?
+       *
+       * The token's policy id IS the hash of its issuance_mint, which is parameterised by the
+       * issuer_admin built from (adminPkh, assetName). So the four fields above determine the
+       * policy id completely, and the backend row either describes this token or some other
+       * one. Deriving it here and comparing costs nothing and is not circular: the derivation
+       * comes from the backend's record, the thing it is compared against is the policy id the
+       * user is operating on.
+       *
+       * Without this the first sign of a wrong row is the SDK refusing the transfer with
+       * "Token policy <real> does not match this FES instance (<derived>)" — which names the
+       * token, reads as a problem with the token, and gives no hint that the fault is a
+       * database row describing something else.
+       */
       protocol.registerSubstandard(fes);
-      registeredFESTokens.current.add(policyId);
-      console.log(`[CIP-113] Registered FES substandard for token ${policyId}`);
+      // Set only AFTER a successful registration: a throw above must not leave this claiming an
+      // instance that was never installed, or the next call would skip re-registering it.
+      installedFESToken.current = policyId;
+      console.log(
+        `[CIP-113] Installed FES instance for token ${policyId}` +
+          ` (replaces any previously installed FES instance)`,
+      );
     }
 
     return tokenCtx.substandardId;

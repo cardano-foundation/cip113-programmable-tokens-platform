@@ -73,6 +73,7 @@ public class TokenContextController {
         Boolean requiresReceiverKyc = null;
         Boolean requiresSenderKyc = null;
         Boolean transfersPaused = null;
+        String blacklistAdminPkh = null;
 
         if ("freeze-and-seize".equals(substandardId)) {
             var tokenRegistration = freezeAndSeizeTokenRegistrationRepository
@@ -99,6 +100,7 @@ public class TokenContextController {
                     blacklistNodePolicyId = blacklistInit.getBlacklistNodePolicyId();
                     blacklistInitTxHash = blacklistInit.getTxHash();
                     blacklistInitOutputIndex = blacklistInit.getOutputIndex();
+                    blacklistAdminPkh = blacklistInit.getAdminPkh();
                 }
             }
         }
@@ -138,7 +140,8 @@ public class TokenContextController {
                 requiresReceiverKyc,
                 requiresSenderKyc,
                 transfersPaused,
-                transferLogicScript
+                transferLogicScript,
+                blacklistAdminPkh
         ));
     }
 

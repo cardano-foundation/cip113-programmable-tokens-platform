@@ -58,6 +58,10 @@ export interface TokenContext {
   issuerAdminPkh?: string;
   blacklistInitTxHash?: string;
   blacklistInitOutputIndex?: number;
+  /** The blacklist init's admin key hash — the SAME value as issuerAdminPkh, and the place the
+   *  correct one survives in rows written before the registration callback was fixed. Offered
+   *  as a CANDIDATE: accept it only after deriving the token's policy id from it. */
+  blacklistAdminPkh?: string;
   /** RWA-token only: whether the on-chain validator requires the recipient
    *  to be in the allowlist. `null` for substandards that don't carry this flag. */
   requiresReceiverKyc?: boolean | null;
