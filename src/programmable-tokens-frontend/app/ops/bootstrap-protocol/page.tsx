@@ -161,7 +161,8 @@ export default function BootstrapProtocolPage() {
         <p className="text-sm text-dark-400">
           Unlisted operator page. Derives a complete core deployment from three one-shot seeds
           and an upgrade multisig, and shows exactly what would go on chain — before anything is
-          signed.
+          signed. Works identically on every network; the badge says which one this build
+          targets, and nothing behaves differently because of it.
         </p>
       </header>
 
@@ -301,12 +302,12 @@ export default function BootstrapProtocolPage() {
 
           <div className="rounded border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-200">
             <strong>Transactions are not built yet.</strong> Everything above is derived and
-            checked offline. Building and submitting the four bootstrap transactions is T-036 and
-            is deliberately not implemented here: a mainnet bootstrap moves real ADA, cannot be
-            unwound once the third transaction lands, and there is no reference implementation in
-            this repository to port — the only one that existed was alpha.2 and was deleted by
-            the alpha.4 migration. It must be written against a real evaluator and exercised on
-            preview before it is offered here.
+            checked offline. Building and submitting the four bootstrap transactions is T-036,
+            and it is waiting on one thing: the reference implementation lives in the SDK&apos;s
+            test tree (<code>test/harness/bootstrap.ts</code>) and is not exported from the
+            published package, so it cannot be imported here yet. Copying it would duplicate
+            protocol-critical logic the SDK owns. Every network is treated the same — this page
+            does not care which one it is pointed at.
           </div>
         </section>
       )}
