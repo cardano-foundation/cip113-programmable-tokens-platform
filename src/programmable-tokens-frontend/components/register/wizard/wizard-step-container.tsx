@@ -52,6 +52,8 @@ export function WizardStepContainer() {
         result,
       });
 
+      let registrationRecorded = true;
+
       // Check if this is the submission step (step right before "success")
       const currentIndex = currentFlow.steps.findIndex((s) => s.id === currentStep.id);
       const isSubmissionStep = currentIndex === currentFlow.steps.length - 2;
@@ -69,21 +71,45 @@ export function WizardStepContainer() {
           };
           const callbackData = currentFlow.getRegistrationCallbackData(updatedState);
           if (callbackData) {
-            // Add issuerAdminPkh from wallet if needed (FES requires it)
+            // ⛔ NO WALLET FALLBACK. This used to fill issuerAdminPkh from
+            // `getUsedAddresses()[0]` when the flow left it unset, and a guessed key hash here
+            // is not a degraded result — the token's policy id is derived from it, so a wrong
+            // guess writes a row describing a DIFFERENT token and every later operation is
+            // refused in terms that blame the token. The flow now supplies the pkh the scripts
+            // were actually built with; if it ever does not, that is a defect to see, not to
+            // paper over.
             if (!callbackData.issuerAdminPkh && callbackData.substandardId === 'freeze-and-seize') {
-              const addresses = await wallet?.getUsedAddresses();
-              callbackData.issuerAdminPkh = addresses?.[0] ? getPaymentKeyHash(addresses[0]) : '';
+              throw new Error(
+                'The registration flow did not report the admin key hash the scripts were built ' +
+                  'with. Refusing to guess it from the wallet: the token policy id is derived ' +
+                  'from this value, so a wrong one records a row describing a different token.',
+              );
             }
             await registerTokenCallback(callbackData);
             console.log('[Registration] Token registered in backend DB');
           }
         } catch (e) {
-          console.warn('[Registration] Backend registration callback failed:', e);
+          // ⚠ SURFACED, not swallowed. The token is already on chain by this point — this
+          // callback is what makes it USABLE from this backend. A console.warn left the
+          // operator with a minted token, a missing or wrong row, and a success screen.
+          console.error('[Registration] Backend registration callback failed:', e);
+          registrationRecorded = false;
+          dispatch({
+            type: 'SET_STEP_ERROR',
+            stepId: currentStep.id,
+            error:
+              `The token was minted, but recording it in this backend failed: ` +
+              `${(e as Error).message} The token exists on chain and is not damaged, but ` +
+              `operations on it from this deployment will fail until its record is repaired.`,
+          });
         }
       }
 
-      // Move to next step if not the last one
-      if (currentIndex < currentFlow.steps.length - 1) {
+      // ⛔ DO NOT advance to the success screen when the record was not written. The token is on
+      // chain either way, but "registered" and "usable from this backend" are different claims,
+      // and showing success for the first while the second failed is how a broken token reaches
+      // an operator looking finished.
+      if (registrationRecorded && currentIndex < currentFlow.steps.length - 1) {
         dispatch({ type: 'NEXT_STEP' });
       }
     },

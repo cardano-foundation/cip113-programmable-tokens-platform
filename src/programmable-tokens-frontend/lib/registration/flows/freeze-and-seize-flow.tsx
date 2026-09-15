@@ -92,7 +92,20 @@ const freezeAndSeizeFlow: RegistrationFlow = {
       // Store the full asset name hex (including CIP-67 label if present)
       assetName: combinedResult.userAssetNameHex || stringToHex(tokenDetails?.assetName || ''),
       blacklistNodePolicyId: combinedResult.blacklistNodePolicyId,
-      // issuerAdminPkh is added by WizardStepContainer from the connected wallet
+      // ⛔ THE PKH THE SCRIPTS WERE ACTUALLY BUILT WITH, not one re-derived from the wallet.
+      //
+      // This field was left for WizardStepContainer to fill from `getUsedAddresses()[0]`, and
+      // the token's own policy id is DERIVED from it — issuer_admin is parameterised by
+      // (adminPkh, assetName) and the policy id is the hash of the issuance_mint built on that.
+      // Registration used `paymentCredentialHash(adminAddress)`, the admin address chosen in the
+      // form. On any multi-address wallet the first used address is a different key, so the
+      // stored row derived a DIFFERENT policy id and every later operation on the token was
+      // refused with "Token policy <real> does not match this FES instance <derived>" — which
+      // names the token, though the token was never the problem.
+      //
+      // The correct value was in this same object the whole time; it was just being written to
+      // `blacklistAdminPkh` only. Both are the one `adminPkh` the build returned.
+      issuerAdminPkh: combinedResult.adminPkh,
       blacklistAdminPkh: combinedResult.adminPkh,
       blacklistInitTxHash: combinedResult.blacklistInitTxInput?.txHash,
       blacklistInitOutputIndex: combinedResult.blacklistInitTxInput?.outputIndex,

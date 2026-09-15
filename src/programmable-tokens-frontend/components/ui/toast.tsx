@@ -52,7 +52,7 @@ function Toast({ toast, onDismiss }: ToastProps) {
   return (
     <div
       className={cn(
-        "pointer-events-auto flex items-start gap-3 rounded-lg border p-4 shadow-lg",
+        "pointer-events-auto flex max-h-[60vh] items-start gap-3 overflow-y-auto rounded-lg border p-4 shadow-lg",
         "animate-in slide-in-from-top-5 fade-in",
         variant.container
       )}
@@ -63,7 +63,10 @@ function Toast({ toast, onDismiss }: ToastProps) {
           <p className="text-sm font-semibold text-white">{toast.title}</p>
         )}
         {toast.description && (
-          <p className="text-sm text-dark-300">{toast.description}</p>
+          // `select-text` and `break-words`: these messages carry policy ids and script hashes,
+          // and the first thing anyone does with one is select it to paste somewhere. A toast
+          // that cannot be selected, or that truncates 56 hex characters, is not a diagnostic.
+          <p className="select-text break-words text-sm text-dark-300">{toast.description}</p>
         )}
       </div>
       <button

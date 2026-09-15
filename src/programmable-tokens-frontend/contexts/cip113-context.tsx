@@ -353,10 +353,53 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
         );
       }
 
+      const fesScripts = createFESScripts(fesBlueprintRef.current);
+      const derivePolicy = (pkh: string) =>
+        protocol.scripts.buildIssuanceMint(
+          fesScripts.buildIssuerAdmin(pkh, (tokenCtx.assetName || assetName)!).hash,
+        ).hash;
+
+      let adminPkhToUse = tokenCtx.issuerAdminPkh!;
+      if (derivePolicy(adminPkhToUse) !== policyId) {
+        /**
+         * REPAIR A ROW WRITTEN BY THE OLD REGISTRATION BUG, but only against proof.
+         *
+         * Until this was fixed, `issuerAdminPkh` was filled from the wallet's first used
+         * address rather than from the admin address the scripts were built with, while the
+         * CORRECT value was written to `blacklistAdminPkh` — both come from the one `adminPkh`
+         * the build returned. So rows from that period carry the right key hash in the other
+         * column, and the token is recoverable without re-registering it.
+         *
+         * ⛔ ACCEPTED ONLY IF IT DERIVES THIS TOKEN'S POLICY ID. This is not "try the other
+         * field and hope": the policy id is the hash of the issuance_mint parameterised by
+         * (adminPkh, assetName), so a candidate either reproduces the policy the user is
+         * operating on or it does not. Nothing is trusted here that is not first derived.
+         */
+        const fallback = tokenCtx.blacklistAdminPkh;
+        if (fallback && derivePolicy(fallback) === policyId) {
+          console.warn(
+            `[CIP-113] Token ${policyId}: stored issuerAdminPkh does not derive this token's ` +
+              `policy id, but blacklistAdminPkh does — using it. The row predates the fix to ` +
+              `the registration callback, which recorded the wallet's first used address ` +
+              `instead of the admin address the scripts were built with.`,
+          );
+          adminPkhToUse = fallback;
+        } else {
+          throw new Error(
+            `The backend's freeze-and-seize record for ${policyId} does not describe that ` +
+              `token: its admin key hash and asset name derive policy ` +
+              `${derivePolicy(tokenCtx.issuerAdminPkh!)}. The token is not at fault and ` +
+              `neither is the chain — the stored row belongs to a different token, or its ` +
+              `assetName is wrong (raw asset-name HEX, and for CIP-68 the LABELLED name, as ` +
+              `minted). Re-register this token against this backend, or correct the row.`,
+          );
+        }
+      }
+
       const fes = freezeAndSeizeSubstandard({
         blueprint: fesBlueprintRef.current,
         deployment: {
-          adminPkh: tokenCtx.issuerAdminPkh!,
+          adminPkh: adminPkhToUse,
           assetName: (tokenCtx.assetName || assetName)!,
           blacklistNodePolicyId: tokenCtx.blacklistNodePolicyId!,
           blacklistInitTxInput: {
@@ -381,24 +424,6 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
        * token, reads as a problem with the token, and gives no hint that the fault is a
        * database row describing something else.
        */
-      const fesScripts = createFESScripts(fesBlueprintRef.current);
-      const expectedPolicyId = protocol.scripts.buildIssuanceMint(
-        fesScripts.buildIssuerAdmin(
-          tokenCtx.issuerAdminPkh!,
-          (tokenCtx.assetName || assetName)!,
-        ).hash,
-      ).hash;
-      if (expectedPolicyId !== policyId) {
-        throw new Error(
-          `The backend's freeze-and-seize record for ${policyId} does not describe that token: ` +
-            `its admin key hash and asset name derive policy ${expectedPolicyId}. The token is ` +
-            `not at fault and neither is the chain — the stored row belongs to a different ` +
-            `token, or its assetName is wrong (it must be the raw asset-name HEX, and for a ` +
-            `CIP-68 token the UNLABELLED name). Re-register this token against this backend, ` +
-            `or correct the row.`,
-        );
-      }
-
       protocol.registerSubstandard(fes);
       // Set only AFTER a successful registration: a throw above must not leave this claiming an
       // instance that was never installed, or the next call would skip re-registering it.

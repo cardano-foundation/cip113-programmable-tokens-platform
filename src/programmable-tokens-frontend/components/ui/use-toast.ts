@@ -20,13 +20,28 @@ let toastCounter = 0;
 const listeners = new Set<(state: ToastState) => void>();
 let memoryState: ToastState = { toasts: [] };
 
+/**
+ * How long a toast stays, by kind.
+ *
+ * ⛔ AN ERROR DOES NOT AUTO-DISMISS. Reported first-hand: "the thing disappears too quickly
+ * lol" — an error naming a policy id and a derived hash was gone before it could be read, let
+ * alone copied. These messages are the whole diagnostic surface for a failed on-chain
+ * operation, and five seconds is not enough to read 56 hex characters, never mind act on them.
+ *
+ * Success and info still clear themselves: they say something happened, and the thing that
+ * happened is visible elsewhere. An error is the only record the operator gets.
+ */
+function defaultDurationFor(variant: ToastVariant | undefined): number {
+  return variant === "error" || variant === "warning" ? Infinity : 5000;
+}
+
 function dispatch(action: { type: string; toast?: Toast; toastId?: string }) {
   if (action.type === "ADD_TOAST") {
     const id = (++toastCounter).toString();
     const toast = {
       ...action.toast!,
       id,
-      duration: action.toast!.duration ?? 5000,
+      duration: action.toast!.duration ?? defaultDurationFor(action.toast!.variant),
     };
 
     memoryState = { toasts: [...memoryState.toasts, toast] };
