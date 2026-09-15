@@ -15,6 +15,7 @@ import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useCIP113 } from "@/contexts/cip113-context";
 import { useToast } from "@/components/ui/use-toast";
 import { getExplorerTxUrl } from "@/lib/utils";
+import { getCardanoNetwork } from "@/lib/utils/network";
 
 interface SeizeSectionProps {
   tokens: AdminTokenInfo[];
@@ -34,7 +35,7 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
   // operations against a live deployment. Deriving this from `sdkAvailable` would flip
   // every user onto an unverified path the moment the capability was re-enabled.
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>("backend");
-  const network = process.env.NEXT_PUBLIC_NETWORK || "preview";
+  const network = getCardanoNetwork();
 
   // Who may seize, per substandard.
   //

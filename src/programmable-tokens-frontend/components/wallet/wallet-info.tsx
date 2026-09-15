@@ -15,6 +15,7 @@ import { Cip171ProvenanceBadge } from "@/components/cip171/provenance-badge";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { TransferModal } from "@/components/transfer/TransferModal";
 import { TokenSendAction } from "@/components/portfolio/TokenSendAction";
+import { getCardanoNetwork } from "@/lib/utils/network";
 
 const WALLET_STORAGE_KEY = 'connectedWallet';
 
@@ -32,7 +33,7 @@ export function WalletInfo() {
   const [transferModalOpen, setTransferModalOpen] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState<ParsedAsset | null>(null);
 
-  const network = process.env.NEXT_PUBLIC_NETWORK || "preview";
+  const network = getCardanoNetwork();
 
   const handleOpenTransferModal = (asset: ParsedAsset) => {
     setSelectedAsset(asset);
