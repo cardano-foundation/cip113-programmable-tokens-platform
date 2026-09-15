@@ -146,6 +146,48 @@ async function main() {
     throw new Error("CIP-171 record dropped parameterisations");
   }
   console.log(`  OK   CIP-171 record: ${record.scripts.length} scripts, ${record.sourceUrl.split("/").slice(-1)[0]} @ ${record.commitHash.slice(0, 8)}`);
+
+  // ---- verifying a deployment the SDK harness produced ---------------------
+  const { verifyDeployment, toBootstrapRecord } = await import("./.deploy-build/verify.js");
+
+  // A DeploymentParams is the committed record minus schemaVersion — measured, every other
+  // key byte-identical — so the committed file doubles as a real fixture without reaching
+  // into a sibling repository.
+  const { schemaVersion, ...deploymentParams } = deployment;
+
+  const verified = verifyDeployment(blueprint, deploymentParams);
+  if (!verified.ok) {
+    console.log("  FAIL verification rejected a known-good deployment:",
+      verified.error ?? verified.mismatches.map((m) => m.name).join(", "));
+    throw new Error("verification rejected the live Preview deployment");
+  }
+  console.log(`  OK   live deployment verifies: ${verified.checks.length} hashes re-derived and matched`);
+
+  const emittedFromParams = toBootstrapRecord(deploymentParams, verified);
+  const diffs2 = [];
+  const walk2 = (a, b, at) => {
+    if (a && b && typeof a === 'object' && typeof b === 'object') {
+      for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) walk2(a[k], b[k], at ? `${at}.${k}` : k);
+    } else if (a !== b) diffs2.push(`${at}`);
+  };
+  walk2(emittedFromParams[0], deployment, "");
+  if (diffs2.length) throw new Error("record built from DeploymentParams differs from the live one");
+  if (Object.keys(emittedFromParams[0])[0] !== "schemaVersion") {
+    throw new Error("schemaVersion should lead, so the emitted file reads like the committed ones");
+  }
+  console.log("  OK   bootstrap record from DeploymentParams is byte-equal to the committed one");
+
+  // A transcribed-by-hand or copied-from-elsewhere hash must not pass.
+  const tampered = JSON.parse(JSON.stringify(deploymentParams));
+  tampered.transfer.scriptHash = "00" + tampered.transfer.scriptHash.slice(2);
+  const bad = verifyDeployment(blueprint, tampered);
+  if (bad.ok) throw new Error("verification accepted a tampered transfer hash");
+  console.log("  OK   a tampered script hash is rejected");
+
+  let refused = false;
+  try { toBootstrapRecord(tampered, bad); } catch { refused = true; }
+  if (!refused) throw new Error("emitted a record from a deployment that did not verify");
+  console.log("  OK   no record is emitted from a deployment that did not verify");
 }
 
 main().catch((e) => {
