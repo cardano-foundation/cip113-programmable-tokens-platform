@@ -71,6 +71,69 @@ async function main() {
   }
   console.log("  forward derivation reproduces the live Preview deployment\n");
 
+  // ---- unfracking disabled: the dispatcher moves, the validator does not ----
+  //
+  // Giovanni's launch shape: the unfracking validator is built, deployed, registered and
+  // published as normal, and ONLY the value programmable_logic_global was compiled against
+  // differs. So a deployment with unfracking disabled carries BOTH values, and neither implies
+  // the other — which is exactly why unfrackingParameter has to be recorded rather than derived.
+  const { UNFRACKING_DISABLED } = await import("@easy1staking/cip113-sdk-ts");
+
+  const enabled = derive({
+    blueprint,
+    seeds: {
+      paramsSeed: deployment.protocolParams.txInput,
+      issuanceSeed: deployment.issuance.txInput,
+      multisigSeed: deployment.upgradeMultisig.txInput,
+    },
+    alwaysFailHash: deployment.issuance.alwaysFailScriptHash,
+    maxInlineDatumBytes: deployment.maxInlineDatumBytes,
+  });
+  const disabled = derive({
+    blueprint,
+    seeds: {
+      paramsSeed: deployment.protocolParams.txInput,
+      issuanceSeed: deployment.issuance.txInput,
+      multisigSeed: deployment.upgradeMultisig.txInput,
+    },
+    alwaysFailHash: deployment.issuance.alwaysFailScriptHash,
+    maxInlineDatumBytes: deployment.maxInlineDatumBytes,
+    unfrackingEnabled: false,
+  });
+
+  if (enabled.unfrackingParameter !== enabled.unfracking) {
+    throw new Error("with unfracking enabled, the parameter must be the real unfracking hash");
+  }
+  if (disabled.unfrackingParameter !== UNFRACKING_DISABLED) {
+    throw new Error(`disabled deployment recorded ${disabled.unfrackingParameter}, not the sentinel`);
+  }
+  console.log("  OK   the recorded parameter is the real hash when enabled, the sentinel when not");
+
+  // THE VALIDATOR IS UNAFFECTED. Every other hash must be identical — only the dispatcher moves.
+  if (disabled.unfracking !== enabled.unfracking) {
+    throw new Error("disabling unfracking changed the unfracking script itself; it should not");
+  }
+  for (const k of ["transfer", "thirdParty", "issuanceLogic", "registryPolicy", "paramsPolicy",
+                   "programmableLogicBase", "upgradeMultisig", "alwaysFailHash"]) {
+    if (disabled[k] !== enabled[k]) throw new Error(`disabling unfracking moved ${k}, which it must not`);
+  }
+  console.log("  OK   disabling unfracking leaves every script except the dispatcher untouched");
+
+  // ⭐ AND THE DISPATCHER MUST MOVE. THIS IS THE ASSERTION THAT MAKES THE OTHER TWO MEAN ANYTHING.
+  //
+  // The two checks above say the recorded parameter differs and that no other script changed.
+  // Neither would notice if the parameter were never reaching the compilation at all — a
+  // deployment could record UNFRACKING_DISABLED while running a dispatcher compiled against the
+  // real hash, claiming unfracking was off while permitting it. Only the dispatcher's own hash
+  // moving proves the sentinel reached the script.
+  if (disabled.programmableLogicGlobal === enabled.programmableLogicGlobal) {
+    throw new Error(
+      "the dispatcher hash is unchanged by the sentinel — the parameter is not reaching the " +
+      "compilation, and a disabled deployment would be indistinguishable from an enabled one");
+  }
+  console.log(`  OK   the dispatcher moves: ${enabled.programmableLogicGlobal.slice(0, 12)}… -> ${disabled.programmableLogicGlobal.slice(0, 12)}…`);
+
+
   // ---- the bootstrap record the platform has to be able to load -------------
   const { buildBootstrapRecord } = await import("./.deploy-build/deployment/record.js");
   const refTx = deployment.programmableBaseRefInput.txHash;

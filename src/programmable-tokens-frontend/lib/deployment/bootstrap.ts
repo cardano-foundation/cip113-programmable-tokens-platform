@@ -199,6 +199,8 @@ export interface BuildBootstrapInput {
   multisig: ResolvedMultisig;
   maxInlineDatumBytes: number;
   alwaysFailNonce: string;
+  /** False compiles the dispatcher against the disabled sentinel. The validator still deploys. */
+  unfrackingEnabled?: boolean;
   /**
    * The three one-shot seed UTxOs, when the wallet already holds three that will do.
    *
@@ -610,6 +612,7 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     seeds,
     alwaysFailNonce,
     maxInlineDatumBytes,
+    unfrackingEnabled: input.unfrackingEnabled,
   });
 
   // `issuance_mint` against a placeholder, so a later registration can splice in the real
@@ -1025,7 +1028,15 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     transfer: { scriptHash: core.transfer.hash },
     thirdParty: { scriptHash: core.thirdParty.hash },
     unfracking: { scriptHash: core.unfracking.hash },
-    programmableLogicGlobal: { scriptHash: core.programmableLogicGlobal.hash },
+    programmableLogicGlobal: {
+      scriptHash: core.programmableLogicGlobal.hash,
+      // ⛔ THE VALUE THE DISPATCHER WAS COMPILED AGAINST, which is NOT always the unfracking hash
+      // recorded below. When unfracking is disabled this is the sentinel, while `unfracking`
+      // still carries the real deployed script — both are true and neither implies the other.
+      // Re-deriving the dispatcher from the real hash in that case yields a hash that is not on
+      // chain, which is why this is written down rather than inferred.
+      unfrackingParameter: core.unfrackingParameter,
+    },
     maxInlineDatumBytes,
     issuanceLogic: { scriptHash: core.issuanceLogic.hash },
     upgradeMultisig: {

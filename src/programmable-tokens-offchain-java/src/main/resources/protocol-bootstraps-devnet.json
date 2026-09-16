@@ -11,7 +11,7 @@
     "transfer": { "scriptHash": "5242ce3ac072de865ad3622e60058136722d166ca601bb02d502fa96" },
     "thirdParty": { "scriptHash": "ff2530b7994846d9771bd94cca087226b0c371361e2f4768224be004" },
     "unfracking": { "scriptHash": "5e4677fde4fab6c44753a1c7e0a4bd3d7cdc86abb13fc603d9c48484" },
-    "programmableLogicGlobal": { "scriptHash": "e9f9380e4d59b08ea8cc16c88334798b1be67d0e568dcef4f429118c" },
+    "programmableLogicGlobal": { "scriptHash": "e9f9380e4d59b08ea8cc16c88334798b1be67d0e568dcef4f429118c", "unfrackingParameter": "5e4677fde4fab6c44753a1c7e0a4bd3d7cdc86abb13fc603d9c48484" },
     "maxInlineDatumBytes": 1024,
     "issuanceLogic": { "scriptHash": "ad8bac622c3edc8c409cef3160c8d491cacb4a7f1a287616d4bec003" },
     "upgradeMultisig": {

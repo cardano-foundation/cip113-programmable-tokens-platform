@@ -26,7 +26,8 @@
       "scriptHash": "09388537947cfb1eacb9f0b2e2799f6ae3ce298348f5130488fd1cec"
     },
     "programmableLogicGlobal": {
-      "scriptHash": "d599d56f944d33a90b16f561ee61f183a4ba3c9185f2d779e0d356f4"
+      "scriptHash": "d599d56f944d33a90b16f561ee61f183a4ba3c9185f2d779e0d356f4",
+      "unfrackingParameter": "09388537947cfb1eacb9f0b2e2799f6ae3ce298348f5130488fd1cec"
     },
     "maxInlineDatumBytes": 1024,
     "issuanceLogic": {
