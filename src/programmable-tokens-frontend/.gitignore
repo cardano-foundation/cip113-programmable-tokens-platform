@@ -56,3 +56,4 @@ frontend.log
 .upgrade-build/
 .registry-build/
 .mine-build/
+.witness-build/
