@@ -1,23 +1,34 @@
 /**
  * What "a low transaction hash" means here, and how long it takes to get one.
  *
- * ## Why anyone wants this
+ * ⛔ THIS IS NOT VANITY, AND THE NEXT PERSON TO FIND A MINER IN A WALLET UI WILL ASSUME IT IS AND
+ * DELETE IT. Read this before you do.
+ *
+ * ## What it is for
  *
  * A Cardano transaction's inputs are sorted into canonical order by `(txHash, outputIndex)`. So a
  * transaction whose own hash is low produces UTxOs that sort EARLY in the input list of every
- * future transaction that spends them — which makes their positions, and therefore the redeemer
- * indices that point at them, predictable. That is the purpose; it is not cosmetic.
+ * future transaction that spends them — which makes their input positions, and therefore the
+ * redeemer indices that point at them, predictable.
  *
- * ## Why four is the default, as arithmetic rather than taste
+ * ## Why four, as arithmetic rather than taste
  *
- * To sort first you only have to be lower than the OTHER inputs in the same transaction, and an
- * un-mined hash is uniform over 2^256. Four leading zero nibbles means a given ordinary input
- * beats you with probability 2^-16, about 1 in 65,536. Against five ordinary inputs the chance
- * any of them sorts below you is roughly 0.008%.
+ * THE OBJECTIVE IS TO SORT AHEAD OF UNMINED INPUTS, not to beat other mined ones. An unmined hash
+ * is uniform over 2^256, so four leading zero nibbles means a given unmined input sorts below you
+ * with probability 2^-16 — about 1 in 65,536. Against five unmined inputs the chance any of them
+ * does is roughly 0.008%. {@link collisionRisk} computes it; show that number rather than
+ * asserting the default is fine.
  *
- * ⚠ THE EXCEPTION, AND IT IS NOT COVERED BY THAT NUMBER: another MINED hash. Four against four is
- * a coin flip, and no threshold fixes a contest — if two mined UTxOs routinely meet in one
- * transaction the target has to be reasoned about as a race, not as a bar. See {@link contested}.
+ * ## Why meeting another mined UTxO is NOT a problem, which is the question everyone asks
+ *
+ * It looks like a tie and it is not a contest at all. Ordering is DETERMINISTIC: every party
+ * computes the same `(txHash, index)` sequence from the same bytes, so there is no winner and
+ * loser, only a sequence. Two outputs of the SAME mined transaction share a hash and are separated
+ * by their index, so they sort adjacently. And being second among several mined UTxOs still leaves
+ * you ahead of everything unmined, which is the whole objective.
+ *
+ * Ruled by Giovanni, 2026-09-16: "it's fine for multiple utxos to be in the same tx, they are
+ * deduped by index."
  */
 
 /** The default target: four leading zero nibbles. Sufficient against ordinary inputs, see above. */
@@ -71,25 +82,23 @@ export function humaniseSeconds(seconds: number): string {
 }
 
 /**
- * The probability that at least one of `otherInputs` ordinary inputs sorts BELOW a mined hash.
+ * The probability that at least one of `unminedInputs` sorts BELOW a hash mined to this target.
  *
- * This is the number that justifies the default, so the UI should show it rather than assert
- * "4 is enough". Ordinary inputs are uniform over 2^256, so each beats a hash with `n` leading
- * zero nibbles with probability 16^-n.
+ * The number that justifies the default, so the UI should show it rather than assert "4 is
+ * enough". Unmined hashes are uniform over 2^256, so each sorts below a hash with `n` leading zero
+ * nibbles with probability 16^-n.
  */
-export function collisionRisk(targetNibbles: number, otherInputs: number): number {
+export function collisionRisk(targetNibbles: number, unminedInputs: number): number {
   const perInput = Math.pow(16, -targetNibbles);
-  return 1 - Math.pow(1 - perInput, Math.max(0, otherInputs));
+  return 1 - Math.pow(1 - perInput, Math.max(0, unminedInputs));
 }
 
-/**
- * Whether the target is being used as a BAR or as a RACE.
+/*
+ * ⛔ THERE IS DELIBERATELY NO `contested()` HERE, and this note exists so it is not added.
  *
- * Against ordinary inputs a target is a bar and {@link collisionRisk} answers it. Against another
- * mined hash at the same target it is a coin flip and the target answers nothing — the only fix
- * is to out-mine the other party, which is an arms race and not a setting. Surfaced as its own
- * function so the distinction cannot be quietly lost in a percentage.
+ * An earlier draft had one, on the reasoning that two mined hashes at the same target are a coin
+ * flip and that a threshold cannot settle a race. That reasoning was wrong, and wrong in a way
+ * worth recording: transaction input ordering is DETERMINISTIC, not raced. Every party derives the
+ * same sequence from the same bytes. There is no contest to lose, so a function implying one would
+ * send a reader looking for a fix to a problem that does not exist.
  */
-export function contested(targetNibbles: number, otherMinedAtSameTarget: number): boolean {
-  return otherMinedAtSameTarget > 0 && targetNibbles > 0;
-}
