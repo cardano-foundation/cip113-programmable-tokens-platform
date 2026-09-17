@@ -71,6 +71,7 @@ import {
   Data,
   DRep,
   InlineDatum,
+  CBOR as EvoCBOR,
   Transaction as EvoTx,
   TransactionHash as EvoTransactionHash,
   UPLC,
@@ -98,12 +99,23 @@ import { buildCoreProvenanceMetadatum, CIP171_METADATA_LABEL } from "./provenanc
 import type { UpstreamPin } from "./blueprint";
 import type { ResolvedMultisig } from "./multisig";
 import type { MultiTxStep } from "../tx/multi-tx";
+import { locateMiningSlots } from "../mining/locate";
+import type { LovelaceSlot } from "../mining/mine";
 
 /** Lovelace parked in each of the three one-shot seed UTxOs. */
 const SEED_LOVELACE = 5_000_000n;
 
 /** Each published reference script output. The script body dominates its min-UTxO. */
 const REF_SCRIPT_LOVELACE = 20_000_000n;
+
+/**
+ * The output a search increments, one lovelace at a time, taking each from change.
+ *
+ * ~1 ADA: comfortably above any min-UTxO floor for a bare output, small enough that the operator
+ * is not locking up much. It becomes a real UTxO they keep until they spend it, and it cannot be
+ * folded back into change afterwards — that would change the body and destroy the mined hash.
+ */
+const MINING_OUTPUT_LOVELACE = 1_000_000n;
 
 /**
  * The issuance CBOR datum carries ~700 bytes after the alpha.4 split, and min-UTxO scales with
@@ -202,6 +214,14 @@ export interface BuildBootstrapInput {
   /** False compiles the dispatcher against the disabled sentinel. The validator still deploys. */
   unfrackingEnabled?: boolean;
   /**
+   * Add the ~1 ADA self-output the miner needs, to the LAST transaction.
+   *
+   * ⛔ IT HAS TO EXIST BEFORE THE BODY IS BUILT. Mining works by moving lovelace between two
+   * outputs that are already there; an output added afterwards changes the body, which is the
+   * hash being mined. So this is a build-time decision, not something the UI can turn on later.
+   */
+  mineable?: boolean;
+  /**
    * The three one-shot seed UTxOs, when the wallet already holds three that will do.
    *
    * Omit and the plan opens with a fragmentation transaction that creates them — one more
@@ -248,6 +268,21 @@ export interface BootstrapPlan {
   walletBalanceLovelace: bigint;
   /** True when the nominee stake key was already registered, so step 4 only delegates. */
   nomineeAlreadyRegistered: boolean;
+  /**
+   * Where mining can happen, when `mineable` was requested.
+   *
+   * The LAST step only. Its hash is the one nothing downstream depends on, and its outputs — the
+   * seven published reference scripts — are the ones every future protocol operation references.
+   */
+  mining?: {
+    /** Index into `steps`. */
+    stepIndex: number;
+    body: Uint8Array;
+    gains: LovelaceSlot;
+    loses: LovelaceSlot;
+    /** Min-UTxO for the change output, for the pre-flight headroom check. */
+    minUtxoLovelace: number;
+  };
 }
 
 const lovelaceOf = (assets: unknown): bigint => EvoAssets.lovelaceOf(assets as never);
@@ -408,6 +443,53 @@ function requirePublishHandlers(blueprint: PlutusBlueprint): void {
         `"${blueprint.preamble.title}" v${blueprint.preamble.version}.`,
     );
   }
+}
+
+/** The ledger's minimum for a bare ada-only output. Used for the mining headroom pre-flight. */
+const MIN_CHANGE_LOVELACE = 1_000_000n;
+
+/**
+ * The BODY bytes of a whole transaction — the only thing a transaction id is computed over.
+ *
+ * A transaction is `[body, witnessSet, isValid, auxiliaryData]`, so the body is the first item
+ * after the array header. The boundary comes from the SDK's decoder rather than from arithmetic
+ * over the CDDL; that distinction has already cost this codebase one defect.
+ */
+function transactionBodyOf(txBytes: Uint8Array): Uint8Array {
+  if (txBytes[0] !== 0x84) {
+    throw new Error(
+      `a transaction must be a 4-element CBOR array, found 0x${txBytes[0]?.toString(16) ?? "??"}`,
+    );
+  }
+  const end = EvoCBOR.decodeItemWithOffset(txBytes, 1).newOffset;
+  return txBytes.subarray(1, end);
+}
+
+/** The deployer's address as raw hex, for matching against an output's address bytes. */
+function addressHexOf(bech32: string): string {
+  const bytes = EvoAddress.toBytes(EvoAddress.fromBech32(bech32) as never) as Uint8Array;
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, "0");
+  return hex;
+}
+
+/** The change this transaction leaves at the deployer's address. */
+function changeLovelaceOf(chain: ChainResult, ownAddress: string): bigint {
+  const created = chain.available.filter(
+    (u) => txHashHexOf(u) === chain.txHash && addressBech32Of(u) === ownAddress && !u.scriptRef,
+  );
+  // Change is the largest own output that is not the ~1 ADA mining output.
+  const candidates = created
+    .map((u) => lovelaceOf(u.assets))
+    .filter((v) => v !== MINING_OUTPUT_LOVELACE)
+    .sort((a, b) => (b > a ? 1 : -1));
+  if (candidates.length === 0) {
+    throw new Error(
+      "the reference-script transaction leaves no change output at the deployer's address, so " +
+        "there is nothing for a mining search to take lovelace from.",
+    );
+  }
+  return candidates[0];
 }
 
 async function cborOf(built: BuiltTx, label: string): Promise<string> {
@@ -915,29 +997,6 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
   }
   const PARAMS_OUTPUT_INDEX = Number(paramsOutputs[0].index);
 
-  // ---- Tx 3: publish the seven reference scripts --------------------------
-  let refTx = client.newTx();
-  const byName: Record<RefScriptName, { compiledCode: string }> = {
-    programmableLogicBase: core.programmableLogicBase,
-    programmableLogicGlobal: core.programmableLogicGlobal,
-    transfer: core.transfer,
-    thirdParty: core.thirdParty,
-    unfracking: core.unfracking,
-    issuanceLogic: core.issuanceLogic,
-    upgradeMultisig: core.upgradeMultisig,
-  };
-  for (const name of REF_SCRIPT_ORDER) {
-    refTx = refTx.payToAddress({
-      address: changeAddressObj,
-      assets: outputAssets(REF_SCRIPT_LOVELACE),
-      script: buildEvoScript(byName[name].compiledCode),
-    });
-  }
-  const refBuilt: BuiltTx = await refTx.build(
-    buildOpts(ownSpendable(genChain.available, changeAddress)),
-  );
-  const refChain = refBuilt.chainResult();
-  steps.push({ label: "reference scripts", unsignedCbor: await cborOf(refBuilt, "the reference-script transaction") });
 
   // ---- Tx 4: the nominee stake key, REGISTERED **AND** DELEGATED ----------
   //
@@ -963,7 +1022,7 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
     : nomineeTx.registerAndDelegateTo({ stakeCredential: nomineeCredential, drep });
 
   const nomineeBuilt: BuiltTx = await retryBuild("Building the nominee transaction", () =>
-    nomineeTx.build(buildOpts(ownSpendable(refChain.available, changeAddress))),
+    nomineeTx.build(buildOpts(ownSpendable(genChain.available, changeAddress))),
   );
   const nomineeChain = nomineeBuilt.chainResult();
   steps.push({
@@ -1005,12 +1064,56 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
   const regChain = regBuilt.chainResult();
   steps.push({ label: "register credentials", unsignedCbor: await cborOf(regBuilt, "the registration transaction") });
 
+  // ---- LAST: publish the seven reference scripts --------------------------
+  //
+  // ⛔ DELIBERATELY LAST, AND THE REASON IS MINING. Nothing in the bootstrap consumes these
+  // outputs: the registration transaction attaches each script's BODY rather than referencing it,
+  // and `ownSpendable` excludes any UTxO carrying a reference script, so they were never
+  // available to a later step even when this ran earlier. Publishing last therefore changes no
+  // dependency — and it means this transaction's hash can be MINED without invalidating anything
+  // built after it, which is not true of any other step in the chain.
+  //
+  // These are also the outputs most worth mining: every future protocol operation references
+  // them, so a low hash makes them sort early in the reference-input list of every one of those
+  // transactions, keeping the indices that point at them predictable.
+  let refTx = client.newTx();
+  const byName: Record<RefScriptName, { compiledCode: string }> = {
+    programmableLogicBase: core.programmableLogicBase,
+    programmableLogicGlobal: core.programmableLogicGlobal,
+    transfer: core.transfer,
+    thirdParty: core.thirdParty,
+    unfracking: core.unfracking,
+    issuanceLogic: core.issuanceLogic,
+    upgradeMultisig: core.upgradeMultisig,
+  };
+  for (const name of REF_SCRIPT_ORDER) {
+    refTx = refTx.payToAddress({
+      address: changeAddressObj,
+      assets: outputAssets(REF_SCRIPT_LOVELACE),
+      script: buildEvoScript(byName[name].compiledCode),
+    });
+  }
+  // ⛔ APPENDED AFTER the seven, never inserted among them. The recorded reference-input indices
+  // are derived from REF_SCRIPT_ORDER, so an output placed before them would shift every index
+  // and hand out reference inputs carrying the wrong script.
+  if (input.mineable) {
+    refTx = refTx.payToAddress({
+      address: changeAddressObj,
+      assets: outputAssets(MINING_OUTPUT_LOVELACE),
+    });
+  }
+  const refBuilt: BuiltTx = await refTx.build(
+    buildOpts(ownSpendable(regChain.available, changeAddress)),
+  );
+  const refChain = refBuilt.chainResult();
+  steps.push({ label: "reference scripts", unsignedCbor: await cborOf(refBuilt, "the reference-script transaction") });
+
   // ---- What it costs ------------------------------------------------------
   //
   // Measured, not estimated: the wallet's own lovelace before, minus what it still holds after
   // the last transaction in the chain. That covers outputs, deposits AND fees without needing
   // to know any of them — and it is the number an operator has to be shown before signing.
-  const remaining = ownSpendable(regChain.available, changeAddress).reduce(
+  const remaining = ownSpendable(refChain.available, changeAddress).reduce(
     (s, u) => s + lovelaceOf(u.assets),
     0n,
   );
@@ -1076,9 +1179,33 @@ export async function buildBootstrapPlan(input: BuildBootstrapInput): Promise<Bo
   // exactly the case that is now the common one.
   const numbered = steps.map((s, i) => ({ ...s, label: `${i + 1}/${steps.length} ${s.label}` }));
 
+  // ⛔ LOCATED FROM THE BUILT BODY, not assumed. locateMiningSlots refuses anything it cannot
+  // identify by both address and expected value, and it skips reference-script outputs — which
+  // matters acutely here, since this transaction pays seven of them to the same address.
+  let mining: BootstrapPlan["mining"];
+  if (input.mineable) {
+    const refBody = EvoTx.toCBORBytes(
+      (await (refBuilt as unknown as { toTransaction: () => Promise<unknown> }).toTransaction()) as never,
+    );
+    const bodyOnly = transactionBodyOf(refBody);
+    const slots = locateMiningSlots(bodyOnly, {
+      selfAddressHex: addressHexOf(changeAddress),
+      expectedGainsLovelace: Number(MINING_OUTPUT_LOVELACE),
+      expectedLosesLovelace: Number(changeLovelaceOf(refChain, changeAddress)),
+    });
+    mining = {
+      stepIndex: numbered.length - 1,
+      body: bodyOnly,
+      gains: slots.gains,
+      loses: slots.loses,
+      minUtxoLovelace: Number(MIN_CHANGE_LOVELACE),
+    };
+  }
+
   return {
     steps: numbered,
     deployment,
+    mining,
     seeds,
     totalCostLovelace,
     walletBalanceLovelace,

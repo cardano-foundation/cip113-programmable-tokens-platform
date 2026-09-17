@@ -30,8 +30,11 @@ import {
   deployerCanAuthorise,
   findWalletSeeds,
   prepareSeedUtxos,
+  applyMinedStep,
   type DeploymentPlan,
 } from "@/lib/deployment/deploy";
+import { MiningPanel } from "@/components/mining/mining-panel";
+import { spliceMinedBody } from "@/lib/mining/locate";
 import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
 import { waitForTxConfirmation } from "@/lib/utils/tx-confirmation";
 import { buildSyncStart } from "@/lib/deployment/record";
@@ -69,6 +72,13 @@ export default function BootstrapProtocolPage() {
   const [multisigSeed, setMultisigSeed] = useState<TxInputForm>(EMPTY);
   const [nonce, setNonce] = useState("");
   const [maxInline, setMaxInline] = useState("1024");
+  /**
+   * Whether the dispatcher permits unfracking. Default: yes.
+   *
+   * ⛔ THIS IS BAKED INTO THE DISPATCHER'S HASH AND CANNOT BE CHANGED AFTERWARDS without deploying
+   * a replacement dispatcher and a protocol upgrade. It is a deployment choice, not a setting.
+   */
+  const [unfrackingEnabled, setUnfrackingEnabled] = useState(true);
   const [membersText, setMembersText] = useState("");
   const [threshold, setThreshold] = useState("1");
 
@@ -99,6 +109,12 @@ export default function BootstrapProtocolPage() {
   /** Set when the deploying wallet is NOT among the upgrade signers — see below. */
   const [cannotAuthorise, setCannotAuthorise] = useState(false);
   const [acceptedNoAuthority, setAcceptedNoAuthority] = useState(false);
+  /**
+   * Whether to add the ~1 ADA output a search needs. BUILD-TIME: the output has to exist before
+   * the body is built, so this cannot be turned on after planning.
+   */
+  const [mineable, setMineable] = useState(false);
+  const [mined, setMined] = useState<{ txHash: string; nonce: number } | null>(null);
 
   /**
    * Seeds are READ FROM THE WALLET and locked, not typed.
@@ -217,6 +233,7 @@ export default function BootstrapProtocolPage() {
         },
         alwaysFailNonce: nonce.trim() || undefined,
         maxInlineDatumBytes: Number(maxInline),
+        unfrackingEnabled,
       });
       setDerived(result);
       setStage("derived");
@@ -224,7 +241,7 @@ export default function BootstrapProtocolPage() {
       setError((e as Error).message);
       setStage("error");
     }
-  }, [memberEntries, threshold, paramsSeed, issuanceSeed, multisigSeed, nonce, maxInline]);
+  }, [memberEntries, threshold, paramsSeed, issuanceSeed, multisigSeed, nonce, maxInline, unfrackingEnabled]);
 
   const cip171 = useMemo(() => {
     if (!derived || !pin) return null;
@@ -353,7 +370,10 @@ export default function BootstrapProtocolPage() {
         multisig: ms,
         maxInlineDatumBytes: Number(maxInline),
         alwaysFailNonce: nonce.trim(),
+        unfrackingEnabled,
+        mineable,
       });
+      setMined(null);
       setPlanned(result);
     } catch (e) {
       setPlanError((e as Error).message);
@@ -371,6 +391,8 @@ export default function BootstrapProtocolPage() {
     paramsSeed,
     issuanceSeed,
     multisigSeed,
+    unfrackingEnabled,
+    mineable,
   ]);
 
   const submitDeploy = useCallback(async () => {
@@ -733,6 +755,30 @@ export default function BootstrapProtocolPage() {
           not the nonce, and it cannot be recovered from the record afterwards.
         </p>
 
+        <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
+          <label className="flex items-start gap-2 text-sm text-dark-200">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={mineable}
+              onChange={(e) => setMineable(e.target.checked)}
+              disabled={planning || !!planned}
+            />
+            <span>Mine a low hash for the reference-script transaction</span>
+          </label>
+          <p className="text-xs text-dark-400">
+            Its outputs are the seven published reference scripts, which every future protocol
+            operation reads — a low transaction hash makes them sort early in those transactions,
+            keeping the indices that point at them predictable. It is the last transaction of the
+            plan precisely so its hash can move without invalidating anything built after it.
+          </p>
+          <p className="text-xs text-dark-400">
+            Adds one extra output of about 1 ADA back to your own address, which a search
+            increments one lovelace at a time. That output has to exist before the transaction is
+            built, so this cannot be turned on after planning.
+          </p>
+        </div>
+
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
@@ -822,6 +868,40 @@ export default function BootstrapProtocolPage() {
                   authorise upgrades.
                 </label>
               </div>
+            )}
+
+            {planned.plan.mining && !mined && (
+              <MiningPanel
+                body={planned.plan.mining.body}
+                gains={planned.plan.mining.gains}
+                loses={planned.plan.mining.loses}
+                minUtxoLovelace={planned.plan.mining.minUtxoLovelace}
+                onMined={({ body, txHash, nonce }: { body: Uint8Array; txHash: string; nonce: number }) => {
+                  // The mined BODY replaces the step's body, and the seven recorded reference
+                  // inputs are repointed at the new transaction id. Both together or neither:
+                  // a plan whose bytes were mined but whose record still names the old hash
+                  // deploys fine and then hands out reference inputs resolving to nothing.
+                  const step = planned.plan.steps[planned.plan.mining!.stepIndex];
+                  const splicedCbor = spliceMinedBody(step.unsignedCbor, body);
+                  setPlanned({
+                    ...planned,
+                    plan: applyMinedStep(planned.plan, {
+                      signedBodyTxHash: txHash,
+                      unsignedCbor: splicedCbor,
+                    }),
+                  });
+                  setMined({ txHash, nonce });
+                }}
+              />
+            )}
+
+            {mined && (
+              <p className="rounded border border-primary-600/40 bg-primary-950/20 p-2 text-xs text-primary-300">
+                Reference-script transaction mined to{" "}
+                <span className="font-mono">{mined.txHash.slice(0, 16)}…</span> — its seven
+                reference inputs are repointed at that hash, and {mined.nonce.toLocaleString()}{" "}
+                lovelace moved into the extra output.
+              </p>
             )}
 
             {progress && <p className="text-xs text-amber-200">{progress}</p>}

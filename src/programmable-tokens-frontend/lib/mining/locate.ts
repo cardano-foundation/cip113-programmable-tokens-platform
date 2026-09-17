@@ -44,6 +44,16 @@ export interface OutputSlot {
   addressHex: string;
   /** Where the coin's CBOR header sits, and what it currently says. */
   slot: LovelaceSlot;
+  /**
+   * Whether this output carries a reference script (Babbage map key 3).
+   *
+   * ⛔ MINING MUST NEVER TOUCH ONE. A transaction that publishes reference scripts pays them to
+   * the deployer's OWN address, so by address alone they are indistinguishable from the change
+   * output and from the mining output — and a bootstrap publishes seven of them at 20 ADA each.
+   * Incrementing one would move ADA out of a UTxO the protocol depends on, and the transaction
+   * would still balance and still hash.
+   */
+  hasScriptRef: boolean;
 }
 
 /** Read a definite-length header: returns the item count and where the contents start. */
@@ -128,6 +138,7 @@ export function readOutputs(body: Uint8Array): OutputSlot[] {
     const header = body[outputStart];
     let addressAt: number;
     let valueAt: number;
+    let hasScriptRef = false;
 
     if (isArrayHeader(header)) {
       // Shelley form: [address, value]. What Evolution emits for an ada-only output.
@@ -136,7 +147,7 @@ export function readOutputs(body: Uint8Array): OutputSlot[] {
       addressAt = arr.start;
       valueAt = skip(body, addressAt);
     } else if (isMapHeader(header)) {
-      // Babbage form: {0: address, 1: value, ...}. Used when a datum or script ref is present.
+      // Babbage form: {0: address, 1: value, 2: datum_option, 3: script_ref}.
       const map = readHeader(body, outputStart);
       let p = map.start;
       addressAt = -1;
@@ -147,6 +158,7 @@ export function readOutputs(body: Uint8Array): OutputSlot[] {
         const vEnd = skip(body, vStart);
         if (key === 0x00) addressAt = vStart;
         if (key === 0x01) valueAt = vStart;
+        if (key === 0x03) hasScriptRef = true;
         p = vEnd;
       }
       if (addressAt < 0 || valueAt < 0) {
@@ -180,6 +192,7 @@ export function readOutputs(body: Uint8Array): OutputSlot[] {
     outputs.push({
       index: i,
       addressHex,
+      hasScriptRef,
       slot: {
         offset: coinAt,
         value:
@@ -223,7 +236,12 @@ export function locateMiningSlots(
   },
 ): MiningSlots {
   const outputs = readOutputs(body);
-  const own = outputs.filter((o) => o.addressHex.toLowerCase() === params.selfAddressHex.toLowerCase());
+  // Reference-script outputs are excluded before anything else: they sit at the same address as
+  // change and as the mining output, so address is not enough to tell them apart, and mining one
+  // would drain a UTxO the protocol depends on without breaking the transaction.
+  const own = outputs.filter(
+    (o) => !o.hasScriptRef && o.addressHex.toLowerCase() === params.selfAddressHex.toLowerCase(),
+  );
 
   if (own.length < 2) {
     throw new Error(
@@ -272,4 +290,56 @@ export function changeHasHeadroom(
 ): { ok: boolean; shortfall: number } {
   const remaining = changeLovelace - expectedAttempts;
   return { ok: remaining >= minUtxoLovelace, shortfall: Math.max(0, minUtxoLovelace - remaining) };
+}
+
+/**
+ * Put a mined body back into its transaction.
+ *
+ * The inverse of taking the body out: a transaction is `[body, witnessSet, isValid, auxiliaryData]`
+ * and only the first item changes. Everything after it is copied verbatim — the witness set is
+ * still empty at this point, and auxiliary data carries the CIP-171 record, which mining must not
+ * touch.
+ *
+ * ⛔ SELF-CHECKED, because a wrong splice produces a transaction that is still valid CBOR and
+ * still submittable, carrying a body that is no longer the one that was mined. The hash would
+ * simply not be low, and nothing downstream would report it — the deployment would just quietly
+ * lose the property it paid for.
+ */
+export function spliceMinedBody(unsignedTxHex: string, minedBody: Uint8Array): string {
+  const tx = hexToBytes(unsignedTxHex);
+  if (tx[0] !== 0x84) {
+    throw new Error(`a transaction must be a 4-element CBOR array, found 0x${tx[0]?.toString(16)}`);
+  }
+  const bodyEnd = EvoCBOR.decodeItemWithOffset(tx, 1).newOffset;
+  const original = tx.subarray(1, bodyEnd);
+  if (original.length !== minedBody.length) {
+    throw new Error(
+      `the mined body is ${minedBody.length} bytes and the original is ${original.length}. Mining ` +
+        `moves lovelace between two outputs and must never change the body's LENGTH — a length ` +
+        `change means the fee moved too, and the hash being chased moved with it.`,
+    );
+  }
+
+  const out = new Uint8Array(tx.length);
+  out.set(tx.subarray(0, 1), 0);
+  out.set(minedBody, 1);
+  out.set(tx.subarray(bodyEnd), bodyEnd);
+
+  const check = out.subarray(1, EvoCBOR.decodeItemWithOffset(out, 1).newOffset);
+  if (bytesToHex(check) !== bytesToHex(minedBody)) {
+    throw new Error("the spliced transaction's body is not the mined body");
+  }
+  return bytesToHex(out);
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += bytes[i].toString(16).padStart(2, "0");
+  return s;
 }
