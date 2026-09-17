@@ -670,6 +670,38 @@ export default function BootstrapProtocolPage() {
             />
           </label>
         </div>
+
+        <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
+          <label className="flex items-start gap-2 text-sm text-dark-200">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={unfrackingEnabled}
+              onChange={(e) => setUnfrackingEnabled(e.target.checked)}
+            />
+            <span>
+              Permit unfracking
+              <span className="ml-2 font-mono text-[0.68rem] uppercase tracking-wider text-dark-400">
+                {unfrackingEnabled ? "enabled" : "disabled — sentinel"}
+              </span>
+            </span>
+          </label>
+          <p className="text-xs text-dark-400">
+            The unfracking validator is built, deployed, registered and published either way. This
+            changes only the hash <code>programmable_logic_global</code> is compiled against: the
+            real script hash, or a 28-byte sentinel no script can hash to. With the sentinel the
+            dispatcher&apos;s unfracking arm can never be satisfied, and the deployment records
+            both values because neither implies the other.
+          </p>
+          {!unfrackingEnabled && (
+            <p className="text-xs text-accent-300">
+              Baked into the dispatcher&apos;s hash and not changeable by configuration afterwards.
+              Enabling it later means compiling a replacement dispatcher, publishing it as a
+              reference script, and a protocol upgrade repointing <code>plg_cred</code> — no new
+              unfracking deployment and no token reissued, but an upgrade rather than a switch.
+            </p>
+          )}
+        </div>
       </section>
 
       <button
@@ -706,6 +738,24 @@ export default function BootstrapProtocolPage() {
                 </div>
               ))}
           </dl>
+
+          {/* The two unfracking values, explained where they are shown — they look like a
+              duplicate until you know one is the script and the other is what the dispatcher was
+              compiled against. */}
+          <p className="text-xs text-dark-400">
+            <code>unfracking</code> is the validator this deployment publishes.{" "}
+            <code>unfrackingParameter</code> is the hash{" "}
+            <code>programmableLogicGlobal</code> was compiled against —{" "}
+            {derived.unfrackingParameter === derived.unfracking ? (
+              <>the same value, so unfracking is permitted.</>
+            ) : (
+              <>
+                the disabled sentinel, so unfracking can never be invoked. The validator is still
+                deployed, registered and published; only the dispatcher refuses it.
+              </>
+            )}{" "}
+            Both are recorded because neither can be derived from the other.
+          </p>
 
           {multisig && (
             <p className="text-xs text-dark-300">
