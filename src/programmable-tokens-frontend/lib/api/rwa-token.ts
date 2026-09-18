@@ -19,6 +19,33 @@ export interface RwaTokenInclusionResponse {
   currentRootLocal: string;
 }
 
+/** One row of the allowlist, as the admin list endpoint returns it.
+ *
+ * `published` and `expired` are computed server-side and are the two fields an
+ * admin actually acts on — see the javadoc on `RwaTokenController#listMembers`.
+ * A member who is present but not `published` is in the local trie only, and
+ * transfers to them still fail until the root is published.
+ *
+ * `credentialType` is part of the member's IDENTITY (it is the first byte of the
+ * MPF leaf key), so the same `memberPkh` can legitimately appear twice — once as
+ * VerificationKey (0), once as Script (1). Key React lists on both, never on the
+ * hash alone, or one row silently replaces the other.
+ */
+export interface RwaTokenMember {
+  memberPkh: string;
+  credentialType: number;
+  boundAddress: string | null;
+  kycSessionId: string | null;
+  validUntilMs: number;
+  addedAt: string | null;
+  publishedAt: string | null;
+  published: boolean;
+  expired: boolean;
+}
+
+export const listRwaTokenMembers = (policyId: string) =>
+  apiGet<RwaTokenMember[]>(`/rwa-token/${policyId}/members`);
+
 export const requestRwaTokenInclusion = (
   policyId: string,
   body: { boundAddress: string; kycSessionId?: string; validUntilMs: number },

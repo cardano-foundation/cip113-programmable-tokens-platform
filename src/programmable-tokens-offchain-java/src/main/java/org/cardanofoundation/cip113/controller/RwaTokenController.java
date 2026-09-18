@@ -17,6 +17,7 @@ import org.cardanofoundation.cip113.service.substandard.SubstandardHandlerFactor
 import org.cardanofoundation.cip113.service.substandard.context.RwaTokenContext;
 import org.cardanofoundation.cip113.repository.RwaTokenDenylistEntryRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenMemberLeafRepository;
+import org.cardanofoundation.cip113.entity.RwaTokenMemberLeafEntity;
 import org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
 import org.cardanofoundation.cip113.scheduling.AdminSigningKeyProvider;
@@ -620,6 +621,58 @@ public class RwaTokenController {
             log.error("getMemberProof failed for policy={} memberPkh={}", policyId, memberPkh, e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
+    }
+
+    /**
+     * The allowlist, as an admin needs to read it.
+     *
+     * <p>Two derived flags carry the whole operational story, and neither is inferable
+     * from the raw row by a caller who does not know this substandard:
+     *
+     * <ul>
+     *   <li>{@code published} — {@code publishedAt} is set, meaning this leaf was part of
+     *       a root that reached the chain. A member added but NOT yet published is in the
+     *       local trie and in no validator's view: transfers to them still fail. The fix
+     *       is the "Publish current root" action, not a re-add, so the distinction has to
+     *       be visible or an admin re-adds forever and nothing changes.
+     *   <li>{@code expired} — {@code validUntilMs} is in the past. An expired leaf is
+     *       still a row and still in the tree, but {@code containsValid} rejects it, so
+     *       it reads as "present" everywhere except where it counts.
+     * </ul>
+     *
+     * <p>{@code credentialType} is returned because it is part of the member's identity
+     * (it is the first byte of the MPF leaf key), so one PKH can legitimately appear
+     * twice — once as VerificationKey, once as Script. Rendering the hash alone would
+     * show what looks like a duplicate row.
+     */
+    @GetMapping("/{policyId}/members")
+    public ResponseEntity<?> listMembers(@PathVariable String policyId) {
+        if (!"rwa-token".equals(programmableTokenRegistryRepository.findByPolicyId(policyId)
+                .map(reg -> reg.getSubstandardId()).orElse(""))) {
+            return ResponseEntity.badRequest().body(Map.of("error", "policyId is not a rwa-token"));
+        }
+        long now = System.currentTimeMillis();
+        List<Map<String, Object>> members = memberLeafRepo
+                .findByProgrammableTokenPolicyId(policyId).stream()
+                .sorted(java.util.Comparator.comparing(
+                        RwaTokenMemberLeafEntity::getAddedAt,
+                        java.util.Comparator.nullsLast(java.util.Comparator.reverseOrder())))
+                .limit(LIST_CAP)
+                .map(e -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("memberPkh", e.getMemberPkh());
+                    m.put("credentialType", e.getCredentialType());
+                    m.put("boundAddress", e.getBoundAddress());
+                    m.put("kycSessionId", e.getKycSessionId());
+                    m.put("validUntilMs", e.getValidUntilMs());
+                    m.put("addedAt", e.getAddedAt() == null ? null : e.getAddedAt().toString());
+                    m.put("publishedAt", e.getPublishedAt() == null ? null : e.getPublishedAt().toString());
+                    m.put("published", e.getPublishedAt() != null);
+                    m.put("expired", e.getValidUntilMs() < now);
+                    return m;
+                })
+                .toList();
+        return ResponseEntity.ok(members);
     }
 
     /** Admin/test-only: upsert an allowlist member manually. Regular users land

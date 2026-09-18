@@ -7,8 +7,12 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Plus, Trash2, ShieldCheck } from "lucide-react";
+import { Loader2, Plus, Trash2, ShieldCheck, ArrowLeft } from "lucide-react";
+import Link from "next/link";
 import {
+  listRwaTokenMembers,
+  requestRwaTokenInclusion,
+  type RwaTokenMember,
   listDenylist,
   addDenylistEntry,
   removeDenylistEntry,
@@ -78,6 +82,13 @@ export default function RwaTokenAdminPage() {
   return (
     <PageContainer>
       <div className="max-w-4xl mx-auto py-10 space-y-6">
+        <Link
+          href="/admin"
+          className="inline-flex items-center gap-1.5 text-xs text-dark-400 transition-colors hover:text-primary-400"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" /> Back to token administration
+        </Link>
+
         <div className="space-y-1">
           <h1 className="text-3xl font-bold text-white">RWA-Token Admin</h1>
           <p className="text-xs font-mono text-dark-400 break-all">{policyId}</p>
@@ -89,6 +100,7 @@ export default function RwaTokenAdminPage() {
         </div>
 
         <MemberRootHashSection policyId={policyId} />
+        <AllowlistSection policyId={policyId} />
         <PowerUsersSection policyId={policyId} />
         <DenylistSection policyId={policyId} />
       </div>
@@ -461,6 +473,174 @@ function DenylistSection({ policyId }: { policyId: string }) {
         <Button type="button" variant="primary" onClick={handleAdd} disabled={busy || !pkh.trim()}>
           <Plus className="h-4 w-4 mr-1" /> Add
         </Button>
+        {error && <p className="text-xs text-red-400">{error}</p>}
+      </div>
+    </Card>
+  );
+}
+
+// ── Allowlist members (off-chain tree; live only once the root is published) ──
+
+const DEFAULT_VALIDITY_DAYS = 365;
+
+function AllowlistSection({ policyId }: { policyId: string }) {
+  const [members, setMembers] = useState<RwaTokenMember[] | null>(null);
+  const [address, setAddress] = useState("");
+  const [days, setDays] = useState(String(DEFAULT_VALIDITY_DAYS));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const refresh = () => {
+    listRwaTokenMembers(policyId)
+      .then(setMembers)
+      .catch(() => setMembers([]));
+  };
+
+  useEffect(refresh, [policyId]);
+
+  const handleAdd = async () => {
+    setError(null);
+    setNotice(null);
+    const addr = address.trim();
+    // Guard here rather than letting the backend derive nothing: it identifies a
+    // member by the STAKE credential, so an enterprise address has no leaf key at
+    // all and comes back as a bare 400. Naming the reason up front is the whole
+    // difference between "fix your address" and "the allowlist is broken".
+    if (!addr.startsWith("addr")) {
+      setError("Enter a bech32 Cardano address (addr… / addr_test…).");
+      return;
+    }
+    const parsedDays = Number(days);
+    if (!Number.isFinite(parsedDays) || parsedDays <= 0) {
+      setError("Validity must be a positive number of days.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await requestRwaTokenInclusion(policyId, {
+        boundAddress: addr,
+        validUntilMs: Date.now() + parsedDays * 24 * 60 * 60 * 1000,
+      });
+      setAddress("");
+      setNotice(
+        `Added ${res.memberPkh.slice(0, 12)}… to the off-chain tree. ` +
+          `Publish the root below to make it effective on chain.`
+      );
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pendingCount = members?.filter((m) => !m.published).length ?? 0;
+
+  return (
+    <Card className="p-6 space-y-4">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-lg font-semibold text-white">Allowlist members</h2>
+        {members !== null && (
+          <Badge variant="info" size="sm">
+            {members.length} member{members.length === 1 ? "" : "s"}
+          </Badge>
+        )}
+      </div>
+      <p className="text-xs text-dark-400">
+        Who may RECEIVE this token. Adding a member writes the off-chain MPF tree only — it
+        takes effect on chain when you publish the root above. Members normally enrol
+        themselves by completing KYC; add them here to admit a wallet directly.
+      </p>
+      {pendingCount > 0 && (
+        <p className="text-xs text-accent-400">
+          {pendingCount} member{pendingCount === 1 ? "" : "s"} not yet on chain — publish the
+          root above, or transfers to them will still be refused.
+        </p>
+      )}
+
+      <div className="space-y-2">
+        {members === null ? (
+          <p className="text-sm text-dark-400 flex items-center gap-2">
+            <Loader2 className="h-3 w-3 animate-spin" /> Loading…
+          </p>
+        ) : members.length === 0 ? (
+          <p className="text-sm text-dark-400">No members enrolled.</p>
+        ) : (
+          members.map((m) => (
+            // Keyed on BOTH fields: the same hash legitimately has two leaves, one per
+            // credential form, and keying on the hash alone drops one of them.
+            <div
+              key={`${m.memberPkh}:${m.credentialType}`}
+              className="flex items-start justify-between gap-3 p-3 bg-dark-900 rounded"
+            >
+              <div className="min-w-0 space-y-0.5">
+                <p className="text-xs font-mono text-dark-300 break-all">{m.memberPkh}</p>
+                {m.boundAddress && (
+                  <p className="text-[10px] font-mono text-dark-500 break-all">{m.boundAddress}</p>
+                )}
+                <p className="text-[10px] text-dark-500">
+                  {m.credentialType === 1 ? "Script credential" : "Verification key"}
+                  {" · expires "}
+                  {new Date(m.validUntilMs).toISOString().slice(0, 10)}
+                </p>
+              </div>
+              <div className="flex flex-col items-end gap-1 shrink-0">
+                <Badge variant={m.published ? "success" : "warning"} size="sm">
+                  {m.published ? "On chain" : "Pending publish"}
+                </Badge>
+                {m.expired && (
+                  <Badge variant="error" size="sm">
+                    Expired
+                  </Badge>
+                )}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="space-y-3 pt-2 border-t border-dark-700">
+        <h3 className="text-sm font-semibold text-white">Add member</h3>
+        <Input
+          placeholder="Wallet address (addr_test1… — must be a base address)"
+          value={address}
+          onChange={(e) => setAddress(e.target.value)}
+          disabled={busy}
+        />
+        <div className="flex items-center gap-2">
+          <Input
+            type="number"
+            min="1"
+            placeholder="Validity (days)"
+            value={days}
+            onChange={(e) => setDays(e.target.value)}
+            disabled={busy}
+            className="max-w-[160px]"
+          />
+          <span className="text-xs text-dark-500">days of membership validity</span>
+        </div>
+        <Button
+          type="button"
+          variant="primary"
+          onClick={handleAdd}
+          disabled={busy || !address.trim()}
+        >
+          {busy ? (
+            <>
+              <Loader2 className="h-4 w-4 mr-1 animate-spin" /> Adding…
+            </>
+          ) : (
+            <>
+              <Plus className="h-4 w-4 mr-1" /> Add member
+            </>
+          )}
+        </Button>
+        <p className="text-[10px] text-dark-500">
+          Identity is the wallet&apos;s STAKE credential, so an enterprise address (one with no
+          stake part) cannot be enrolled.
+        </p>
+        {notice && <p className="text-xs text-primary-400">{notice}</p>}
         {error && <p className="text-xs text-red-400">{error}</p>}
       </div>
     </Card>
