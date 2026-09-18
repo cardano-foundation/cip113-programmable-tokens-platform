@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Loader2, Plus, Trash2, ShieldCheck, ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import {
+  acknowledgeRootPublish,
   listRwaTokenMembers,
   requestRwaTokenInclusion,
   type RwaTokenMember,
@@ -36,6 +37,10 @@ export default function RwaTokenAdminPage() {
   const params = useParams<{ policyId: string }>();
   const policyId = params?.policyId ?? "";
 
+  // Bumped by a successful root publish so the member list re-reads its
+  // published/pending badges — they are the whole point of this page and are
+  // exactly what a publish changes.
+  const [publishCount, setPublishCount] = useState(0);
   const [substandardOk, setSubstandardOk] = useState<boolean | null>(null);
   const [requiresReceiverKyc, setRequiresReceiverKyc] = useState<boolean | null>(null);
 
@@ -99,8 +104,11 @@ export default function RwaTokenAdminPage() {
           )}
         </div>
 
-        <MemberRootHashSection policyId={policyId} />
-        <AllowlistSection policyId={policyId} />
+        <MemberRootHashSection
+          policyId={policyId}
+          onPublished={() => setPublishCount((n) => n + 1)}
+        />
+        <AllowlistSection policyId={policyId} refreshToken={publishCount} />
         <PowerUsersSection policyId={policyId} />
         <DenylistSection policyId={policyId} />
       </div>
@@ -110,11 +118,18 @@ export default function RwaTokenAdminPage() {
 
 // ── Member root hash (admin-signed publish) ─────────────────────────────────
 
-function MemberRootHashSection({ policyId }: { policyId: string }) {
+function MemberRootHashSection({
+  policyId,
+  onPublished,
+}: {
+  policyId: string;
+  onPublished?: () => void;
+}) {
   const { wallet } = useWallet();
   const [onchainHash, setOnchainHash] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [lastPublishedTx, setLastPublishedTx] = useState<string | null>(null);
 
   const refresh = () => {
@@ -132,6 +147,7 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
     }
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const addrs = await wallet.getUsedAddresses();
       const adminAddress = addrs[0];
@@ -143,6 +159,41 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
       setLastPublishedTx(txHash);
       // Optimistic update; reconfirm after ~20s when chain reflects it.
       setOnchainHash(newRootHashHex);
+
+      // Tell the backend the root landed. WITHOUT THIS the publish is invisible
+      // off chain: `markLeavesPublished` never runs, every leaf keeps
+      // `publishedAt = null`, and GET /proofs/{pkh} answers 425 "publish
+      // pending" forever — so a member who was added AND published still reads
+      // as "not in the allowlist" at the point of transfer, with a correct root
+      // sitting on chain the whole time. That is exactly the failure this
+      // section is supposed to resolve, so the ack is not optional here.
+      //
+      // GlobalStateSection runs the same ack for its UpdateMemberRootHash
+      // action; this page is the other way to reach the same operation, and it
+      // was the half that did not.
+      try {
+        const ack = await acknowledgeRootPublish(policyId, {
+          txHash,
+          newRootHashHex,
+        });
+        setNotice(
+          `Published. ${ack.leavesMarkedPublished} member` +
+            `${ack.leavesMarkedPublished === 1 ? "" : "s"} now marked on chain.`
+        );
+        onPublished?.();
+      } catch (ackErr) {
+        // The chain has the root either way, so this is recoverable rather than
+        // fatal — but it is NOT a console warning, because the visible symptom
+        // is "the allowlist does not work" and the admin is the only one who can
+        // retry. Say so where they are looking.
+        setError(
+          "The root was submitted (" +
+            txHash.slice(0, 12) +
+            "…) but the backend did not record it, so members will still show as " +
+            "pending. Publish again once the node has caught up. " +
+            (ackErr instanceof Error ? ackErr.message : String(ackErr))
+        );
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -180,6 +231,7 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
           Submitted: {lastPublishedTx}
         </p>
       )}
+      {notice && <p className="text-xs text-primary-400">{notice}</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
     </Card>
   );
@@ -483,7 +535,13 @@ function DenylistSection({ policyId }: { policyId: string }) {
 
 const DEFAULT_VALIDITY_DAYS = 365;
 
-function AllowlistSection({ policyId }: { policyId: string }) {
+function AllowlistSection({
+  policyId,
+  refreshToken = 0,
+}: {
+  policyId: string;
+  refreshToken?: number;
+}) {
   const [members, setMembers] = useState<RwaTokenMember[] | null>(null);
   const [address, setAddress] = useState("");
   const [days, setDays] = useState(String(DEFAULT_VALIDITY_DAYS));
@@ -497,7 +555,7 @@ function AllowlistSection({ policyId }: { policyId: string }) {
       .catch(() => setMembers([]));
   };
 
-  useEffect(refresh, [policyId]);
+  useEffect(refresh, [policyId, refreshToken]);
 
   const handleAdd = async () => {
     setError(null);
