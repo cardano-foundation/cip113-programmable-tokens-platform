@@ -257,15 +257,48 @@ public class RwaTokenController {
             reg.setLastRootUpdateTxHash(txHash);
             reg.setLastRootUpdateAt(java.time.Instant.now());
             registrationRepo.save(reg);
-            int marked = allowlistService.markLeavesPublished(policyId, java.time.Instant.now());
+
+            // Mark by VERIFIED LEAF SET, not by a timestamp. The previous version marked
+            // every leaf added at-or-before `Instant.now()` — evaluated here, AFTER the
+            // publish — so a member enrolled between building the root and this call was
+            // marked published without being in the root that went on chain. Nothing
+            // downstream could tell: the admin list and the proof endpoint both trust
+            // publishedAt, and the first thing to disagree was the validator, at transfer
+            // time. See RwaTokenAllowlistService#markPublishedIfRootMatches.
+            RwaTokenAllowlistService.AckResult ack = allowlistService.markPublishedIfRootMatches(
+                    policyId, HexUtil.decodeHexString(newRootHashHex));
+            if (!ack.matched()) {
+                // Deliberately 200, not an error: the transaction is on chain and the
+                // registration above is correct. Only the leaf marking was skipped, and
+                // skipping it leaves members PENDING — refused rather than wrongly
+                // admitted. Publishing again resolves it.
+                log.warn("rwa-token root publish ack: policy={} tx={} acked root={} but local "
+                         + "leaf set now hashes to {} — members changed during the publish, "
+                         + "no leaves marked", policyId, txHash, newRootHashHex,
+                         HexUtil.encodeHexString(ack.currentRoot()));
+                Map<String, Object> drifted = new java.util.LinkedHashMap<>();
+                drifted.put("policyId", policyId);
+                drifted.put("memberRootHashOnchain", newRootHashHex);
+                drifted.put("lastRootUpdateTxHash", txHash);
+                drifted.put("lastRootUpdateAt", reg.getLastRootUpdateAt().toString());
+                drifted.put("leavesMarkedPublished", 0);
+                drifted.put("rootDrifted", true);
+                drifted.put("currentLocalRoot", HexUtil.encodeHexString(ack.currentRoot()));
+                drifted.put("message", "The allowlist changed while this root was being "
+                        + "published, so no members were marked on chain. Publish again to "
+                        + "cover them.");
+                return ResponseEntity.ok(drifted);
+            }
             log.info("rwa-token root publish ack: policy={} tx={} root={} leaves_marked={}",
-                    policyId, txHash, newRootHashHex, marked);
-            return ResponseEntity.ok(Map.of(
-                    "policyId", policyId,
-                    "memberRootHashOnchain", newRootHashHex,
-                    "lastRootUpdateTxHash", txHash,
-                    "lastRootUpdateAt", reg.getLastRootUpdateAt().toString(),
-                    "leavesMarkedPublished", marked));
+                    policyId, txHash, newRootHashHex, ack.marked());
+            Map<String, Object> ok = new java.util.LinkedHashMap<>();
+            ok.put("policyId", policyId);
+            ok.put("memberRootHashOnchain", newRootHashHex);
+            ok.put("lastRootUpdateTxHash", txHash);
+            ok.put("lastRootUpdateAt", reg.getLastRootUpdateAt().toString());
+            ok.put("leavesMarkedPublished", ack.marked());
+            ok.put("rootDrifted", false);
+            return ResponseEntity.ok(ok);
         } catch (Exception e) {
             log.error("rwa-token acknowledgeRootPublish failed for policy={}", policyId, e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));

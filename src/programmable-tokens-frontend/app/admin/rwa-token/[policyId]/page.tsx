@@ -176,10 +176,21 @@ function MemberRootHashSection({
           txHash,
           newRootHashHex,
         });
-        setNotice(
-          `Published. ${ack.leavesMarkedPublished} member` +
-            `${ack.leavesMarkedPublished === 1 ? "" : "s"} now marked on chain.`
-        );
+        if (ack.rootDrifted) {
+          // 200, but nothing was marked. Reported as an error because the member
+          // the admin just published for is still pending and will still be
+          // refused — the same visible symptom as publishing not working at all.
+          setError(
+            ack.message ??
+              "The allowlist changed while this root was being published, so no " +
+                "members were marked on chain. Publish again to cover them."
+          );
+        } else {
+          setNotice(
+            `Published. ${ack.leavesMarkedPublished} member` +
+              `${ack.leavesMarkedPublished === 1 ? "" : "s"} now marked on chain.`
+          );
+        }
         onPublished?.();
       } catch (ackErr) {
         // The chain has the root either way, so this is recoverable rather than

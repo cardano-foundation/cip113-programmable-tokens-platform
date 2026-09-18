@@ -391,6 +391,16 @@ export const acknowledgeRootPublish = (
     lastRootUpdateTxHash: string;
     lastRootUpdateAt: string;
     leavesMarkedPublished: number;
+    /** True when the allowlist changed while the root was in flight, so the local
+     *  leaf set no longer hashes to the published root and NO member was marked.
+     *  A 200 with `rootDrifted` is not a success — the transaction landed, but the
+     *  members it was published for still read as pending and will still be refused
+     *  at transfer. Publishing again resolves it. Treat it as a visible outcome,
+     *  never as noise: an unreported zero here is the exact shape of the bug this
+     *  field exists to prevent. */
+    rootDrifted?: boolean;
+    currentLocalRoot?: string;
+    message?: string;
   }>(`/rwa-token/${policyId}/global-state/root-published`, body);
 
 /** User-signed UpdateMemberRootHash. Backend computes the current local MPF
