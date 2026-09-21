@@ -152,6 +152,22 @@ async function main() {
   console.log("  OK   a witness set with no vkey witnesses yields no checks");
   ran++;
 
+  // ── The shipped wrapper agrees with the chain ─────────────────────────────
+  // lib/utils/tx-hash.ts is what the registration flows actually render. It
+  // computed SHA-256 of the whole transaction until 2026-09-21, so this asserts
+  // the user-visible value, not just the primitive underneath it.
+  const { resolveTxHash } = await import("./.hash-build/utils/tx-hash.js");
+  for (const tx of fixture.transactions) {
+    assert.strictEqual(
+      await resolveTxHash(tx.cbor),
+      tx.txHash,
+      "resolveTxHash — the value shown to users — disagrees with the chain"
+    );
+  }
+  assert.strictEqual(await resolveTxHash("not a transaction"), "");
+  console.log("  OK   resolveTxHash (the user-visible hash) matches the chain, and \"\" on junk");
+  ran++;
+
   console.log(`\n${ran} checks passed`);
 }
 
