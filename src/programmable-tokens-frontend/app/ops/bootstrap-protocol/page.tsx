@@ -36,6 +36,8 @@ import {
 import { MiningPanel } from "@/components/mining/mining-panel";
 import { spliceMinedBody } from "@/lib/mining/locate";
 import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
+import { CosignaturePanel, type CosignatureState } from "@/components/deployment/cosignature-panel";
+import { assembleUpgradeTx } from "@/lib/upgrade/witness";
 import { waitForTxConfirmation } from "@/lib/utils/tx-confirmation";
 import { buildSyncStart } from "@/lib/deployment/record";
 import {
@@ -86,6 +88,10 @@ export default function BootstrapProtocolPage() {
   const [error, setError] = useState<string | null>(null);
   const [derived, setDerived] = useState<DerivedCoreDeployment | null>(null);
   const [multisig, setMultisig] = useState<ResolvedMultisig | null>(null);
+  // Signatures from the declared participants over the upgrade-multisig transaction.
+  // Every member must sign — see CosignaturePanel for why that is stricter than the
+  // on-chain threshold on purpose.
+  const [cosign, setCosign] = useState<CosignatureState>({ witnesses: [], complete: false });
   const [pin, setPin] = useState<UpstreamPin | null>(null);
   const [blueprintSha, setBlueprintSha] = useState<string | null>(null);
 
@@ -395,6 +401,12 @@ export default function BootstrapProtocolPage() {
     mineable,
   ]);
 
+  /** The step whose transaction records the signer tree — the one participants sign. */
+  const multisigStepIndex = useMemo(
+    () => planned?.plan.steps.findIndex((s) => s.label.endsWith("upgrade multisig")) ?? -1,
+    [planned],
+  );
+
   const submitDeploy = useCallback(async () => {
     if (!planned || !planned.verification.ok) return;
     setPlanError(null);
@@ -403,12 +415,25 @@ export default function BootstrapProtocolPage() {
         ? "Waiting for signatures — every transaction is signed before any is submitted."
         : `${p.phase} ${p.label}`;
     try {
-      const result = await signAndSubmitSequence(wallet.wallet, planned.plan.steps, {
+      // Merge the participants' witnesses into the multisig transaction BEFORE the
+      // deployer signs. `assembleUpgradeTx` splices without re-encoding the body, and
+      // the wallet's own signature is merged on top by the same assembler — so all of
+      // them end up committing to the identical bytes they each verified against.
+      let steps = planned.plan.steps;
+      if (multisigStepIndex >= 0 && cosign.witnesses.length > 0) {
+        steps = steps.map((step, i) =>
+          i === multisigStepIndex
+            ? { ...step, unsignedCbor: assembleUpgradeTx(step.unsignedCbor, cosign.witnesses) }
+            : step,
+        );
+      }
+
+      const result = await signAndSubmitSequence(wallet.wallet, steps, {
         onPhase: (p) => setProgress(phaseText(p)),
         waitForConfirmation: (txHash) => waitForTxConfirmation(txHash),
       });
       setSubmitted(result.submitted);
-      setDeployComplete(result.submitted.length === planned.plan.steps.length);
+      setDeployComplete(result.submitted.length === steps.length);
       setProgress(null);
       // The indexer has to start BEFORE the genesis, so resolve it from the chain rather than
       // asking the operator to work it out.
@@ -436,7 +461,7 @@ export default function BootstrapProtocolPage() {
         setPlanError((e as Error).message);
       }
     }
-  }, [planned, wallet, network]);
+  }, [planned, wallet, network, cosign, multisigStepIndex]);
 
   const downloadDeployedRecord = useCallback(() => {
     if (!planned?.verification.ok) return;
@@ -956,6 +981,14 @@ export default function BootstrapProtocolPage() {
 
             {progress && <p className="text-xs text-amber-200">{progress}</p>}
 
+            {multisig && multisigStepIndex >= 0 && (
+              <CosignaturePanel
+                unsignedCbor={planned.plan.steps[multisigStepIndex].unsignedCbor}
+                memberKeyHashes={multisig.members.map((m) => m.keyHash)}
+                onChange={setCosign}
+              />
+            )}
+
             <button
               type="button"
               onClick={submitDeploy}
@@ -963,12 +996,24 @@ export default function BootstrapProtocolPage() {
                 !planned.verification.ok ||
                 !!progress ||
                 deployComplete ||
-                (cannotAuthorise && !acceptedNoAuthority)
+                (cannotAuthorise && !acceptedNoAuthority) ||
+                // Every declared participant must have signed. There is no override:
+                // an unproven key recorded as an authority is the thing this step
+                // exists to prevent, and an escape hatch would be taken under exactly
+                // the time pressure that makes it a bad idea.
+                (multisigStepIndex >= 0 && !cosign.complete)
               }
               className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
             >
               Sign all six and submit
             </button>
+            {multisigStepIndex >= 0 && !cosign.complete && (
+              <p className="text-xs text-dark-400">
+                Waiting on participant signatures. Every declared member must sign the
+                upgrade-multisig transaction before this protocol can be deployed — the panel
+                above shows who is outstanding.
+              </p>
+            )}
           </div>
         )}
 
