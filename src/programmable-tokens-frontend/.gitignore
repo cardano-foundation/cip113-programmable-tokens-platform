@@ -57,3 +57,4 @@ frontend.log
 .registry-build/
 .mine-build/
 .witness-build/
+.hash-build/

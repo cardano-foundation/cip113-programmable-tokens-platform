@@ -16,11 +16,14 @@
     "test:multitx": "tsc lib/tx/*.ts --outDir .upgrade-build/tx --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-multi-tx.js",
     "test:registry": "tsc lib/registry/walk.ts lib/registry/types.ts lib/registry/substandards.ts --outDir .registry-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .registry-build && node test-registry-walk.js",
     "test:mining": "tsc lib/mining/mine.ts lib/mining/target.ts lib/mining/locate.ts lib/mining/locate.ts --outDir .mine-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .mine-build && node test-mining.js && node test-mining-locate.js && node test-mining-splice.js && node test-mining-locate.js",
-    "test:witness": "tsc lib/tx/witness-set.ts --outDir .witness-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .witness-build && node test-witness-preservation.js"
+    "test:witness": "tsc lib/tx/witness-set.ts --outDir .witness-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .witness-build && node test-witness-preservation.js",
+    "test:txhash": "tsc lib/tx/hash.ts lib/tx/witness-set.ts --outDir .hash-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .hash-build && node test-tx-hash.js"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.11.0",
     "@hookform/resolvers": "^3.9.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^1.8.0",
     "@utxorpc/sdk": "^0.7.0",
     "@utxorpc/spec": "^0.18.1",
     "cbor": "^10.0.11",
