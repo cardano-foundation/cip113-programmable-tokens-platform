@@ -30,26 +30,38 @@ const HASH_B = "9dc7fb65d53743f5960d8306f04e933b35d10715754d6f4f7e35cc84";
 const hex = (b) => Buffer.from(b).toString("hex");
 const bin = (h) => Uint8Array.from(Buffer.from(h, "hex"));
 
-/** A witness set the way a CIP-30 wallet commonly returns one: a bare array under key 0. */
-const walletWitnessSet = (vkeyHex) =>
-  "a10081" + "82" + "5820" + vkeyHex + "5840" + "ab".repeat(64);
+/** A witness set the way a CIP-30 wallet commonly returns one: a bare array under key 0.
+ *
+ *  The signature is a PARAMETER now. It used to be a fixed "ab"*64, which was fine while
+ *  checkQuorum only read key hashes — and became the thing under test the moment it started
+ *  verifying signatures. A fixture whose signature is noise can only prove the rejection path.
+ */
+const walletWitnessSet = (vkeyHex, sigHex) =>
+  "a10081" + "82" + "5820" + vkeyHex + "5840" + sigHex;
+
+/** Sixty-four bytes that are not a signature — the forgery case, named. */
+const NOT_A_SIGNATURE = "ab".repeat(64);
 
 async function main() {
   const { keyHashOfVkey, keyHashesInWitnessSet, checkQuorum, assembleUpgradeTx } =
     require("./.upgrade-build/upgrade/witness.js");
+  const { transactionBodyBytes } = require("./.upgrade-build/tx/hash.js");
   const { Transaction, TransactionWitnessSet, Address } = await import("@evolution-sdk/evolution");
+  const { ed25519 } = await import("@noble/curves/ed25519.js");
+  const { blake2b } = await import("@noble/hashes/blake2");
 
   /** The same witness set as EVOLUTION encodes it — tag 258 — by round-tripping through its codec. */
-  const evolutionWitnessSet = (vkeyHex) =>
+  const evolutionWitnessSet = (vkeyHex, sigHex) =>
     hex(TransactionWitnessSet.toCBORBytes(
-      TransactionWitnessSet.fromCBORBytes(bin(walletWitnessSet(vkeyHex)))));
+      TransactionWitnessSet.fromCBORBytes(bin(walletWitnessSet(vkeyHex, sigHex)))));
 
   // Proof the two fixtures really are different encodings, so running both is not running one
   // twice. If Evolution ever stopped tagging, this would say so rather than silently halving
   // the coverage.
-  assert.notStrictEqual(walletWitnessSet(VKEY_A), evolutionWitnessSet(VKEY_A),
+  assert.notStrictEqual(
+    walletWitnessSet(VKEY_A, NOT_A_SIGNATURE), evolutionWitnessSet(VKEY_A, NOT_A_SIGNATURE),
     "the two witness-set fixtures are byte-identical — the tagged form is not being exercised");
-  assert.ok(evolutionWitnessSet(VKEY_A).includes("d90102"),
+  assert.ok(evolutionWitnessSet(VKEY_A, NOT_A_SIGNATURE).includes("d90102"),
     "Evolution's witness set is no longer tag-258; this test's premise needs rechecking");
 
   /**
@@ -86,35 +98,73 @@ async function main() {
   assert.throws(() => keyHashOfVkey("00".repeat(31)), /32 bytes/);
   console.log("  OK   key hash is blake2b-224, matching an independent implementation");
 
-  const members = [HASH_A, HASH_B, "cc".repeat(28)];
+  // ---- real keys, so "signed" can mean signed ----
+  // Deterministic seeds: the test must give the same answer on every machine, and a
+  // random key would make a failure unreproducible.
+  const SEED_A = Uint8Array.from(Buffer.alloc(32, 0x11));
+  const SEED_B = Uint8Array.from(Buffer.alloc(32, 0x22));
+  const SEED_OUTSIDER = Uint8Array.from(Buffer.alloc(32, 0x33));
+  const pub = (seed) => hex(ed25519.getPublicKey(seed));
+  const VK_A = pub(SEED_A), VK_B = pub(SEED_B), VK_OUT = pub(SEED_OUTSIDER);
+
+  // The message every witness commits to, taken through the SAME extraction the
+  // verifier uses — not a re-encode of the body, which could differ by a byte and
+  // make every signature in this test fail for a reason the test does not name.
+  const BODY_HASH = blake2b(transactionBodyBytes(UNSIGNED_TX), { dkLen: 32 });
+  const signBy = (seed) => hex(ed25519.sign(BODY_HASH, seed));
+  const SIG_A = signBy(SEED_A), SIG_B = signBy(SEED_B), SIG_OUT = signBy(SEED_OUTSIDER);
+
+  const members = [keyHashOfVkey(VK_A), keyHashOfVkey(VK_B), "cc".repeat(28)];
 
   // Every witness-dependent assertion, against BOTH encodings that reach this code.
   for (const [encoding, ws] of [
     ["wallet (bare array)", walletWitnessSet],
     ["evolution (tag 258)", evolutionWitnessSet],
   ]) {
-    assert.deepStrictEqual(keyHashesInWitnessSet(ws(VKEY_A)), [HASH_A],
+    assert.deepStrictEqual(keyHashesInWitnessSet(ws(VKEY_A, NOT_A_SIGNATURE)), [HASH_A],
       `key hashes not read from the ${encoding} form`);
 
-    const two = checkQuorum([ws(VKEY_A), ws(VKEY_B)], members, 2);
+    const two = checkQuorum([ws(VK_A, SIG_A), ws(VK_B, SIG_B)], members, 2, UNSIGNED_TX);
     assert.strictEqual(two.satisfied, true, `2-of-3 failed on the ${encoding} form`);
     assert.strictEqual(two.signed.length, 2);
     assert.strictEqual(two.missing.length, 1);
+    assert.strictEqual(two.forged.length, 0);
 
     // The failure a counting tool makes: one signer pasted twice.
-    const dup = checkQuorum([ws(VKEY_A), ws(VKEY_A)], members, 2);
+    const dup = checkQuorum([ws(VK_A, SIG_A), ws(VK_A, SIG_A)], members, 2, UNSIGNED_TX);
     assert.strictEqual(dup.signed.length, 1, "duplicate signer must collapse");
     assert.strictEqual(dup.satisfied, false, "two pastes from one signer is not a quorum");
 
-    // The other failure: a signature from outside the authority.
-    const stranger = checkQuorum([ws(VKEY_A), ws("11".repeat(32))], members, 2);
+    // The other failure: a signature from outside the authority. Note it is a REAL
+    // signature — valid, and still not a member. Validity is not membership.
+    const stranger = checkQuorum([ws(VK_A, SIG_A), ws(VK_OUT, SIG_OUT)], members, 2, UNSIGNED_TX);
     assert.strictEqual(stranger.strangers.length, 1);
     assert.strictEqual(stranger.satisfied, false, "a stranger's witness must not count");
 
+    // The failure NO amount of key-hash matching can see: a declared member's real
+    // vkey beside sixty-four bytes that are not a signature. Before verification this
+    // counted toward quorum and failed at the ledger after everyone else had signed.
+    const forged = checkQuorum([ws(VK_A, SIG_A), ws(VK_B, NOT_A_SIGNATURE)], members, 2, UNSIGNED_TX);
+    assert.strictEqual(forged.forged.length, 1, "a non-verifying member witness must be reported");
+    assert.strictEqual(forged.forged[0], keyHashOfVkey(VK_B));
+    assert.strictEqual(forged.signed.length, 1, "a forged witness must not count as signed");
+    assert.strictEqual(forged.satisfied, false, "quorum must not be satisfied by a forgery");
+    assert.ok(!forged.missing.includes(keyHashOfVkey(VK_B)),
+      "a member who sent something unusable is not 'missing' — that is a different fix");
+
+    // A real signature over a DIFFERENT transaction is equally refused: this is what
+    // makes the shared body frozen in practice rather than by agreement.
+    const otherBodyHash = blake2b(transactionBodyBytes(UNSIGNED_TX), { dkLen: 32 }).slice();
+    otherBodyHash[0] ^= 0xff;
+    const wrongTx = checkQuorum(
+      [ws(VK_A, SIG_A), ws(VK_B, hex(ed25519.sign(otherBodyHash, SEED_B)))],
+      members, 2, UNSIGNED_TX);
+    assert.strictEqual(wrongTx.forged.length, 1, "a signature over other bytes must not count");
+
     // ---- assembly ----
-    const assembled = assembleUpgradeTx(UNSIGNED_TX, [ws(VKEY_A), ws(VKEY_B)]);
+    const assembled = assembleUpgradeTx(UNSIGNED_TX, [ws(VK_A, SIG_A), ws(VK_B, SIG_B)]);
     assert.ok(assembled.startsWith("84"), "assembled tx must still be a 4-element array");
-    assert.ok(assembled.includes(VKEY_A) && assembled.includes(VKEY_B),
+    assert.ok(assembled.includes(VK_A) && assembled.includes(VK_B),
       `both witnesses must survive assembly of the ${encoding} form`);
     // ⛔ The witness set is extracted with Evolution's decoder, NOT by character arithmetic.
     // This line used to read `assembled.slice(4, length - 4)`, which worked only because the
@@ -122,7 +172,7 @@ async function main() {
     // straight through the middle of one. An empty fixture hid a broken extraction AND made the
     // body-preservation check below unfalsifiable at the same time.
     const back = keyHashesInWitnessSet(witnessSetOf(assembled));
-    assert.deepStrictEqual(new Set(back), new Set([HASH_A, HASH_B]));
+    assert.deepStrictEqual(new Set(back), new Set([keyHashOfVkey(VK_A), keyHashOfVkey(VK_B)]));
 
     // ⭐ The body is what every signature commits to. Asserted against a REAL body via
     // Evolution's decoder — the old check compared the two characters "a0", which an empty
