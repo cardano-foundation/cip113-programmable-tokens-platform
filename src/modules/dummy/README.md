@@ -11,13 +11,13 @@ Use this as:
 
 ## Prerequisites
 
-- [Aiken](https://aiken-lang.org/installation-instructions) v1.1.19 (pinned in `aiken.toml`)
+- [Aiken](https://aiken-lang.org/installation-instructions) v1.1.21 (pinned in `aiken.toml`)
 
 ## Build and test
 
 ```bash
 aiken fmt --check
-aiken check
+aiken check -D
 aiken build
 ```
 
@@ -34,7 +34,7 @@ dummy/
 ## Related
 
 - Platform overview: [root README](../../../README.md)
-- Core framework: [cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2)
+- Core framework: [cardano-foundation/cip113-programmable-tokens](https://github.com/cardano-foundation/cip113-programmable-tokens)
 - Contract provenance: [docs/CONTRACTS.md](../../../docs/CONTRACTS.md)
 
 ## License

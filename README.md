@@ -82,7 +82,7 @@ Programmable tokens are **native Cardano assets** with an additional layer of va
 - Regulated financial instruments
 - Any token requiring programmable transfer rules
 
-For a deeper walkthrough of the on-chain design, see the [on-chain repository's README](https://github.com/cardano-foundation/cip113-programmable-tokens-2#readme) and [architecture doc](https://github.com/cardano-foundation/cip113-programmable-tokens-2/blob/main/documentation/02-ARCHITECTURE.md).
+For a deeper walkthrough of the on-chain design, see the [on-chain repository's README](https://github.com/cardano-foundation/cip113-programmable-tokens#readme) and [architecture doc](https://github.com/cardano-foundation/cip113-programmable-tokens/blob/main/documentation/02-ARCHITECTURE.md).
 
 ---
 
@@ -90,7 +90,7 @@ For a deeper walkthrough of the on-chain design, see the [on-chain repository's 
 
 **Current Status:** Research & Development
 
-- ✅ Core on-chain validators implemented and tested (see the [on-chain repo](https://github.com/cardano-foundation/cip113-programmable-tokens-2))
+- ✅ Core on-chain validators implemented and tested (see the [on-chain repo](https://github.com/cardano-foundation/cip113-programmable-tokens))
 - ✅ Reference frontend with wallet integration and core flows
 - ✅ Java off-chain service with transaction builders and Blockfrost/Yaci integration
 - ✅ Dummy, Freeze-and-Seize, KYC, and KYC-Extended modules implemented; the RWA-token blueprint is shipped from upstream
@@ -113,7 +113,7 @@ For a deeper walkthrough of the on-chain design, see the [on-chain repository's 
 ### Prerequisites
 
 - **Frontend:** Node.js 20+, npm, Blockfrost API key
-- **Backend:** Java 17+, Gradle
+- **Backend:** Java 21, Gradle
 - **Modules:** [Aiken](https://aiken-lang.org/installation-instructions) v1.1.21 (the version used by module CI)
 - **Local devnet (optional):** Docker and [Yaci DevKit](https://github.com/bloxbean/yaci-devkit), exposing yaci-store on port 8080
 
@@ -122,7 +122,7 @@ For a deeper walkthrough of the on-chain design, see the [on-chain repository's 
 ```bash
 cd src/programmable-tokens-frontend
 npm install
-cp .env.preview.example .env.preview   # add your Blockfrost key
+cp .env.preview.example .env.local   # add your Blockfrost key and backend URL
 npm run dev
 ```
 
@@ -145,7 +145,7 @@ Each module is an independent Aiken project:
 ```bash
 cd src/modules/freeze-and-seize   # or src/modules/dummy
 aiken build
-aiken check
+aiken check -D
 ```
 
 For detailed setup, testing, and deployment instructions, see the respective README files in each subdirectory.
@@ -276,7 +276,7 @@ The same two deployment commands work against preview or preprod: drop the
 
 ## Related Repositories
 
-- **On-chain (Aiken):** [cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2) — Core CIP-113 validators, registry, and framework
+- **On-chain (Aiken):** [cardano-foundation/cip113-programmable-tokens](https://github.com/cardano-foundation/cip113-programmable-tokens) — Core CIP-113 validators, registry, and framework
 
 ---
 

@@ -2,7 +2,7 @@
 
 A Next.js reference web application for interacting with CIP-113 programmable tokens on Cardano.
 
-Part of the [CIP-113 platform repository](../../README.md). The on-chain Aiken implementation lives in [cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2).
+Part of the [CIP-113 platform repository](../../README.md). The on-chain Aiken implementation lives in [cardano-foundation/cip113-programmable-tokens](https://github.com/cardano-foundation/cip113-programmable-tokens).
 
 ## Features
 
@@ -46,14 +46,15 @@ Part of the [CIP-113 platform repository](../../README.md). The on-chain Aiken i
 3. Create an environment file:
 
    ```bash
-   cp .env.preview.example .env.preview
+   cp .env.preview.example .env.local
    ```
 
-4. Add your Blockfrost API key to `.env.preview`:
+4. Add your Blockfrost API key and backend origin to `.env.local`:
 
    ```
    NEXT_PUBLIC_BLOCKFROST_API_KEY=your_preview_api_key_here
    NEXT_PUBLIC_NETWORK=preview
+   NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
    ```
 
 ### Development
@@ -111,7 +112,7 @@ with the CIP-113 SDK and uses it directly; legacy deployment adapters are intent
 
 ### Modules
 
-The backend lists available modules through `/modules`. The four first-party Aiken projects are in [`../modules/`](../modules/); the RWA-token blueprint is supplied from upstream.
+The backend lists available modules at `/api/v1/modules`. The four first-party Aiken projects are in [`../modules/`](../modules/); the RWA-token blueprint is supplied from upstream.
 
 ## Testing
 
@@ -126,7 +127,7 @@ npm run build
 - Platform overview: [root README](../../README.md)
 - Off-chain backend: [../programmable-tokens-offchain-java/](../programmable-tokens-offchain-java/)
 - Modules: [../modules/](../modules/)
-- On-chain core: [cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2)
+- On-chain core: [cardano-foundation/cip113-programmable-tokens](https://github.com/cardano-foundation/cip113-programmable-tokens)
 
 ## License
 

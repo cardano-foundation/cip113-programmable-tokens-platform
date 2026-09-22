@@ -19,7 +19,7 @@ This module demonstrates how regulatory controls can be implemented on top of th
 
 ```bash
 aiken fmt --check
-aiken check
+aiken check -D
 aiken build
 ```
 
@@ -44,12 +44,12 @@ freeze-and-seize/
 
 This module is a **stake validator** invoked via a 0-ADA withdrawal, registered in the CIP-113 registry alongside the token's issuance policy. When a transfer occurs, the core `programmable_logic_global` validator looks the token up in the registry and requires this module's withdrawal to succeed — which is where denylist checks happen.
 
-For the full on-chain coordination model, see the [core framework's architecture doc](https://github.com/cardano-foundation/cip113-programmable-tokens-2/blob/main/documentation/02-ARCHITECTURE.md).
+For the full on-chain coordination model, see the [core framework's architecture doc](https://github.com/cardano-foundation/cip113-programmable-tokens/blob/main/documentation/02-ARCHITECTURE.md).
 
 ## Related
 
 - Platform overview: [root README](../../../README.md)
-- Core framework: [cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2)
+- Core framework: [cardano-foundation/cip113-programmable-tokens](https://github.com/cardano-foundation/cip113-programmable-tokens)
 - Contract provenance: [docs/CONTRACTS.md](../../../docs/CONTRACTS.md)
 
 ## License

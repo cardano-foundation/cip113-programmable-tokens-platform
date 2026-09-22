@@ -117,10 +117,10 @@ Two traps from the last upgrade, both of which a hash-only check would have miss
 
 - **`issuance_mint`'s fourth parameter changed type while staying in position four.** Arity
   was unchanged, so nothing complained; the applied script was simply a different one.
-- **The protocol-params datum grew from 5 fields to 7 — and fields 2–4 were *reordered*, not
-  appended.** Reading an old deployment's datum with the new parser yields plausible values
-  in the wrong slots rather than a parse error, which is why
-  `CoreProtocolParamsDatum.validateForDeployment()` exists.
+- **The protocol-params datum grew from 5 fields to 6 — the new issuance credential was
+  inserted at field 1, shifting existing fields rather than appending.**
+  `CoreProtocolParamsDatum.from()` rejects an old five-field datum by field count;
+  it cannot be positionally adapted to the new protocol.
 
 ## Why a blueprint is not just data
 
