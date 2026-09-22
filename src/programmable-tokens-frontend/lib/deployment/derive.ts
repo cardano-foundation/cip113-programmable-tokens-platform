@@ -54,7 +54,24 @@ export interface DeriveCoreDeploymentInput {
    */
   alwaysFailNonce?: string;
   alwaysFailHash?: string;
-  /** Baked into transfer, third_party, unfracking and issuance_logic. Live preview uses 1024. */
+  /**
+   * Baked into the compiled hashes of transfer, third_party, unfracking and issuance_logic,
+   * so changing it means redeploying all four and upgrading the protocol. It is a deployment
+   * choice, not a setting.
+   *
+   * ⛔ 1024 IS A DEVNET FIXTURE VALUE THAT NOBODY CHOSE. The SDK's own constant says so:
+   * "a security parameter with no upstream guidance; 1024 is what upstream's own test
+   * fixtures use and is NOT a recommendation. The production value is deferred."
+   *
+   * ⚠ That deployed instances carry 1024 is NOT evidence for 1024. They inherited the same
+   * unchosen default, and citing them back as precedent is precisely how a fixture becomes a
+   * decision nobody made. This comment used to read "Live preview uses 1024", which did
+   * exactly that.
+   *
+   * A real value would come from a cost model — upstream's
+   * `validators/programmable_logic/datum_size_cost.test.ak` is where that lives. Until one is
+   * chosen deliberately, every deployment is parameterised by a placeholder.
+   */
   maxInlineDatumBytes: number;
   /**
    * Whether the dispatcher is compiled to permit unfracking at all. Default: yes.

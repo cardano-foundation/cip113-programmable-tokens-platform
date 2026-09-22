@@ -684,7 +684,10 @@ export default function BootstrapProtocolPage() {
               onChange={(e) => setNonce(e.target.value)}
             />
           </label>
-          <label className="flex items-center gap-2">
+        </div>
+
+        <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
+          <label className="flex items-center gap-2 text-sm text-dark-200">
             <span>max inline datum bytes</span>
             <input
               type="number"
@@ -694,6 +697,19 @@ export default function BootstrapProtocolPage() {
               onChange={(e) => setMaxInline(e.target.value)}
             />
           </label>
+          <p className="text-xs text-dark-400">
+            Compiled into <code>transfer</code>, <code>third_party</code>, <code>unfracking</code>{" "}
+            and <code>issuance_logic</code>, so it is part of all four script hashes. Changing it
+            later means redeploying those four and upgrading the protocol — a deployment choice,
+            not a setting.
+          </p>
+          <p className="text-xs text-accent-300">
+            1024 is a devnet fixture value that nobody chose. Upstream ships no guidance for this
+            parameter and the SDK&apos;s own constant calls 1024 &ldquo;what upstream&apos;s test
+            fixtures use&rdquo; and explicitly not a recommendation. That existing deployments
+            carry it is not support for it — they inherited the same default. If a cost model has
+            since been settled, use that number here instead.
+          </p>
         </div>
 
         <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
