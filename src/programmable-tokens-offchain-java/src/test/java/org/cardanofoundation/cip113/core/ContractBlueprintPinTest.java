@@ -20,12 +20,12 @@ import static org.junit.jupiter.api.Assertions.fail;
  *
  * <h2>What replaced what</h2>
  *
- * The Aiken source for both contract sets was vendored into this repository and checked by a
- * pair of tests that hashed every file in each tree. The source is gone — the backend only
- * ever consumed {@code plutus.json}, and the trees duplicated what upstream already owns.
+ * The Aiken source for the core and RWA contract sets was once vendored into this repository.
+ * Those source copies are gone; the backend consumes their {@code plutus.json} blueprints.
+ * The four first-party module source trees remain in this repository.
  *
- * <p>Removing them costs the ability to rebuild or audit the blueprints from inside this
- * repository; that trade was made deliberately and both remain reproducible outside it (see
+ * <p>Removing the core and RWA source copies costs the ability to rebuild those blueprints
+ * from inside this repository; both remain reproducible outside it (see
  * {@code docs/CONTRACTS.md}). What must NOT be lost with them is the answer to "which
  * upstream revision is this?" — before any of it existed, recovering that took scanning 270
  * upstream commits comparing validator hashes.
@@ -75,7 +75,7 @@ class ContractBlueprintPinTest {
 
         if (!problems.isEmpty()) {
             fail("A shipped contract blueprint does not match its pin.\n"
-                    + "These files are compiled artifacts copied from upstream — they are not edited here.\n"
+                    + "These files are compiled artifacts; inspect their provenance before editing.\n"
                     + "If you are deliberately adopting a new upstream revision, update contracts-pin.json\n"
                     + "(commit, sha256, compiler) and work through CoreBlueprintSurfaceTest's diff.\n"
                     + "See docs/CONTRACTS.md.\n\n"

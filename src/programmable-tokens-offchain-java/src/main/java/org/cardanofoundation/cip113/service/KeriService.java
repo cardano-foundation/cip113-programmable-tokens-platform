@@ -112,9 +112,9 @@ public class KeriService {
     @Autowired(required = false)
     private ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
-    /** Per-substandard membership hooks keyed by {@link TokenMembershipHook#substandardId()}.
+    /** Per-module membership hooks keyed by {@link TokenMembershipHook#moduleId()}.
      *  Populated by Spring with every {@link TokenMembershipHook} bean on the classpath, so
-     *  adding or removing a substandard's hook is a self-contained, no-edit change here. */
+     *  adding or removing a module's hook is a self-contained, no-edit change here. */
     private final Map<String, TokenMembershipHook> membershipHooks;
 
     public KeriService(
@@ -139,7 +139,7 @@ public class KeriService {
         this.quickTxBuilder = quickTxBuilder;
         this.membershipHooks = hooks.stream()
                 .collect(java.util.stream.Collectors.toUnmodifiableMap(
-                        TokenMembershipHook::substandardId, h -> h));
+                        TokenMembershipHook::moduleId, h -> h));
         this.identifierName = identifierName;
         this.registryName = registryName;
         this.signingMnemonic = signingMnemonic;
@@ -481,8 +481,8 @@ public class KeriService {
         }
         var reg = programmableTokenRegistryRepository.findByPolicyId(policyId)
                 .orElseThrow(() -> new IllegalArgumentException("Token not registered: " + policyId));
-        if (!"kyc-extended".equals(reg.getSubstandardId())) {
-            throw new IllegalArgumentException("Token substandard is not 'kyc-extended': " + reg.getSubstandardId());
+        if (!"kyc-extended".equals(reg.getModuleId())) {
+            throw new IllegalArgumentException("Token module is not 'kyc-extended': " + reg.getModuleId());
         }
         kyc.setBoundTokenPolicyId(policyId);
         kycSessionRepository.save(kyc);
@@ -516,10 +516,10 @@ public class KeriService {
         return proof;
     }
 
-    /** Look up the bound policy's substandard and forward the proof to the matching
-     *  {@link TokenMembershipHook}. Substandard-specific side effects (e.g. MPF
+    /** Look up the bound policy's module and forward the proof to the matching
+     *  {@link TokenMembershipHook}. Module-specific side effects (e.g. MPF
      *  allowlist upsert) live entirely on the hook implementation, so {@code KeriService}
-     *  remains substandard-agnostic. */
+     *  remains module-agnostic. */
     private void dispatchMembershipHook(KycSessionEntity kyc, KycProofResponse proof) {
         String boundPolicyId = kyc.getBoundTokenPolicyId();
         if (boundPolicyId == null) return;
@@ -527,16 +527,16 @@ public class KeriService {
 
         var regOpt = programmableTokenRegistryRepository.findByPolicyId(boundPolicyId);
         if (regOpt.isEmpty()) return;
-        String substandardId = regOpt.get().getSubstandardId();
+        String moduleId = regOpt.get().getModuleId();
 
-        TokenMembershipHook hook = membershipHooks.get(substandardId);
-        if (hook == null) return; // no hook registered for this substandard — silently skip
+        TokenMembershipHook hook = membershipHooks.get(moduleId);
+        if (hook == null) return; // no hook registered for this module — silently skip
 
         try {
             hook.onProofGenerated(kyc, proof);
         } catch (Exception e) {
-            log.warn("Membership hook for substandard '{}' threw for policy {} session {}: {}",
-                    substandardId, boundPolicyId, kyc.getSessionId(), e.getMessage());
+            log.warn("Membership hook for module '{}' threw for policy {} session {}: {}",
+                    moduleId, boundPolicyId, kyc.getSessionId(), e.getMessage());
         }
     }
 

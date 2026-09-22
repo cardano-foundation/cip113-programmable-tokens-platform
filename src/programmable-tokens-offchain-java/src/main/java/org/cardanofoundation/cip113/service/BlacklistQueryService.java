@@ -7,15 +7,15 @@ import org.cardanofoundation.cip113.entity.ProgrammableTokenRegistryEntity;
 import org.cardanofoundation.cip113.repository.BlacklistInitRepository;
 import org.cardanofoundation.cip113.repository.FreezeAndSeizeTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
-import org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler;
-import org.cardanofoundation.cip113.service.substandard.SubstandardHandlerFactory;
-import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
+import org.cardanofoundation.cip113.service.module.FreezeAndSeizeHandler;
+import org.cardanofoundation.cip113.service.module.ModuleHandlerFactory;
+import org.cardanofoundation.cip113.service.module.context.FreezeAndSeizeContext;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 
 /**
  * Service for querying blacklist status from on-chain data.
- * Follows the same pattern as ComplianceOperationsService - resolves substandard,
+ * Follows the same pattern as ComplianceOperationsService - resolves module,
  * builds context, and delegates to the appropriate handler.
  */
 @Service
@@ -23,7 +23,7 @@ import org.springframework.stereotype.Service;
 @Slf4j
 public class BlacklistQueryService {
 
-    private final SubstandardHandlerFactory handlerFactory;
+    private final ModuleHandlerFactory handlerFactory;
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeTokenRegistrationRepository;
     private final BlacklistInitRepository blacklistInitRepository;
@@ -32,12 +32,12 @@ public class BlacklistQueryService {
      * Check if an address is blacklisted for a specific token.
      * <p>
      * This method:
-     * 1. Resolves the substandard from token policy ID
+     * 1. Resolves the module from token policy ID
      * 2. Builds the appropriate context (e.g., FreezeAndSeizeContext)
      * 3. Gets the handler and delegates the check
      * <p>
-     * Only substandards with blacklist capability (e.g., freeze-and-seize) will return true.
-     * Other substandards (e.g., dummy) will return false.
+     * Only modules with blacklist capability (e.g., freeze-and-seize) will return true.
+     * Other modules (e.g., dummy) will return false.
      *
      * @param tokenPolicyId The programmable token policy ID
      * @param address       The bech32 address to check
@@ -48,25 +48,25 @@ public class BlacklistQueryService {
         try {
             log.debug("Checking blacklist status for token={}, address={}", tokenPolicyId, address);
 
-            // 1. Resolve substandard ID from policy ID
-            var substandardIdOpt = programmableTokenRegistryRepository.findByPolicyId(tokenPolicyId)
-                    .map(ProgrammableTokenRegistryEntity::getSubstandardId);
+            // 1. Resolve module ID from policy ID
+            var moduleIdOpt = programmableTokenRegistryRepository.findByPolicyId(tokenPolicyId)
+                    .map(ProgrammableTokenRegistryEntity::getModuleId);
 
-            if (substandardIdOpt.isEmpty()) {
+            if (moduleIdOpt.isEmpty()) {
                 log.debug("Token {} not found in programmable token registry", tokenPolicyId);
                 return false; // Not a programmable token
             }
 
-            String substandardId = substandardIdOpt.get();
-            log.debug("Resolved substandard: {}", substandardId);
+            String moduleId = moduleIdOpt.get();
+            log.debug("Resolved module: {}", moduleId);
 
-            // 2. Build context based on substandard
+            // 2. Build context based on module
             // Currently only freeze-and-seize supports blacklist
-            if ("freeze-and-seize".equals(substandardId)) {
+            if ("freeze-and-seize".equals(moduleId)) {
                 return checkFreezeAndSeizeBlacklist(tokenPolicyId, address);
             } else {
-                log.debug("Substandard {} does not support blacklist", substandardId);
-                return false; // Other substandards don't have blacklist
+                log.debug("Module {} does not support blacklist", moduleId);
+                return false; // Other modules don't have blacklist
             }
 
         } catch (Exception e) {

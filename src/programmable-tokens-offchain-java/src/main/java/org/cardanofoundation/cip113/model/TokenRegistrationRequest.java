@@ -7,8 +7,8 @@ package org.cardanofoundation.cip113.model;
 public record TokenRegistrationRequest(
         /** Policy ID of the programmable token */
         String policyId,
-        /** Substandard identifier (e.g., "dummy", "freeze-and-seize") */
-        String substandardId,
+        /** Module identifier (e.g., "dummy", "freeze-and-seize") */
+        String moduleId,
         /** Hex-encoded asset name */
         String assetName,
         /** Issuer admin PKH (FES only, nullable) */

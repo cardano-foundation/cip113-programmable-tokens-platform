@@ -98,9 +98,9 @@ class Cip68Test {
     }
 
     /**
-     * The rule, in isolation. NOTE that no substandard on this platform passes {@code true} —
-     * see {@link #noSubstandardClaimsALifetimeCap}. This pins the decision function so that a
-     * future substandard which genuinely bounds lifetime issuance gets the right answer.
+     * The rule, in isolation. NOTE that no module on this platform passes {@code true} —
+     * see {@link #noModuleClaimsALifetimeCap}. This pins the decision function so that a
+     * future module which genuinely bounds lifetime issuance gets the right answer.
      */
     @Test
     void userTokenLabelIsNftOnlyForACappedSupplyOfExactlyOne() {
@@ -118,7 +118,7 @@ class Cip68Test {
         // The whole point of the flag. dummy and freeze-and-seize expose an unconstrained later
         // mint under the same policy and name, so registering ONE unit does not make the token
         // non-fungible — a second unit can be minted tomorrow. Labelling it (222) would be a
-        // promise the substandard cannot keep, and no off-chain check can keep it either: whoever
+        // promise the module cannot keep, and no off-chain check can keep it either: whoever
         // holds the minting authority can build the transaction without this backend.
         assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(BigInteger.ONE, false));
         assertEquals(Cip68.LABEL_FT, Cip68.userTokenLabel(BigInteger.ZERO, false));
@@ -143,12 +143,12 @@ class Cip68Test {
      * {@code OfflineCip68EvalTest#rwaTokenAtACapOfOneIsStillFungible}.
      */
     @Test
-    void noSubstandardClaimsALifetimeCap() throws Exception {
+    void noModuleClaimsALifetimeCap() throws Exception {
         // Gradle runs the test JVM with the project directory as its working directory.
         var handlers = java.nio.file.Path.of(
-                "src/main/java/org/cardanofoundation/cip113/service/substandard");
+                "src/main/java/org/cardanofoundation/cip113/service/module");
         assertTrue(java.nio.file.Files.isDirectory(handlers),
-                "expected the substandard handlers at " + handlers.toAbsolutePath()
+                "expected the module handlers at " + handlers.toAbsolutePath()
                 + " — this test reads source, so it fails loudly rather than silently passing "
                 + "if the layout moves");
         try (var paths = java.nio.file.Files.list(handlers)) {
@@ -161,7 +161,7 @@ class Cip68Test {
                         .replaceAll("(?m)//.*$", "");
                 assertFalse(code.contains("userTokenLabel("),
                         file.getFileName() + " calls the capped/uncapped decision function "
-                        + "directly. Every substandard must use Cip68.uncappedUserTokenLabel(): "
+                        + "directly. Every module must use Cip68.uncappedUserTokenLabel(): "
                         + "no pinned contract caps LIFETIME supply, so none may claim (222).");
                 assertFalse(code.contains("LABEL_NFT"),
                         file.getFileName() + " references LABEL_NFT. A (222) label asserts one "

@@ -1,5 +1,5 @@
 /**
- * Freeze-and-Seize Substandard Flow
+ * Freeze-and-Seize Module Flow
  * Token registration with compliance features (freeze addresses, seize tokens)
  *
  * Uses combined build-sign-submit step: builds init + registration txs together,
@@ -32,7 +32,7 @@ function FreezeSeizeSuccessStep(props: StepComponentProps) {
   const enhancedResult = props.wizardState.finalResult || {
     policyId: combinedResult?.tokenPolicyId || '',
     txHash: combinedResult?.regTxHash || '',
-    substandardId: 'freeze-and-seize',
+    moduleId: 'freeze-and-seize',
     assetName: '',
     quantity: '',
     metadata: {
@@ -88,7 +88,7 @@ const freezeAndSeizeFlow: RegistrationFlow = {
     if (!combinedResult?.tokenPolicyId) return null;
     return {
       policyId: combinedResult.tokenPolicyId,
-      substandardId: 'freeze-and-seize',
+      moduleId: 'freeze-and-seize',
       // Store the full asset name hex (including CIP-67 label if present)
       assetName: combinedResult.userAssetNameHex || stringToHex(tokenDetails?.assetName || ''),
       blacklistNodePolicyId: combinedResult.blacklistNodePolicyId,
@@ -127,7 +127,7 @@ const freezeAndSeizeFlow: RegistrationFlow = {
     } | undefined;
 
     return {
-      substandardId: 'freeze-and-seize',
+      moduleId: 'freeze-and-seize',
       feePayerAddress: '', // Will be filled by the step
       assetName: tokenDetails?.assetName || '',
       quantity: tokenDetails?.quantity || '',

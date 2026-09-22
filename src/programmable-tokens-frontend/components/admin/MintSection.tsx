@@ -68,7 +68,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const { wallet } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
-  const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
+  const { getProtocol, ensureModule, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   // Default to the backend builder even when the SDK is available. Parity means the SDK
   // CAN build a transaction, not that it becomes the default route (PLAN.md A-5) — the
   // SDK path is opt-in per operation via the toggle until T-018 has verified all seven
@@ -76,16 +76,16 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   // every user onto an unverified path the moment the capability was re-enabled.
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>("backend");
 
-  // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize substandards. KYC and
+  // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize modules. KYC and
   // rwa-token have no SDK implementation, so their mints must go through the
   // backend regardless of the toggle.
   const sdkAvailableForSelected = (token: AdminTokenInfo | null) =>
     sdkAvailable
-    && token?.substandardId !== "kyc"
-    && token?.substandardId !== "rwa-token";
+    && token?.moduleId !== "kyc"
+    && token?.moduleId !== "rwa-token";
 
   // Per-page capability gate. Show:
-  //   - any token where the wallet has ISSUER_ADMIN (legacy substandards)
+  //   - any token where the wallet has ISSUER_ADMIN (legacy modules)
   //   - all dummy tokens (open mint by design)
   //   - rwa-tokens where the wallet has MINTER or ADMIN capability
   //     in the on-chain power-users linked list (BaFin model)
@@ -93,13 +93,13 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   // power-user membership; this just enforces the per-page capability bit so
   // a token where the wallet is e.g. only PAUSER doesn't show up here.
   const mintableTokens = tokens.filter((t) => {
-    if (t.substandardId === "rwa-token") {
+    if (t.moduleId === "rwa-token") {
       return hasRwaTokenCapability(
         t,
         RwaTokenCapability.MINTER | RwaTokenCapability.ADMIN,
       );
     }
-    return t.roles.includes("ISSUER_ADMIN") || t.substandardId === "dummy";
+    return t.roles.includes("ISSUER_ADMIN") || t.moduleId === "dummy";
   });
 
   // Form state
@@ -180,8 +180,8 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     recipientAddress: "",
   });
 
-  const isKycToken = selectedToken?.substandardId === "kyc";
-  const isRwaToken = selectedToken?.substandardId === "rwa-token";
+  const isKycToken = selectedToken?.moduleId === "kyc";
+  const isRwaToken = selectedToken?.moduleId === "rwa-token";
 
   // For rwa-token: fetch the on-chain GS datum whenever the selected
   // token changes so we can show the admin the remaining mintable_amount
@@ -435,7 +435,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       const useSdk = txBuilder === "sdk" && sdkAvailableForSelected(selectedToken);
 
       if (useSdk) {
-        const substandardId = await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
+        const moduleId = await ensureModule(selectedToken.policyId, selectedToken.assetName);
         const protocol = await getProtocol();
         const result = await protocol.mint({
           feePayerAddress,
@@ -443,7 +443,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           assetName: selectedToken.assetName,
           quantity: BigInt(quantity),
           recipientAddress: recipientAddress.trim(),
-          substandardId,
+          substandardId: moduleId,
         });
         unsignedCborTx = result.cbor;
       } else {
@@ -1044,9 +1044,9 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         onChange={setTxBuilder}
         sdkAvailable={sdkAvailableForSelected(selectedToken)}
       />
-      {selectedToken?.substandardId === "kyc" && (
+      {selectedToken?.moduleId === "kyc" && (
         <p className="text-xs text-dark-400 -mt-3">
-          KYC tokens are minted via the backend (no SDK substandard available).
+          KYC tokens are minted via the backend (no SDK module available).
         </p>
       )}
       {isRwaToken && (

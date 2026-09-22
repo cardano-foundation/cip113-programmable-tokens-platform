@@ -1,12 +1,12 @@
 /**
- * Dummy Substandard Flow
+ * Dummy Module Flow
  * Simple token registration without compliance features
  */
 
 import { registerFlow, isFlowEnabled } from '../flow-registry';
 import type { RegistrationFlow, WizardState, DummyRegistrationData, TokenRegistrationCallbackData, CIP68MetadataFormData } from '@/types/registration';
 import { stringToHex } from '@/lib/api';
-import { labelAssetNameHex, userTokenLabelForSubstandard } from '@/lib/utils/cip68';
+import { labelAssetNameHex, userTokenLabelForModule } from '@/lib/utils/cip68';
 import { TokenDetailsStep } from '@/components/register/steps/token-details-step';
 import { PreRegistrationStep } from '@/components/register/steps/pre-registration-step';
 import { SuccessStep } from '@/components/register/steps/success-step';
@@ -98,14 +98,14 @@ const dummyFlow: RegistrationFlow = {
     const baseAssetNameHex = stringToHex(tokenDetails?.assetName || '');
     return {
       policyId,
-      substandardId: 'dummy',
+      moduleId: 'dummy',
       // The LABELLED name when CIP-68 is on — that is what the backend minted, and a later
       // mint or transfer resolves the token by this recorded name. dummy caps no lifetime
       // supply (`issue` is `redeemer == 100` and the mint endpoint stays open), so the label is
       // (333) whatever the registered quantity is — the same rule Cip68.userTokenLabel applies.
       assetName: tokenDetails?.cip68Metadata?.enabled
         ? labelAssetNameHex(
-            userTokenLabelForSubstandard('dummy', tokenDetails?.quantity ?? '0'),
+            userTokenLabelForModule('dummy', tokenDetails?.quantity ?? '0'),
             baseAssetNameHex
           )
         : baseAssetNameHex,
@@ -119,7 +119,7 @@ const dummyFlow: RegistrationFlow = {
     } | undefined;
 
     return {
-      substandardId: 'dummy',
+      moduleId: 'dummy',
       feePayerAddress: '', // Will be filled by the step
       assetName: tokenDetails?.assetName || '',
       quantity: tokenDetails?.quantity || '',

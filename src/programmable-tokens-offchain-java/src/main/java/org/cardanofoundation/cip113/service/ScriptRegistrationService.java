@@ -44,7 +44,7 @@ public class ScriptRegistrationService {
         //   - The index can simply not contain the certificate. It is populated from
         //     `sync-start-slot`, which is deliberately not genesis on every profile (mainnet starts
         //     at the block that minted the contract ref input), and it restarts empty whenever a
-        //     devnet is reset or the database recreated. The dummy substandard's issue/transfer
+        //     devnet is reset or the database recreated. The dummy module's issue/transfer
         //     validators are protocol-GLOBAL and unparameterized, so they are registered exactly
         //     once per network — most likely long before whatever slot this deployment syncs from.
         //     Absence from the index therefore does not mean absence from the chain.

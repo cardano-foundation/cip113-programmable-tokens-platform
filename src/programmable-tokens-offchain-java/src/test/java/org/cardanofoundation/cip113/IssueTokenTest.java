@@ -38,9 +38,9 @@ public class IssueTokenTest extends AbstractPreviewTest {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    private static final String SUBSTANDARD_ISSUE_CONTRACT = "585701010029800aba2aba1aab9eaab9dab9a4888896600264646644b30013370e900218031baa00289919b87375a6012008906400980418039baa0028a504014600c600e002600c004600c00260066ea801a29344d9590011";
+    private static final String MODULE_ISSUE_CONTRACT = "585701010029800aba2aba1aab9eaab9dab9a4888896600264646644b30013370e900218031baa00289919b87375a6012008906400980418039baa0028a504014600c600e002600c004600c00260066ea801a29344d9590011";
 
-    private static final String SUBSTANDARD_TRANSFER_CONTRACT = "585701010029800aba2aba1aab9eaab9dab9a4888896600264646644b30013370e900218031baa00289919b87375a6012008904801980418039baa0028a504014600c600e002600c004600c00260066ea801a29344d9590011";
+    private static final String MODULE_TRANSFER_CONTRACT = "585701010029800aba2aba1aab9eaab9dab9a4888896600264646644b30013370e900218031baa00289919b87375a6012008904801980418039baa0028a504014600c600e002600c004600c00260066ea801a29344d9590011";
 
     private String ISSUANCE_MINT, DIRECTORY_MINT_CONTRACT, DIRECTORY_SPEND_CONTRACT;
 
@@ -108,15 +108,15 @@ public class IssueTokenTest extends AbstractPreviewTest {
         }
         log.info("directorySetNode: {}", directorySetNode);
 
-        var substandardIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(SUBSTANDARD_ISSUE_CONTRACT, PlutusVersion.v3);
-        log.info("substandardIssueContract: {}", substandardIssueContract.getPolicyId());
+        var moduleIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(MODULE_ISSUE_CONTRACT, PlutusVersion.v3);
+        log.info("moduleIssueContract: {}", moduleIssueContract.getPolicyId());
 
-        var substandardIssueAddress = AddressProvider.getRewardAddress(substandardIssueContract, network);
-        log.info("substandardIssueAddress: {}", substandardIssueAddress.getAddress());
+        var moduleIssueAddress = AddressProvider.getRewardAddress(moduleIssueContract, network);
+        log.info("moduleIssueAddress: {}", moduleIssueAddress.getAddress());
 
 //        var registerAddressTx = new Tx()
 //                .from(adminAccount.baseAddress())
-//                .registerStakeAddress(substandardIssueAddress.getAddress())
+//                .registerStakeAddress(moduleIssueAddress.getAddress())
 //                .withChangeAddress(adminAccount.baseAddress());
 //
 //        quickTxBuilder.compose(registerAddressTx)
@@ -124,7 +124,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
 //                .withSigner(SignerProviders.signerFrom(adminAccount))
 //                .completeAndWait();
 
-        var substandardTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(SUBSTANDARD_TRANSFER_CONTRACT, PlutusVersion.v3);
+        var moduleTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(MODULE_TRANSFER_CONTRACT, PlutusVersion.v3);
 
         // Issuance Parameterization
         // v0.4.0 issuance_mint takes FOUR parameters — programmable_logic_base (Credential),
@@ -137,7 +137,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ),
                 BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().scriptHash())),
                 ConstrPlutusData.of(1,
-                        BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                        BytesPlutusData.of(moduleIssueContract.getScriptHash())
                 ),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(
@@ -179,7 +179,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
         // field is a Credential, not a bare hash.
         var directoryMintRedeemer = ConstrPlutusData.of(1,
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash()))
+                ConstrPlutusData.of(1, BytesPlutusData.of(moduleIssueContract.getScriptHash()))
         );
 
         var directoryMintNft = Asset.builder()
@@ -218,9 +218,9 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var directoryMintDatum = ConstrPlutusData.of(0,
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
                 BytesPlutusData.of(HexUtil.decodeHexString("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")),
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardTransferContract.getScriptHash())),
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
+                ConstrPlutusData.of(1, BytesPlutusData.of(moduleIssueContract.getScriptHash())),
+                ConstrPlutusData.of(1, BytesPlutusData.of(moduleTransferContract.getScriptHash())),
+                ConstrPlutusData.of(1, BytesPlutusData.of(moduleIssueContract.getScriptHash())),
                 ConstrPlutusData.of(0, BytesPlutusData.of("")),
                 BytesPlutusData.of(""));
 
@@ -267,7 +267,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var tx = new ScriptTx()
                 .collectFrom(walletUtxos)
                 .collectFrom(directoryUtxo, ConstrPlutusData.of(0))
-                .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(100))
+                .withdraw(moduleIssueAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(100))
                 // Redeemer is DirectoryInit (constr(0))
                 .mintAsset(issuanceContract, pintToken, issuanceRedeemer)
                 .mintAsset(directoryMintContract, directoryMintNft, directoryMintRedeemer)
@@ -287,7 +287,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
                                 .index(issuanceUtxo.getOutputIndex())
                                 .build())
                 .attachSpendingValidator(directorySpendContract)
-                .attachRewardValidator(substandardIssueContract)
+                .attachRewardValidator(moduleIssueContract)
                 .withChangeAddress(adminAccount.baseAddress());
 
         var transaction = quickTxBuilder.compose(tx)
@@ -379,11 +379,11 @@ public class IssueTokenTest extends AbstractPreviewTest {
         }
         log.info("directorySetNode: {}", directorySetNode);
 
-        var substandardIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(SUBSTANDARD_ISSUE_CONTRACT, PlutusVersion.v3);
-        log.info("substandardIssueContract: {}", substandardIssueContract.getPolicyId());
+        var moduleIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(MODULE_ISSUE_CONTRACT, PlutusVersion.v3);
+        log.info("moduleIssueContract: {}", moduleIssueContract.getPolicyId());
 
-        var substandardIssueAddress = AddressProvider.getRewardAddress(substandardIssueContract, network);
-        log.info("substandardIssueAddress: {}", substandardIssueAddress.getAddress());
+        var moduleIssueAddress = AddressProvider.getRewardAddress(moduleIssueContract, network);
+        log.info("moduleIssueAddress: {}", moduleIssueAddress.getAddress());
 
 
         // Issuance Parameterization
@@ -397,7 +397,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ),
                 BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().scriptHash())),
                 ConstrPlutusData.of(1,
-                        BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                        BytesPlutusData.of(moduleIssueContract.getScriptHash())
                 ),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(
@@ -477,11 +477,11 @@ public class IssueTokenTest extends AbstractPreviewTest {
 
         var tx = new ScriptTx()
                 .collectFrom(walletUtxos)
-                .withdraw(substandardIssueAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(100))
+                .withdraw(moduleIssueAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(100))
                 .mintAsset(issuanceContract, pintToken, issuanceRedeemer)
                 .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(pintTokenValue), ConstrPlutusData.of(0))
                 .readFrom(registryRefInput)
-                .attachRewardValidator(substandardIssueContract)
+                .attachRewardValidator(moduleIssueContract)
                 .withChangeAddress(adminAccount.baseAddress());
 
         var transaction = quickTxBuilder.compose(tx)
@@ -531,15 +531,15 @@ public class IssueTokenTest extends AbstractPreviewTest {
 
         var latestIssueContract = "5857010100323232323225333002323232323253330073370e900218041baa0011323370e6eb400d20c801300a300937540022940c024c02800cc020008c01c008c01c004c010dd50008a4c26cacae6955ceaab9e5742ae881";
 
-        var substandardIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(latestIssueContract, PlutusVersion.v3);
-        log.info("substandardIssueContract: {}", substandardIssueContract.getPolicyId());
+        var moduleIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(latestIssueContract, PlutusVersion.v3);
+        log.info("moduleIssueContract: {}", moduleIssueContract.getPolicyId());
 
-        var substandardIssueAddress = AddressProvider.getRewardAddress(substandardIssueContract, network);
-        log.info("substandardIssueAddress: {}", substandardIssueAddress.getAddress());
+        var moduleIssueAddress = AddressProvider.getRewardAddress(moduleIssueContract, network);
+        log.info("moduleIssueAddress: {}", moduleIssueAddress.getAddress());
 
         var registerAddressTx = new Tx()
                 .from(adminAccount.baseAddress())
-                .registerStakeAddress(substandardIssueAddress.getAddress())
+                .registerStakeAddress(moduleIssueAddress.getAddress())
                 .withChangeAddress(adminAccount.baseAddress());
 
         quickTxBuilder.compose(registerAddressTx)
@@ -598,15 +598,15 @@ public class IssueTokenTest extends AbstractPreviewTest {
         }
         log.info("directorySetNode: {}", directorySetNode);
 
-        var substandardIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(SUBSTANDARD_ISSUE_CONTRACT, PlutusVersion.v3);
-        log.info("substandardIssueContract: {}", substandardIssueContract.getPolicyId());
+        var moduleIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(MODULE_ISSUE_CONTRACT, PlutusVersion.v3);
+        log.info("moduleIssueContract: {}", moduleIssueContract.getPolicyId());
 
-        var substandardIssueAddress = AddressProvider.getRewardAddress(substandardIssueContract, network);
-        log.info("substandardIssueAddress: {}", substandardIssueAddress.getAddress());
+        var moduleIssueAddress = AddressProvider.getRewardAddress(moduleIssueContract, network);
+        log.info("moduleIssueAddress: {}", moduleIssueAddress.getAddress());
 
 //        var registerAddressTx = new Tx()
 //                .from(adminAccount.baseAddress())
-//                .registerStakeAddress(substandardIssueAddress.getAddress())
+//                .registerStakeAddress(moduleIssueAddress.getAddress())
 //                .withChangeAddress(adminAccount.baseAddress());
 //
 //        quickTxBuilder.compose(registerAddressTx)
@@ -614,7 +614,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
 //                .withSigner(SignerProviders.signerFrom(adminAccount))
 //                .completeAndWait();
 
-        var substandardTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(SUBSTANDARD_TRANSFER_CONTRACT, PlutusVersion.v3);
+        var moduleTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(MODULE_TRANSFER_CONTRACT, PlutusVersion.v3);
 
         // Issuance Parameterization
         // v0.4.0 issuance_mint takes FOUR parameters — programmable_logic_base (Credential),
@@ -627,7 +627,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
                 ),
                 BytesPlutusData.of(HexUtil.decodeHexString(protocolBootstrapParams.registry().scriptHash())),
                 ConstrPlutusData.of(1,
-                        BytesPlutusData.of(substandardIssueContract.getScriptHash())
+                        BytesPlutusData.of(moduleIssueContract.getScriptHash())
                 ),
                 ConstrPlutusData.of(1,
                         BytesPlutusData.of(HexUtil.decodeHexString(
@@ -669,7 +669,7 @@ public class IssueTokenTest extends AbstractPreviewTest {
         // field is a Credential, not a bare hash.
         var directoryMintRedeemer = ConstrPlutusData.of(1,
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash()))
+                ConstrPlutusData.of(1, BytesPlutusData.of(moduleIssueContract.getScriptHash()))
         );
 
         var directoryMintNft = Asset.builder()
@@ -708,9 +708,9 @@ public class IssueTokenTest extends AbstractPreviewTest {
         var directoryMintDatum = ConstrPlutusData.of(0,
                 BytesPlutusData.of(issuanceContract.getScriptHash()),
                 BytesPlutusData.of(HexUtil.decodeHexString("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")),
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardTransferContract.getScriptHash())),
-                ConstrPlutusData.of(1, BytesPlutusData.of(substandardIssueContract.getScriptHash())),
+                ConstrPlutusData.of(1, BytesPlutusData.of(moduleIssueContract.getScriptHash())),
+                ConstrPlutusData.of(1, BytesPlutusData.of(moduleTransferContract.getScriptHash())),
+                ConstrPlutusData.of(1, BytesPlutusData.of(moduleIssueContract.getScriptHash())),
                 ConstrPlutusData.of(0, BytesPlutusData.of("")),
                 BytesPlutusData.of(""));
 

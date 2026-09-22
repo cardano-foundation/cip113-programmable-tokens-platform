@@ -3,7 +3,7 @@
  * Export all shared step components
  */
 
-export { SelectSubstandardStep } from './select-substandard-step';
+export { SelectModuleStep } from './select-module-step';
 export { TokenDetailsStep } from './token-details-step';
 export { PreviewStep } from './preview-step';
 export { BuildPreviewStep } from './build-preview-step';

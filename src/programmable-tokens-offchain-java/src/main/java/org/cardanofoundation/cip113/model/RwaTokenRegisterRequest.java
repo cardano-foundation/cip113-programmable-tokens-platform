@@ -8,7 +8,7 @@ import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
 import lombok.experimental.SuperBuilder;
 
-/** Registration request for the "rwa-token" substandard. */
+/** Registration request for the "rwa-token" module. */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @SuperBuilder

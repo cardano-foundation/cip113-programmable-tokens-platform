@@ -11,7 +11,7 @@ import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.core.CoreBlueprint;
 import org.cardanofoundation.cip113.core.CoreScriptFactory;
 import org.cardanofoundation.cip113.service.ProtocolScriptBuilderService;
-import org.cardanofoundation.cip113.service.SubstandardService;
+import org.cardanofoundation.cip113.service.ModuleService;
 import org.mockito.Mockito;
 import org.springframework.data.domain.Pageable;
 
@@ -24,7 +24,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 
 /**
- * Wires the production substandard handlers to an {@link OfflineChain} instead of Spring, a
+ * Wires the production module handlers to an {@link OfflineChain} instead of Spring, a
  * database and a node.
  *
  * <p>The point is to exercise the <em>real</em> handler code — the CIP-68 branch under test lives
@@ -50,9 +50,9 @@ public final class HandlerFixtures {
     private HandlerFixtures() {
     }
 
-    /** The real SubstandardService, loading {@code classpath:substandards/&#42;/plutus.json}. */
-    public static SubstandardService substandardService() {
-        var service = new SubstandardService(OBJECT_MAPPER);
+    /** The real ModuleService, loading {@code classpath:modules/&#42;/plutus.json}. */
+    public static ModuleService moduleService() {
+        var service = new ModuleService(OBJECT_MAPPER);
         service.init();
         return service;
     }

@@ -9,7 +9,7 @@ import { getExplorerTxUrl } from '@/lib/utils/format';
 interface RegistrationSuccessProps {
   txHash: string;
   policyId: string;
-  substandardId: string;
+  moduleId: string;
   issueContractName: string;
   tokenName: string;
   quantity: string;
@@ -18,7 +18,7 @@ interface RegistrationSuccessProps {
 export function RegistrationSuccess({
   txHash,
   policyId,
-  substandardId,
+  moduleId,
   issueContractName,
   tokenName,
   quantity,
@@ -35,8 +35,8 @@ export function RegistrationSuccess({
   };
 
   const handleMintTokens = () => {
-    // Navigate to mint page with pre-selected substandard and issue contract
-    router.push(`/mint?substandard=${substandardId}&issueContract=${issueContractName}`);
+    // Navigate to mint page with pre-selected module and issue contract
+    router.push(`/mint?module=${moduleId}&issueContract=${issueContractName}`);
   };
 
   return (
@@ -108,9 +108,9 @@ export function RegistrationSuccess({
           </div>
 
           <div className="flex justify-between items-center">
-            <span className="text-sm text-dark-400">Substandard:</span>
+            <span className="text-sm text-dark-400">Module:</span>
             <span className="text-sm font-medium text-white">
-              {substandardId}
+              {moduleId}
             </span>
           </div>
 

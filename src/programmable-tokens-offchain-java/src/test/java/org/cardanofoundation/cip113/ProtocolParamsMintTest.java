@@ -57,7 +57,7 @@ public class ProtocolParamsMintTest extends AbstractPreviewTest {
                 // FIXME: these are NOT the correct one, just testing if it passes validation
                 BytesPlutusData.of(protocolParamsContract.getScriptHashBytes()), // policy id of the nft of the directory (programmable token registry)
                 ConstrPlutusData.of(0,
-                        BytesPlutusData.of(adminAccount.getBaseAddress().getPaymentCredentialHash().get()) // script hash of the substandard?
+                        BytesPlutusData.of(adminAccount.getBaseAddress().getPaymentCredentialHash().get()) // script hash of the module?
                 )
         );
 

@@ -3,7 +3,7 @@ package org.cardanofoundation.cip113.cip171;
 import com.bloxbean.cardano.client.util.HexUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.cardanofoundation.cip113.service.FreezeAndSeizeScriptBuilderService;
-import org.cardanofoundation.cip113.service.SubstandardService;
+import org.cardanofoundation.cip113.service.ModuleService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -41,7 +41,7 @@ class Cip171ReconstructionTest {
     /** Hop 1: by-hash(transfer logic) -> the transfer script and its applied parameters. */
     private static final String HOP1 = """
             {"txHash":"2d62d6d7981d30e0a20abc0d9562060db09ea225e6d3722ac7feab1716946f4e",
-             "sourcePath":"src/substandards/freeze-and-seize","status":"VERIFIED",
+             "sourcePath":"src/modules/freeze-and-seize","status":"VERIFIED",
              "scripts":[{"scriptName":"example_transfer_logic.transfer",
                "finalHash":"278ecd35897748c372e39a6c60210a734813eb6622e8234264692f0d",
                "requiredParameters":[{"title":"programmable_logic_base_cred"},{"title":"blacklist_node_cs"}],
@@ -53,7 +53,7 @@ class Cip171ReconstructionTest {
     /** Hop 2: by-hash(blacklist policy) -> blacklist_mint and its applied parameters. */
     private static final String HOP2 = """
             {"txHash":"2d62d6d7981d30e0a20abc0d9562060db09ea225e6d3722ac7feab1716946f4e",
-             "sourcePath":"src/substandards/freeze-and-seize","status":"VERIFIED",
+             "sourcePath":"src/modules/freeze-and-seize","status":"VERIFIED",
              "scripts":[{"scriptName":"blacklist_mint",
                "finalHash":"9a20498043c1031c08f70a4df2fe4e43e33768eb5dfe221546150e32",
                "requiredParameters":[{"title":"utxo_ref"},{"title":"manager_pkh"}],
@@ -67,9 +67,9 @@ class Cip171ReconstructionTest {
 
     @BeforeEach
     void setUp() {
-        var substandardService = new SubstandardService(MAPPER);
-        substandardService.init();
-        fes = new FreezeAndSeizeScriptBuilderService(substandardService);
+        var moduleService = new ModuleService(MAPPER);
+        moduleService.init();
+        fes = new FreezeAndSeizeScriptBuilderService(moduleService);
     }
 
     @Test

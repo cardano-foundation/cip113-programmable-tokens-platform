@@ -13,9 +13,9 @@ import org.cardanofoundation.cip113.repository.KycExtendedTokenRegistrationRepos
 import org.cardanofoundation.cip113.service.MpfRootSyncTrigger;
 import org.cardanofoundation.cip113.service.MpfTreeService;
 import org.cardanofoundation.cip113.service.ProtocolBootstrapService;
-import org.cardanofoundation.cip113.service.substandard.KycExtendedSubstandardHandler;
-import org.cardanofoundation.cip113.service.substandard.SubstandardHandlerFactory;
-import org.cardanofoundation.cip113.service.substandard.context.KycExtendedContext;
+import org.cardanofoundation.cip113.service.module.KycExtendedModuleHandler;
+import org.cardanofoundation.cip113.service.module.ModuleHandlerFactory;
+import org.cardanofoundation.cip113.service.module.context.KycExtendedContext;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -47,7 +47,7 @@ public class MpfRootSyncJob {
     private final KycExtendedTokenRegistrationRepository registrationRepo;
     private final GlobalStateInitRepository globalStateInitRepository;
     private final MpfTreeService mpfTreeService;
-    private final SubstandardHandlerFactory handlerFactory;
+    private final ModuleHandlerFactory handlerFactory;
     private final ProtocolBootstrapService protocolBootstrapService;
     private final AdminSigningKeyProvider adminSigner;
     private final BFBackendService bfBackendService;
@@ -166,7 +166,7 @@ public class MpfRootSyncJob {
                 .memberRootHashLocal(reg.getMemberRootHashLocal())
                 .build();
 
-        var handler = (KycExtendedSubstandardHandler) handlerFactory.getHandler("kyc-extended", ctx);
+        var handler = (KycExtendedModuleHandler) handlerFactory.getHandler("kyc-extended", ctx);
         var txContext = handler.buildUpdateMemberRootHashTransaction(
                 policyId, newLocalRoot, adminSigner.getAdminAddress(), signerPkh, protocolParams);
         if (!txContext.isSuccessful()) {
@@ -222,7 +222,7 @@ public class MpfRootSyncJob {
                     .issuerAdminPkh(reg.getIssuerAdminPkh())
                     .globalStatePolicyId(reg.getTelPolicyId())
                     .build();
-            var handler = (KycExtendedSubstandardHandler) handlerFactory.getHandler("kyc-extended", ctx);
+            var handler = (KycExtendedModuleHandler) handlerFactory.getHandler("kyc-extended", ctx);
             return handler.readGlobalState(reg.getProgrammableTokenPolicyId())
                     .map(gs -> gs.memberRootHash() != null
                             ? HexUtil.decodeHexString(gs.memberRootHash())
@@ -245,7 +245,7 @@ public class MpfRootSyncJob {
                 .issuerAdminPkh(reg.getIssuerAdminPkh())
                 .globalStatePolicyId(reg.getTelPolicyId())
                 .build();
-        var handler = (KycExtendedSubstandardHandler) handlerFactory.getHandler("kyc-extended", ctx);
+        var handler = (KycExtendedModuleHandler) handlerFactory.getHandler("kyc-extended", ctx);
 
         while (Instant.now().isBefore(deadline)) {
             try {

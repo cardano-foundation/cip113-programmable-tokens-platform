@@ -56,11 +56,11 @@ public class UtilController {
                 .filter(assetType -> progTokenPolicyIds.contains(assetType.policyId()))
                 .forEach(assetType -> {
                     log.info("assetType: {}", assetType);
-                    var substandardId = assetType.policyId().equals(dummyPolicyId) ? "dummy" : "freeze-and-seize";
+                    var moduleId = assetType.policyId().equals(dummyPolicyId) ? "dummy" : "freeze-and-seize";
                     programmableTokenRegistryRepository.save(ProgrammableTokenRegistryEntity.builder()
                             .policyId(assetType.policyId())
                             .assetName(assetType.assetName())
-                            .substandardId(substandardId)
+                            .moduleId(moduleId)
                             .build());
                 });
 

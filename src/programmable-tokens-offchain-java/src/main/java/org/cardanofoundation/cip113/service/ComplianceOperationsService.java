@@ -5,26 +5,26 @@ import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.model.TransactionContext;
 import org.cardanofoundation.cip113.model.TransactionContext.MintingResult;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
-import org.cardanofoundation.cip113.service.substandard.SubstandardHandlerFactory;
-import org.cardanofoundation.cip113.service.substandard.capabilities.BlacklistManageable;
-import org.cardanofoundation.cip113.service.substandard.capabilities.BlacklistManageable.*;
-import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable;
-import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable.AddTrustedEntityRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable.GlobalStateInitRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable.GlobalStateInitResult;
-import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable.GlobalStateUpdateRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable.RemoveTrustedEntityRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.Seizeable;
-import org.cardanofoundation.cip113.service.substandard.capabilities.Seizeable.*;
-import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable;
-import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable.*;
-import org.cardanofoundation.cip113.service.substandard.context.SubstandardContext;
+import org.cardanofoundation.cip113.service.module.ModuleHandlerFactory;
+import org.cardanofoundation.cip113.service.module.capabilities.BlacklistManageable;
+import org.cardanofoundation.cip113.service.module.capabilities.BlacklistManageable.*;
+import org.cardanofoundation.cip113.service.module.capabilities.GlobalStateManageable;
+import org.cardanofoundation.cip113.service.module.capabilities.GlobalStateManageable.AddTrustedEntityRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.GlobalStateManageable.GlobalStateInitRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.GlobalStateManageable.GlobalStateInitResult;
+import org.cardanofoundation.cip113.service.module.capabilities.GlobalStateManageable.GlobalStateUpdateRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.GlobalStateManageable.RemoveTrustedEntityRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.Seizeable;
+import org.cardanofoundation.cip113.service.module.capabilities.Seizeable.*;
+import org.cardanofoundation.cip113.service.module.capabilities.WhitelistManageable;
+import org.cardanofoundation.cip113.service.module.capabilities.WhitelistManageable.*;
+import org.cardanofoundation.cip113.service.module.context.ModuleContext;
 import org.springframework.stereotype.Service;
 
 /**
  * Service orchestration layer for compliance operations.
  * This service coordinates blacklist, whitelist, and seize operations
- * between controllers and substandard handlers.
+ * between controllers and module handlers.
  *
  * <p>Supported capabilities:</p>
  * <ul>
@@ -38,7 +38,7 @@ import org.springframework.stereotype.Service;
 @Slf4j
 public class ComplianceOperationsService {
 
-    private final SubstandardHandlerFactory handlerFactory;
+    private final ModuleHandlerFactory handlerFactory;
     private final ProtocolBootstrapService protocolBootstrapService;
 
     private final ProtocolDeploymentResolver protocolDeploymentResolver;
@@ -48,81 +48,81 @@ public class ComplianceOperationsService {
     /**
      * Initialize a blacklist for a programmable token.
      *
-     * @param substandardId  The substandard identifier (e.g., "freeze-and-seize")
+     * @param moduleId  The module identifier (e.g., "freeze-and-seize")
      * @param request        The blacklist initialization request
      * @param protocolTxHash Optional protocol version tx hash (uses default if null)
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx and bootstrap parameters
      */
     public TransactionContext<MintingResult> initBlacklist(
-            String substandardId,
+            String moduleId,
             BlacklistInitRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Initializing blacklist for substandard: {}, admin: {}",
-                substandardId, request.adminAddress());
+        log.info("Initializing blacklist for module: {}, admin: {}",
+                moduleId, request.adminAddress());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var blacklistMgr = getBlacklistManageable(substandardId, context);
+        var blacklistMgr = getBlacklistManageable(moduleId, context);
 
         var txContext = blacklistMgr.buildBlacklistInitTransaction(request, protocolParams);
 
-        log.info("Blacklist init transaction built successfully for substandard: {}", substandardId);
+        log.info("Blacklist init transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
     /**
      * Add an address to the blacklist (freeze).
      *
-     * @param substandardId  The substandard identifier
+     * @param moduleId  The module identifier
      * @param request        The add to blacklist request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx
      */
     public TransactionContext<Void> addToBlacklist(
-            String substandardId,
+            String moduleId,
             AddToBlacklistRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Adding to blacklist for substandard: {}, target: {}",
-                substandardId, request.targetAddress());
+        log.info("Adding to blacklist for module: {}, target: {}",
+                moduleId, request.targetAddress());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var blacklistMgr = getBlacklistManageable(substandardId, context);
+        var blacklistMgr = getBlacklistManageable(moduleId, context);
 
         var txContext = blacklistMgr.buildAddToBlacklistTransaction(request, protocolParams);
 
-        log.info("Add to blacklist transaction built successfully for substandard: {}", substandardId);
+        log.info("Add to blacklist transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
     /**
      * Remove an address from the blacklist (unfreeze).
      *
-     * @param substandardId  The substandard identifier
+     * @param moduleId  The module identifier
      * @param request        The remove from blacklist request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx
      */
     public TransactionContext<Void> removeFromBlacklist(
-            String substandardId,
+            String moduleId,
             RemoveFromBlacklistRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Removing from blacklist for substandard: {}, target: {}",
-                substandardId, request.targetAddress());
+        log.info("Removing from blacklist for module: {}, target: {}",
+                moduleId, request.targetAddress());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var blacklistMgr = getBlacklistManageable(substandardId, context);
+        var blacklistMgr = getBlacklistManageable(moduleId, context);
 
         var txContext = blacklistMgr.buildRemoveFromBlacklistTransaction(request, protocolParams);
 
-        log.info("Remove from blacklist transaction built successfully for substandard: {}", substandardId);
+        log.info("Remove from blacklist transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
@@ -131,81 +131,81 @@ public class ComplianceOperationsService {
     /**
      * Initialize a whitelist for a programmable token.
      *
-     * @param substandardId  The substandard identifier
+     * @param moduleId  The module identifier
      * @param request        The whitelist initialization request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx and bootstrap parameters
      */
     public TransactionContext<WhitelistInitResult> initWhitelist(
-            String substandardId,
+            String moduleId,
             WhitelistInitRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Initializing whitelist for substandard: {}, admin: {}",
-                substandardId, request.adminAddress());
+        log.info("Initializing whitelist for module: {}, admin: {}",
+                moduleId, request.adminAddress());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var whitelistMgr = getWhitelistManageable(substandardId, context);
+        var whitelistMgr = getWhitelistManageable(moduleId, context);
 
         var txContext = whitelistMgr.buildWhitelistInitTransaction(request, protocolParams);
 
-        log.info("Whitelist init transaction built successfully for substandard: {}", substandardId);
+        log.info("Whitelist init transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
     /**
      * Add an address to the whitelist (KYC approval).
      *
-     * @param substandardId  The substandard identifier
+     * @param moduleId  The module identifier
      * @param request        The add to whitelist request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx
      */
     public TransactionContext<Void> addToWhitelist(
-            String substandardId,
+            String moduleId,
             AddToWhitelistRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Adding to whitelist for substandard: {}, target: {}",
-                substandardId, request.targetCredential());
+        log.info("Adding to whitelist for module: {}, target: {}",
+                moduleId, request.targetCredential());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var whitelistMgr = getWhitelistManageable(substandardId, context);
+        var whitelistMgr = getWhitelistManageable(moduleId, context);
 
         var txContext = whitelistMgr.buildAddToWhitelistTransaction(request, protocolParams);
 
-        log.info("Add to whitelist transaction built successfully for substandard: {}", substandardId);
+        log.info("Add to whitelist transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
     /**
      * Remove an address from the whitelist (revoke KYC approval).
      *
-     * @param substandardId  The substandard identifier
+     * @param moduleId  The module identifier
      * @param request        The remove from whitelist request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx
      */
     public TransactionContext<Void> removeFromWhitelist(
-            String substandardId,
+            String moduleId,
             RemoveFromWhitelistRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Removing from whitelist for substandard: {}, target: {}",
-                substandardId, request.targetCredential());
+        log.info("Removing from whitelist for module: {}, target: {}",
+                moduleId, request.targetCredential());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var whitelistMgr = getWhitelistManageable(substandardId, context);
+        var whitelistMgr = getWhitelistManageable(moduleId, context);
 
         var txContext = whitelistMgr.buildRemoveFromWhitelistTransaction(request, protocolParams);
 
-        log.info("Remove from whitelist transaction built successfully for substandard: {}", substandardId);
+        log.info("Remove from whitelist transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
@@ -214,108 +214,108 @@ public class ComplianceOperationsService {
     /**
      * Initialize the global state UTxO for a new token deployment.
      *
-     * @param substandardId  The substandard identifier (e.g., "kyc")
+     * @param moduleId  The module identifier (e.g., "kyc")
      * @param request        The initialization request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx and global-state policy ID
      */
     public TransactionContext<GlobalStateInitResult> initGlobalState(
-            String substandardId,
+            String moduleId,
             GlobalStateInitRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Initializing global state for substandard: {}, admin: {}",
-                substandardId, request.adminAddress());
+        log.info("Initializing global state for module: {}, admin: {}",
+                moduleId, request.adminAddress());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var globalStateMgr = getGlobalStateManageable(substandardId, context);
+        var globalStateMgr = getGlobalStateManageable(moduleId, context);
 
         var txContext = globalStateMgr.buildGlobalStateInitTransaction(request, protocolParams);
 
-        log.info("Global state init transaction built successfully for substandard: {}", substandardId);
+        log.info("Global state init transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
     /**
      * Add a trusted entity (verification key) to the global state.
      *
-     * @param substandardId  The substandard identifier
+     * @param moduleId  The module identifier
      * @param request        The add-entity request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx
      */
     public TransactionContext<Void> addTrustedEntity(
-            String substandardId,
+            String moduleId,
             AddTrustedEntityRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Adding trusted entity for substandard: {}, target: {}",
-                substandardId, request.verificationKey());
+        log.info("Adding trusted entity for module: {}, target: {}",
+                moduleId, request.verificationKey());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var globalStateMgr = getGlobalStateManageable(substandardId, context);
+        var globalStateMgr = getGlobalStateManageable(moduleId, context);
 
         var txContext = globalStateMgr.buildAddTrustedEntityTransaction(request, protocolParams);
 
-        log.info("Add trusted entity transaction built successfully for substandard: {}", substandardId);
+        log.info("Add trusted entity transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
     /**
      * Remove a trusted entity (verification key) from the global state.
      *
-     * @param substandardId  The substandard identifier
+     * @param moduleId  The module identifier
      * @param request        The remove-entity request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx
      */
     public TransactionContext<Void> removeTrustedEntity(
-            String substandardId,
+            String moduleId,
             RemoveTrustedEntityRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Removing trusted entity for substandard: {}, target: {}",
-                substandardId, request.verificationKey());
+        log.info("Removing trusted entity for module: {}, target: {}",
+                moduleId, request.verificationKey());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var globalStateMgr = getGlobalStateManageable(substandardId, context);
+        var globalStateMgr = getGlobalStateManageable(moduleId, context);
 
         var txContext = globalStateMgr.buildRemoveTrustedEntityTransaction(request, protocolParams);
 
-        log.info("Remove trusted entity transaction built successfully for substandard: {}", substandardId);
+        log.info("Remove trusted entity transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
     /**
      * Update the global state UTxO (pause transfers, mintable amount, security info).
      *
-     * @param substandardId  The substandard identifier
+     * @param moduleId  The module identifier
      * @param request        The global state update request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx
      */
     public TransactionContext<Void> updateGlobalState(
-            String substandardId,
+            String moduleId,
             GlobalStateUpdateRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Updating global state for substandard: {}, action: {}",
-                substandardId, request.action());
+        log.info("Updating global state for module: {}, action: {}",
+                moduleId, request.action());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var globalStateMgr = getGlobalStateManageable(substandardId, context);
+        var globalStateMgr = getGlobalStateManageable(moduleId, context);
 
         var txContext = globalStateMgr.buildGlobalStateUpdateTransaction(request, protocolParams);
 
-        log.info("Global state update transaction built successfully for substandard: {}", substandardId);
+        log.info("Global state update transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
@@ -324,54 +324,54 @@ public class ComplianceOperationsService {
     /**
      * Seize assets from a blacklisted address.
      *
-     * @param substandardId  The substandard identifier
+     * @param moduleId  The module identifier
      * @param request        The seize request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx
      */
     public TransactionContext<Void> seize(
-            String substandardId,
+            String moduleId,
             SeizeRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Seizing assets for substandard: {}, from: {}, destination: {}",
-                substandardId, request.destinationAddress(), request.destinationAddress());
+        log.info("Seizing assets for module: {}, from: {}, destination: {}",
+                moduleId, request.destinationAddress(), request.destinationAddress());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var seizeable = getSeizeable(substandardId, context);
+        var seizeable = getSeizeable(moduleId, context);
 
         var txContext = seizeable.buildSeizeTransaction(request, protocolParams);
 
-        log.info("Seize transaction built successfully for substandard: {}", substandardId);
+        log.info("Seize transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
     /**
      * Seize assets from multiple UTxOs in a single transaction.
      *
-     * @param substandardId  The substandard identifier
+     * @param moduleId  The module identifier
      * @param request        The multi-seize request
      * @param protocolTxHash Optional protocol version tx hash
      * @param context        Optional context for context-aware handlers
      * @return Transaction context with unsigned CBOR tx
      */
     public TransactionContext<Void> multiSeize(
-            String substandardId,
+            String moduleId,
             MultiSeizeRequest request,
             String protocolTxHash,
-            SubstandardContext context) {
+            ModuleContext context) {
 
-        log.info("Multi-seizing assets for substandard: {}, utxo count: {}, destination: {}",
-                substandardId, request.utxoReferences().size(), request.destinationAddress());
+        log.info("Multi-seizing assets for module: {}, utxo count: {}, destination: {}",
+                moduleId, request.utxoReferences().size(), request.destinationAddress());
 
         var protocolParams = resolveProtocolParams(protocolTxHash);
-        var seizeable = getSeizeable(substandardId, context);
+        var seizeable = getSeizeable(moduleId, context);
 
         var txContext = seizeable.buildMultiSeizeTransaction(request, protocolParams);
 
-        log.info("Multi-seize transaction built successfully for substandard: {}", substandardId);
+        log.info("Multi-seize transaction built successfully for module: {}", moduleId);
         return txContext;
     }
 
@@ -387,68 +387,68 @@ public class ComplianceOperationsService {
     /**
      * Get BlacklistManageable capability from handler.
      */
-    private BlacklistManageable getBlacklistManageable(String substandardId, SubstandardContext context) {
+    private BlacklistManageable getBlacklistManageable(String moduleId, ModuleContext context) {
         var handler = context != null
-                ? handlerFactory.getHandler(substandardId, context)
-                : handlerFactory.getHandler(substandardId);
+                ? handlerFactory.getHandler(moduleId, context)
+                : handlerFactory.getHandler(moduleId);
 
         if (handler == null) {
-            throw new IllegalArgumentException("Unknown substandard: " + substandardId);
+            throw new IllegalArgumentException("Unknown module: " + moduleId);
         }
 
         return handler.asBlacklistManageable()
                 .orElseThrow(() -> new UnsupportedOperationException(
-                        "Substandard '" + substandardId + "' does not support blacklist management"));
+                        "Module '" + moduleId + "' does not support blacklist management"));
     }
 
     /**
      * Get WhitelistManageable capability from handler.
      */
-    private WhitelistManageable getWhitelistManageable(String substandardId, SubstandardContext context) {
+    private WhitelistManageable getWhitelistManageable(String moduleId, ModuleContext context) {
         var handler = context != null
-                ? handlerFactory.getHandler(substandardId, context)
-                : handlerFactory.getHandler(substandardId);
+                ? handlerFactory.getHandler(moduleId, context)
+                : handlerFactory.getHandler(moduleId);
 
         if (handler == null) {
-            throw new IllegalArgumentException("Unknown substandard: " + substandardId);
+            throw new IllegalArgumentException("Unknown module: " + moduleId);
         }
 
         return handler.asWhitelistManageable()
                 .orElseThrow(() -> new UnsupportedOperationException(
-                        "Substandard '" + substandardId + "' does not support whitelist management"));
+                        "Module '" + moduleId + "' does not support whitelist management"));
     }
 
     /**
      * Get GlobalStateManageable capability from handler.
      */
-    private GlobalStateManageable getGlobalStateManageable(String substandardId, SubstandardContext context) {
+    private GlobalStateManageable getGlobalStateManageable(String moduleId, ModuleContext context) {
         var handler = context != null
-                ? handlerFactory.getHandler(substandardId, context)
-                : handlerFactory.getHandler(substandardId);
+                ? handlerFactory.getHandler(moduleId, context)
+                : handlerFactory.getHandler(moduleId);
 
         if (handler == null) {
-            throw new IllegalArgumentException("Unknown substandard: " + substandardId);
+            throw new IllegalArgumentException("Unknown module: " + moduleId);
         }
 
         return handler.asGlobalStateManageable()
                 .orElseThrow(() -> new UnsupportedOperationException(
-                        "Substandard '" + substandardId + "' does not support global state management"));
+                        "Module '" + moduleId + "' does not support global state management"));
     }
 
     /**
      * Get Seizeable capability from handler.
      */
-    private Seizeable getSeizeable(String substandardId, SubstandardContext context) {
+    private Seizeable getSeizeable(String moduleId, ModuleContext context) {
         var handler = context != null
-                ? handlerFactory.getHandler(substandardId, context)
-                : handlerFactory.getHandler(substandardId);
+                ? handlerFactory.getHandler(moduleId, context)
+                : handlerFactory.getHandler(moduleId);
 
         if (handler == null) {
-            throw new IllegalArgumentException("Unknown substandard: " + substandardId);
+            throw new IllegalArgumentException("Unknown module: " + moduleId);
         }
 
         return handler.asSeizeable()
                 .orElseThrow(() -> new UnsupportedOperationException(
-                        "Substandard '" + substandardId + "' does not support seize operations"));
+                        "Module '" + moduleId + "' does not support seize operations"));
     }
 }

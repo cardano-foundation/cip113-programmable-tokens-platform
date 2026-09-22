@@ -13,7 +13,7 @@ export const findValidator = (
   return validator.compiledCode;
 };
 
-export const findSubstandardValidator = (
+export const findModuleValidator = (
   validators: { title: string; script_bytes: string }[],
   validatorName: string,
   purpose: string

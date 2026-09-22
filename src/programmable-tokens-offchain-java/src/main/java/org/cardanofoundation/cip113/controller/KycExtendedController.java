@@ -26,7 +26,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
-/** Public + admin endpoints for the kyc-extended substandard. */
+/** Public + admin endpoints for the kyc-extended module. */
 @RestController
 @RequestMapping("${apiPrefix}/kyc-extended")
 @ConditionalOnProperty(name = "kycExtended.enabled", havingValue = "true", matchIfMissing = true)
@@ -113,7 +113,7 @@ public class KycExtendedController {
             @PathVariable String policyId,
             @RequestBody Map<String, Object> body) {
         if (!"kyc-extended".equals(programmableTokenRegistryRepository.findByPolicyId(policyId)
-                .map(reg -> reg.getSubstandardId()).orElse(""))) {
+                .map(reg -> reg.getModuleId()).orElse(""))) {
             return ResponseEntity.badRequest().body(Map.of("error", "policyId is not a kyc-extended token"));
         }
         String boundAddress = (String) body.get("boundAddress");
@@ -127,7 +127,7 @@ public class KycExtendedController {
         long validUntilMs = ((Number) validUntilObj).longValue();
         String sessionId = (String) body.getOrDefault("kycSessionId", null);
 
-        // Identity is the stake credential — see KycExtendedSubstandardHandler#buildTransferTransaction.
+        // Identity is the stake credential — see KycExtendedModuleHandler#buildTransferTransaction.
         byte[] pkh = AddressUtil.extractStakeCredHashFromAddress(boundAddress);
         if (pkh == null) {
             return ResponseEntity.badRequest().body(Map.of("error",

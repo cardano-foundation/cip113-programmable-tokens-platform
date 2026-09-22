@@ -1,6 +1,6 @@
 /**
  * Flow Registry
- * Central registry for registration flows by substandard
+ * Central registry for registration flows by module
  */
 
 import type { RegistrationFlow } from '@/types/registration';
@@ -67,17 +67,17 @@ export function isFlowEnabled(flowId: string, defaultValue: boolean = true): boo
 const flowRegistry = new Map<string, RegistrationFlow>();
 
 /**
- * Register a flow for a substandard
+ * Register a flow for a module
  */
 export function registerFlow(flow: RegistrationFlow): void {
   flowRegistry.set(flow.id, flow);
 }
 
 /**
- * Get a flow by substandard ID
+ * Get a flow by module ID
  */
-export function getFlow(substandardId: string): RegistrationFlow | undefined {
-  return flowRegistry.get(substandardId);
+export function getFlow(moduleId: string): RegistrationFlow | undefined {
+  return flowRegistry.get(moduleId);
 }
 
 /**
@@ -104,10 +104,10 @@ export function getFlowIds(): string[] {
 }
 
 /**
- * Check if a flow exists for a substandard
+ * Check if a flow exists for a module
  */
-export function hasFlow(substandardId: string): boolean {
-  return flowRegistry.has(substandardId);
+export function hasFlow(moduleId: string): boolean {
+  return flowRegistry.has(moduleId);
 }
 
 /**

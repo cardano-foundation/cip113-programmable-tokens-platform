@@ -5,8 +5,8 @@ import org.cardanofoundation.cip113.model.KycExtendedRegisterRequest;
 import org.cardanofoundation.cip113.model.KycRegisterRequest;
 import org.cardanofoundation.cip113.model.MintTokenRequest;
 import org.cardanofoundation.cip113.model.TransactionContext;
-import org.cardanofoundation.cip113.service.substandard.KycExtendedSubstandardHandler;
-import org.cardanofoundation.cip113.service.substandard.KycSubstandardHandler;
+import org.cardanofoundation.cip113.service.module.KycExtendedModuleHandler;
+import org.cardanofoundation.cip113.service.module.KycModuleHandler;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -31,14 +31,14 @@ public class Cip68RefusalTest {
             "Refused Token", "should never reach the chain", "NOPE", 0, null, null);
 
     /** Every dependency is null: the guard must fire before any of them is dereferenced. */
-    private static KycSubstandardHandler kycHandler() {
-        return new KycSubstandardHandler(
+    private static KycModuleHandler kycHandler() {
+        return new KycModuleHandler(
                 null, null, null, null, null, null, null, null, null, null,
                 null, null, null, null, null, null);
     }
 
-    private static KycExtendedSubstandardHandler kycExtendedHandler() {
-        return new KycExtendedSubstandardHandler(
+    private static KycExtendedModuleHandler kycExtendedHandler() {
+        return new KycExtendedModuleHandler(
                 null, null, null, null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null, null);
     }
@@ -65,7 +65,7 @@ public class Cip68RefusalTest {
     @Test
     public void kycRegistrationRefusesCip68Metadata() {
         var request = KycRegisterRequest.builder()
-                .substandardId("kyc")
+                .moduleId("kyc")
                 .assetName("4d59544b4e")
                 .quantity("1000")
                 .cip68Metadata(METADATA)
@@ -96,7 +96,7 @@ public class Cip68RefusalTest {
     @Test
     public void kycExtendedRegistrationRefusesCip68Metadata() {
         var request = KycExtendedRegisterRequest.builder()
-                .substandardId("kyc-extended")
+                .moduleId("kyc-extended")
                 .assetName("4d59544b4e")
                 .quantity("1000")
                 .cip68Metadata(METADATA)
@@ -121,17 +121,17 @@ public class Cip68RefusalTest {
                 "a request with no cip68Metadata must not be refused by the CIP-68 guard, got: " + error);
     }
 
-    private static void assertRefused(String what, TransactionContext<?> result, String substandardId) {
+    private static void assertRefused(String what, TransactionContext<?> result, String moduleId) {
         Assertions.assertFalse(result.isSuccessful(), what + " must refuse CIP-68 metadata");
         Assertions.assertNull(result.unsignedCborTx(),
                 what + " must not return a transaction when it refuses");
         String error = String.valueOf(result.error());
         Assertions.assertTrue(error.contains("CIP-68"),
                 what + " error must name CIP-68, got: " + error);
-        Assertions.assertTrue(error.contains(substandardId),
-                what + " error must name the substandard, got: " + error);
+        Assertions.assertTrue(error.contains(moduleId),
+                what + " error must name the module, got: " + error);
         // The error is only useful if it says where CIP-68 DOES work.
         Assertions.assertTrue(error.contains("rwa-token"),
-                what + " error must point at the supported substandards, got: " + error);
+                what + " error must point at the supported modules, got: " + error);
     }
 }

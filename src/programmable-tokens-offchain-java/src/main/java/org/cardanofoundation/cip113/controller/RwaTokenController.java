@@ -12,9 +12,9 @@ import org.cardanofoundation.cip113.model.TransactionContext;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.service.ProtocolBootstrapService;
-import org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler;
-import org.cardanofoundation.cip113.service.substandard.SubstandardHandlerFactory;
-import org.cardanofoundation.cip113.service.substandard.context.RwaTokenContext;
+import org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler;
+import org.cardanofoundation.cip113.service.module.ModuleHandlerFactory;
+import org.cardanofoundation.cip113.service.module.context.RwaTokenContext;
 import org.cardanofoundation.cip113.repository.RwaTokenDenylistEntryRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenMemberLeafRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository;
@@ -41,7 +41,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
-/** Public + admin endpoints for the rwa-token substandard. */
+/** Public + admin endpoints for the rwa-token module. */
 @RestController
 @RequestMapping("${apiPrefix}/rwa-token")
 @ConditionalOnProperty(name = "rwaToken.enabled", havingValue = "true", matchIfMissing = true)
@@ -58,7 +58,7 @@ public class RwaTokenController {
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
     private final RwaTokenAllowlistService allowlistService;
     private final AdminSigningKeyProvider adminSigningKeyProvider;
-    private final SubstandardHandlerFactory handlerFactory;
+    private final ModuleHandlerFactory handlerFactory;
     private final ProtocolBootstrapService protocolBootstrapService;
 
     // ── Discovery ────────────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ public class RwaTokenController {
             if (adminAddress == null || adminAddress.isBlank()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "adminAddress is required"));
             }
-            RwaTokenSubstandardHandler handler = (RwaTokenSubstandardHandler) handlerFactory
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
                     .getHandler("rwa-token", RwaTokenContext.emptyContext());
             TransactionContext<Void> result = handler.buildAddPowerUserTransaction(
                     policyId, powerUserPkh, ((Number) capsObj).intValue(), adminAddress);
@@ -141,7 +141,7 @@ public class RwaTokenController {
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
-            RwaTokenSubstandardHandler handler = (RwaTokenSubstandardHandler) handlerFactory
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
                     .getHandler("rwa-token", RwaTokenContext.emptyContext());
             TransactionContext<Void> result =
                     handler.buildUpgradeRegistryNodeTransaction(policyId, feePayerAddress, protocolParams);
@@ -164,7 +164,7 @@ public class RwaTokenController {
      *  submits sequentially via {@code /issue-token/submit-chain}.
      *
      *  <p>Body: {@code { feePayerAddress, changes: [{action, ...}, ...] }} where
-     *  each change is a {@link RwaTokenSubstandardHandler.GsChangeSpec}. */
+     *  each change is a {@link RwaTokenModuleHandler.GsChangeSpec}. */
     @PostMapping("/{policyId}/global-state/update-chain")
     public ResponseEntity<?> updateGlobalStateChain(@PathVariable String policyId,
                                                     @RequestBody Map<String, Object> body) {
@@ -177,14 +177,14 @@ public class RwaTokenController {
             if (!(changesObj instanceof List<?> changesList) || changesList.isEmpty()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "changes (non-empty array) is required"));
             }
-            List<RwaTokenSubstandardHandler.GsChangeSpec> changes = new java.util.ArrayList<>();
+            List<RwaTokenModuleHandler.GsChangeSpec> changes = new java.util.ArrayList<>();
             for (Object o : changesList) {
                 if (!(o instanceof Map<?, ?> m)) {
                     return ResponseEntity.badRequest().body(Map.of("error", "each change must be an object"));
                 }
                 @SuppressWarnings("unchecked")
                 Map<String, Object> change = (Map<String, Object>) m;
-                changes.add(new RwaTokenSubstandardHandler.GsChangeSpec(
+                changes.add(new RwaTokenModuleHandler.GsChangeSpec(
                         (String) change.get("action"),
                         (Boolean) change.get("transfersPaused"),
                         (String) change.get("newSecurityInfoHex"),
@@ -211,7 +211,7 @@ public class RwaTokenController {
                             .orElseThrow(() -> new IllegalArgumentException(
                                     "feePayerAddress has no payment credential: " + feePayerAddress)));
 
-            RwaTokenSubstandardHandler handler = (RwaTokenSubstandardHandler) handlerFactory
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
                     .getHandler("rwa-token", RwaTokenContext.emptyContext());
             TransactionContext<List<String>> result = handler.buildGlobalStateUpdateChain(
                     policyId, changes, feePayerAddress, signerPkh, protocolParams);
@@ -299,7 +299,7 @@ public class RwaTokenController {
                             .orElseThrow(() -> new IllegalArgumentException(
                                     "feePayerAddress has no payment credential: " + feePayerAddress)));
 
-            RwaTokenSubstandardHandler handler = (RwaTokenSubstandardHandler) handlerFactory
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
                     .getHandler("rwa-token", RwaTokenContext.emptyContext());
             TransactionContext<Void> result = handler.buildUpdateMemberRootHashTransaction(
                     policyId, currentLocalRoot, feePayerAddress, signerPkh, protocolParams);
@@ -316,7 +316,7 @@ public class RwaTokenController {
         }
     }
 
-    /** One-shot admin tx that registers the substandard's transfer-logic stake
+    /** One-shot admin tx that registers the module's transfer-logic stake
      *  credential on chain via a Conway RegCert. Must be called once after
      *  registration, before the first burn (or any future op that withdraws
      *  against transferLogic). Isolated from burn so Eternl-style wallets
@@ -334,7 +334,7 @@ public class RwaTokenController {
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
-            RwaTokenSubstandardHandler handler = (RwaTokenSubstandardHandler) handlerFactory
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
                     .getHandler("rwa-token", RwaTokenContext.emptyContext());
             TransactionContext<Void> result = handler.buildRegisterTransferLogicTransaction(
                     policyId, feePayerAddress, protocolParams);
@@ -349,7 +349,7 @@ public class RwaTokenController {
         }
     }
 
-    /** One-shot admin tx that registers the substandard's THIRD-PARTY transfer-logic
+    /** One-shot admin tx that registers the module's THIRD-PARTY transfer-logic
      *  stake credential. Required before the first burn: {@code ThirdPartyAct} demands a
      *  withdrawal keyed on registry-node slot 4, which now names this validator, and a
      *  withdrawal from an unregistered reward account is rejected at submit — after the
@@ -372,7 +372,7 @@ public class RwaTokenController {
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
-            RwaTokenSubstandardHandler handler = (RwaTokenSubstandardHandler) handlerFactory
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
                     .getHandler("rwa-token", RwaTokenContext.emptyContext());
             TransactionContext<Void> result = handler.buildRegisterThirdPartyTransferLogicTransaction(
                     policyId, feePayerAddress, protocolParams);
@@ -414,14 +414,14 @@ public class RwaTokenController {
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
-            RwaTokenSubstandardHandler handler = (RwaTokenSubstandardHandler)
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler)
                     handlerFactory.getHandler("rwa-token", RwaTokenContext.emptyContext());
-            TransactionContext<RwaTokenSubstandardHandler.ChainBuildResult> result = handler.buildFullRegistrationChain(request, protocolParams);
+            TransactionContext<RwaTokenModuleHandler.ChainBuildResult> result = handler.buildFullRegistrationChain(request, protocolParams);
             if (!result.isSuccessful()) {
                 return ResponseEntity.badRequest().body(Map.of(
                         "error", result.error() != null ? result.error() : "chain build failed"));
             }
-            RwaTokenSubstandardHandler.ChainBuildResult meta = result.metadata();
+            RwaTokenModuleHandler.ChainBuildResult meta = result.metadata();
             // Use HashMap (Map.of caps at 10 entries; we now have 12).
             // Null-value entries (e.g. the optional 4th tx) are skipped so the
             // JSON response omits them, keeping the wire shape forward-compat.
@@ -467,7 +467,7 @@ public class RwaTokenController {
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
-            RwaTokenSubstandardHandler handler = (RwaTokenSubstandardHandler)
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler)
                     handlerFactory.getHandler("rwa-token", RwaTokenContext.emptyContext());
             TransactionContext<TransactionContext.RegistrationResult> result = handler.buildGlobalStateInitTransaction(request, protocolParams);
             if (!result.isSuccessful()) {
@@ -502,7 +502,7 @@ public class RwaTokenController {
     @GetMapping("/{policyId}/global-state")
     public ResponseEntity<?> getGlobalState(@PathVariable String policyId) {
         try {
-            RwaTokenSubstandardHandler handler = (RwaTokenSubstandardHandler)
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler)
                     handlerFactory.getHandler("rwa-token", RwaTokenContext.emptyContext());
             // Compute the current local MPF root so the admin UI can show whether
             // the on-chain root is stale (i.e. needs a publish). The local root
@@ -627,7 +627,7 @@ public class RwaTokenController {
     @PostMapping("/{policyId}/members")
     public ResponseEntity<?> upsertMember(@PathVariable String policyId, @RequestBody Map<String, Object> body) {
         if (!"rwa-token".equals(programmableTokenRegistryRepository.findByPolicyId(policyId)
-                .map(reg -> reg.getSubstandardId()).orElse(""))) {
+                .map(reg -> reg.getModuleId()).orElse(""))) {
             return ResponseEntity.badRequest().body(Map.of("error", "policyId is not a rwa-token"));
         }
         String boundAddress = (String) body.get("boundAddress");
@@ -641,7 +641,7 @@ public class RwaTokenController {
         long validUntilMs = ((Number) validUntilObj).longValue();
         String sessionId = (String) body.getOrDefault("kycSessionId", null);
 
-        // Identity is the stake credential — see RwaTokenSubstandardHandler#buildTransferTransaction.
+        // Identity is the stake credential — see RwaTokenModuleHandler#buildTransferTransaction.
         byte[] pkh = AddressUtil.extractStakeCredHashFromAddress(boundAddress);
         if (pkh == null) {
             return ResponseEntity.badRequest().body(Map.of("error",
@@ -679,7 +679,7 @@ public class RwaTokenController {
     }
 
     /** Admin-only off-chain mirror update. Builds + submits the on-chain tx
-     *  once {@code RwaTokenSubstandardHandler#buildAddDenylistEntryTransaction}
+     *  once {@code RwaTokenModuleHandler#buildAddDenylistEntryTransaction}
      *  is filled in; today persists locally only. */
     @PostMapping("/{policyId}/denylist")
     public ResponseEntity<?> addDenylistEntry(@PathVariable String policyId, @RequestBody Map<String, Object> body) {

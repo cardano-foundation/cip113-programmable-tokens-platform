@@ -18,7 +18,7 @@ export interface AdminTokenInfo {
   policyId: string;
   assetName: string;          // Hex encoded
   assetNameDisplay: string;   // Human readable
-  substandardId: string;
+  moduleId: string;
   roles: AdminRole[];
   details: {
     blacklistNodePolicyId?: string;
@@ -29,7 +29,7 @@ export interface AdminTokenInfo {
   /** RWA-token only: bitfield of the connected wallet's BaFin power-user
    *  capabilities for this token. Backed by {@link RwaTokenCapability}.
    *  Use {@link hasRwaTokenCapability} to test specific bits. Null/undefined
-   *  for tokens of other substandards. */
+   *  for tokens of other modules. */
   rwaTokenCapabilities?: number;
 }
 
@@ -50,7 +50,7 @@ export function hasRwaTokenCapability(
   token: AdminTokenInfo,
   capabilities: number,
 ): boolean {
-  if (token.substandardId !== "rwa-token") return false;
+  if (token.moduleId !== "rwa-token") return false;
   const cap = token.rwaTokenCapabilities ?? 0;
   return (cap & capabilities) !== 0;
 }

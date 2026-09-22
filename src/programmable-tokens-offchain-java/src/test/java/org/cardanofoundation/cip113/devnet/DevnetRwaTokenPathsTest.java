@@ -22,7 +22,7 @@ import java.util.List;
 /**
  * The rwa-token (RWA) paths, driven against a REAL chain.
  *
- * <p>Everything else that covers this substandard stops at script evaluation. That is a
+ * <p>Everything else that covers this module stops at script evaluation. That is a
  * lot — it scores the validators with genuine ex-units — but it is not the ledger, and the
  * rules the ledger applies on its own are exactly the ones that bite after a user has
  * signed: whether a withdrawal's reward account is registered, whether a transaction fits,
@@ -349,9 +349,9 @@ public class DevnetRwaTokenPathsTest {
         var registrations = new java.util.HashMap<String,
                 org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity>();
 
-        var handler = new org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler(
+        var handler = new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler(
                 new org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService(
-                        HandlerFixtures.substandardService(),
+                        HandlerFixtures.moduleService(),
                         HandlerFixtures.protocolScriptBuilderService()),
                 HandlerFixtures.protocolScriptBuilderService(),
                 org.mockito.Mockito.mock(org.cardanofoundation.cip113.service.RwaTokenAllowlistService.class),
@@ -384,7 +384,7 @@ public class DevnetRwaTokenPathsTest {
                 .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
 
         var request = org.cardanofoundation.cip113.model.RwaTokenRegisterRequest.builder()
-                .substandardId("rwa-token")
+                .moduleId("rwa-token")
                 .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
                 .recipientAddress(BootstrapFixture.ALICE.baseAddress())
                 .assetName(BASE_ASSET_NAME_HEX)

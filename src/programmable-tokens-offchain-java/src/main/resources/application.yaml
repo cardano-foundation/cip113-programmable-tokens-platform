@@ -35,13 +35,13 @@ store:
     sync-start-slot: 154984561
     keep-alive-interval: 1000
 
-# Substandards hidden from the API and the issuance wizard. The contracts stay
+# Modules hidden from the API and the issuance wizard. The contracts stay
 # vendored and already-issued tokens keep working; this only removes them as
 # choices for NEW tokens.
-substandards:
-  disabled: ${SUBSTANDARDS_DISABLED:kyc,kyc-extended}
+modules:
+  disabled: ${MODULES_DISABLED:kyc,kyc-extended}
 
-# CIP-171 script-provenance lookups (uplc.link). Used only to LABEL a token whose substandard
+# CIP-171 script-provenance lookups (uplc.link). Used only to LABEL a token whose module
 # cannot be derived locally -- never to authorise anything. Scoped by DOMAIN, not by a query
 # parameter: a lookup against the wrong host answers 404 rather than erroring, so each network
 # profile below sets its own base-url and leaves this default empty (= disabled).
@@ -158,8 +158,8 @@ blockfrost:
 koios:
   url: ${KOIOS_URL:https://preview.koios.rest/api/v1/}
 
-# Off by default on preview: KERI is only needed by the kyc substandards, both of which are
-# in substandards.disabled, and its client otherwise dials localhost:3901 on every boot of a
+# Off by default on preview: KERI is only needed by the kyc modules, both of which are
+# in modules.disabled, and its client otherwise dials localhost:3901 on every boot of a
 # laptop that is not running a KERI agent. Still overridable via KERI_ENABLED=true.
 keri:
   enabled: ${KERI_ENABLED:false}

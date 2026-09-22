@@ -196,8 +196,8 @@ public final class Cip68 {
      *       {@code (333)}.</li>
      * </ul>
      *
-     * <h3>No substandard on this platform passes {@code true}</h3>
-     * All three CIP-68 substandards — {@code dummy}, {@code freeze-and-seize} and
+     * <h3>No module on this platform passes {@code true}</h3>
+     * All three CIP-68 modules — {@code dummy}, {@code freeze-and-seize} and
      * {@code rwa-token} — use {@link #uncappedUserTokenLabel()}. None of the pinned contracts
      * caps lifetime supply:
      * <ul>
@@ -210,11 +210,11 @@ public final class Cip68 {
      *       {@code remaining = mintable_amount - minted_amount} with a <em>signed</em>
      *       {@code minted_amount}, so a burn passes a negative and <strong>restores</strong> the
      *       allowance (this platform mirrors that arithmetic in
-     *       {@code RwaTokenSubstandardHandler.buildBurnTransaction}). {@code mint 1 → burn 1
+     *       {@code RwaTokenModuleHandler.buildBurnTransaction}). {@code mint 1 → burn 1
      *       → mint 1} is therefore accepted and lifetime issuance exceeds one. A cap of 1 bounds
      *       the amount outstanding at any instant, which is not what {@code (222)} claims.</li>
      * </ul>
-     * The parameter is kept because the <em>rule</em> is sound and a future substandard may
+     * The parameter is kept because the <em>rule</em> is sound and a future module may
      * genuinely cap lifetime supply; it must not be passed {@code true} on the strength of a cap
      * that a burn can refill.
      *
@@ -241,7 +241,7 @@ public final class Cip68 {
      * {@code (333)}.
      *
      * <p>Shorthand for {@code userTokenLabel(quantity, false)}, kept as a named method so the call
-     * sites read as a decision rather than a magic boolean. Every CIP-68 substandard on this
+     * sites read as a decision rather than a magic boolean. Every CIP-68 module on this
      * platform — {@code dummy}, {@code freeze-and-seize} and {@code rwa-token} — uses this;
      * see {@link #userTokenLabel} for why {@code rwa-token}'s {@code mintable_amount} is not
      * a lifetime cap.
@@ -287,7 +287,7 @@ public final class Cip68 {
      * the datum is the permanent, on-chain statement of what this token is, and silently shipping
      * a half-sentence description would be a worse outcome than an error the user can act on.
      * The check lives here rather than in a DTO annotation because this method is the single
-     * choke point every substandard's CIP-68 path passes through.
+     * choke point every module's CIP-68 path passes through.
      *
      * @throws IllegalArgumentException if {@code metadata} is null, its name is blank, any field
      *                                  exceeds its ceiling, or the datum exceeds the budget

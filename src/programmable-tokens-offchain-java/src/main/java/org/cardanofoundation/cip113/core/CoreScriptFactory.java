@@ -60,7 +60,7 @@ public class CoreScriptFactory {
      * The parameterised script for a core validator under a given deployment.
      *
      * @throws IllegalArgumentException for {@link CoreValidator#ISSUANCE_MINT}, whose
-     *         parameters depend on a substandard's minting-logic credential and therefore
+     *         parameters depend on a module's minting-logic credential and therefore
      *         cannot be derived from the bootstrap record alone — use
      *         {@link #issuanceMint}. Rejecting it here rather than returning a plausible
      *         wrong script is the whole point of this class.
@@ -68,7 +68,7 @@ public class CoreScriptFactory {
     public PlutusScript script(CoreValidator validator, ProtocolBootstrapParams bootstrap) {
         if (validator == CoreValidator.ISSUANCE_MINT) {
             throw new IllegalArgumentException(
-                    "issuance_mint is parameterised by the substandard's minting-logic credential; "
+                    "issuance_mint is parameterised by the module's minting-logic credential; "
                             + "call issuanceMint(bootstrap, mintingLogicScript) instead.");
         }
         if (validator == CoreValidator.ALWAYS_FAIL) {
@@ -82,9 +82,9 @@ public class CoreScriptFactory {
     }
 
     /**
-     * {@code issuance_mint} for a specific substandard.
+     * {@code issuance_mint} for a specific module.
      *
-     * <p>Not cached: the substandard's minting-logic script varies per registered token,
+     * <p>Not cached: the module's minting-logic script varies per registered token,
      * so the cache key would be the pair, and the win over recomputing is not worth the
      * retention.
      */
@@ -93,9 +93,9 @@ public class CoreScriptFactory {
         try {
             mintingLogicHash = mintingLogicScript.getScriptHash();
         } catch (CborSerializationException e) {
-            // The substandard's minting-logic script came from a blueprint we just parsed, so
+            // The module's minting-logic script came from a blueprint we just parsed, so
             // failing to hash it means that blueprint is malformed, not that this call is wrong.
-            throw new IllegalStateException("could not hash the substandard minting-logic script", e);
+            throw new IllegalStateException("could not hash the module minting-logic script", e);
         }
         // alpha.4 moved the programmable-logic and registry checks into issuance_logic.
         // issuance_mint now dispatches to the datum-selected issuance credential and needs

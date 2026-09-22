@@ -9,20 +9,20 @@ import java.util.Optional;
 
 /**
  * Repository for the unified programmable token registry.
- * Used to look up which substandard a token belongs to.
+ * Used to look up which module a token belongs to.
  */
 @Repository
 public interface ProgrammableTokenRegistryRepository extends JpaRepository<ProgrammableTokenRegistryEntity, String> {
 
     /**
-     * Find the substandard for a given policy ID.
+     * Find the module for a given policy ID.
      */
     Optional<ProgrammableTokenRegistryEntity> findByPolicyId(String policyId);
 
     /**
-     * Find all tokens for a given substandard.
+     * Find all tokens for a given module.
      */
-    List<ProgrammableTokenRegistryEntity> findBySubstandardId(String substandardId);
+    List<ProgrammableTokenRegistryEntity> findByModuleId(String moduleId);
 
     /**
      * Check if a token is registered.

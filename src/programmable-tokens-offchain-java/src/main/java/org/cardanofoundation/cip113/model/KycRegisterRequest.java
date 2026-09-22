@@ -7,7 +7,7 @@ import lombok.NoArgsConstructor;
 import lombok.experimental.SuperBuilder;
 
 /**
- * Registration request for the "kyc" substandard.
+ * Registration request for the "kyc" module.
  * Includes the global state policy ID that will be used
  * to verify KYC attestations during token transfers.
  */

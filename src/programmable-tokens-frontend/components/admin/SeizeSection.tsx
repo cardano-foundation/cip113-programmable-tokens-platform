@@ -28,7 +28,7 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
   const { wallet } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
-  const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
+  const { getProtocol, ensureModule, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   // Default to the backend builder even when the SDK is available. Parity means the SDK
   // CAN build a transaction, not that it becomes the default route (PLAN.md A-5) — the
   // SDK path is opt-in per operation via the toggle until T-018 has verified all seven
@@ -37,7 +37,7 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
   const [txBuilder, setTxBuilder] = useState<TransactionBuilder>("backend");
   const network = getCardanoNetwork();
 
-  // Who may seize, per substandard.
+  // Who may seize, per module.
   //
   // For a rwa-token the authorising role is the on-chain power-user capability
   // `can_force_transfer`, which is what third_party_transfer_logic_script gates every
@@ -45,7 +45,7 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
   // the backend will refuse produces a signature request that dies at build time with
   // "does not hold can_force_transfer", so the selector matches the builder's own rule.
   const seizableTokens = tokens.filter((t) =>
-    t.substandardId === "rwa-token"
+    t.moduleId === "rwa-token"
       ? hasRwaTokenCapability(t, RwaTokenCapability.FORCE_TRANSFER)
       : t.roles.includes("ISSUER_ADMIN"));
 
@@ -120,24 +120,24 @@ export function SeizeSection({ tokens, adminAddress }: SeizeSectionProps) {
       let unsignedCborTx: string;
 
       // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize. For rwa-token
-      // (and kyc / kyc-extended) the SDK path errors with "Substandard not registered",
+      // (and kyc / kyc-extended) the SDK path errors with "Module not registered",
       // so force the backend route regardless of the toggle — the same guard BurnSection
       // already has. Without it a rwa-token seizure fails on the SDK path even though
       // the backend implements it, which reads as "seize is broken" rather than "wrong
       // builder".
       const sdkSupportsSelected =
-        selectedToken.substandardId !== "rwa-token"
-        && selectedToken.substandardId !== "kyc"
-        && selectedToken.substandardId !== "kyc-extended";
+        selectedToken.moduleId !== "rwa-token"
+        && selectedToken.moduleId !== "kyc"
+        && selectedToken.moduleId !== "kyc-extended";
 
       if (txBuilder === "sdk" && sdkSupportsSelected) {
-        await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
+        await ensureModule(selectedToken.policyId, selectedToken.assetName);
         const protocol = await getProtocol();
         const result = await protocol.compliance.seize({
           // Route explicitly — REQUIRED since 0.4.0. See the note in BlacklistSection:
-          // a try-all would report "no substandard can handle seize" when the truth is
+          // a try-all would report "no module can handle seize" when the truth is
           // that one did and the validator refused.
-          substandardId: selectedToken.substandardId,
+          substandardId: selectedToken.moduleId,
           feePayerAddress: adminAddress,
           tokenPolicyId: selectedToken.policyId,
           assetName: selectedToken.assetName,

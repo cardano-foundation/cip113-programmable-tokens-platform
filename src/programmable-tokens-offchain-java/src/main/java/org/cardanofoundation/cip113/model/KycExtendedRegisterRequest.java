@@ -7,11 +7,11 @@ import lombok.NoArgsConstructor;
 import lombok.experimental.SuperBuilder;
 
 /**
- * Registration request for the "kyc-extended" substandard.
+ * Registration request for the "kyc-extended" module.
  *
  * Mirrors {@link KycRegisterRequest} structurally; declared as a separate type so
  * Jackson can discriminate between "kyc" and "kyc-extended" via the
- * {@code substandardId} property.
+ * {@code moduleId} property.
  */
 @Data
 @EqualsAndHashCode(callSuper = true)

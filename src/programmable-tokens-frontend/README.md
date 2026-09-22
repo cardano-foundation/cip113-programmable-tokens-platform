@@ -86,9 +86,6 @@ programmable-tokens-frontend/
 │   ├── admin/              # Admin panel (mint / burn / blacklist / seize)
 │   ├── layout/             # Layout components
 │   └── ui/                 # Reusable UI components
-├── config/
-│   ├── cip113-blueprint.json
-│   └── substandards/
 ├── contexts/
 ├── hooks/
 ├── lib/
@@ -105,16 +102,16 @@ NEXT_PUBLIC_NETWORK=preview   # or preprod, mainnet
 
 ### CIP-113 Blueprint
 
-Core CIP-113 contract blueprints live in `config/cip113-blueprint.json`.
+The backend serves the pinned CIP-113 core and module blueprints. Their source and hashes are documented in [contract provenance](../../docs/CONTRACTS.md).
 
 ### Protocol Bootstrap
 
 The frontend obtains the active schema-3 deployment from the backend. It validates that record
 with the CIP-113 SDK and uses it directly; legacy deployment adapters are intentionally absent.
 
-### Substandards
+### Modules
 
-Transfer-logic configurations live in `config/substandards/`. For the on-chain substandard implementations, see [`../substandards/`](../substandards/).
+The backend lists available modules through `/modules`. The four first-party Aiken projects are in [`../modules/`](../modules/); the RWA-token blueprint is supplied from upstream.
 
 ## Testing
 
@@ -128,7 +125,7 @@ npm run build
 
 - Platform overview: [root README](../../README.md)
 - Off-chain backend: [../programmable-tokens-offchain-java/](../programmable-tokens-offchain-java/)
-- Substandards: [../substandards/](../substandards/)
+- Modules: [../modules/](../modules/)
 - On-chain core: [cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2)
 
 ## License

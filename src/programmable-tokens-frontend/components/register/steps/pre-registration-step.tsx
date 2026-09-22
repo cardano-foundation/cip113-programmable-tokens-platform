@@ -159,7 +159,7 @@ export function PreRegistrationStep({
         }
         const adminPubKeyHash = getPaymentKeyHash(feePayerAddress);
         request = {
-          substandardId: 'freeze-and-seize',
+          moduleId: 'freeze-and-seize',
           feePayerAddress,
           assetName: stringToHex(tokenDetails.assetName || ''),
           quantity: tokenDetails.quantity || '0',
@@ -169,7 +169,7 @@ export function PreRegistrationStep({
         };
       } else {
         request = {
-          substandardId: 'dummy',
+          moduleId: 'dummy',
           feePayerAddress,
           assetName: stringToHex(tokenDetails.assetName || ''),
           quantity: tokenDetails.quantity || '0',
