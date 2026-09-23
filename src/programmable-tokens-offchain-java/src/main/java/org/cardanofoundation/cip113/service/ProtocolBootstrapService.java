@@ -73,7 +73,7 @@ public class ProtocolBootstrapService {
             }
             if (firstUsable == null) {
                 throw new IllegalStateException(
-                        protocolBootstrapFilename + " contains no alpha.4 deployment. Deploy and record "
+                        protocolBootstrapFilename + " contains no alpha.5 deployment. Deploy and record "
                                 + "the current protocol — see docs/DEVNET-GUIDE.md.");
             }
 
@@ -83,7 +83,7 @@ public class ProtocolBootstrapService {
                 if (protocolBootstrapParams == null) {
                     throw new IllegalStateException(
                             "programmable.token.default.txHash names " + defaultTxHash
-                                    + ", which is not an alpha.4 deployment in "
+                                    + ", which is not an alpha.5 deployment in "
                                     + protocolBootstrapFilename);
                 }
                 log.info("Using default protocol bootstrap with txHash: {}", defaultTxHash);
@@ -134,7 +134,7 @@ public class ProtocolBootstrapService {
                     "Protocol bootstrap entry txHash=" + params.txHash() + " declares schemaVersion="
                             + (version == null ? "none (pre-versioning)" : version)
                             + ", but this build requires " + ProtocolBootstrapParams.CURRENT_SCHEMA_VERSION
-                            + ". This development build supports alpha.4 only; deploy and record the current "
+                            + ". This development build supports alpha.5 only; deploy and record the current "
                             + "protocol rather than adapting an older record.");
         }
 

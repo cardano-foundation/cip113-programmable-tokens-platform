@@ -1,3 +1,4 @@
+import { PINNED_CORE_BLUEPRINT_DIR } from "@/lib/deployment/blueprint";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -11,7 +12,7 @@ import path from "node:path";
 export async function GET() {
   const file = path.join(
     process.cwd(),
-    "node_modules/@easy1staking/cip113-sdk-ts/blueprints/standard/v0.5.0-alpha.4/plutus.json",
+    `node_modules/@easy1staking/cip113-sdk-ts/blueprints/standard/${PINNED_CORE_BLUEPRINT_DIR}/plutus.json`,
   );
   const bytes = await readFile(file);
   return new Response(bytes, { headers: { "content-type": "application/json" } });

@@ -30,8 +30,10 @@ async function main() {
     await import("./.sdkrec-build/sdk-record.js");
 
   const SDK_FILE = "./test-fixtures/sdk-instance-alpha4-7e8a631.json";
-  const PLATFORM_FILE =
-    "../programmable-tokens-offchain-java/src/main/resources/protocol-bootstraps-preview.json";
+  // The alpha.4 preview instance, kept as a FIXTURE now that the live resource is
+  // empty: alpha.5 abandons that instance, but the record is still the real thing
+  // both repositories once held, and it is what makes this comparison meaningful.
+  const PLATFORM_FILE = "./test-fixtures/platform-record-alpha4-preview.json";
 
   const sdkBytes = readFileSync(SDK_FILE, "utf8");
   const platformEntries = JSON.parse(readFileSync(PLATFORM_FILE, "utf8"));
