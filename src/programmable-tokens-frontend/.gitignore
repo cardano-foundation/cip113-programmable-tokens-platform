@@ -58,3 +58,4 @@ frontend.log
 .mine-build/
 .witness-build/
 .hash-build/
+.sdkrec-build/
