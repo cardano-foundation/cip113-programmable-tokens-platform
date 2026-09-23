@@ -10,3 +10,4 @@ export BLOCKFROST_KEY=DUMMY_KEY
 
 export KERI_URL=https://keria.dev.idw-sandboxes.cf-deployments.org
 export KERI_BOOT_URL=https://keria-boot.dev.idw-sandboxes.cf-deployments.org
+export RWA_TOKEN_CREATION_AUDIENCE=http://localhost:8080/api/v1

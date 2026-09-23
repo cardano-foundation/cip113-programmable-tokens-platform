@@ -322,16 +322,10 @@ export function KycConfigStep({
           PowerUserCapability.FORCE_TRANSFER;
 
         // ── Phase 1: build the chain on the backend ──
-        setStatusMessage('Phase 1/3 — building the registration chain (genesis + AddPowerUser + publish reference scripts + register + transferLogic cert)…');
-        // Seed the GS datum's trusted_entity_vkeys with the wizard's chosen
-        // trusted entities (the kyc-config step lets the admin add/remove
-        // them). Almost always includes this backend's KERI signing-entity
-        // vkey — required so KYC proofs issued by this backend verify on
-        // chain immediately. Without this, the admin would have to run a
-        // separate AddTrustedEntity GS-update tx before the first transfer.
-        const initialTrustedEntityVkeys = trustedEntities.length > 0
-          ? trustedEntities
-          : (signingEntityVkey ? [signingEntityVkey] : []);
+        setStatusMessage('Phase 1/3 — authorize token creation in your wallet, then build the registration chain…');
+        // The issuer's explicit selection is authoritative. Loading the backend
+        // key for display never grants it signing rights implicitly.
+        const initialTrustedEntityVkeys = trustedEntities;
 
         const chain = await buildRwaTokenChain({
           feePayerAddress: adminAddress,
@@ -370,7 +364,7 @@ export function KycConfigStep({
           // Only meaningful alongside receiver KYC + a first mint; harmless otherwise,
           // and the backend ignores it when nothing is minted.
           seedRecipientInAllowlistAtGenesis: seedRecipientInAllowlist,
-        });
+        }, rawApi);
 
         // ── Phase 2: single wallet popup signs all txs in the chain ──
         // 4-tx shape when the backend included the transferLogic RegCert
@@ -836,9 +830,9 @@ export function KycConfigStep({
           </div>
         </div>
         <p className="text-xs text-dark-400">
-          Ed25519 verification keys authorized to sign KYC attestations for this token.
-          The <span className="text-primary-400">signing entity key</span> is the KERI backend&apos;s key used to sign KYC proofs — it must be in this list for transfers to work.
-          Your wallet key may also be added if you want to sign proofs manually.
+          Ed25519 verification keys authorized to sign raw CMTA attestations for this token.
+          Add the backend signing entity only if you want this public backend to have that authority.
+          Membership proofs use the admin-signed Merkle root and do not require a trusted entity.
         </p>
 
         {isLoadingVkey && trustedEntities.length === 0 ? (

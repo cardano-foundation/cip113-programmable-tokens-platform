@@ -7,8 +7,15 @@ import com.bloxbean.cardano.vds.mpf.internal.TestNodeStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.entity.RwaTokenMemberLeafEntity;
+import org.cardanofoundation.cip113.entity.RwaTokenMemberRootSnapshotEntity;
 import org.cardanofoundation.cip113.repository.RwaTokenMemberLeafRepository;
+import org.cardanofoundation.cip113.repository.RwaTokenMemberRootSnapshotRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
+import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.PlutusData;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,6 +25,9 @@ import java.nio.ByteOrder;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Set;
 
 /** Per-policy MPF allowlist tree for the rwa-token module.
  *  Independent of {@code MpfTreeService} (kyc-extended's tree) so the two
@@ -30,6 +40,9 @@ public class RwaTokenAllowlistService {
 
     private final RwaTokenRegistrationRepository tokenRegRepo;
     private final RwaTokenMemberLeafRepository leafRepo;
+    private final RwaTokenMemberRootSnapshotRepository snapshotRepo;
+    private final UtxoProvider utxoProvider;
+    private final ObjectMapper objectMapper;
     private final org.cardanofoundation.cip113.config.AppConfig.Network network;
 
     // Root-publish trigger removed: UpdateMemberRootHash is admin-only on the
@@ -50,6 +63,13 @@ public class RwaTokenAllowlistService {
     /** Frozen view of the trie used to build a publish tx — root + the exact leaf IDs
      *  that produced it, so post-confirmation we mark the same leaf set as published. */
     public record TrieSnapshot(byte[] root, java.util.Set<Long> leafIds) {}
+
+    /** Exact data committed by an MPF root; a later KYC refresh cannot alter it. */
+    public record MemberLeaf(String credentialHash, short credentialType, long validUntilMs) {}
+
+    public record MemberCandidate(String baselineRootHash, String rootHash,
+                                  List<MemberLeaf> baseline, List<MemberLeaf> added,
+                                  List<MemberLeaf> leaves) {}
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -72,11 +92,9 @@ public class RwaTokenAllowlistService {
      *   member's identity, not a description of it, so a key-credential membership must
      *   NOT answer for a script credential sharing the hash. */
     public boolean containsValid(String policyId, byte[] memberPkh, short credentialType, long nowMs) {
-        String memberPkhHex = HexUtil.encodeHexString(memberPkh);
-        return leafRepo.findByProgrammableTokenPolicyIdAndMemberPkhAndCredentialType(
-                        policyId, memberPkhHex, credentialType)
-                .map(leaf -> leaf.getValidUntilMs() >= nowMs)
-                .orElse(false);
+        return activeLeaves(policyId).stream().anyMatch(leaf ->
+                leaf.credentialHash().equalsIgnoreCase(HexUtil.encodeHexString(memberPkh))
+                && leaf.credentialType() == credentialType && leaf.validUntilMs() >= nowMs);
     }
 
     /** @param credentialType see {@link #containsValid}. It selects the leaf AND forms the
@@ -85,15 +103,19 @@ public class RwaTokenAllowlistService {
     public Optional<MpfLeafView> inclusionProof(String policyId, byte[] memberPkh,
                                                 short credentialType, long nowMs) {
         String memberPkhHex = HexUtil.encodeHexString(memberPkh);
-        // Generate the proof from the trie of *published* leaves only — that trie's root
-        // matches what's on-chain, so the proof validates against the datum's member_root_hash.
-        List<RwaTokenMemberLeafEntity> publishedLeaves = leafRepo.findPublishedByProgrammableTokenPolicyId(policyId);
-        MpfTrie publishedTrie = buildTrieFromLeaves(
-                publishedLeaves, securityPolicyIdOf(policyId), networkId());
-        Optional<RwaTokenMemberLeafEntity> leaf = publishedLeaves.stream()
-                .filter(l -> memberPkhHex.equalsIgnoreCase(l.getMemberPkh())
-                        && l.getCredentialType() == credentialType
-                        && l.getValidUntilMs() >= nowMs)
+        byte[] rootOnchain = liveOnchainRoot(policyId);
+        List<MemberLeaf> leaves = activeLeaves(policyId, rootOnchain);
+        MpfTrie publishedTrie = buildTrieFromSnapshot(leaves, policyId);
+        byte[] rootLocal = rootBytes(publishedTrie);
+        if (!Arrays.equals(rootLocal, rootOnchain)) {
+            log.warn("inclusionProof({}): no verified snapshot for live root {}", policyId,
+                    HexUtil.encodeHexString(rootOnchain));
+            return Optional.empty();
+        }
+        Optional<MemberLeaf> leaf = leaves.stream()
+                .filter(l -> memberPkhHex.equalsIgnoreCase(l.credentialHash())
+                        && l.credentialType() == credentialType
+                        && l.validUntilMs() >= nowMs)
                 .findFirst();
         if (leaf.isEmpty()) return Optional.empty();
         // The trie is keyed by `credential_type ‖ hash`, so the proof must be requested
@@ -101,14 +123,207 @@ public class RwaTokenAllowlistService {
         // nothing, which would turn every membership proof into a silent "not a member".
         return publishedTrie.getProofPlutusData(membershipLeafKey(memberPkh, credentialType)).map(proof -> {
             byte[] proofCbor = serializePlutusData(proof);
-            byte[] rootOnchain = resolveOnchainRoot(policyId);
-            byte[] rootLocal = rootBytes(publishedTrie);
-            if (!java.util.Arrays.equals(rootLocal, rootOnchain)) {
-                log.warn("inclusionProof({}): published-trie root {} != DB onchain root {} — publish tracking drifted",
-                        policyId, HexUtil.encodeHexString(rootLocal), HexUtil.encodeHexString(rootOnchain));
-            }
-            return new MpfLeafView(proofCbor, leaf.get().getValidUntilMs(), rootOnchain, rootLocal);
+            return new MpfLeafView(proofCbor, leaf.get().validUntilMs(), rootOnchain, rootLocal);
         });
+    }
+
+    /** Proof for an unsubmitted registration chain. The caller supplies the root from
+     *  that chain's GS datum; no chain lookup or mutable leaf-table fallback occurs. */
+    public Optional<MpfLeafView> inclusionProofFromSnapshot(String policyId, byte[] expectedRoot,
+                                                             byte[] memberPkh, short credentialType,
+                                                             long nowMs) {
+        String rootHex = HexUtil.encodeHexString(expectedRoot);
+        var stored = snapshotRepo.findByProgrammableTokenPolicyIdAndRootHash(policyId, rootHex);
+        if (stored.isEmpty()) return Optional.empty();
+        List<MemberLeaf> leaves = decodeLeaves(stored.get().getLeavesJson());
+        MpfTrie trie = buildTrieFromSnapshot(leaves, policyId);
+        byte[] actualRoot = rootBytes(trie);
+        if (!Arrays.equals(actualRoot, expectedRoot))
+            throw new IllegalStateException("genesis member snapshot does not match its GS root");
+        String memberHex = HexUtil.encodeHexString(memberPkh);
+        var leaf = leaves.stream().filter(l -> l.credentialType() == credentialType
+                && l.credentialHash().equalsIgnoreCase(memberHex)
+                && l.validUntilMs() >= nowMs).findFirst();
+        if (leaf.isEmpty()) return Optional.empty();
+        return trie.getProofPlutusData(membershipLeafKey(memberPkh, credentialType))
+                .map(proof -> new MpfLeafView(serializePlutusData(proof),
+                        leaf.get().validUntilMs(), expectedRoot, actualRoot));
+    }
+
+    /** Retain the exact genesis leaves even before the GS NFT reaches the chain. */
+    @Transactional
+    public void saveGenesisSnapshot(String policyId, byte[] expectedRoot,
+                                    @Nullable MemberLeaf seededMember, String genesisTxHash) {
+        List<MemberLeaf> leaves = seededMember == null ? List.of() : List.of(seededMember);
+        if (!Arrays.equals(rootBytes(buildTrieFromSnapshot(leaves, policyId)), expectedRoot))
+            throw new IllegalStateException("genesis member snapshot root differs from GS datum");
+        String rootHex = HexUtil.encodeHexString(expectedRoot);
+        var existing = snapshotRepo.findByProgrammableTokenPolicyIdAndRootHash(policyId, rootHex);
+        if (existing.isPresent()) {
+            if (!decodeLeaves(existing.get().getLeavesJson()).equals(leaves))
+                throw new IllegalStateException("existing genesis snapshot has different leaves");
+            return;
+        }
+        saveSnapshot(policyId, rootHex, rootHex, leaves, genesisTxHash);
+    }
+
+    /** Read the GS NFT rather than the registration cache when deciding which snapshot is active. */
+    public byte[] liveOnchainRoot(String policyId) {
+        var reg = tokenRegRepo.findByProgrammableTokenPolicyId(policyId)
+                .orElseThrow(() -> new IllegalArgumentException("rwa-token registration not found"));
+        var utxo = utxoProvider.findUtxoByAsset(reg.getGlobalStatePolicyId(),
+                RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX)
+                .orElseThrow(() -> new IllegalStateException("GS NFT is unavailable on chain"));
+        if (utxo.getInlineDatum() == null) throw new IllegalStateException("GS datum is unavailable");
+        PlutusData datum;
+        try {
+            datum = PlutusData.deserialize(HexUtil.decodeHexString(utxo.getInlineDatum()));
+        } catch (com.bloxbean.cardano.client.exception.CborDeserializationException e) {
+            throw new IllegalStateException("GS datum cannot be decoded", e);
+        }
+        if (!(datum instanceof ConstrPlutusData gs) || gs.getData().getPlutusDataList().size() != 14
+                || !(gs.getData().getPlutusDataList().get(8) instanceof BytesPlutusData root)) {
+            throw new IllegalStateException("GS datum has an unexpected layout");
+        }
+        return root.getValue();
+    }
+
+    public List<MemberLeaf> activeLeaves(String policyId) {
+        return activeLeaves(policyId, liveOnchainRoot(policyId));
+    }
+
+    /** Legacy bootstrap is allowed only if the old published rows reproduce the live root. */
+    @Transactional
+    public List<MemberLeaf> activeLeaves(String policyId, byte[] liveRoot) {
+        String rootHex = HexUtil.encodeHexString(liveRoot);
+        var stored = snapshotRepo.findByProgrammableTokenPolicyIdAndRootHash(policyId, rootHex);
+        if (stored.isPresent()) {
+            reconcileRootMetadata(policyId, rootHex, stored.get().getTxHash());
+            return decodeLeaves(stored.get().getLeavesJson());
+        }
+        List<MemberLeaf> legacy = leafRepo.findPublishedByProgrammableTokenPolicyId(policyId).stream()
+                .map(this::asMemberLeaf).toList();
+        if (!Arrays.equals(rootBytes(buildTrieFromSnapshot(legacy, policyId)), liveRoot)) {
+            throw new IllegalStateException("published membership snapshot cannot be reconciled with the live GS root");
+        }
+        saveSnapshot(policyId, rootHex, rootHex, legacy, null);
+        reconcileRootMetadata(policyId, rootHex, null);
+        return legacy;
+    }
+
+    private void reconcileRootMetadata(String policyId, String rootHex, String attemptedTxHash) {
+        tokenRegRepo.findByProgrammableTokenPolicyId(policyId).ifPresent(reg -> {
+            if (rootHex.equalsIgnoreCase(reg.getMemberRootHashOnchain())) return;
+            reg.setMemberRootHashOnchain(rootHex);
+            if (attemptedTxHash != null) reg.setLastRootUpdateTxHash(attemptedTxHash);
+            reg.setLastRootUpdateAt(Instant.now());
+            tokenRegRepo.save(reg);
+        });
+    }
+
+    public List<MemberLeaf> pendingLeaves(String policyId) {
+        return pendingLeaves(policyId, activeLeaves(policyId));
+    }
+
+    private List<MemberLeaf> pendingLeaves(String policyId, List<MemberLeaf> baseline) {
+        java.util.Map<String, Long> published = baseline.stream().collect(
+                java.util.stream.Collectors.toMap(this::memberKey, MemberLeaf::validUntilMs));
+        return leafRepo.findByProgrammableTokenPolicyId(policyId).stream()
+                .map(this::asMemberLeaf)
+                .filter(leaf -> leaf.validUntilMs() > System.currentTimeMillis())
+                .filter(leaf -> !java.util.Objects.equals(published.get(memberKey(leaf)), leaf.validUntilMs()))
+                .toList();
+    }
+
+    public MemberCandidate prepareCandidate(String policyId, MemberLeaf manual, Set<String> selectedKeys) {
+        byte[] baselineRoot = liveOnchainRoot(policyId);
+        List<MemberLeaf> baseline = activeLeaves(policyId, baselineRoot);
+        List<MemberLeaf> added = new ArrayList<>();
+        if (manual != null) added.add(manual);
+        List<MemberLeaf> pending = pendingLeaves(policyId, baseline);
+        for (MemberLeaf leaf : pending) {
+            if (selectedKeys.contains(memberKey(leaf))) added.add(leaf);
+        }
+        if (added.size() != selectedKeys.size() + (manual == null ? 0 : 1)) {
+            throw new IllegalArgumentException("selected pending members changed; refresh and review again");
+        }
+        if (added.isEmpty()) throw new IllegalArgumentException("select a pending member or enter a manual credential");
+        java.util.Map<String, MemberLeaf> byKey = new java.util.HashMap<>();
+        for (MemberLeaf leaf : baseline) byKey.put(memberKey(leaf), leaf);
+        Set<String> changed = new java.util.HashSet<>();
+        for (MemberLeaf leaf : added) {
+            validateLeaf(leaf);
+            String key = memberKey(leaf);
+            if (!changed.add(key)) throw new IllegalArgumentException("member credential was selected more than once");
+            if (leaf.equals(byKey.get(key))) throw new IllegalArgumentException("member is already published with that expiry");
+            byKey.put(key, leaf);
+        }
+        List<MemberLeaf> result = new ArrayList<>(byKey.values());
+        result.sort(java.util.Comparator.comparing(this::memberKey));
+        return new MemberCandidate(HexUtil.encodeHexString(baselineRoot),
+                HexUtil.encodeHexString(rootBytes(buildTrieFromSnapshot(result, policyId))),
+                baseline, added, List.copyOf(result));
+    }
+
+    @Transactional
+    public void saveCandidate(String policyId, MemberCandidate candidate, String txHash) {
+        saveSnapshot(policyId, candidate.rootHash(), candidate.baselineRootHash(), candidate.leaves(), txHash);
+    }
+
+    private void saveSnapshot(String policyId, String rootHex, String baselineRootHex,
+                              List<MemberLeaf> leaves, String txHash) {
+        if (snapshotRepo.findByProgrammableTokenPolicyIdAndRootHash(policyId, rootHex).isPresent()) return;
+        try {
+            var snapshot = new RwaTokenMemberRootSnapshotEntity();
+            snapshot.setProgrammableTokenPolicyId(policyId);
+            snapshot.setRootHash(rootHex);
+            snapshot.setBaselineRootHash(baselineRootHex);
+            snapshot.setLeavesJson(objectMapper.writeValueAsString(leaves));
+            snapshot.setTxHash(txHash);
+            snapshotRepo.save(snapshot);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("cannot encode member snapshot", e);
+        }
+    }
+
+    private List<MemberLeaf> decodeLeaves(String json) {
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<MemberLeaf>>() {});
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("cannot decode member snapshot", e);
+        }
+    }
+
+    private MemberLeaf asMemberLeaf(RwaTokenMemberLeafEntity leaf) {
+        return new MemberLeaf(leaf.getMemberPkh(), leaf.getCredentialType(), leaf.getValidUntilMs());
+    }
+
+    private String memberKey(MemberLeaf leaf) {
+        return leaf.credentialType() + ":" + leaf.credentialHash().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static void validateLeaf(MemberLeaf leaf) {
+        if (leaf == null || leaf.credentialHash() == null || !leaf.credentialHash().matches("(?i)[0-9a-f]{56}"))
+            throw new IllegalArgumentException("stake credential hash must be 56 hex characters");
+        if (leaf.credentialType() != 0 && leaf.credentialType() != 1)
+            throw new IllegalArgumentException("credential type must be key (0) or script (1)");
+        if (leaf.validUntilMs() <= System.currentTimeMillis())
+            throw new IllegalArgumentException("expiry must be in the future");
+    }
+
+    private MpfTrie buildTrieFromSnapshot(List<MemberLeaf> leaves, String policyId) {
+        MpfTrie trie = new MpfTrie(new TestNodeStore());
+        byte[] policy = securityPolicyIdOf(policyId);
+        for (MemberLeaf leaf : leaves) {
+            trie.put(membershipLeafKey(HexUtil.decodeHexString(leaf.credentialHash()), leaf.credentialType()),
+                    membershipLeafValue(leaf.validUntilMs(), policy, networkId()));
+        }
+        return trie;
+    }
+
+    /** Pure root calculation for cross-language MPF fixture tests. */
+    byte[] rootForMembers(String policyId, List<MemberLeaf> leaves) {
+        return rootBytes(buildTrieFromSnapshot(leaves, policyId));
     }
 
     @Transactional
@@ -134,6 +349,10 @@ public class RwaTokenAllowlistService {
     @Transactional
     public void putMember(String policyId, byte[] memberPkh, short credentialType, long validUntilMs,
                           @Nullable String boundAddress, @Nullable String sessionId) {
+        // Preserve the old published leaf values before a Veridian refresh upserts them.
+        byte[] knownRoot = resolveOnchainRoot(policyId);
+        try { activeLeaves(policyId, knownRoot); }
+        catch (IllegalStateException ex) { log.warn("legacy member snapshot unavailable for {}: {}", policyId, ex.getMessage()); }
         String memberPkhHex = HexUtil.encodeHexString(memberPkh);
         // Native upsert avoids the find-then-insert race under concurrent inclusion requests.
         leafRepo.upsertMember(policyId, memberPkhHex, credentialType, validUntilMs, boundAddress, sessionId, Instant.now());

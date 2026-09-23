@@ -29,6 +29,8 @@ public interface RwaTokenRegistrationRepository
 
     boolean existsByProgrammableTokenPolicyId(String policyId);
 
+    boolean existsByBootstrapTxHashAndBootstrapOutputIndex(String txHash, int outputIndex);
+
     /** Newest-first listing for the discovery / verify index. */
     List<RwaTokenRegistrationEntity> findAllByOrderByLastRootUpdateAtDesc(Pageable pageable);
 

@@ -32,6 +32,7 @@ import {
 } from "@/lib/api/keri";
 import { setKycProof, type KycProofCookie } from "@/lib/utils/kyc-cookie";
 import { getKeriSessionIdForWallet } from "@/lib/utils/keri-session";
+import { bindSessionToToken } from "@/lib/api/kyc-extended";
 
 type KycStep = 1 | 2 | 3 | 4;
 
@@ -44,6 +45,9 @@ interface KycVerificationFlowProps {
    *  Set on entrypoints where the user explicitly came to (re-)verify (e.g. /verify page),
    *  so a stale cached proof from a prior transfer flow doesn't auto-complete the flow. */
   forceFresh?: boolean;
+  /** Bind the verified KERI session before proof generation so the module hook
+   *  stages its membership. The token admin still publishes the root. */
+  stageMembership?: boolean;
 }
 
 export function KycVerificationFlow({
@@ -52,6 +56,7 @@ export function KycVerificationFlow({
   onComplete,
   onBack,
   forceFresh = false,
+  stageMembership = false,
 }: KycVerificationFlowProps) {
   const [step, setStep] = useState<KycStep>(1);
   const [isLoading, setIsLoading] = useState(false);
@@ -330,6 +335,9 @@ export function KycVerificationFlow({
     setIsLoading(true);
     setError(null);
     try {
+      if (stageMembership) {
+        await bindSessionToToken(policyId, sessionIdRef.current);
+      }
       const proofResponse = await generateKycProof(sessionIdRef.current);
       const proof: KycProofCookie = {
         payloadHex: proofResponse.payloadHex,
@@ -348,7 +356,7 @@ export function KycVerificationFlow({
     } finally {
       setIsLoading(false);
     }
-  }, [policyId, onComplete]);
+  }, [policyId, senderAddress, onComplete, stageMembership]);
 
   // ── Step indicator ────────────────────────────────────────────────────────
 

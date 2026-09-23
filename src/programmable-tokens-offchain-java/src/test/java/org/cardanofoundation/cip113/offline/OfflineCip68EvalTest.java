@@ -726,6 +726,31 @@ public class OfflineCip68EvalTest {
                 "no redeemer was evaluated on the member-root-hash update");
     }
 
+    @Test
+    public void rwaTokenSeededFirstMintBuildsBeforeGenesisIsOnChain() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L, "1000",
+                BootstrapFixture.ALICE.baseAddress(), false, true);
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(st.built().registrationCborHex()));
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("rwa-token/seeded-registration", tx) > 0,
+                "seeded first-mint registration must evaluate against its chained genesis root");
+        byte[] aliceStake = new Address(BootstrapFixture.ALICE.baseAddress())
+                .getDelegationCredentialHash().orElseThrow();
+        Assertions.assertTrue(st.allowlist().inclusionProof(st.built().programmableTokenPolicyId(),
+                aliceStake, (short) 0, System.currentTimeMillis()).isPresent(),
+                "once genesis is live, the ordinary proof path must find the exact saved snapshot");
+    }
+
+    @Test
+    public void rwaTokenEarlierUnsignedChainStillWorksAfterRetry() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L, "1000",
+                BootstrapFixture.ALICE.baseAddress(), false, true, true);
+        byte[] aliceStake = new Address(BootstrapFixture.ALICE.baseAddress())
+                .getDelegationCredentialHash().orElseThrow();
+        Assertions.assertTrue(st.allowlist().inclusionProof(st.built().programmableTokenPolicyId(),
+                aliceStake, (short) 0, System.currentTimeMillis()).isPresent(),
+                "the earlier chain must retain its proof if it lands after a retry is built");
+    }
+
     /**
      * The admin global-state actions validate.
      *
@@ -1635,7 +1660,8 @@ public class OfflineCip68EvalTest {
                     built,
             org.cardanofoundation.cip113.service.UtxoProvider utxoProvider,
             org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository
-                    registrationRepository) {
+                    registrationRepository,
+            org.cardanofoundation.cip113.service.RwaTokenAllowlistService allowlist) {
     }
 
     /**
@@ -1654,6 +1680,10 @@ public class OfflineCip68EvalTest {
         Mockito.when(utxoProvider.findIssuanceCborHexUtxo(Mockito.any()))
                 .thenReturn(java.util.Optional.of(boot.issuanceCborHexUtxo()));
         Mockito.when(utxoProvider.findUtxos(Mockito.anyString()))
+                .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
+        Mockito.when(utxoProvider.findUtxosFromBlockfrost(Mockito.anyString()))
+                .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
+        Mockito.when(utxoProvider.findAllCurrentUtxosFromBlockfrost(Mockito.anyString()))
                 .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
         // Linked-list anchors (denylist, power users) are found BY POLICY, not by unit —
         // their asset name is the empty root name — so the mutation builders need this or
@@ -1697,6 +1727,12 @@ public class OfflineCip68EvalTest {
         });
         Mockito.when(repo.findByProgrammableTokenPolicyId(Mockito.anyString()))
                 .thenAnswer(inv -> java.util.Optional.ofNullable(registrations.get((String) inv.getArgument(0))));
+        Mockito.when(repo.existsByProgrammableTokenPolicyId(Mockito.anyString()))
+                .thenAnswer(inv -> registrations.containsKey((String) inv.getArgument(0)));
+        Mockito.when(repo.existsByBootstrapTxHashAndBootstrapOutputIndex(Mockito.anyString(), Mockito.anyInt()))
+                .thenAnswer(inv -> registrations.values().stream().anyMatch(row ->
+                        inv.getArgument(0).equals(row.getBootstrapTxHash())
+                                && inv.getArgument(1).equals(row.getBootstrapOutputIndex())));
         Mockito.when(repo.claimCip68ReferenceMint(Mockito.anyString())).thenAnswer(inv -> {
             var row = registrations.get((String) inv.getArgument(0));
             if (row == null || row.isCip68ReferenceMinted()) {
@@ -1744,6 +1780,25 @@ public class OfflineCip68EvalTest {
                                                   String initialMintQuantity, String recipientAddress,
                                                   boolean rewardAccountsRegistered)
             throws Exception {
+        return rwaTokenChain(metadata, initialMintableAmount, initialMintQuantity,
+                recipientAddress, rewardAccountsRegistered, false);
+    }
+
+    private RwaTokenChain rwaTokenChain(Cip68Metadata metadata, long initialMintableAmount,
+                                                  String initialMintQuantity, String recipientAddress,
+                                                  boolean rewardAccountsRegistered,
+                                                  boolean seedReceiverKyc)
+            throws Exception {
+        return rwaTokenChain(metadata, initialMintableAmount, initialMintQuantity,
+                recipientAddress, rewardAccountsRegistered, seedReceiverKyc, false);
+    }
+
+    private RwaTokenChain rwaTokenChain(Cip68Metadata metadata, long initialMintableAmount,
+                                                  String initialMintQuantity, String recipientAddress,
+                                                  boolean rewardAccountsRegistered,
+                                                  boolean seedReceiverKyc,
+                                                  boolean submitEarlierAttempt)
+            throws Exception {
         var chain = new OfflineChain();
         var boot = BootstrapFixture.bootstrap(chain);
         var label = "rwa-token";
@@ -1753,6 +1808,55 @@ public class OfflineCip68EvalTest {
 
         var utxoProvider = rwaTokenUtxoProvider(chain, boot);
         var registrationRepository = rwaTokenRegistrationRepository(registrations);
+        var reservationRepository = Mockito.mock(org.cardanofoundation.cip113.repository.RwaGenesisReservationRepository.class);
+        var fundingReservationRepository = Mockito.mock(org.cardanofoundation.cip113.repository.RwaGenesisFundingReservationRepository.class);
+        var fundingReservations = new java.util.HashMap<String, String>();
+        Mockito.when(fundingReservationRepository.existsById(Mockito.anyString()))
+                .thenAnswer(inv -> fundingReservations.containsKey(inv.getArgument(0)));
+        Mockito.when(fundingReservationRepository.claim(Mockito.anyString(), Mockito.anyString()))
+                .thenAnswer(inv -> fundingReservations.putIfAbsent(inv.getArgument(0), inv.getArgument(1)) == null ? 1 : 0);
+        Mockito.when(fundingReservationRepository.findById(Mockito.anyString()))
+                .thenAnswer(inv -> {
+                    String ref = inv.getArgument(0);
+                    String gs = fundingReservations.get(ref);
+                    if (gs == null) return java.util.Optional.empty();
+                    var row = new org.cardanofoundation.cip113.entity.RwaGenesisFundingReservationEntity();
+                    row.setInputRef(ref);
+                    row.setGlobalStatePolicyId(gs);
+                    return java.util.Optional.of(row);
+                });
+        var reservations = new java.util.HashMap<String, String>();
+        Mockito.when(reservationRepository.existsByBootstrapTxHashAndBootstrapOutputIndex(Mockito.anyString(), Mockito.anyInt()))
+                .thenAnswer(inv -> reservations.containsValue(inv.getArgument(0) + "#" + inv.getArgument(1)));
+        Mockito.when(reservationRepository.claim(Mockito.anyString(), Mockito.anyString(), Mockito.anyInt()))
+                .thenAnswer(inv -> {
+                    String gs = inv.getArgument(0);
+                    String ref = inv.getArgument(1) + "#" + inv.getArgument(2);
+                    if (reservations.containsKey(gs) || reservations.containsValue(ref)) return 0;
+                    reservations.put(gs, ref);
+                    return 1;
+                });
+        org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.ChainBuildResult firstBuilt = null;
+        if (seedReceiverKyc) {
+            chain.seedAda("rwa-retry-fresh-funding", BootstrapFixture.ADMIN.baseAddress(), 0, 200);
+        }
+        var allowlist = Mockito.mock(org.cardanofoundation.cip113.service.RwaTokenAllowlistService.class);
+        if (seedReceiverKyc) {
+            var snapshotRepo = Mockito.mock(org.cardanofoundation.cip113.repository.RwaTokenMemberRootSnapshotRepository.class);
+            var snapshots = new java.util.HashMap<String, org.cardanofoundation.cip113.entity.RwaTokenMemberRootSnapshotEntity>();
+            Mockito.when(snapshotRepo.findByProgrammableTokenPolicyIdAndRootHash(Mockito.anyString(), Mockito.anyString()))
+                    .thenAnswer(inv -> java.util.Optional.ofNullable(snapshots.get(
+                            inv.getArgument(0) + ":" + inv.getArgument(1))));
+            Mockito.when(snapshotRepo.save(Mockito.any())).thenAnswer(inv -> {
+                var snapshot = (org.cardanofoundation.cip113.entity.RwaTokenMemberRootSnapshotEntity) inv.getArgument(0);
+                snapshots.put(snapshot.getProgrammableTokenPolicyId() + ":" + snapshot.getRootHash(), snapshot);
+                return snapshot;
+            });
+            allowlist = new org.cardanofoundation.cip113.service.RwaTokenAllowlistService(
+                    registrationRepository,
+                    Mockito.mock(org.cardanofoundation.cip113.repository.RwaTokenMemberLeafRepository.class),
+                    snapshotRepo, utxoProvider, HandlerFixtures.OBJECT_MAPPER, HandlerFixtures.NETWORK);
+        }
 
         // The chain orchestrator builds genesis → AddPowerUser → registration back-to-back with
         // nothing submitted in between, handing each transaction's outputs to this supplier so
@@ -1766,8 +1870,10 @@ public class OfflineCip68EvalTest {
                         HandlerFixtures.moduleService(),
                         HandlerFixtures.protocolScriptBuilderService()),
                 HandlerFixtures.protocolScriptBuilderService(),
-                Mockito.mock(org.cardanofoundation.cip113.service.RwaTokenAllowlistService.class),
+                allowlist,
                 registrationRepository,
+                reservationRepository,
+                fundingReservationRepository,
                 Mockito.mock(org.cardanofoundation.cip113.repository.RwaTokenDenylistEntryRepository.class),
                 // The power-user DB MIRROR, stubbed for the admin only.
                 //
@@ -1829,20 +1935,86 @@ public class OfflineCip68EvalTest {
                 .bootstrapPowerUserPkh(adminPkh)
                 .bootstrapPowerUserCapabilities(255)
                 .bootstrapPowerUserLabel("admin")
-                .requiresReceiverKyc(false)
+                .requiresReceiverKyc(seedReceiverKyc)
                 .requiresSenderKyc(false)
+                .seedRecipientInAllowlistAtGenesis(seedReceiverKyc)
                 .build();
 
         var chainResult = handler.buildFullRegistrationChain(registerRequest, boot.params());
         Assertions.assertTrue(chainResult.isSuccessful(),
                 "rwa-token registration chain build failed: " + chainResult.error());
 
+        if (seedReceiverKyc) {
+            // The first chain was built but abandoned. A fresh seed expiry changes
+            // the genesis root while the previous snapshot and registration row remain.
+            Thread.sleep(5);
+            var firstRootTx = chainResult.metadata().genesisCborHex();
+            firstBuilt = chainResult.metadata();
+            String firstPolicy = chainResult.metadata().programmableTokenPolicyId();
+            var prior = registrations.get(firstPolicy);
+            String priorJson = HandlerFixtures.OBJECT_MAPPER.writeValueAsString(prior);
+            var directUnspent = utxoProvider.findUtxosFromBlockfrost(BootstrapFixture.ADMIN.baseAddress());
+            Assertions.assertTrue(directUnspent.stream().anyMatch(u ->
+                            u.getTxHash().equalsIgnoreCase(prior.getBootstrapTxHash())
+                                    && u.getOutputIndex() == prior.getBootstrapOutputIndex()),
+                    "abandoned genesis bootstrap " + prior.getBootstrapTxHash() + "#" + prior.getBootstrapOutputIndex()
+                    + " must still be unspent in the offline backend: "
+                            + directUnspent.stream().map(u -> u.getTxHash() + "#" + u.getOutputIndex()).toList());
+            chainResult = handler.buildFullRegistrationChain(registerRequest, boot.params());
+            Assertions.assertTrue(chainResult.isSuccessful(),
+                    "retry after an unsubmitted seeded chain failed: " + chainResult.error());
+            Assertions.assertNotEquals(firstRootTx, chainResult.metadata().genesisCborHex(),
+                    "retry must build a new exact genesis snapshot");
+            Assertions.assertNotEquals(firstPolicy, chainResult.metadata().programmableTokenPolicyId(),
+                    "retry must use a fresh bootstrap and policy");
+            Assertions.assertEquals(priorJson,
+                    HandlerFixtures.OBJECT_MAPPER.writeValueAsString(registrations.get(firstPolicy)),
+                    "retry must preserve the previous attempt's metadata");
+            int persistedAttempts = registrations.size();
+            Mockito.when(reservationRepository.claim(Mockito.anyString(), Mockito.anyString(), Mockito.anyInt()))
+                    .thenReturn(0);
+            var raced = handler.buildFullRegistrationChain(registerRequest, boot.params());
+            Assertions.assertFalse(raced.isSuccessful(), "a concurrent claim must not create another registration");
+            Assertions.assertTrue(String.valueOf(raced.error()).contains("reserved"));
+            Assertions.assertEquals(persistedAttempts, registrations.size());
+            Mockito.when(reservationRepository.existsByBootstrapTxHashAndBootstrapOutputIndex(
+                    Mockito.anyString(), Mockito.anyInt())).thenReturn(true);
+            var exhausted = handler.buildFullRegistrationChain(registerRequest, boot.params());
+            Assertions.assertFalse(exhausted.isSuccessful(), "no eligible bootstrap must fail before persistence");
+            Assertions.assertTrue(String.valueOf(exhausted.error()).contains("Fund a fresh ADA-only UTxO"));
+            Assertions.assertEquals(persistedAttempts, registrations.size());
+            if (submitEarlierAttempt) {
+                chainResult = org.cardanofoundation.cip113.model.TransactionContext.ok(
+                        firstBuilt.genesisCborHex(), firstBuilt);
+            }
+        }
+
         var built = chainResult.metadata();
+        // Exercise the same final-chain funding audit the controller runs after the
+        // builder. It must recognize chained outputs and protocol inputs while
+        // reserving every external wallet input used by later phases.
+        var finalHandler = Mockito.mock(org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.class);
+        Mockito.when(finalHandler.buildFullRegistrationChain(Mockito.any(), Mockito.any()))
+                .thenReturn(org.cardanofoundation.cip113.model.TransactionContext.ok(
+                        built.genesisCborHex(), built));
+        var factory = Mockito.mock(org.cardanofoundation.cip113.service.module.ModuleHandlerFactory.class);
+        Mockito.when(factory.getHandler(Mockito.eq("rwa-token"), Mockito.any())).thenReturn(finalHandler);
+        var creation = new org.cardanofoundation.cip113.service.RwaTokenCreationService(
+                factory, utxoProvider, registrationRepository, fundingReservationRepository);
+        Assertions.assertEquals(built, creation.buildChain(registerRequest, boot.params()));
         log.info("[{}] chain built: globalStatePolicy={} progTokenPolicy={} denylistPolicy={}",
                 label, built.globalStatePolicyId(), built.programmableTokenPolicyId(),
                 built.denylistPolicyId());
 
         // Virtually submit the chain in order, so each tx sees the previous one's outputs.
+        if (seedReceiverKyc) {
+            byte[] recipientStake = new Address(recipientAddress).getDelegationCredentialHash().orElseThrow();
+            var seededAllowlist = allowlist;
+            Assertions.assertThrows(IllegalStateException.class,
+                    () -> seededAllowlist.inclusionProof(built.programmableTokenPolicyId(), recipientStake,
+                            (short) 0, System.currentTimeMillis()),
+                    "public proof lookup must not trust an unsubmitted genesis snapshot");
+        }
         var stages = new java.util.LinkedHashMap<String, String>();
         stages.put("genesis", built.genesisCborHex());
         stages.put("addPowerUser", built.addPowerUserCborHex());
@@ -1882,7 +2054,7 @@ public class OfflineCip68EvalTest {
         }
 
         return new RwaTokenChain(chain, boot, handler, registrations, built,
-                utxoProvider, registrationRepository);
+                utxoProvider, registrationRepository, allowlist);
     }
 
     /** A rwa-token mint request against the offline fixture's admin/recipient pair. */

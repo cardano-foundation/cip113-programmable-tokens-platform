@@ -13,11 +13,15 @@
     "test:parameterization": "node test-parameterization.js",
     "test:deployment": "tsc lib/deployment/*.ts --outDir .deploy-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .deploy-build && node test-deployment-derivation.js",
     "test:upgrade": "tsc lib/upgrade/*.ts lib/tx/*.ts --outDir .upgrade-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-upgrade-witness.js",
-    "test:multitx": "tsc lib/tx/*.ts --outDir .upgrade-build/tx --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-multi-tx.js"
+    "test:multitx": "tsc lib/tx/*.ts --outDir .upgrade-build/tx --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-multi-tx.js",
+    "test:member-root": "tsc lib/rwa/member-root.ts lib/rwa/review-root-tx.ts --outDir .root-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-member-root.js && node test-review-root-tx.js",
+    "test:stake-address": "tsc lib/rwa/stake-address.ts --outDir .stake-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-stake-address.js",
+    "test:cmta-attestation": "tsc lib/rwa/attestation.ts --outDir .attestation-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-cmta-attestation.js"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.9.0",
     "@hookform/resolvers": "^3.9.0",
+    "@noble/hashes": "1.8.0",
     "@utxorpc/sdk": "^0.7.0",
     "@utxorpc/spec": "^0.18.1",
     "cbor": "^10.0.11",

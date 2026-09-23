@@ -93,6 +93,9 @@ kycExtended:
 # rwa-token autonomous root-sync job. Same admin-signing-key reuse caveat
 # as the kyc-extended block above.
 rwaToken:
+  # Required: exact frontend NEXT_PUBLIC_API_BASE_URL (without trailing slash) plus /api/v1.
+  # Example: https://issuer.example/api/v1. Must identify this deployment, not just its network.
+  creationAudience: ${RWA_TOKEN_CREATION_AUDIENCE:}
   enabled: ${SECURITY_TOKEN_ENABLED:true}
   rootHashUpdateIntervalSeconds: ${SECURITY_TOKEN_ROOT_UPDATE_INTERVAL_SECONDS:30}
   memberValidityDays: ${SECURITY_TOKEN_MEMBER_VALIDITY_DAYS:30}

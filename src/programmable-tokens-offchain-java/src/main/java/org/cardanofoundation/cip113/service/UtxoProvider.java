@@ -126,6 +126,27 @@ public class UtxoProvider {
         return getBlockfrostUtxos(address);
     }
 
+    /** Complete current-unspent address view for one-shot bootstrap selection.
+     *  A truncated first page could hide a safe retry input. Any incomplete or
+     *  failed lookup throws so registration cannot infer availability. */
+    public List<Utxo> findAllCurrentUtxosFromBlockfrost(String address) {
+        List<Utxo> result = new java.util.ArrayList<>();
+        try {
+            for (int page = 1; page <= 100; page++) {
+                var response = bfBackendService.getUtxoService().getUtxos(address, 100, page);
+                if (response.code() == 404 && page == 1) return List.of();
+                if (!response.isSuccessful() || response.getValue() == null)
+                    throw new IllegalStateException("current UTxO lookup failed at page " + page);
+                var batch = response.getValue();
+                result.addAll(batch);
+                if (batch.size() < 100) return result;
+            }
+            throw new IllegalStateException("current UTxO lookup exceeded 100 pages");
+        } catch (ApiException e) {
+            throw new IllegalStateException("current UTxO lookup failed", e);
+        }
+    }
+
     private List<Utxo> getBlockfrostUtxos(String address) {
         try {
             var utxoResult = bfBackendService.getUtxoService().getUtxos(address, 100, 1);

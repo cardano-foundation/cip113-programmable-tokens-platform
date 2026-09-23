@@ -95,7 +95,7 @@ export default function VerifyPolicyPage() {
   useEffect(() => {
     if (viewState.kind !== "ready") return;
     if (!walletAddress) return;
-    bindSessionToToken(policyId).catch((e) => {
+    bindSessionToToken(policyId, getKeriSessionIdForWallet(walletAddress)).catch((e) => {
       // eslint-disable-next-line no-console
       console.warn("[verify] bindSessionToToken failed", e);
     });

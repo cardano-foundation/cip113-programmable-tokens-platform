@@ -35,7 +35,6 @@ import {
   submitTokenChain,
   parseSubmitChainFailure,
   getRwaTokenGlobalState,
-  acknowledgeRootPublish,
   type GsChangeSpec,
   type SubmitChainPartialFailure,
 } from "@/lib/api/rwa-token";
@@ -619,6 +618,7 @@ function RwaTokenGlobalStatePanel({
     securityInfoHex: string | null;
     memberRootHash: string | null;
     memberRootHashLocal: string | null;
+    pendingMemberCount: number;
     trustedEntityVkeys: string[];
     adminCredentialHash: string | null;
     /** Which minting authority the permanent proxy currently delegates to. */
@@ -634,7 +634,6 @@ function RwaTokenGlobalStatePanel({
   const [securityInfo, setSecurityInfo] = useState("");
   const [trustedEntities, setTrustedEntities] = useState<string[]>([]);
   const [newEntityInput, setNewEntityInput] = useState("");
-  const [republishRoot, setRepublishRoot] = useState(false);
   // D5 — staged UpdateTrustedEntity operations, keyed by the vkey being replaced.
   // Kept separate from the add/remove diff so a rename is ONE transaction
   // (Remove + Add is two, and leaves the entity briefly absent on chain).
@@ -663,6 +662,7 @@ function RwaTokenGlobalStatePanel({
         securityInfoHex: gs.securityInfoHex ?? null,
         memberRootHash: gs.memberRootHash ?? null,
         memberRootHashLocal: gs.memberRootHashLocal ?? null,
+        pendingMemberCount: gs.pendingMemberCount ?? 0,
         mintingScriptCredentialHash: gs.mintingScriptCredentialHash ?? null,
         upgradesLocked: gs.upgradesLocked ?? false,
         trustedEntityVkeys: gs.trustedEntityVkeys ?? [],
@@ -677,13 +677,6 @@ function RwaTokenGlobalStatePanel({
       setTrustedEntities([...next.trustedEntityVkeys]);
       setTrustedUpdates([]);
       setEditingEntity(null);
-      // Default the re-publish checkbox to TRUE when the on-chain root is stale,
-      // so the admin doesn't have to remember to tick it.
-      setRepublishRoot(
-        next.memberRootHashLocal !== null
-          && next.memberRootHash !== null
-          && next.memberRootHashLocal.toLowerCase() !== next.memberRootHash.toLowerCase()
-      );
     } catch (e) {
       // Drop whatever was on screen. Leaving the previous token's datum in place
       // would render ITS pause flag, supply and trusted entities under the newly
@@ -734,8 +727,7 @@ function RwaTokenGlobalStatePanel({
         : null;
   const deactivated = onchain?.deactivated ?? false;
   const hasChanges = pauseChanged || requiresChanged || senderKycChanged || securityChanged
-    || trustedAdded.length > 0 || trustedRemoved.length > 0 || trustedUpdates.length > 0
-    || republishRoot;
+    || trustedAdded.length > 0 || trustedRemoved.length > 0 || trustedUpdates.length > 0;
 
   /** Each staged change as (spec, human label). The labels are kept alongside so a
    *  partial submit failure can name WHICH change failed and which ones landed —
@@ -808,10 +800,6 @@ function RwaTokenGlobalStatePanel({
         label: `Set requires-receiver-KYC ${requiresReceiverKyc ? "on" : "off"}`,
       });
     }
-    if (republishRoot) {
-      // Backend pulls the current local MPF root when newMemberRootHashHex omitted.
-      changes.push({ spec: { action: "UpdateMemberRootHash" }, label: "Publish member root" });
-    }
     return changes;
   };
 
@@ -848,7 +836,6 @@ function RwaTokenGlobalStatePanel({
         description: `${submit.txHashes.length} transaction${submit.txHashes.length !== 1 ? "s" : ""} submitted`,
         variant: "success",
       });
-      await ackRootPublishIfNeeded(changes.map((c) => c.spec), submit.txHashes);
       setTimeout(() => { refresh(); }, 10_000);
       return true;
     } catch (e) {
@@ -860,9 +847,6 @@ function RwaTokenGlobalStatePanel({
       if (failure.txHashes.length > 0 || failure.failedIndex !== undefined) {
         setPartialFailure({ ...failure, labels });
         setSubmittedHashes(failure.txHashes);
-        // Anything that landed before the failure is real on-chain state, so a
-        // member-root publish among them still needs acknowledging.
-        await ackRootPublishIfNeeded(changes.map((c) => c.spec), failure.txHashes);
         showToast({
           title: failure.txHashes.length > 0 ? "Chain partially applied" : "Submit failed",
           description: failure.txHashes.length > 0
@@ -878,30 +862,6 @@ function RwaTokenGlobalStatePanel({
       return false;
     } finally {
       setBusy(false);
-    }
-  };
-
-  /** If a member-root publish is among the changes that actually landed, tell the
-   *  backend so it can update memberRootHashOnchain / lastRootUpdateTxHash and
-   *  mark the current leaves as published. The autonomous sync job used to do this
-   *  after submit+confirm; with user-driven publishing the frontend has to ack. */
-  const ackRootPublishIfNeeded = async (specs: GsChangeSpec[], txHashes: string[]) => {
-    const rootIdx = specs.findIndex((c) => c.action === "UpdateMemberRootHash");
-    if (rootIdx < 0 || !txHashes[rootIdx]) return;
-    try {
-      const newRoot = specs[rootIdx].newMemberRootHashHex
-        ?? onchain?.memberRootHashLocal
-        ?? "";
-      if (newRoot) {
-        await acknowledgeRootPublish(policyId, {
-          txHash: txHashes[rootIdx],
-          newRootHashHex: newRoot,
-        });
-      }
-    } catch (ackErr) {
-      // Non-fatal: the chain has the new root regardless; the DB just
-      // shows stale "needs publish" until the next refresh fixes it.
-      console.warn("root-publish ack failed:", ackErr);
     }
   };
 
@@ -1496,16 +1456,14 @@ function RwaTokenGlobalStatePanel({
       {(() => {
         const local = onchain.memberRootHashLocal;
         const chain = onchain.memberRootHash;
-        const diverged =
-          local !== null && chain !== null
-            && local.toLowerCase() !== chain.toLowerCase();
+        const diverged = onchain.pendingMemberCount > 0;
         return (
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="block text-sm font-medium text-white">Member root hash</label>
               {diverged ? (
                 <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-2 py-0.5">
-                  <RefreshCw className="h-3 w-3" /> needs publish
+                  <RefreshCw className="h-3 w-3" /> {onchain.pendingMemberCount} staged update(s)
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-success-300 bg-success-500/10 border border-success-500/30 rounded px-2 py-0.5">
@@ -1523,7 +1481,7 @@ function RwaTokenGlobalStatePanel({
                 diverged ? "bg-amber-500/5 border-amber-500/40" : "bg-dark-900 border-dark-700"
               )}>
                 <p className="text-[10px] uppercase tracking-wider text-dark-500">
-                  Local (computed from {trustedEntities.length === 0 ? "0" : "current"} enrolled members)
+                  Confirmed snapshot root
                 </p>
                 <p className={cn(
                   "text-xs font-mono mt-0.5 break-all",
@@ -1531,18 +1489,9 @@ function RwaTokenGlobalStatePanel({
                 )}>{local ?? "—"}</p>
               </div>
             </div>
-            <label className="inline-flex items-center gap-2 mt-3 text-xs text-dark-300">
-              <input
-                type="checkbox"
-                checked={republishRoot}
-                onChange={(e) => setRepublishRoot(e.target.checked)}
-                disabled={busy || !diverged}
-              />
-              {diverged
-                ? "Publish the new local root in this batch (recommended)"
-                : "Re-publish current local root in this batch"}
-            </label>
-            {republishRoot && <p className="mt-1 text-xs text-amber-400">Will submit: UpdateMemberRootHash</p>}
+            <a className="inline-block mt-3 text-xs text-primary-300 underline" href={`/admin/rwa-token/${policyId}`}>
+              Review members and publish a root from the RWA admin page
+            </a>
           </div>
         );
       })()}
