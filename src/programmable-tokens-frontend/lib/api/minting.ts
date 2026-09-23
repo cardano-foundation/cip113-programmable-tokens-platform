@@ -132,8 +132,8 @@ export function prepareLegacyMintRequest(
 ): LegacyMintTokenRequest {
   return {
     issuerBaseAddress: issuerAddress,
-    substandardName: formData.substandardId,
-    substandardIssueContractName: formData.validatorTitle,
+    moduleName: formData.moduleId,
+    moduleIssueContractName: formData.validatorTitle,
     recipientAddress: formData.recipientAddress || undefined,
     assetName: stringToHex(formData.tokenName),
     quantity: formData.quantity,

@@ -66,10 +66,10 @@ export function GlobalStateSection({
   //   admin_credential_hash field of the datum — anyone with the ADMIN
   //   capability bit in the on-chain power-users LL counts as such.
   const manageableTokens = tokens.filter((t) => {
-    if (t.substandardId === "rwa-token") {
+    if (t.moduleId === "rwa-token") {
       return hasRwaTokenCapability(t, RwaTokenCapability.ADMIN);
     }
-    return t.roles.includes("ISSUER_ADMIN") && t.substandardId === "kyc";
+    return t.roles.includes("ISSUER_ADMIN") && t.moduleId === "kyc";
   });
 
   const [selectedToken, setSelectedToken] = useState<AdminTokenInfo | null>(null);
@@ -128,7 +128,7 @@ export function GlobalStateSection({
     // rwa-token has its own GS endpoint at /api/v1/rwa-token/.../global-state
     // and renders RwaTokenGlobalStatePanel below; the kyc compliance endpoint
     // would 404 for rwa-token policies, so skip the load here.
-    if (selectedToken.substandardId === "rwa-token") {
+    if (selectedToken.moduleId === "rwa-token") {
       setGlobalState(null);
       return;
     }
@@ -332,7 +332,7 @@ export function GlobalStateSection({
   // Branch render: rwa-tokens use the BaFin GS validator which has a
   // different datum shape, different actions, and admin gating via
   // admin_credential_hash (not a power-user role). Render its own panel.
-  if (selectedToken?.substandardId === "rwa-token") {
+  if (selectedToken?.moduleId === "rwa-token") {
     return (
       <div className="space-y-6">
         <AdminTokenSelector

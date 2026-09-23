@@ -58,7 +58,7 @@ public class KycSessionEntity {
 
     /**
      * If set, binds this session to a specific kyc-extended programmable token policy.
-     * When non-null and resolves to a kyc-extended substandard, KERI proof generation
+     * When non-null and resolves to a kyc-extended module, KERI proof generation
      * will auto-upsert the user's PKH into the per-policy MPF tree.
      * Set via {@code POST /keri/session/bound-token}.
      */

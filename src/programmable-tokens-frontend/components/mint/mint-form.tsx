@@ -4,8 +4,8 @@ import { useState } from "react";
 import { useWallet } from "@/hooks/use-wallet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { SubstandardSelector } from "./substandard-selector";
-import { Substandard, LegacyMintFormData } from "@/types/api";
+import { ModuleSelector } from "./module-selector";
+import { Module, LegacyMintFormData } from "@/types/api";
 import {
   prepareLegacyMintRequest,
   legacyMintToken,
@@ -15,20 +15,20 @@ import { useToast } from "@/components/ui/use-toast";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 
 interface MintFormProps {
-  substandards: Substandard[];
+  modules: Module[];
   onTransactionBuilt: (
     txHex: string,
     assetName: string,
     quantity: string
   ) => void;
-  preSelectedSubstandard?: string;
+  preSelectedModule?: string;
   preSelectedIssueContract?: string;
 }
 
 export function MintForm({
-  substandards,
+  modules,
   onTransactionBuilt,
-  preSelectedSubstandard,
+  preSelectedModule,
   preSelectedIssueContract,
 }: MintFormProps) {
   const { connected, wallet } = useWallet();
@@ -38,7 +38,7 @@ export function MintForm({
   const [tokenName, setTokenName] = useState("");
   const [quantity, setQuantity] = useState("");
   const [recipientAddress, setRecipientAddress] = useState("");
-  const [substandardId, setSubstandardId] = useState("");
+  const [moduleId, setModuleId] = useState("");
   const [validatorTitle, setValidatorTitle] = useState("");
   const [isBuilding, setIsBuilding] = useState(false);
 
@@ -46,16 +46,16 @@ export function MintForm({
     tokenName: "",
     quantity: "",
     recipientAddress: "",
-    substandard: "",
+    module: "",
   });
 
-  const handleSubstandardSelect = (
-    selectedSubstandardId: string,
+  const handleModuleSelect = (
+    selectedModuleId: string,
     selectedValidatorTitle: string
   ) => {
-    setSubstandardId(selectedSubstandardId);
+    setModuleId(selectedModuleId);
     setValidatorTitle(selectedValidatorTitle);
-    setErrors((prev) => ({ ...prev, substandard: "" }));
+    setErrors((prev) => ({ ...prev, module: "" }));
   };
 
   const validateForm = (): boolean => {
@@ -63,7 +63,7 @@ export function MintForm({
       tokenName: "",
       quantity: "",
       recipientAddress: "",
-      substandard: "",
+      module: "",
     };
 
     if (!tokenName.trim()) {
@@ -84,8 +84,8 @@ export function MintForm({
       newErrors.recipientAddress = "Invalid Cardano address format";
     }
 
-    if (!substandardId || !validatorTitle) {
-      newErrors.substandard = "Please select a substandard and validator";
+    if (!moduleId || !validatorTitle) {
+      newErrors.module = "Please select a module and validator";
     }
 
     setErrors(newErrors);
@@ -126,7 +126,7 @@ export function MintForm({
       const formData: LegacyMintFormData = {
         tokenName,
         quantity,
-        substandardId,
+        moduleId,
         validatorTitle,
         recipientAddress: recipientAddress.trim() || undefined,
       };
@@ -211,17 +211,17 @@ export function MintForm({
         placeholder="addr..."
       />
 
-      {/* Substandard Selector */}
+      {/* Module Selector */}
       <div>
-        <SubstandardSelector
-          substandards={substandards}
-          onSelect={handleSubstandardSelect}
+        <ModuleSelector
+          modules={modules}
+          onSelect={handleModuleSelect}
           disabled={isBuilding}
-          initialSubstandard={preSelectedSubstandard}
+          initialModule={preSelectedModule}
           initialValidator={preSelectedIssueContract}
         />
-        {errors.substandard && (
-          <p className="mt-1 text-sm text-red-400">{errors.substandard}</p>
+        {errors.module && (
+          <p className="mt-1 text-sm text-red-400">{errors.module}</p>
         )}
       </div>
 

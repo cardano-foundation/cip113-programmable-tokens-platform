@@ -1,5 +1,5 @@
 /**
- * KYC-Extended Substandard Flow
+ * KYC-Extended Module Flow
  *
  * Like the basic KYC flow, but receivers must also be in an on-chain allowlist.
  * Whenever a user finishes KYC for this token, the backend automatically inserts
@@ -9,7 +9,7 @@
  * receivers must onboard before they can receive.
  *
  * The wizard reuses every step component from the basic kyc flow (token-details,
- * kyc-config, kyc-cip170, kyc-build-sign, success). Only the substandardId,
+ * kyc-config, kyc-cip170, kyc-build-sign, success). Only the moduleId,
  * name, description, and the buildRegistrationRequest discriminator differ.
  */
 
@@ -34,7 +34,7 @@ function KycExtendedSuccessStep(props: StepComponentProps) {
   const enhancedResult = props.wizardState.finalResult || {
     policyId: buildResult?.tokenPolicyId || '',
     txHash: buildResult?.regTxHash || '',
-    substandardId: 'kyc-extended',
+    moduleId: 'kyc-extended',
     assetName: '',
     quantity: '',
     metadata: {
@@ -107,7 +107,7 @@ const kycExtendedFlow: RegistrationFlow = {
     } | undefined;
 
     return {
-      substandardId: 'kyc-extended',
+      moduleId: 'kyc-extended',
       feePayerAddress: '',
       assetName: tokenDetails?.assetName || '',
       quantity: tokenDetails?.quantity || '',

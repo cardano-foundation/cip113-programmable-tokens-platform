@@ -91,7 +91,7 @@ dependencies {
 tasks.named('test') {
 	useJUnitPlatform()
 	// NOTE: this task used to declare two vendored contract trees (../core-contracts and
-	// ../substandards/rwa-token) as inputs, so that editing an Aiken file invalidated the
+	// ../modules/rwa-token) as inputs, so that editing an Aiken file invalidated the
 	// test task. Those trees are gone — only the compiled blueprints are shipped now, and
 	// they live in src/main/resources, which is already an implicit input. See
 	// docs/CONTRACTS.md and ContractBlueprintPinTest.

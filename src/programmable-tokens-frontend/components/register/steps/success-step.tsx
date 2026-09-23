@@ -62,7 +62,7 @@ export function SuccessStep({
     ?? signSubmitResult?.data?.txHash
     ?? '';
   const flowId: string = wizardState.flowId ?? '';
-  const substandardId: string = registrationResult?.substandardId ?? '';
+  const moduleId: string = registrationResult?.moduleId ?? '';
   const resultAssetName: string = registrationResult?.assetName ?? '';
   const resultQuantity: string = registrationResult?.quantity ?? '';
   // Get blacklist node policy ID from init-blacklist step or finalResult metadata
@@ -73,7 +73,7 @@ export function SuccessStep({
 
   // Computed display values
   const displayTokenName: string = tokenName || resultAssetName || '-';
-  const displaySubstandard: string = flowId || substandardId || '-';
+  const displayModule: string = flowId || moduleId || '-';
   const effectiveQuantity: string = mintedQuantity || tokenQuantity || resultQuantity;
   const displayQuantity: string = effectiveQuantity
     ? BigInt(effectiveQuantity).toLocaleString()
@@ -128,8 +128,8 @@ export function SuccessStep({
             <p className="text-white font-medium">{displayQuantity}</p>
           </div>
           <div>
-            <span className="text-sm text-dark-400">Substandard</span>
-            <p className="text-white font-medium capitalize">{displaySubstandard}</p>
+            <span className="text-sm text-dark-400">Module</span>
+            <p className="text-white font-medium capitalize">{displayModule}</p>
           </div>
         </div>
       </Card>

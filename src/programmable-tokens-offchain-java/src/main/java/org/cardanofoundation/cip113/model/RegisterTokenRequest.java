@@ -9,9 +9,9 @@ import lombok.experimental.SuperBuilder;
 
 /**
  * Base class for token registration requests with polymorphic JSON deserialization.
- * The {@code substandardId} field acts as the discriminator for Jackson.
+ * The {@code moduleId} field acts as the discriminator for Jackson.
  *
- * <p>Each substandard defines its own request subtype with specific fields:</p>
+ * <p>Each module defines its own request subtype with specific fields:</p>
  * <ul>
  *   <li>{@link DummyRegisterRequest} - No additional fields</li>
  *   <li>{@link FreezeAndSeizeRegisterRequest} - adminPubKeyHash, blacklistNodePolicyId</li>
@@ -20,7 +20,7 @@ import lombok.experimental.SuperBuilder;
 @JsonTypeInfo(
         use = JsonTypeInfo.Id.NAME,
         include = JsonTypeInfo.As.EXISTING_PROPERTY,
-        property = "substandardId",
+        property = "moduleId",
         visible = true
 )
 @JsonSubTypes({
@@ -37,9 +37,9 @@ import lombok.experimental.SuperBuilder;
 public abstract class RegisterTokenRequest {
 
     /**
-     * The substandard identifier (discriminator for polymorphic deserialization).
+     * The module identifier (discriminator for polymorphic deserialization).
      */
-    private String substandardId;
+    private String moduleId;
 
     /**
      * The address that pays for the transaction fees.
@@ -71,7 +71,7 @@ public abstract class RegisterTokenRequest {
      * policy instead of a single bare asset:
      * <ul>
      *   <li>the user token, its name prefixed with the CIP-67 {@code (333)} label — always
-     *       {@code (333)}, whatever the quantity, because none of the pinned substandard
+     *       {@code (333)}, whatever the quantity, because none of the pinned module
      *       contracts caps <em>lifetime</em> supply and only such a cap entitles a token to the
      *       {@code (222)} non-fungibility claim (see
      *       {@link org.cardanofoundation.cip113.util.Cip68#userTokenLabel}),</li>
@@ -80,7 +80,7 @@ public abstract class RegisterTokenRequest {
      *       can spend it later to update the metadata.</li>
      * </ul>
      *
-     * <p>Note this changes {@code assetName} on chain, and for substandards that bake the asset
+     * <p>Note this changes {@code assetName} on chain, and for modules that bake the asset
      * name into a script parameter (freeze-and-seize, rwa-token) it therefore changes the
      * resulting token policy id.
      *

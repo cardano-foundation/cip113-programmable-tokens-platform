@@ -5,7 +5,7 @@ import { useWallet } from "@/hooks/use-wallet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ValidatorTripleSelector } from "./validator-triple-selector";
-import { Substandard, DummyRegisterRequest, FreezeAndSeizeRegisterRequest } from "@/types/api";
+import { Module, DummyRegisterRequest, FreezeAndSeizeRegisterRequest } from "@/types/api";
 import { getPaymentKeyHash } from "@/lib/utils/address";
 import {
   registerToken,
@@ -15,11 +15,11 @@ import { useToast } from "@/components/ui/use-toast";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 
 interface RegistrationFormProps {
-  substandards: Substandard[];
+  modules: Module[];
   onTransactionBuilt: (
     unsignedCborTx: string,
     policyId: string,
-    substandardId: string,
+    moduleId: string,
     issueContractName: string,
     tokenName: string,
     quantity: string,
@@ -28,7 +28,7 @@ interface RegistrationFormProps {
 }
 
 export function RegistrationForm({
-  substandards,
+  modules,
   onTransactionBuilt,
 }: RegistrationFormProps) {
   const { connected, wallet } = useWallet();
@@ -38,7 +38,7 @@ export function RegistrationForm({
   const [tokenName, setTokenName] = useState("");
   const [quantity, setQuantity] = useState("");
   const [recipientAddress, setRecipientAddress] = useState("");
-  const [substandardId, setSubstandardId] = useState("");
+  const [moduleId, setModuleId] = useState("");
   const [issueContract, setIssueContract] = useState("");
   const [transferContract, setTransferContract] = useState("");
   const [thirdPartyContract, setThirdPartyContract] = useState("");
@@ -48,20 +48,20 @@ export function RegistrationForm({
     tokenName: "",
     quantity: "",
     recipientAddress: "",
-    substandard: "",
+    module: "",
   });
 
   const handleValidatorSelect = (
-    selectedSubstandardId: string,
+    selectedModuleId: string,
     selectedIssueContract: string,
     selectedTransferContract: string,
     selectedThirdPartyContract?: string
   ) => {
-    setSubstandardId(selectedSubstandardId);
+    setModuleId(selectedModuleId);
     setIssueContract(selectedIssueContract);
     setTransferContract(selectedTransferContract);
     setThirdPartyContract(selectedThirdPartyContract || "");
-    setErrors((prev) => ({ ...prev, substandard: "" }));
+    setErrors((prev) => ({ ...prev, module: "" }));
   };
 
   const validateForm = (): boolean => {
@@ -69,7 +69,7 @@ export function RegistrationForm({
       tokenName: "",
       quantity: "",
       recipientAddress: "",
-      substandard: "",
+      module: "",
     };
 
     if (!tokenName.trim()) {
@@ -90,9 +90,9 @@ export function RegistrationForm({
       newErrors.recipientAddress = "Invalid Cardano address format";
     }
 
-    if (!substandardId || !issueContract || !transferContract) {
-      newErrors.substandard =
-        "Please select substandard, issue contract, and transfer contract";
+    if (!moduleId || !issueContract || !transferContract) {
+      newErrors.module =
+        "Please select module, issue contract, and transfer contract";
     }
 
     setErrors(newErrors);
@@ -132,12 +132,12 @@ export function RegistrationForm({
 
       let request: DummyRegisterRequest | FreezeAndSeizeRegisterRequest;
 
-      if (substandardId === 'freeze-and-seize') {
+      if (moduleId === 'freeze-and-seize') {
         // Freeze-and-seize requires blacklist initialization step
         // Use the wizard flow for full freeze-and-seize registration
         const adminPubKeyHash = getPaymentKeyHash(registrarAddress);
         request = {
-          substandardId: 'freeze-and-seize',
+          moduleId: 'freeze-and-seize',
           feePayerAddress: registrarAddress,
           assetName: stringToHex(tokenName),
           quantity,
@@ -146,9 +146,9 @@ export function RegistrationForm({
           blacklistNodePolicyId: "", // Not available in legacy form - must use wizard
         };
       } else {
-        // Dummy or other simple substandards
+        // Dummy or other simple modules
         request = {
-          substandardId: 'dummy',
+          moduleId: 'dummy',
           feePayerAddress: registrarAddress,
           assetName: stringToHex(tokenName),
           quantity,
@@ -171,7 +171,7 @@ export function RegistrationForm({
       onTransactionBuilt(
         unsignedCborTx,
         policyId,
-        substandardId,
+        moduleId,
         issueContract,
         tokenName,
         quantity,
@@ -223,12 +223,12 @@ export function RegistrationForm({
       {/* Validator Triple Selector */}
       <div>
         <ValidatorTripleSelector
-          substandards={substandards}
+          modules={modules}
           onSelect={handleValidatorSelect}
           disabled={isBuilding}
         />
-        {errors.substandard && (
-          <p className="mt-2 text-sm text-red-400">{errors.substandard}</p>
+        {errors.module && (
+          <p className="mt-2 text-sm text-red-400">{errors.module}</p>
         )}
       </div>
 

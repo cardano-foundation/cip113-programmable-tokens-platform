@@ -11,7 +11,7 @@ export interface AdminTokenInfo {
   policyId: string;
   assetName: string;          // Hex encoded
   assetNameDisplay: string;   // Human readable
-  substandardId: string;
+  moduleId: string;
   roles: AdminRole[];
   details: {
     blacklistNodePolicyId?: string;
@@ -39,7 +39,7 @@ export function getMockAdminTokens(pkh: string): AdminTokensResponse {
       policyId: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
       assetName: "4d79546f6b656e", // "MyToken" in hex
       assetNameDisplay: "MyToken",
-      substandardId: "freeze-and-seize",
+      moduleId: "freeze-and-seize",
       roles: ["ISSUER_ADMIN", "BLACKLIST_MANAGER"],
       details: {
         blacklistNodePolicyId: "f1e2d3c4b5a6f1e2d3c4b5a6f1e2d3c4b5a6f1e2d3c4b5a6f1e2d3c4",

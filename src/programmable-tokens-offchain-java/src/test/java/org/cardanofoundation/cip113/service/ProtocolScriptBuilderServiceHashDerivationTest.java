@@ -118,7 +118,7 @@ class ProtocolScriptBuilderServiceHashDerivationTest {
 
     /**
      * issuance_mint is deliberately NOT asserted against a recorded hash the way the others are.
-     * Its 3rd parameter, {@code minting_logic_cred}, is the <em>substandard's</em> issuer script
+     * Its 3rd parameter, {@code minting_logic_cred}, is the <em>module's</em> issuer script
      * — not part of the protocol bootstrap, and different per token — so there is no fixed
      * "protocol" policy id for issuance_mint in the deployment record to compare against. What
      * the record holds is a split prefix/postfix CBOR template built around a dummy placeholder
@@ -127,7 +127,7 @@ class ProtocolScriptBuilderServiceHashDerivationTest {
      * <p>{@code AikenScriptUtil.applyParamToScript} performs no arity check and no type check, so
      * asserting the output is <em>some</em> well-formed 28-byte hash would pass equally with
      * three parameters applied as with four. So this follows the deployment's own technique:
-     * serialise the applied script body, split it on the substandard script's hash (the 3rd
+     * serialise the applied script body, split it on the module script's hash (the 3rd
      * parameter, unambiguous and known here), and assert the 4th parameter's bytes landed in the
      * postfix — i.e. after the third.
      *
@@ -140,16 +140,16 @@ class ProtocolScriptBuilderServiceHashDerivationTest {
      */
     @Test
     void issuanceMintAppliesTwoParametersInOrder() throws Exception {
-        var substandardIssueScript = protocolScriptBuilderService.getParameterizedAlwaysFailScript("deadbeef");
+        var moduleIssueScript = protocolScriptBuilderService.getParameterizedAlwaysFailScript("deadbeef");
 
-        var script = protocolScriptBuilderService.getParameterizedIssuanceMintScript(params, substandardIssueScript);
+        var script = protocolScriptBuilderService.getParameterizedIssuanceMintScript(params, moduleIssueScript);
 
         var serializedBody = HexUtil.encodeHexString(script.serializeScriptBody());
-        var substandardHashHex = HexUtil.encodeHexString(substandardIssueScript.getScriptHash());
-        var parts = serializedBody.split(substandardHashHex);
+        var moduleHashHex = HexUtil.encodeHexString(moduleIssueScript.getScriptHash());
+        var parts = serializedBody.split(moduleHashHex);
 
         assertEquals(2, parts.length,
-                "substandard credential must appear exactly once in the applied issuance_mint body");
+                "module credential must appear exactly once in the applied issuance_mint body");
         assertTrue(parts[1].contains(params.protocolParams().policyId()),
                 "alpha.4 params_policy must follow the minting_logic_cred");
     }

@@ -46,7 +46,7 @@ public enum CoreValidator {
     /** Replaceable issuance checks invoked by every mint and burn. */
     ISSUANCE_LOGIC("issuance_logic", Purpose.WITHDRAW),
 
-    /** Minting policy for programmable tokens. Parameterised per substandard, so its
+    /** Minting policy for programmable tokens. Parameterised per module, so its
      *  policy id IS the token's identity. */
     ISSUANCE_MINT("issuance_mint", Purpose.MINT),
 

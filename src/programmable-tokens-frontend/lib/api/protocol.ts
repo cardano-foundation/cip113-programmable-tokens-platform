@@ -3,7 +3,7 @@
  */
 
 import { apiGet } from './client';
-import type { ProtocolBlueprint, ProtocolBootstrapParams, SubstandardBlueprint, TokenContext } from '@/types/protocol';
+import type { ProtocolBlueprint, ProtocolBootstrapParams, ModuleBlueprint, TokenContext } from '@/types/protocol';
 
 /**
  * Get protocol blueprint (validators and compiled code)
@@ -29,20 +29,20 @@ export async function getProtocolBootstrap(protocolTxHash?: string): Promise<Pro
 }
 
 /**
- * Get substandard blueprint (validators for a specific substandard)
+ * Get module blueprint (validators for a specific module)
  *
- * @param substandardId - The substandard identifier (e.g., "dummy", "kyc", "kyc-extended", "rwa-token")
- * @returns Substandard blueprint with validators
+ * @param moduleId - The module identifier (e.g., "dummy", "kyc", "kyc-extended", "rwa-token")
+ * @returns Module blueprint with validators
  */
-export async function getSubstandardBlueprint(substandardId: string): Promise<SubstandardBlueprint> {
-  return apiGet<SubstandardBlueprint>(`/substandards/${substandardId}`);
+export async function getModuleBlueprint(moduleId: string): Promise<ModuleBlueprint> {
+  return apiGet<ModuleBlueprint>(`/modules/${moduleId}`);
 }
 
 /**
- * Get token context (substandardId, blacklistNodePolicyId, etc.) for a given policy ID
+ * Get token context (moduleId, blacklistNodePolicyId, etc.) for a given policy ID
  *
  * @param policyId - The programmable token policy ID
- * @returns Token context with substandard info and optional compliance parameters
+ * @returns Token context with module info and optional compliance parameters
  */
 export async function getTokenContext(policyId: string): Promise<TokenContext> {
   return apiGet<TokenContext>(`/token-context/${policyId}`);

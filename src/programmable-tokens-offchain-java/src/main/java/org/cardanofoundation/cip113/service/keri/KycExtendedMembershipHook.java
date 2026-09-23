@@ -9,10 +9,10 @@ import org.cardanofoundation.cip113.util.AddressUtil;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
-/** {@link TokenMembershipHook} for the {@code kyc-extended} substandard.
+/** {@link TokenMembershipHook} for the {@code kyc-extended} module.
  *  Auto-upserts the verified user's stake credential into the per-policy MPF
  *  allowlist tree. The hook is gated by {@code kycExtended.enabled} so removing
- *  the substandard entirely (config flag flip + deleting these files) leaves
+ *  the module entirely (config flag flip + deleting these files) leaves
  *  {@code KeriService} untouched. */
 @Component
 @ConditionalOnProperty(name = "kycExtended.enabled", havingValue = "true", matchIfMissing = true)
@@ -23,7 +23,7 @@ public class KycExtendedMembershipHook implements TokenMembershipHook {
     private final MpfTreeService mpfTreeService;
 
     @Override
-    public String substandardId() {
+    public String moduleId() {
         return "kyc-extended";
     }
 

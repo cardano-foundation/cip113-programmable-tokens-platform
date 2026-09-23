@@ -133,7 +133,7 @@ export function buildCoreScriptSet(input: DeriveCoreDeploymentInput): CoreScript
   // Sealed once the CORE set is complete. The CIP-171 record IS this list, and it must
   // describe the scripts this deployment runs. A caller that later parameterises
   // `issuance_mint` off the same builders (the bootstrap does, for the CBOR splice) would
-  // otherwise append a script belonging to a substandard registration, not to this
+  // otherwise append a script belonging to a module registration, not to this
   // deployment — silently, and only visible as an extra entry in a published record.
   let sealed = false;
   const scripts = createStandardScripts(blueprint, (event) => {

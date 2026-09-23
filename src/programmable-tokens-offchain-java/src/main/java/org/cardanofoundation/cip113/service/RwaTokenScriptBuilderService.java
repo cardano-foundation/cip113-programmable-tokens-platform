@@ -12,7 +12,7 @@ import com.bloxbean.cardano.client.transaction.spec.TransactionInput;
 import com.bloxbean.cardano.client.util.HexUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.cardanofoundation.cip113.model.SubstandardValidator;
+import org.cardanofoundation.cip113.model.ModuleValidator;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.util.Cip68;
 import org.springframework.stereotype.Service;
@@ -42,12 +42,12 @@ import java.math.BigInteger;
 @Slf4j
 public class RwaTokenScriptBuilderService {
 
-    private static final String SUBSTANDARD_ID = "rwa-token";
+    private static final String MODULE_ID = "rwa-token";
 
     /** Asset name from the ported {@code lib/constants.ak}. */
     public static final String GLOBAL_STATE_ASSET_NAME_HEX = "476c6f62616c5374617465"; // "GlobalState"
 
-    private final SubstandardService substandardService;
+    private final ModuleService moduleService;
     private final ProtocolScriptBuilderService protocolScriptBuilderService;
 
     // ── The resolved set ─────────────────────────────────────────────────────
@@ -162,7 +162,7 @@ public class RwaTokenScriptBuilderService {
         // programmable_logic_base's hash is deliberately NOT read here any more. The
         // 2026-08-21 upstream dropped it from all three validators that took it: CIP-113's
         // base layer already confines the token to that credential, so re-asserting it in
-        // the substandard was redundant. Reintroducing it would silently change three
+        // the module was redundant. Reintroducing it would silently change three
         // script hashes.
 
         PlutusScript mintingLogicProxy = buildMintingLogicScript(globalStatePolicyId);
@@ -201,7 +201,7 @@ public class RwaTokenScriptBuilderService {
     // ── Global state ─────────────────────────────────────────────────────────
 
     public PlutusScript buildGlobalStateMintScript(TransactionInput bootstrapTxInput) {
-        SubstandardValidator contract = getContract("global_state.global_state_mint_validator.mint");
+        ModuleValidator contract = getContract("global_state.global_state_mint_validator.mint");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(bootstrapTxInput.getTransactionId())),
                 BigIntPlutusData.of(BigInteger.valueOf(bootstrapTxInput.getIndex()))
@@ -217,7 +217,7 @@ public class RwaTokenScriptBuilderService {
                                                     String issuancePolicyId,
                                                     String globalStatePolicyId,
                                                     String powerUserListScriptHash) {
-        SubstandardValidator contract = getContract("global_state.global_state_spend_validator.spend");
+        ModuleValidator contract = getContract("global_state.global_state_spend_validator.spend");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
                 BytesPlutusData.of(HexUtil.decodeHexString(issuancePolicyId)),
@@ -235,7 +235,7 @@ public class RwaTokenScriptBuilderService {
     public PlutusScript buildDenylistMintScript(String globalStatePolicyId,
                                                 TransactionInput initInputOutRef,
                                                 String powerUserListScriptHash) {
-        SubstandardValidator contract = getContract("denylist.mint.mint");
+        ModuleValidator contract = getContract("denylist.mint.mint");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
                 outputReferenceData(initInputOutRef),
@@ -245,7 +245,7 @@ public class RwaTokenScriptBuilderService {
     }
 
     public PlutusScript buildDenylistSpendScript(String denylistLinkedListPolicyId) {
-        SubstandardValidator contract = getContract("denylist.denylist_validator.spend");
+        ModuleValidator contract = getContract("denylist.denylist_validator.spend");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(denylistLinkedListPolicyId))
         );
@@ -256,7 +256,7 @@ public class RwaTokenScriptBuilderService {
 
     public PlutusScript buildPowerUsersMintScript(String globalStatePolicyId,
                                                   TransactionInput initInputOutRef) {
-        SubstandardValidator contract = getContract("power_users.mint.mint");
+        ModuleValidator contract = getContract("power_users.mint.mint");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
                 outputReferenceData(initInputOutRef)
@@ -266,7 +266,7 @@ public class RwaTokenScriptBuilderService {
 
     public PlutusScript buildPowerUsersSpendScript(String globalStatePolicyId,
                                                    String powerUsersLinkedListPolicyId) {
-        SubstandardValidator contract = getContract("power_users.power_users_validator.spend");
+        ModuleValidator contract = getContract("power_users.power_users_validator.spend");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
                 BytesPlutusData.of(HexUtil.decodeHexString(powerUsersLinkedListPolicyId))
@@ -297,7 +297,7 @@ public class RwaTokenScriptBuilderService {
      * reward accounts must be registered on chain.
      */
     public PlutusScript buildMintingLogicScript(String globalStatePolicyId) {
-        SubstandardValidator contract = getContract("minting_logic_script.minting_logic_validator.withdraw");
+        ModuleValidator contract = getContract("minting_logic_script.minting_logic_validator.withdraw");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId))
         );
@@ -342,7 +342,7 @@ public class RwaTokenScriptBuilderService {
                                                     String denylistScriptHash,
                                                     String powerUserListScriptHash,
                                                     String referenceAssetNameHex) {
-        SubstandardValidator contract = getContract("minting_authority.minting_authority_validator.withdraw");
+        ModuleValidator contract = getContract("minting_authority.minting_authority_validator.withdraw");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
@@ -371,7 +371,7 @@ public class RwaTokenScriptBuilderService {
                                                  String globalStatePolicyId,
                                                  String expectedIssuancePolicyId,
                                                  String denylistScriptHash) {
-        SubstandardValidator contract = getContract("transfer_logic_script.transfer_logic_validator.withdraw");
+        ModuleValidator contract = getContract("transfer_logic_script.transfer_logic_validator.withdraw");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
@@ -384,9 +384,9 @@ public class RwaTokenScriptBuilderService {
     // ── Third-party transfer logic (power-user seizure / forced transfer) ────
 
     /**
-     * The substandard's dedicated third-party transfer validator, wired into
+     * The module's dedicated third-party transfer validator, wired into
      * {@code RegistryNode.third_party_transfer_logic_script} (index 4) by
-     * {@code RwaTokenSubstandardHandler.buildRegistrationTransaction}.
+     * {@code RwaTokenModuleHandler.buildRegistrationTransaction}.
      *
      * <p>Five parameters as of the 2026-08-21 upstream, down from eight.
      * {@code power_users_linked_list_policy_id}, {@code registry_policy_id} and
@@ -402,7 +402,7 @@ public class RwaTokenScriptBuilderService {
                                                            String expectedIssuancePolicyId,
                                                            String denylistScriptHash,
                                                            String powerUserListScriptHash) {
-        SubstandardValidator contract =
+        ModuleValidator contract =
                 getContract("third_party_transfer_logic_script.third_party_transfer_logic_validator.withdraw");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
@@ -423,13 +423,13 @@ public class RwaTokenScriptBuilderService {
                 BigIntPlutusData.of(BigInteger.valueOf(in.getIndex())));
     }
 
-    private SubstandardValidator getContract(String contractPath) {
-        return substandardService.getSubstandardValidator(SUBSTANDARD_ID, contractPath)
+    private ModuleValidator getContract(String contractPath) {
+        return moduleService.getModuleValidator(MODULE_ID, contractPath)
                 .orElseThrow(() -> new IllegalStateException(
                         "rwa-token contract not found: " + contractPath));
     }
 
-    private PlutusScript applyParameters(SubstandardValidator contract,
+    private PlutusScript applyParameters(ModuleValidator contract,
                                          ListPlutusData params,
                                          String scriptName) {
         try {

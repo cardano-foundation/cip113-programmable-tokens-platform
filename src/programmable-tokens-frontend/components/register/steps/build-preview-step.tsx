@@ -123,7 +123,7 @@ export function BuildPreviewStep({
       if (isFreezeAndSeize) {
         const adminPubKeyHash = getPaymentKeyHash(feePayerAddress);
         request = {
-          substandardId: 'freeze-and-seize',
+          moduleId: 'freeze-and-seize',
           feePayerAddress,
           assetName: stringToHex(tokenDetails.assetName),
           quantity: tokenDetails.quantity,
@@ -134,7 +134,7 @@ export function BuildPreviewStep({
         };
       } else {
         request = {
-          substandardId: 'dummy',
+          moduleId: 'dummy',
           feePayerAddress,
           assetName: stringToHex(tokenDetails.assetName),
           quantity: tokenDetails.quantity,
@@ -239,7 +239,7 @@ export function BuildPreviewStep({
                 </p>
               </div>
               <div>
-                <span className="text-dark-400">Substandard</span>
+                <span className="text-dark-400">Module</span>
                 <p className="text-white font-medium capitalize">{flowId}</p>
               </div>
               {tokenDetails.recipientAddress && (
@@ -327,7 +327,7 @@ export function BuildPreviewStep({
                 </p>
               </div>
               <div>
-                <span className="text-dark-400">Substandard</span>
+                <span className="text-dark-400">Module</span>
                 <p className="text-white font-medium capitalize">{flowId}</p>
               </div>
             </div>

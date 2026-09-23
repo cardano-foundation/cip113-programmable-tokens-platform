@@ -12,7 +12,7 @@ import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
 import org.cardanofoundation.cip113.repository.CustomStakeRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.service.AccountService;
-import org.cardanofoundation.cip113.service.substandard.DummySubstandardHandler;
+import org.cardanofoundation.cip113.service.module.DummyModuleHandler;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -29,7 +29,7 @@ import java.util.Set;
  * UNREGISTERED reward account is rejected phase-1 with {@code WithdrawalsNotInRewardsCERTS}; a
  * duplicate registration is rejected with {@code StakeKeyAlreadyRegisteredDELEG}. Neither is
  * catchable by script evaluation, because reward-account existence is a ledger rule and not a
- * Plutus one — so both substandards build and evaluate a perfectly good transaction and then
+ * Plutus one — so both modules build and evaluate a perfectly good transaction and then
  * fail at submit, after the user has signed.
  *
  * <p>The dummy handler shipped with the predicate inverted: it derived the "to register" list
@@ -58,20 +58,20 @@ public class StakeRegistrationIdempotenceTest {
         return repo;
     }
 
-    private static DummySubstandardHandler dummyHandler(OfflineChain chain,
+    private static DummyModuleHandler dummyHandler(OfflineChain chain,
                                                         BootstrapFixture.Bootstrapped boot,
                                                         CustomStakeRegistrationRepository stakeRepo)
             throws Exception {
         var registrySpendHash = HexUtil.encodeHexString(boot.registrySpend().getScriptHash());
         var registryAddress = boot.registryOriginUtxo().getAddress();
-        return new DummySubstandardHandler(
+        return new DummyModuleHandler(
                 HandlerFixtures.OBJECT_MAPPER,
                 HandlerFixtures.NETWORK,
                 HandlerFixtures.utxoRepository(chain, registryAddress, registrySpendHash),
                 Mockito.mock(org.cardanofoundation.cip113.service.UtxoProvider.class),
                 new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
                 Mockito.mock(AccountService.class),
-                HandlerFixtures.substandardService(),
+                HandlerFixtures.moduleService(),
                 HandlerFixtures.protocolScriptBuilderService(),
                 chain.quickTxBuilder(),
                 chain.protocolParamsSupplier(),
@@ -96,7 +96,7 @@ public class StakeRegistrationIdempotenceTest {
 
     private static DummyRegisterRequest dummyRequest() {
         var request = new DummyRegisterRequest();
-        request.setSubstandardId("dummy");
+        request.setModuleId("dummy");
         request.setFeePayerAddress(BootstrapFixture.ADMIN.baseAddress());
         request.setAssetName(HexUtil.encodeHexString("IdempotenceToken".getBytes()));
         request.setQuantity("1000");
@@ -150,7 +150,7 @@ public class StakeRegistrationIdempotenceTest {
         // Discover the two addresses the handler needs by letting it tell us: with nothing
         // registered it must ask for both, so the same run that proves the previous test also
         // yields the address pair, without this test hard-coding script hashes that change
-        // whenever the substandard blueprint is rebuilt.
+        // whenever the module blueprint is rebuilt.
         var discovery = dummyHandler(chain, boot, stakeRepo(Set.of()))
                 .buildPreRegistrationTransaction(dummyRequest(), boot.params());
         Assertions.assertNotNull(discovery.unsignedCborTx(), "discovery run must build certs");
@@ -217,19 +217,19 @@ public class StakeRegistrationIdempotenceTest {
                 : com.bloxbean.cardano.client.address.Credential.fromKey(cred.getHash());
     }
 
-    private static org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler
+    private static org.cardanofoundation.cip113.service.module.FreezeAndSeizeHandler
             freezeAndSeizeHandler(OfflineChain chain, CustomStakeRegistrationRepository stakeRepo) throws Exception {
         var utxoProvider = Mockito.mock(org.cardanofoundation.cip113.service.UtxoProvider.class);
-        var substandardService = HandlerFixtures.substandardService();
-        return new org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler(
+        var moduleService = HandlerFixtures.moduleService();
+        return new org.cardanofoundation.cip113.service.module.FreezeAndSeizeHandler(
                 HandlerFixtures.OBJECT_MAPPER,
                 HandlerFixtures.NETWORK,
                 Mockito.mock(org.cardanofoundation.cip113.model.onchain.siezeandfreeze.blacklist.BlacklistNodeParser.class),
                 new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
                 new AccountService(utxoProvider),
-                substandardService,
+                moduleService,
                 HandlerFixtures.protocolScriptBuilderService(),
-                new org.cardanofoundation.cip113.service.FreezeAndSeizeScriptBuilderService(substandardService),
+                new org.cardanofoundation.cip113.service.FreezeAndSeizeScriptBuilderService(moduleService),
                 new org.cardanofoundation.cip113.service.LinkedListService(utxoProvider),
                 chain.quickTxBuilder(),
                 chain.protocolParamsSupplier(),
@@ -315,7 +315,7 @@ public class StakeRegistrationIdempotenceTest {
         // An index with NOTHING in it — the pre-sync-start-slot situation.
         var emptyIndex = stakeRepo(Set.of());
 
-        var handler = new DummySubstandardHandler(
+        var handler = new DummyModuleHandler(
                 HandlerFixtures.OBJECT_MAPPER,
                 HandlerFixtures.NETWORK,
                 HandlerFixtures.utxoRepository(chain, boot.registryOriginUtxo().getAddress(),
@@ -323,7 +323,7 @@ public class StakeRegistrationIdempotenceTest {
                 Mockito.mock(org.cardanofoundation.cip113.service.UtxoProvider.class),
                 new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
                 Mockito.mock(AccountService.class),
-                HandlerFixtures.substandardService(),
+                HandlerFixtures.moduleService(),
                 HandlerFixtures.protocolScriptBuilderService(),
                 chain.quickTxBuilder(),
                 chain.protocolParamsSupplier(),
@@ -380,7 +380,7 @@ public class StakeRegistrationIdempotenceTest {
                     .builder().stakeAddress(addr).source("LEDGER_REJECT").registered(true).build());
         });
 
-        var handler = new DummySubstandardHandler(
+        var handler = new DummyModuleHandler(
                 HandlerFixtures.OBJECT_MAPPER,
                 HandlerFixtures.NETWORK,
                 HandlerFixtures.utxoRepository(chain, boot.registryOriginUtxo().getAddress(),
@@ -388,7 +388,7 @@ public class StakeRegistrationIdempotenceTest {
                 Mockito.mock(org.cardanofoundation.cip113.service.UtxoProvider.class),
                 new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
                 Mockito.mock(AccountService.class),
-                HandlerFixtures.substandardService(),
+                HandlerFixtures.moduleService(),
                 HandlerFixtures.protocolScriptBuilderService(),
                 chain.quickTxBuilder(),
                 chain.protocolParamsSupplier(),
@@ -560,7 +560,7 @@ public class StakeRegistrationIdempotenceTest {
                 // is about the register/skip decision rather than about a specific blacklist.
                 .blacklistNodePolicyId("00".repeat(28))
                 .build();
-        request.setSubstandardId("freeze-and-seize");
+        request.setModuleId("freeze-and-seize");
         request.setFeePayerAddress(BootstrapFixture.ADMIN.baseAddress());
         request.setAssetName(HexUtil.encodeHexString("IdempotenceToken".getBytes()));
         request.setQuantity("1000");

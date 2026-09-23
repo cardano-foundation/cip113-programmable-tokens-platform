@@ -187,14 +187,14 @@ export function KycBuildSignSubmitStep({
         adminPubKeyHash = getPaymentKeyHash(adminAddress);
       }
 
-      const substandardId = isKycExtended
+      const moduleId = isKycExtended
         ? 'kyc-extended'
         : isRwaToken
           ? 'rwa-token'
           : 'kyc';
 
       const regRequest: KycRegisterRequest | KycExtendedRegisterRequest | RwaTokenRegisterRequest = {
-        substandardId,
+        moduleId,
         feePayerAddress: adminAddress,
         assetName: stringToHex(tokenDetails.assetName),
         quantity: tokenDetails.quantity,
@@ -507,7 +507,7 @@ export function KycBuildSignSubmitStep({
                 </p>
               </div>
               <div>
-                <span className="text-dark-400">Substandard</span>
+                <span className="text-dark-400">Module</span>
                 <p className="text-white font-medium">KYC</p>
               </div>
               <div className="col-span-2">

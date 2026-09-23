@@ -113,27 +113,27 @@ class CoreLayoutTest {
     /**
      * A wallet adding a key-hash reward withdrawal is the classic source of a shifted
      * index. Because scripts sort first it cannot move a script's position — but a SECOND
-     * substandard script withdrawal can, and does. Both halves are asserted here because
+     * module script withdrawal can, and does. Both halves are asserted here because
      * only knowing the first invites the conclusion that script indices are stable.
      */
     @Test
     @DisplayName("a key withdrawal cannot shift script positions; another script withdrawal can")
     void whatShiftsAnIndex() {
         var coreDelegate = CoreLayout.WithdrawalKey.script("cc".repeat(28));
-        var substandard = CoreLayout.WithdrawalKey.script("ee".repeat(28));
+        var module = CoreLayout.WithdrawalKey.script("ee".repeat(28));
 
-        var before = CoreLayout.builder().withdrawal(coreDelegate).withdrawal(substandard).build();
+        var before = CoreLayout.builder().withdrawal(coreDelegate).withdrawal(module).build();
         assertEquals(0, before.withdrawalIndex(coreDelegate));
 
         var withWalletKey = CoreLayout.builder()
-                .withdrawal(coreDelegate).withdrawal(substandard)
+                .withdrawal(coreDelegate).withdrawal(module)
                 .withdrawal(CoreLayout.WithdrawalKey.key("00".repeat(28)))
                 .build();
         assertEquals(0, withWalletKey.withdrawalIndex(coreDelegate),
                 "a key credential sorts after every script, so it cannot displace one");
 
         var withEarlierScript = CoreLayout.builder()
-                .withdrawal(coreDelegate).withdrawal(substandard)
+                .withdrawal(coreDelegate).withdrawal(module)
                 .withdrawal(CoreLayout.WithdrawalKey.script("00".repeat(28)))
                 .build();
         assertEquals(1, withEarlierScript.withdrawalIndex(coreDelegate),

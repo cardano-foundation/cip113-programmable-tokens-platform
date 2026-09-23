@@ -6,9 +6,9 @@ import { Card } from "@/components/ui/card";
 import { ArrowRight } from "lucide-react";
 import { useMpfMembershipStatus } from "@/hooks/useMpfMembershipStatus";
 
-/** Common shape across substandards that support KYC enrollment on the
+/** Common shape across modules that support KYC enrollment on the
  *  verify page. Kept minimal so it can wrap kyc-extended and rwa-token
- *  summaries (and any future MPF-allowlist substandard). */
+ *  summaries (and any future MPF-allowlist module). */
 export interface VerifiableTokenSummary {
   policyId: string;
   displayName: string;
@@ -19,7 +19,7 @@ export interface VerifiableTokenSummary {
    *  The rwa-token verify page handles the optional requires_receiver_kyc
    *  toggle (skips MPF enrollment when off). */
   kind: "kyc-extended" | "rwa-token";
-  /** Substandard-specific hint shown as helper text. */
+  /** Module-specific hint shown as helper text. */
   requiresReceiverKyc?: boolean;
 }
 
@@ -32,7 +32,7 @@ export function TokenRowVerify({ token, walletAddress }: Props) {
   // useMpfMembershipStatus probes the kyc-extended allowlist endpoint by
   // policy id. The rwa-token inclusion endpoint lives at
   // /rwa-token/{policyId}/proofs/{memberPkh} (same shape); extending
-  // the hook to multi-substandard is a follow-up. For now only show the
+  // the hook to multi-module is a follow-up. For now only show the
   // membership badge for kyc-extended.
   const { status } = useMpfMembershipStatus(
     token.kind === "kyc-extended" ? token.policyId : "",
@@ -49,7 +49,7 @@ export function TokenRowVerify({ token, walletAddress }: Props) {
       badge = <Badge variant="warning" size="sm">Expired</Badge>;
     }
   }
-  const substandardBadge = token.kind === "rwa-token"
+  const moduleBadge = token.kind === "rwa-token"
     ? <Badge variant="default" size="sm">RWA Token</Badge>
     : null;
 
@@ -64,7 +64,7 @@ export function TokenRowVerify({ token, walletAddress }: Props) {
           <div className="flex-1 space-y-1">
             <div className="flex items-center gap-2">
               <h3 className="text-base font-semibold text-white">{token.displayName}</h3>
-              {substandardBadge}
+              {moduleBadge}
             </div>
             <p className="text-xs font-mono text-dark-400 truncate">{token.policyId}</p>
             {token.description && (

@@ -1,5 +1,5 @@
 /**
- * RWA-Token Substandard Flow
+ * RWA-Token Module Flow
  *
  * Adds an optional receiver-KYC toggle, an on-chain denylist, and role-gated
  * "power users" on top of the kyc-extended pattern. The wizard reuses every
@@ -42,7 +42,7 @@ function RwaTokenSuccessStep(props: StepComponentProps) {
   const enhancedResult = props.wizardState.finalResult || {
     policyId: chainResult?.programmableTokenPolicyId || '',
     txHash: byName?.registration || '',
-    substandardId: 'rwa-token',
+    moduleId: 'rwa-token',
     assetName: '',
     quantity: chainResult?.initialMintQuantity || '',
     metadata: {
@@ -118,7 +118,7 @@ const rwaTokenFlow: RegistrationFlow = {
     } | undefined;
 
     return {
-      substandardId: 'rwa-token',
+      moduleId: 'rwa-token',
       feePayerAddress: '',
       assetName: tokenDetails?.assetName || '',
       quantity: tokenDetails?.quantity || '',

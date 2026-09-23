@@ -13,7 +13,7 @@ import com.bloxbean.cardano.client.util.HexUtil;
 import com.easy1staking.util.Pair;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.cardanofoundation.cip113.model.SubstandardValidator;
+import org.cardanofoundation.cip113.model.ModuleValidator;
 import org.cardanofoundation.cip113.util.PlutusSerializationHelper;
 import org.springframework.stereotype.Service;
 
@@ -31,12 +31,12 @@ import java.math.BigInteger;
 @Slf4j
 public class KycExtendedScriptBuilderService {
 
-    private static final String SUBSTANDARD_ID = "kyc-extended";
+    private static final String MODULE_ID = "kyc-extended";
 
     /** "GlobalState" in UTF-8 hex — must match constants.global_state_asset_name in Aiken */
     public static final String GLOBAL_STATE_ASSET_NAME_HEX = "476c6f62616c5374617465";
 
-    private final SubstandardService substandardService;
+    private final ModuleService moduleService;
 
     public PlutusScript buildIssueScript(String globalStatePolicyId, Credential adminCredential) {
         var contract = getContract("kyc_extended_transfer.issue.withdraw");
@@ -100,15 +100,15 @@ public class KycExtendedScriptBuilderService {
 
     // ========== Private Helpers ==========
 
-    private SubstandardValidator getContract(String contractPath) {
-        return substandardService.getSubstandardValidator(SUBSTANDARD_ID, contractPath)
+    private ModuleValidator getContract(String contractPath) {
+        return moduleService.getModuleValidator(MODULE_ID, contractPath)
                 .orElseThrow(() -> new IllegalStateException(
                         "kyc-extended contract not found: " + contractPath
                 ));
     }
 
     private PlutusScript applyParameters(
-            SubstandardValidator contract,
+            ModuleValidator contract,
             ListPlutusData params,
             String scriptName) {
 

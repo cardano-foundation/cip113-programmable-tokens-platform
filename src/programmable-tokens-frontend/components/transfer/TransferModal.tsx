@@ -60,7 +60,7 @@ export function TransferModal({
   const { wallet } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
-  const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
+  const { getProtocol, ensureModule, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   const [step, setStep] = useState<TransferStep>("form");
   const [quantity, setQuantity] = useState("");
   const [recipientAddress, setRecipientAddress] = useState("");
@@ -171,16 +171,16 @@ export function TransferModal({
 
       getTokenContext(policyId)
         .then((ctx) => {
-          if (ctx.substandardId === "kyc") {
+          if (ctx.moduleId === "kyc") {
             setIsKycToken(true);
             const cachedProof = getKycProof(policyId, senderAddress);
             if (cachedProof) setKycProofState(cachedProof);
-          } else if (ctx.substandardId === "kyc-extended") {
+          } else if (ctx.moduleId === "kyc-extended") {
             setIsKycToken(true);
             setIsKycExtendedToken(true);
             const cachedProof = getKycProof(policyId, senderAddress);
             if (cachedProof) setKycProofState(cachedProof);
-          } else if (ctx.substandardId === "rwa-token") {
+          } else if (ctx.moduleId === "rwa-token") {
             setIsKycToken(true);
             setIsRwaTokenToken(true);
             setRwaTokenRequiresReceiverKyc(ctx.requiresReceiverKyc ?? true);
@@ -309,16 +309,16 @@ export function TransferModal({
 
       if (useSdk) {
         showToast({ title: "Building Transaction", description: "Initializing CIP-113 SDK...", variant: "default" });
-        const substandardId = await ensureSubstandard(asset.policyId, asset.assetNameHex);
+        const moduleId = await ensureModule(asset.policyId, asset.assetNameHex);
         const protocol = await getProtocol();
-        showToast({ title: "Building Transaction", description: `Building ${substandardId} transfer with CIP-113 SDK...`, variant: "default" });
+        showToast({ title: "Building Transaction", description: `Building ${moduleId} transfer with CIP-113 SDK...`, variant: "default" });
         const result = await protocol.transfer({
           senderAddress,
           recipientAddress: recipientAddress.trim(),
           tokenPolicyId: asset.policyId,
           assetName: asset.assetNameHex,
           quantity: BigInt(quantity),
-          substandardId,
+          substandardId: moduleId,
         });
         unsignedCborTx = result.cbor;
       } else {
@@ -597,7 +597,7 @@ export function TransferModal({
                     </div>
                   </div>
                   {/* For rwa-token, Verified badge follows on-chain membership
-                      (not the cookie). For other substandards, falls back to kycProof. */}
+                      (not the cookie). For other modules, falls back to kycProof. */}
                   <div className="shrink-0">
                   {isRwaTokenToken ? (
                     rwaTokenSenderMembership.status.kind === "verified" && rwaTokenSenderMembership.status.onChainSynced ? (

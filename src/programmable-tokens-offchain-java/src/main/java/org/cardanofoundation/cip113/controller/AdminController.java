@@ -97,12 +97,12 @@ public class AdminController {
                     programmableTokenRepo.findByPolicyId(policyId);
             if (registryEntry.isPresent()) {
                 var foo = registryEntry.get();
-                log.info("registryEntry: {}, {}, {}", foo.getSubstandardId(), foo.getPolicyId(), foo.getAssetName());
+                log.info("registryEntry: {}, {}, {}", foo.getModuleId(), foo.getPolicyId(), foo.getAssetName());
             }
 
             String assetName = registryEntry.map(ProgrammableTokenRegistryEntity::getAssetName).orElse("");
             String assetNameDisplay = hexToString(assetName);
-            String substandardId = registryEntry.map(ProgrammableTokenRegistryEntity::getSubstandardId).orElse("freeze-and-seize");
+            String moduleId = registryEntry.map(ProgrammableTokenRegistryEntity::getModuleId).orElse("freeze-and-seize");
 
             AdminTokenDetails details = new AdminTokenDetails(
                     blacklistInit != null ? blacklistInit.getBlacklistNodePolicyId() : null,
@@ -115,7 +115,7 @@ public class AdminController {
                     policyId,
                     assetName,
                     assetNameDisplay,
-                    substandardId,
+                    moduleId,
                     roles,
                     details
             ));
@@ -144,7 +144,7 @@ public class AdminController {
                                 existing.policyId(),
                                 existing.assetName(),
                                 existing.assetNameDisplay(),
-                                existing.substandardId(),
+                                existing.moduleId(),
                                 updatedRoles,
                                 existing.details()
                         ));
@@ -156,7 +156,7 @@ public class AdminController {
 
                     String assetName = registryEntry.map(ProgrammableTokenRegistryEntity::getAssetName).orElse("");
                     String assetNameDisplay = hexToString(assetName);
-                    String substandardId = registryEntry.map(ProgrammableTokenRegistryEntity::getSubstandardId).orElse("freeze-and-seize");
+                    String moduleId = registryEntry.map(ProgrammableTokenRegistryEntity::getModuleId).orElse("freeze-and-seize");
 
                     AdminTokenDetails details = new AdminTokenDetails(
                             blacklistPolicyId,
@@ -169,7 +169,7 @@ public class AdminController {
                             policyId,
                             assetName,
                             assetNameDisplay,
-                            substandardId,
+                            moduleId,
                             List.of("BLACKLIST_MANAGER"),
                             details
                     ));
@@ -189,7 +189,7 @@ public class AdminController {
 
                 String assetName = registryEntry.map(ProgrammableTokenRegistryEntity::getAssetName).orElse("");
                 String assetNameDisplay = hexToString(assetName);
-                String substandardId = registryEntry.map(ProgrammableTokenRegistryEntity::getSubstandardId).orElse("kyc");
+                String moduleId = registryEntry.map(ProgrammableTokenRegistryEntity::getModuleId).orElse("kyc");
 
                 String globalStatePolicyId = token.getGlobalStateInit() != null ? token.getGlobalStateInit().getGlobalStatePolicyId() : null;
 
@@ -204,7 +204,7 @@ public class AdminController {
                         policyId,
                         assetName,
                         assetNameDisplay,
-                        substandardId,
+                        moduleId,
                         List.of("ISSUER_ADMIN"),
                         details
                 ));
@@ -225,7 +225,7 @@ public class AdminController {
                     programmableTokenRepo.findByPolicyId(policyId);
             String assetName = registryEntry.map(ProgrammableTokenRegistryEntity::getAssetName).orElse("");
             String assetNameDisplay = hexToString(assetName);
-            String substandardId = registryEntry.map(ProgrammableTokenRegistryEntity::getSubstandardId).orElse("kyc-extended");
+            String moduleId = registryEntry.map(ProgrammableTokenRegistryEntity::getModuleId).orElse("kyc-extended");
 
             AdminTokenDetails details = new AdminTokenDetails(
                     null,
@@ -235,7 +235,7 @@ public class AdminController {
             );
             tokenMap.put(policyId, new AdminTokenInfo(
                     policyId, assetName, assetNameDisplay,
-                    substandardId, List.of("ISSUER_ADMIN"), details));
+                    moduleId, List.of("ISSUER_ADMIN"), details));
         }
 
         // 5. Query rwa-token registrations where the connected wallet is
@@ -269,8 +269,8 @@ public class AdminController {
                     .map(ProgrammableTokenRegistryEntity::getAssetName)
                     .orElse(token.getSecurityAssetNameHex() != null ? token.getSecurityAssetNameHex() : "");
             String assetNameDisplay = hexToString(assetName);
-            String substandardId = registryEntry
-                    .map(ProgrammableTokenRegistryEntity::getSubstandardId)
+            String moduleId = registryEntry
+                    .map(ProgrammableTokenRegistryEntity::getModuleId)
                     .orElse("rwa-token");
 
             // The frontend's AdminRole type only knows ISSUER_ADMIN and
@@ -301,12 +301,12 @@ public class AdminController {
             );
             tokenMap.put(policyId, new AdminTokenInfo(
                     policyId, assetName, assetNameDisplay,
-                    substandardId, roles, details, pu.getCapabilities()));
+                    moduleId, roles, details, pu.getCapabilities()));
         }
 
         // 6. For dummy tokens - include ALL registered dummy tokens (anyone can mint)
         List<ProgrammableTokenRegistryEntity> dummyTokens =
-                programmableTokenRepo.findBySubstandardId("dummy");
+                programmableTokenRepo.findByModuleId("dummy");
 
         for (ProgrammableTokenRegistryEntity dummyToken : dummyTokens) {
             String policyId = dummyToken.getPolicyId();
@@ -457,7 +457,7 @@ public class AdminController {
             String policyId,
             String assetName,           // Hex encoded
             String assetNameDisplay,    // Human readable
-            String substandardId,
+            String moduleId,
             List<String> roles,         // ["ISSUER_ADMIN", "BLACKLIST_MANAGER"]
             AdminTokenDetails details,
             /** RWA-token only: bitfield of the connected wallet's BaFin
@@ -468,8 +468,8 @@ public class AdminController {
             Integer rwaTokenCapabilities
     ) {
         public AdminTokenInfo(String policyId, String assetName, String assetNameDisplay,
-                              String substandardId, List<String> roles, AdminTokenDetails details) {
-            this(policyId, assetName, assetNameDisplay, substandardId, roles, details, null);
+                              String moduleId, List<String> roles, AdminTokenDetails details) {
+            this(policyId, assetName, assetNameDisplay, moduleId, roles, details, null);
         }
     }
 

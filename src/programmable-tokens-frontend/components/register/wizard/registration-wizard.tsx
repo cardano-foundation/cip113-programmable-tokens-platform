@@ -164,20 +164,20 @@ function WizardContent() {
 function FlowSelector() {
   const { dispatch } = useRegistrationWizard();
 
-  // Import and use SelectSubstandardStep
-  const { SelectSubstandardStep } = require('@/components/register/steps/select-substandard-step');
+  // Import and use SelectModuleStep
+  const { SelectModuleStep } = require('@/components/register/steps/select-module-step');
 
   const handleFlowSelect = (flowId: string) => {
     dispatch({ type: 'SELECT_FLOW', flowId });
   };
 
   return (
-    <SelectSubstandardStep
+    <SelectModuleStep
       stepData={{}}
       onDataChange={() => {}}
       onComplete={(result: { data?: unknown }) => {
-        if (result.data && typeof result.data === 'object' && 'substandardId' in result.data) {
-          handleFlowSelect((result.data as { substandardId: string }).substandardId);
+        if (result.data && typeof result.data === 'object' && 'moduleId' in result.data) {
+          handleFlowSelect((result.data as { moduleId: string }).moduleId);
         }
       }}
       onError={() => {}}

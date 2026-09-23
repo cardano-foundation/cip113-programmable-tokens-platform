@@ -25,9 +25,9 @@ export function TelSection({ tokens, adminAddress }: TelSectionProps) {
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
 
-  // Filter tokens where user has ISSUER_ADMIN role and substandardId is kyc
+  // Filter tokens where user has ISSUER_ADMIN role and moduleId is kyc
   const manageableTokens = tokens.filter(
-    (t) => t.roles.includes("ISSUER_ADMIN") && t.substandardId === "kyc"
+    (t) => t.roles.includes("ISSUER_ADMIN") && t.moduleId === "kyc"
   );
 
   const [selectedToken, setSelectedToken] = useState<AdminTokenInfo | null>(null);

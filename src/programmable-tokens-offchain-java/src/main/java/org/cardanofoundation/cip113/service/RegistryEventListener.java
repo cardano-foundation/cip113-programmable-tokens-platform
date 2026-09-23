@@ -29,7 +29,7 @@ public class RegistryEventListener {
     private final RegistryService registryService;
     private final RegistryNodeParser registryNodeParser;
     private final ProtocolParamsService protocolParamsService;
-    private final SubstandardResolver substandardResolver;
+    private final ModuleResolver moduleResolver;
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
     private static final int POLICY_ID_HEX_LENGTH = 56;
@@ -170,8 +170,8 @@ public class RegistryEventListener {
      * registry node holds. This is the backstop that makes a wiped database rebuild the answer
      * from the chain rather than from whoever happened to call.
      *
-     * <p>Writes nothing when the substandard cannot be identified. A row with an unknown
-     * substandard would turn an honest 404 into a 200 the SDK cannot route.
+     * <p>Writes nothing when the module cannot be identified. A row with an unknown
+     * module would turn an honest 404 into a 200 the SDK cannot route.
      */
     private void indexProgrammableToken(RegistryNodeEntity node,
                                         ProtocolParamsEntity protocolParams,
@@ -184,7 +184,7 @@ public class RegistryEventListener {
             return;
         }
 
-        // Every policy the transaction touched, as candidate second-parameters for a substandard
+        // Every policy the transaction touched, as candidate second-parameters for a module
         // whose registry node carries no global state of its own.
         var candidatePolicyIds = unitsInTx.stream()
                 .filter(unit -> unit.length() >= POLICY_ID_HEX_LENGTH)
@@ -192,14 +192,14 @@ public class RegistryEventListener {
                 .distinct()
                 .toList();
 
-        var substandardId = substandardResolver.resolve(
+        var moduleId = moduleResolver.resolve(
                 protocolParams.getProgLogicScriptHash(),
                 node.getGlobalStatePolicyId(),
                 node.getTransferLogicScript(),
                 candidatePolicyIds);
 
-        if (substandardId.isEmpty()) {
-            log.info("Registry node {} indexed, but no substandard reproduces its transfer logic "
+        if (moduleId.isEmpty()) {
+            log.info("Registry node {} indexed, but no module reproduces its transfer logic "
                             + "{} (globalState={}) -- not adding a token-context row. rwa-token is "
                             + "expected here: its transfer logic takes a denylist hash no registry "
                             + "node carries.",
@@ -226,11 +226,11 @@ public class RegistryEventListener {
 
         programmableTokenRegistryRepository.save(ProgrammableTokenRegistryEntity.builder()
                 .policyId(policyId)
-                .substandardId(substandardId.get())
+                .moduleId(moduleId.get())
                 .assetName(assetNameHex)
                 .build());
 
-        log.info("Indexed programmable token from chain: policyId={}, substandardId={}, assetName={}",
-                policyId, substandardId.get(), assetNameHex.isEmpty() ? "(not in this tx)" : assetNameHex);
+        log.info("Indexed programmable token from chain: policyId={}, moduleId={}, assetName={}",
+                policyId, moduleId.get(), assetNameHex.isEmpty() ? "(not in this tx)" : assetNameHex);
     }
 }

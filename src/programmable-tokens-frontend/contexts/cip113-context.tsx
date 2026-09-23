@@ -34,13 +34,13 @@ import {
   EvoAssets,
   EvoTransactionHash,
 } from "@easy1staking/cip113-sdk-ts";
-import { dummySubstandard } from "@easy1staking/cip113-sdk-ts/dummy";
-import { freezeAndSeizeSubstandard, createFESScripts } from "@easy1staking/cip113-sdk-ts/freeze-and-seize";
+import { dummySubstandard as dummyModule } from "@easy1staking/cip113-sdk-ts/dummy";
+import { freezeAndSeizeSubstandard as freezeAndSeizeModule, createFESScripts } from "@easy1staking/cip113-sdk-ts/freeze-and-seize";
 import type { FESDeploymentParams } from "@easy1staking/cip113-sdk-ts";
 import {
   getProtocolBlueprint,
   getProtocolBootstrap,
-  getSubstandardBlueprint,
+  getModuleBlueprint,
   getTokenContext,
 } from "@/lib/api/protocol";
 import { apiGet, apiPost } from "@/lib/api/client";
@@ -59,10 +59,10 @@ import type { ParameterizedScript } from "@easy1staking/cip113-sdk-ts";
 
 interface CIP113ContextValue {
   getProtocol(): Promise<CIP113Protocol>;
-  ensureSubstandard(policyId: string, assetName: string): Promise<string>;
+  ensureModule(policyId: string, assetName: string): Promise<string>;
   registerTokenCallback(params: {
     policyId: string;
-    substandardId: string;
+    moduleId: string;
     assetName: string;
     issuerAdminPkh?: string;
     blacklistNodePolicyId?: string;
@@ -106,7 +106,7 @@ interface CIP113ContextValue {
 
 const CIP113Context = createContext<CIP113ContextValue>({
   getProtocol: () => Promise.reject(new Error("CIP113Provider not mounted")),
-  ensureSubstandard: () => Promise.reject(new Error("CIP113Provider not mounted")),
+  ensureModule: () => Promise.reject(new Error("CIP113Provider not mounted")),
   registerTokenCallback: () => Promise.reject(new Error("CIP113Provider not mounted")),
   buildFESRegistration: () => Promise.reject(new Error("CIP113Provider not mounted")),
   available: false,
@@ -156,7 +156,7 @@ function toSdkBlueprint(bp: { validators: Array<{ title: string; compiledCode: s
   };
 }
 
-function substandardToSdkBlueprint(bp: { id: string; validators: Array<{ title: string; script_bytes: string; script_hash: string }> }): PlutusBlueprint {
+function moduleToSdkBlueprint(bp: { id: string; validators: Array<{ title: string; script_bytes: string; script_hash: string }> }): PlutusBlueprint {
   return {
     preamble: { title: bp.id, version: "0.1.0" },
     validators: bp.validators.map((v) => ({
@@ -182,8 +182,8 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
   /**
    * The token the CURRENTLY INSTALLED freeze-and-seize plugin belongs to — one value, not a set.
    *
-   * ⛔ THIS WAS A SET, AND THAT WAS THE BUG. The SDK holds ONE plugin per substandard id
-   * (`substandards.set(plugin.id, plugin)`), so registering FES for a second token REPLACES the
+   * ⛔ THIS WAS A SET, AND THAT WAS THE BUG. The SDK holds ONE plugin per module id
+   * (`modules.set(plugin.id, plugin)`), so registering FES for a second token REPLACES the
    * first — registration is not additive. A set recording every token ever registered therefore
    * answers the wrong question: it says "have we built a plugin for this token before", when
    * what decides correctness is "is the plugin installed right now the one for this token".
@@ -268,7 +268,7 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
       const [protocolBp, bootstrapParams, dummyBp] = await Promise.all([
         getProtocolBlueprint(),
         getProtocolBootstrap(selectedVersion?.txHash),
-        getSubstandardBlueprint("dummy"),
+        getModuleBlueprint("dummy"),
       ]);
 
       // 2. Create Evolution SDK client (ReadOnlyClient — no wallet for CIP-30 flow)
@@ -291,11 +291,11 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
           deployment: toDeploymentParams(bootstrapParams),
         },
         substandards: [
-          dummySubstandard({ blueprint: substandardToSdkBlueprint(dummyBp) }),
+          dummyModule({ blueprint: moduleToSdkBlueprint(dummyBp) }),
         ],
       });
 
-      console.log("[CIP-113] SDK initialized. Substandards:", protocol.listSubstandards());
+      console.log("[CIP-113] SDK initialized. Modules:", protocol.listSubstandards());
       protocolRef.current = protocol;
       // Stamp which version this instance was built for, so the guard above can detect a
       // later switch. Set only on success — a failed init must not claim the cache is warm.
@@ -313,15 +313,15 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
     }
   }, [blockfrostKey, blockfrostUrl, network, selectedVersion?.txHash, versionsLoading, getChain]);
 
-  const ensureSubstandard = useCallback(async (policyId: string, assetName: string): Promise<string> => {
+  const ensureModule = useCallback(async (policyId: string, assetName: string): Promise<string> => {
     const tokenCtx = await getTokenContext(policyId);
 
-    if (tokenCtx.substandardId === "freeze-and-seize" && installedFESToken.current !== policyId) {
+    if (tokenCtx.moduleId === "freeze-and-seize" && installedFESToken.current !== policyId) {
       const protocol = await getProtocol();
 
       if (!fesBlueprintRef.current) {
-        const fesBp = await getSubstandardBlueprint("freeze-and-seize");
-        fesBlueprintRef.current = substandardToSdkBlueprint(fesBp);
+        const fesBp = await getModuleBlueprint("freeze-and-seize");
+        fesBlueprintRef.current = moduleToSdkBlueprint(fesBp);
       }
 
       // Fail on missing FES data instead of substituting "".
@@ -396,7 +396,7 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
         }
       }
 
-      const fes = freezeAndSeizeSubstandard({
+      const fes = freezeAndSeizeModule({
         blueprint: fesBlueprintRef.current,
         deployment: {
           adminPkh: adminPkhToUse,
@@ -434,12 +434,12 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
       );
     }
 
-    return tokenCtx.substandardId;
+    return tokenCtx.moduleId;
   }, [getProtocol]);
 
   const registerTokenCallback = useCallback(async (params: {
     policyId: string;
-    substandardId: string;
+    moduleId: string;
     assetName: string;
     issuerAdminPkh?: string;
     blacklistNodePolicyId?: string;
@@ -504,8 +504,8 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
 
     // Fetch FES blueprint
     if (!fesBlueprintRef.current) {
-      const fesBp = await getSubstandardBlueprint("freeze-and-seize");
-      fesBlueprintRef.current = substandardToSdkBlueprint(fesBp);
+      const fesBp = await getModuleBlueprint("freeze-and-seize");
+      fesBlueprintRef.current = moduleToSdkBlueprint(fesBp);
     }
 
     // Step 1: Compute blacklistInitTxInput from first wallet UTxO — pick largest
@@ -525,13 +525,13 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
     const blacklistNodePolicyId = blacklistMintScript.hash;
     console.log("[CIP-113] Pre-computed blacklistNodePolicyId:", blacklistNodePolicyId);
 
-    // Create a FES substandard with the CORRECT blacklistNodePolicyId
+    // Create a FES module with the CORRECT blacklistNodePolicyId
     // Record what gets parameterised, so a CIP-171 record can be DERIVED from the calls that
     // actually happened rather than transcribed beside them. Collected even when the checkbox is
     // off — the cost is four pushes and it keeps the enabled and disabled paths identical up to
     // the point where the record is built.
     const paramEvents: ParameterizedScript[] = [];
-    const fes = freezeAndSeizeSubstandard({
+    const fes = freezeAndSeizeModule({
       blueprint: fesBlueprintRef.current,
       deployment: {
         adminPkh,
@@ -647,9 +647,9 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
   }, [getProtocol, network]);
 
   const value = useMemo(
-    () => ({ getProtocol, ensureSubstandard, registerTokenCallback, buildFESRegistration, available,
+    () => ({ getProtocol, ensureModule, registerTokenCallback, buildFESRegistration, available,
               sdkUnavailableReason: available ? undefined : SDK_UNAVAILABLE_REASON }),
-    [getProtocol, ensureSubstandard, registerTokenCallback, buildFESRegistration, available]
+    [getProtocol, ensureModule, registerTokenCallback, buildFESRegistration, available]
   );
 
   return (

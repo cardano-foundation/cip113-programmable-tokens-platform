@@ -1,4 +1,4 @@
-/** API client for the kyc-extended substandard. */
+/** API client for the kyc-extended module. */
 
 import { apiGet, apiPost } from './client';
 

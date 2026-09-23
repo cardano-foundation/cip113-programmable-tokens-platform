@@ -71,7 +71,7 @@ export interface WizardStep {
  */
 export interface TokenRegistrationCallbackData {
   policyId: string;
-  substandardId: string;
+  moduleId: string;
   /** Hex-encoded asset name */
   assetName: string;
   /** Issuer admin public key hash (FES only) */
@@ -101,7 +101,7 @@ export interface TokenRegistrationCallbackData {
  * Definition of a registration flow (sequence of steps)
  */
 export interface RegistrationFlow {
-  /** Flow identifier (matches substandardId) */
+  /** Flow identifier (matches moduleId) */
   id: string;
   /** Display name */
   name: string;
@@ -148,7 +148,7 @@ export interface StepState {
  * Complete wizard state
  */
 export interface WizardState {
-  /** Selected flow/substandard ID */
+  /** Selected flow/module ID */
   flowId: string | null;
   /** Index of current step */
   currentStepIndex: number;
@@ -172,11 +172,11 @@ export interface WizardState {
 export interface RegistrationResult {
   policyId: string;
   txHash: string;
-  substandardId: string;
+  moduleId: string;
   assetName: string;
   quantity: string;
   recipientAddress?: string;
-  /** Additional data specific to the substandard */
+  /** Additional data specific to the module */
   metadata?: Record<string, unknown>;
 }
 
@@ -185,10 +185,10 @@ export interface RegistrationResult {
 // ============================================================================
 
 /**
- * Base registration data common to all substandards
+ * Base registration data common to all modules
  */
 export interface BaseRegistrationData {
-  substandardId: string;
+  moduleId: string;
   feePayerAddress: string;
   assetName: string;
   quantity: string;
@@ -196,45 +196,45 @@ export interface BaseRegistrationData {
 }
 
 /**
- * Dummy substandard registration data
+ * Dummy module registration data
  */
 export interface DummyRegistrationData extends BaseRegistrationData {
-  substandardId: 'dummy';
+  moduleId: 'dummy';
 }
 
 /**
- * Freeze-and-seize substandard registration data
+ * Freeze-and-seize module registration data
  */
 export interface FreezeAndSeizeRegistrationData extends BaseRegistrationData {
-  substandardId: 'freeze-and-seize';
+  moduleId: 'freeze-and-seize';
   adminPubKeyHash: string;
   blacklistNodePolicyId: string;
 }
 
 /**
- * KYC substandard registration data
+ * KYC module registration data
  */
 export interface KycRegistrationData extends BaseRegistrationData {
-  substandardId: 'kyc';
+  moduleId: 'kyc';
   adminPubKeyHash: string;
   globalStatePolicyId: string;
 }
 
 /**
- * KYC-Extended substandard registration data — receiver allowlist via on-chain MPF root.
+ * KYC-Extended module registration data — receiver allowlist via on-chain MPF root.
  */
 export interface KycExtendedRegistrationData extends BaseRegistrationData {
-  substandardId: 'kyc-extended';
+  moduleId: 'kyc-extended';
   adminPubKeyHash: string;
   globalStatePolicyId: string;
 }
 
 /**
- * RWA-token substandard registration data — BaFin-style: MPF allowlist +
+ * RWA-token module registration data — BaFin-style: MPF allowlist +
  * denylist linked list + power-user linked list + togglable receiver KYC.
  */
 export interface RwaTokenRegistrationData extends BaseRegistrationData {
-  substandardId: 'rwa-token';
+  moduleId: 'rwa-token';
   adminPubKeyHash: string;
   globalStatePolicyId: string;
   denylistPolicyId: string;
@@ -257,10 +257,10 @@ export type RegistrationRequest =
 // ============================================================================
 
 /**
- * Data for substandard selection step
+ * Data for module selection step
  */
-export interface SubstandardSelectionData {
-  substandardId: string;
+export interface ModuleSelectionData {
+  moduleId: string;
 }
 
 /**

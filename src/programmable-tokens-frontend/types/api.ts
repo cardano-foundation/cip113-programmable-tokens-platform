@@ -3,25 +3,25 @@
  */
 
 // ============================================================================
-// Substandards
+// Modules
 // ============================================================================
 
-export interface SubstandardValidator {
+export interface ModuleValidator {
   title: string;
   script_bytes: string;
   script_hash: string;
 }
 
-export interface Substandard {
+export interface Module {
   id: string;
-  /** Display name from the substandard\'s metadata.json; falls back to the capitalised id. */
+  /** Display name from the module\'s metadata.json; falls back to the capitalised id. */
   name?: string;
   /** One-paragraph summary from metadata.json; may be empty. */
   description?: string;
-  validators: SubstandardValidator[];
+  validators: ModuleValidator[];
 }
 
-export type SubstandardsResponse = Substandard[];
+export type ModulesResponse = Module[];
 
 // ============================================================================
 // Token Registration
@@ -48,7 +48,7 @@ export interface Cip68MetadataRequest {
 
 /** Base type for all registration requests */
 export interface BaseRegisterTokenRequest {
-  substandardId: string;       // Discriminator - backend knows which contracts to use
+  moduleId: string;       // Discriminator - backend knows which contracts to use
   feePayerAddress: string;     // User's wallet address (renamed from registrarAddress)
   assetName: string;           // HEX ENCODED token name, WITHOUT any CIP-67 label
   quantity: string;            // Amount to register/mint
@@ -60,40 +60,40 @@ export interface BaseRegisterTokenRequest {
   cip68Metadata?: Cip68MetadataRequest;
 }
 
-/** Dummy substandard - no extra fields needed */
+/** Dummy module - no extra fields needed */
 export interface DummyRegisterRequest extends BaseRegisterTokenRequest {
-  substandardId: 'dummy';
+  moduleId: 'dummy';
 }
 
-/** Freeze-and-seize substandard - requires blacklist info */
+/** Freeze-and-seize module - requires blacklist info */
 export interface FreezeAndSeizeRegisterRequest extends BaseRegisterTokenRequest {
-  substandardId: 'freeze-and-seize';
+  moduleId: 'freeze-and-seize';
   adminPubKeyHash: string;         // Payment key hash derived from feePayerAddress
   blacklistNodePolicyId: string;   // From blacklist initialization step
 }
 
-/** KYC substandard - requires Global State policy ID */
+/** KYC module - requires Global State policy ID */
 export interface KycRegisterRequest extends BaseRegisterTokenRequest {
-  substandardId: 'kyc';
+  moduleId: 'kyc';
   adminPubKeyHash: string;         // Payment key hash derived from feePayerAddress
   globalStatePolicyId: string;     // Global State policy ID
   attestation?: Cip170AttestationData;  // Optional CIP-170 attestation
 }
 
-/** KYC-Extended substandard - basic kyc + on-chain receiver allowlist (MPF root in global state) */
+/** KYC-Extended module - basic kyc + on-chain receiver allowlist (MPF root in global state) */
 export interface KycExtendedRegisterRequest extends BaseRegisterTokenRequest {
-  substandardId: 'kyc-extended';
+  moduleId: 'kyc-extended';
   adminPubKeyHash: string;
   globalStatePolicyId: string;
   attestation?: Cip170AttestationData;
 }
 
-/** RWA-token (BaFin) substandard - same shape as kyc-extended for the registration
- *  step. The backend's RwaTokenSubstandardHandler.buildRegistrationTransaction
+/** RWA-token (BaFin) module - same shape as kyc-extended for the registration
+ *  step. The backend's RwaTokenModuleHandler.buildRegistrationTransaction
  *  builds a combined tx (stake-cred registrations + CIP-113 directory insert +
  *  MintSecurity + initial token mint) — the user signs once. */
 export interface RwaTokenRegisterRequest extends BaseRegisterTokenRequest {
-  substandardId: 'rwa-token';
+  moduleId: 'rwa-token';
   adminPubKeyHash: string;
   globalStatePolicyId: string;
   attestation?: Cip170AttestationData;
@@ -152,8 +152,8 @@ export interface MintFormData {
 
 export interface LegacyMintTokenRequest {
   issuerBaseAddress: string;
-  substandardName: string;
-  substandardIssueContractName: string;
+  moduleName: string;
+  moduleIssueContractName: string;
   recipientAddress?: string;
   assetName: string;      // HEX ENCODED token name
   quantity: string;       // Amount as string to handle large numbers
@@ -162,7 +162,7 @@ export interface LegacyMintTokenRequest {
 export interface LegacyMintFormData {
   tokenName: string;           // Human-readable name (will be hex encoded)
   quantity: string;            // Amount to mint
-  substandardId: string;       // Substandard ID (e.g., "dummy")
+  moduleId: string;       // Module ID (e.g., "dummy")
   validatorTitle: string;      // Validator contract name
   recipientAddress?: string;   // Optional recipient (defaults to issuer)
 }

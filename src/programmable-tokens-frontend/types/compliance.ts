@@ -10,7 +10,7 @@ import type { Cip68MetadataRequest } from './api';
 // ============================================================================
 
 export interface BlacklistInitRequest {
-  substandardId: string;         // Substandard ID (e.g., 'freeze-and-seize')
+  moduleId: string;         // Module ID (e.g., 'freeze-and-seize')
   adminAddress: string;          // Admin address that will manage this blacklist
   feePayerAddress: string;       // Address that pays for the transaction
   assetName: string;             // Hex-encoded asset name, WITHOUT any CIP-67 label
@@ -80,8 +80,8 @@ export type SeizeTokensResponse = TransactionContextResponse<void>;
 // ============================================================================
 
 export interface WhitelistInitRequest {
-  tokenPolicyId?: string;        // Policy ID of the programmable token (optional if substandardId provided)
-  substandardId?: string;        // Substandard ID (e.g., "kyc") - for pre-registration init
+  tokenPolicyId?: string;        // Policy ID of the programmable token (optional if moduleId provided)
+  moduleId?: string;        // Module ID (e.g., "kyc") - for pre-registration init
   adminAddress: string;          // Admin address that will manage this whitelist
   bootstrapTxHash: string;       // Bootstrap UTxO transaction hash
   bootstrapOutputIndex: number;  // Bootstrap UTxO output index
@@ -110,12 +110,12 @@ export interface RemoveFromWhitelistRequest {
 export type WhitelistOperationResponse = TransactionContextResponse<void>;
 
 // ============================================================================
-// Global State Init / Entity Management (KYC substandard)
+// Global State Init / Entity Management (KYC module)
 // Separate from Whitelist — mirrors GlobalStateManageable on the backend.
 // ============================================================================
 
 export interface GlobalStateInitRequest {
-  substandardId: string;              // e.g. "kyc" | "kyc-extended"
+  moduleId: string;              // e.g. "kyc" | "kyc-extended"
   adminAddress: string;               // fee-payer address (user's wallet)
   /** Optional explicit admin PKH for the entity that will sign future admin
    *  operations. When absent the backend derives it from adminAddress. */

@@ -9,7 +9,7 @@ import org.cardanofoundation.cip113.util.AddressUtil;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
-/** {@link TokenMembershipHook} for the {@code rwa-token} substandard.
+/** {@link TokenMembershipHook} for the {@code rwa-token} module.
  *  Auto-upserts the verified user's stake credential into the per-policy MPF
  *  allowlist tree. */
 @Component
@@ -21,7 +21,7 @@ public class RwaTokenMembershipHook implements TokenMembershipHook {
     private final RwaTokenAllowlistService allowlistService;
 
     @Override
-    public String substandardId() {
+    public String moduleId() {
         return "rwa-token";
     }
 
