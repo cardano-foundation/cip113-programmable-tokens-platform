@@ -54,3 +54,6 @@ frontend.log
 
 # Output of `npm run test:upgrade`. Generated, never committed.
 .upgrade-build/
+.root-build/
+.stake-build/
+.attestation-build/

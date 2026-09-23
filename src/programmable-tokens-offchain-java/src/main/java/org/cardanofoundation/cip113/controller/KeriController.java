@@ -186,7 +186,8 @@ public class KeriController {
      * KERI proof generation will auto-upsert the user's PKH into the per-policy MPF tree.
      *
      * Body: {@code { "policyId": "<56-hex-chars>" }}.
-     * 204 on success; 400 if the policy isn't a kyc-extended token; 401 if no session.
+     * Supports kyc-extended and rwa-token membership hooks.
+     * 204 on success; 400 if the module has no hook; 401 if no session.
      */
     @PostMapping("/session/bound-token")
     public ResponseEntity<?> bindSessionToToken(

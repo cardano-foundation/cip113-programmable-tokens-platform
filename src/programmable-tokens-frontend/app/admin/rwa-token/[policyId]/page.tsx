@@ -18,13 +18,22 @@ import {
   addPowerUserOnChain,
   buildUpdateMemberRootHashTx,
   getRwaTokenGlobalState,
+  listRwaMembers,
   PowerUserCapability,
   type DenylistEntry,
   type PowerUser,
   type PowerUserCapabilityName,
+  type RwaMemberCandidate,
+  type RwaMemberLeaf,
+  type RwaMemberList,
 } from "@/lib/api/rwa-token";
 import { getTokenContext } from "@/lib/api/protocol";
 import { useWallet } from "@/hooks/use-wallet";
+import { getPaymentKeyHash } from "@/lib/utils/address";
+import { getCardanoNetwork } from "@/lib/utils/network";
+import { resolveStakeMemberAddress } from "@/lib/rwa/stake-address";
+import { reviewMemberRootTransaction } from "@/lib/rwa/review-root-tx";
+import { canonicalMemberBody, findAdminWalletAddress, signRwaAdminRequest } from "@/lib/rwa/admin-auth";
 
 const CAPABILITY_NAMES = Object.keys(PowerUserCapability) as PowerUserCapabilityName[];
 
@@ -99,21 +108,45 @@ export default function RwaTokenAdminPage() {
 // ── Member root hash (admin-signed publish) ─────────────────────────────────
 
 function MemberRootHashSection({ policyId }: { policyId: string }) {
-  const { wallet } = useWallet();
-  const [onchainHash, setOnchainHash] = useState<string | null>(null);
+  const { wallet, rawApi } = useWallet();
+  const [state, setState] = useState<Awaited<ReturnType<typeof getRwaTokenGlobalState>> | null>(null);
+  const [members, setMembers] = useState<RwaMemberList | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [stakeAddress, setStakeAddress] = useState("");
+  const [expiry, setExpiry] = useState("");
+  const [candidate, setCandidate] = useState<(RwaMemberCandidate & {
+    approvedAdded: RwaMemberLeaf[];
+    manualStakeAddress?: string;
+  }) | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastPublishedTx, setLastPublishedTx] = useState<string | null>(null);
 
-  const refresh = () => {
-    getRwaTokenGlobalState(policyId)
-      .then((gs) => setOnchainHash(gs.memberRootHash ?? null))
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  const refresh = async () => {
+    try {
+      const gs = await getRwaTokenGlobalState(policyId);
+      setState(gs);
+      if (!rawApi) { setMembers(null); return; }
+      const headers = await signRwaAdminRequest({
+        rawApi, policyId, gsPolicyId: gs.globalStatePolicyId,
+        adminHash: gs.adminCredentialHash, method: "GET",
+        path: `/rwa-token/${policyId}/members`, canonicalBody: "",
+      });
+      setMembers(await listRwaMembers(policyId, headers));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
-  useEffect(refresh, [policyId]);
+  useEffect(() => {
+    getRwaTokenGlobalState(policyId).then(setState)
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [policyId]);
 
-  const handlePublish = async () => {
+  const pendingKey = (member: { credentialHash: string; credentialType: number }) =>
+    `${member.credentialType}:${member.credentialHash.toLowerCase()}`;
+
+  const handlePrepare = async () => {
     if (!wallet) {
       setError("Connect a wallet first");
       return;
@@ -121,16 +154,68 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
     setBusy(true);
     setError(null);
     try {
-      const addrs = await wallet.getUsedAddresses();
-      const adminAddress = addrs[0];
-      if (!adminAddress) throw new Error("no wallet address");
-      const { unsignedCborTx, newRootHashHex } =
-        await buildUpdateMemberRootHashTx(policyId, adminAddress);
-      const signed = await wallet.signTx(unsignedCborTx, true);
+      if (!state) throw new Error("Global State is not loaded");
+      const adminAddress = await findAdminWalletAddress(wallet, state.adminCredentialHash);
+      if (!state || getPaymentKeyHash(adminAddress).toLowerCase() !== state.adminCredentialHash.toLowerCase())
+        throw new Error("The connected wallet is not the current on-chain GS admin");
+      let manualMember;
+      if (stakeAddress.trim()) {
+        const credential = resolveStakeMemberAddress(stakeAddress, getCardanoNetwork());
+        const validUntilMs = new Date(expiry).getTime();
+        if (!Number.isSafeInteger(validUntilMs) || validUntilMs <= Date.now()) throw new Error("Choose a future expiry");
+        manualMember = { ...credential, validUntilMs };
+      }
+      const selectedPendingMembers = members?.pending.filter((member) => selected.has(pendingKey(member))) ?? [];
+      const body = {
+        feePayerAddress: adminAddress,
+        manualMember,
+        selectedPendingMembers,
+      };
+      const headers = await signRwaAdminRequest({
+        rawApi, policyId, gsPolicyId: state.globalStatePolicyId,
+        adminHash: state.adminCredentialHash, method: "POST",
+        path: `/rwa-token/${policyId}/update-member-root-hash`,
+        canonicalBody: canonicalMemberBody(adminAddress, manualMember, selectedPendingMembers),
+      });
+      const proposal = await buildUpdateMemberRootHashTx(policyId, body, headers);
+      const approvedAdded = [
+        ...(manualMember ? [manualMember] : []),
+        ...selectedPendingMembers,
+      ];
+      const key = (member: RwaMemberLeaf) => `${member.credentialType}:${member.credentialHash.toLowerCase()}:${member.validUntilMs}`;
+      if (approvedAdded.map(key).sort().join("|") !== proposal.added.map(key).sort().join("|"))
+        throw new Error("Backend proposal includes an unselected member or changed expiry");
+      setCandidate({ ...proposal, approvedAdded,
+        manualStakeAddress: manualMember ? stakeAddress.trim() : undefined });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSign = async () => {
+    if (!wallet || !candidate || !state) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await findAdminWalletAddress(wallet, state.adminCredentialHash);
+      await reviewMemberRootTransaction({
+        ...candidate,
+        gsPolicyId: state.globalStatePolicyId,
+        tokenPolicyId: policyId,
+        adminHash: state.adminCredentialHash,
+      });
+      const signed = await wallet.signTx(candidate.unsignedCborTx, true);
       const txHash = await wallet.submitTx(signed);
+      if (txHash.toLowerCase() !== candidate.txHash.toLowerCase())
+        throw new Error("Wallet submitted a different transaction body; inspect the chain before retrying");
       setLastPublishedTx(txHash);
-      // Optimistic update; reconfirm after ~20s when chain reflects it.
-      setOnchainHash(newRootHashHex);
+      setCandidate(null);
+      setTimeout(() => {
+        getRwaTokenGlobalState(policyId).then(setState)
+          .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      }, 15_000);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -142,30 +227,69 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
     <Card className="p-6 space-y-4">
       <h2 className="text-lg font-semibold text-white">Member root hash</h2>
       <p className="text-xs text-dark-400">
-        On-chain MPF allowlist root. The backend recomputes it from your enrolled
-        members on every KYC change but does NOT publish autonomously — the
-        BaFin validator requires the admin wallet to sign the update.
+        Add a stake credential to the CMTA member tree. The admin wallet signs
+        the root update after you review the exact members being added. A member
+        can receive proofs after the transaction is confirmed on chain.
       </p>
 
       <div className="space-y-1">
         <p className="text-xs text-dark-500 uppercase tracking-wider">Current on-chain</p>
         <p className="text-xs font-mono text-dark-300 break-all">
-          {onchainHash ?? "—"}
+          {state?.memberRootHash ?? "—"}
         </p>
       </div>
+
+      <Button type="button" variant="secondary" onClick={() => void refresh()} disabled={!rawApi || busy}>
+        Load current and pending members
+      </Button>
+
+      <div className="space-y-2">
+        <label className="block text-sm text-white" htmlFor="manual-stake-address">Stake address</label>
+        <Input id="manual-stake-address" value={stakeAddress} onChange={(e) => { setStakeAddress(e.target.value); setCandidate(null); }} placeholder={getCardanoNetwork() === "mainnet" ? "stake1…" : "stake_test1…"} />
+        <p className="text-xs text-dark-400">The address determines the stake credential and whether it is a key or script.</p>
+        <label className="block text-sm text-white" htmlFor="manual-expiry">Valid until</label>
+        <Input id="manual-expiry" type="datetime-local" value={expiry} onChange={(e) => { setExpiry(e.target.value); setCandidate(null); }} />
+      </div>
+
+      {members && members.pending.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-sm text-white">Pending Veridian members and expiry updates (select only those to include)</p>
+          {members.pending.map((member) => {
+            const key = pendingKey(member);
+            return <label key={key} className="flex items-start gap-2 text-xs text-dark-300">
+              <input type="checkbox" checked={selected.has(key)} onChange={(e) => {
+                const next = new Set(selected); e.target.checked ? next.add(key) : next.delete(key);
+                setSelected(next); setCandidate(null);
+              }} />
+              <span className="font-mono break-all">{member.credentialHash} ({member.credentialType === 0 ? "key" : "script"}; expires {new Date(member.validUntilMs).toLocaleString()})</span>
+            </label>;
+          })}
+        </div>
+      )}
 
       <Button
         type="button"
         variant="primary"
-        onClick={handlePublish}
+        onClick={handlePrepare}
         disabled={busy}
       >
-        {busy ? "Publishing…" : "Publish current root"}
+        {busy ? "Preparing…" : "Review member root update"}
       </Button>
+
+      {candidate && <div className="space-y-3 rounded border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-dark-200">
+        <p className="font-semibold text-white">Review before wallet signing</p>
+        {candidate.manualStakeAddress && <p className="font-mono break-all">Manual stake address: {candidate.manualStakeAddress}</p>}
+        <p>Current members: {candidate.baseline.length}. Added or updated: {candidate.added.length}. New total: {candidate.leaves.length}.</p>
+        {candidate.added.map((member) => <p key={pendingKey(member)} className="font-mono break-all">
+          {member.credentialHash} ({member.credentialType === 0 ? "stake key" : "stake script"}) — expires {new Date(member.validUntilMs).toLocaleString()}
+        </p>)}
+        <p className="font-mono break-all">New root: {candidate.newRootHashHex}</p>
+        <Button type="button" variant="primary" onClick={handleSign} disabled={busy}>{busy ? "Checking and signing…" : "Verify on chain and sign"}</Button>
+      </div>}
 
       {lastPublishedTx && (
         <p className="text-xs text-green-400 break-all">
-          Submitted: {lastPublishedTx}
+          Submitted: {lastPublishedTx}. Waiting for chain confirmation; refresh to see the active root.
         </p>
       )}
       {error && <p className="text-xs text-red-400">{error}</p>}

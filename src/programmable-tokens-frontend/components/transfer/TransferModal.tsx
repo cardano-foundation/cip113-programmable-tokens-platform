@@ -13,10 +13,12 @@ import {
   Shield,
   Loader2,
   AlertCircle,
+  ChevronDown,
+  Copy,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { transferToken, getTokenContext } from "@/lib/api";
-import { TransferTokenRequest, ParsedAsset, ApiException } from "@/types/api";
+import { TransferTokenRequest, ParsedAsset, ApiException, type CmtaAttestation } from "@/types/api";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useCIP113 } from "@/contexts/cip113-context";
 import { useToast } from "@/components/ui/use-toast";
@@ -26,8 +28,9 @@ import { getKycProof, clearKycProof, type KycProofCookie } from "@/lib/utils/kyc
 import { useMpfMembershipStatus } from "@/hooks/useMpfMembershipStatus";
 import { useRwaTokenMembershipStatus } from "@/hooks/useRwaTokenMembershipStatus";
 import { getMpfInclusionProof, requestMpfInclusion } from "@/lib/api/kyc-extended";
-import { getRwaTokenInclusionProof, requestRwaTokenInclusion } from "@/lib/api/rwa-token";
+import { getRwaTokenInclusionProof, getRwaTokenGlobalState } from "@/lib/api/rwa-token";
 import { extractStakeCredHashFromAddress } from "@/lib/utils/address";
+import { buildCmtaAttestationPayloadHex, prepareCmtaSignature, sameStakeIdentity, stakeIdentityFromBaseAddress } from "@/lib/rwa/attestation";
 import { getKeriSessionIdForWallet } from "@/lib/utils/keri-session";
 
 type TransactionBuilder = "sdk" | "backend";
@@ -50,6 +53,33 @@ type RecipientCheckStatus =
   | { kind: "expired" }
   | { kind: "publish-pending" }
   | { kind: "error"; message: string };
+
+type SignatureInput = { text: string; signedPayloadHex: string };
+
+function preparedPayload(address: string, policyId: string, networkId: number | null,
+  tier: string, expiry: string): { payloadHex: string; error: string | null } {
+  try {
+    if (networkId === null) throw new Error("Waiting for live CMTA token details");
+    return { payloadHex: buildCmtaAttestationPayloadHex(address, policyId, networkId,
+      Number(tier), new Date(expiry).getTime()), error: null };
+  } catch (e) {
+    return { payloadHex: "", error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+function parsePastedSignature(input: SignatureInput, payloadHex: string,
+  context: { trustedVkeys: string[] } | null, expiry: string):
+  { value: CmtaAttestation | null; validUntilMs: number | null; error: string | null } {
+  if (!input.text.trim()) return { value: null, validUntilMs: null, error: null };
+  if (!context) return { value: null, validUntilMs: null, error: "Loading the live trusted-entity list" };
+  try {
+    const value = prepareCmtaSignature(input.text, input.signedPayloadHex,
+      payloadHex, context.trustedVkeys);
+    return { value, validUntilMs: new Date(expiry).getTime(), error: null };
+  } catch (e) {
+    return { value: null, validUntilMs: null, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 export function TransferModal({
   isOpen,
@@ -78,6 +108,8 @@ export function TransferModal({
   const [isKycToken, setIsKycToken] = useState(false);
   const [isKycExtendedToken, setIsKycExtendedToken] = useState(false);
   const [isRwaTokenToken, setIsRwaTokenToken] = useState(false);
+  const [tokenContextReady, setTokenContextReady] = useState(false);
+  const [tokenContextError, setTokenContextError] = useState<string | null>(null);
   /** RWA-token only: per-token toggle from the global-state datum. Defaults to true
    *  (the safer regulatory-compliance posture) until the token context resolves. */
   const [rwaTokenRequiresReceiverKyc, setRwaTokenRequiresReceiverKyc] = useState(true);
@@ -90,6 +122,17 @@ export function TransferModal({
    *  surface a banner and disable the Send button so the user doesn't burn fees
    *  on a tx the network will refuse. */
   const [rwaTokenTransfersPaused, setRwaTokenTransfersPaused] = useState(false);
+  const [rwaAttestationContext, setRwaAttestationContext] = useState<{ networkId: number; trustedVkeys: string[] } | null>(null);
+  const [rwaAttestationContextError, setRwaAttestationContextError] = useState<string | null>(null);
+  const [senderSignature, setSenderSignature] = useState<SignatureInput>({ text: "", signedPayloadHex: "" });
+  const [recipientSignature, setRecipientSignature] = useState<SignatureInput>({ text: "", signedPayloadHex: "" });
+  const [senderCopiedPayloadHex, setSenderCopiedPayloadHex] = useState("");
+  const [recipientCopiedPayloadHex, setRecipientCopiedPayloadHex] = useState("");
+  const [senderTier, setSenderTier] = useState("1");
+  const [recipientTier, setRecipientTier] = useState("1");
+  const [senderExpiry, setSenderExpiry] = useState(() => localDateTimeValue(Date.now() + 60 * 60 * 1000));
+  const [recipientExpiry, setRecipientExpiry] = useState(() => localDateTimeValue(Date.now() + 60 * 60 * 1000));
+  const [senderProofNeededForChange, setSenderProofNeededForChange] = useState(false);
   const [kycProof, setKycProofState] = useState<KycProofCookie | null>(null);
 
   const [recipientCheckStatus, setRecipientCheckStatus] = useState<RecipientCheckStatus>({ kind: "idle" });
@@ -123,22 +166,20 @@ export function TransferModal({
   // validator until the new root is published. So gate STRICTLY on on-chain
   // membership for rwa-token. For kyc-extended, the cookie is an accepted
   // fallback (the validator filters senders out of receiver_witnesses).
-  /** The sender's own change output is a DESTINATION on chain: the validator's
-   *  per-destination loop (gated on `requires_receiver_kyc`) runs over every output's
-   *  stake credential, the sender's change included. So a token with
-   *  `requires_sender_kyc = false` but `requires_receiver_kyc = true` still needs the
-   *  sender enrolled — unless the transfer leaves no change, or is a self-send (the
-   *  builder emits no destination actions at all for those). */
-  const sendsChangeBack = (() => {
-    const qty = Number(quantity);
-    return Number.isFinite(qty) && qty > 0 && qty < Number(asset.amount);
-  })();
-  const rwaTokenSenderProofRequired =
-    rwaTokenRequiresSenderKyc
-    || (rwaTokenRequiresReceiverKyc && sendsChangeBack && recipientCheckStatus.kind !== "self");
+  const senderPayload = preparedPayload(senderAddress, policyId, rwaAttestationContext?.networkId ?? null,
+    senderTier, senderExpiry);
+  const recipientPayload = preparedPayload(recipientAddress, policyId, rwaAttestationContext?.networkId ?? null,
+    recipientTier, recipientExpiry);
+  const parsedSenderAttestation = parsePastedSignature(senderSignature, senderPayload.payloadHex,
+    rwaAttestationContext, senderExpiry);
+  const parsedRecipientAttestation = parsePastedSignature(recipientSignature, recipientPayload.payloadHex,
+    rwaAttestationContext, recipientExpiry);
+  // Only the backend knows whether the selected token UTxOs create change.
+  // The sender flag is the only unconditional sender gate in this form.
+  const rwaTokenSenderProofRequired = rwaTokenRequiresSenderKyc;
 
   const senderReady = isRwaTokenToken
-    ? !rwaTokenSenderProofRequired || senderMpfReady
+    ? !rwaTokenSenderProofRequired || senderMpfReady || !!parsedSenderAttestation.value
     : isKycExtendedToken
       ? senderMpfReady || !!kycProof
       : isKycToken
@@ -150,10 +191,26 @@ export function TransferModal({
   const recipientReady =
     !(isKycExtendedToken || (isRwaTokenToken && rwaTokenRequiresReceiverKyc)) ||
     recipientCheckStatus.kind === "verified" ||
-    recipientCheckStatus.kind === "self";
+    (isRwaTokenToken && !!parsedRecipientAttestation.value) ||
+    (isRwaTokenToken && recipientCheckStatus.kind === "self"
+      && (senderMpfReady || !!parsedSenderAttestation.value)) ||
+    (!isRwaTokenToken && recipientCheckStatus.kind === "self");
+
+  const freshSignatureAttestation = (party: "sender" | "receiver"): CmtaAttestation => {
+    if (!rwaAttestationContext) throw new Error("Live CMTA token details are unavailable");
+    const input = party === "sender" ? senderSignature : recipientSignature;
+    const prepared = preparedPayload(party === "sender" ? senderAddress : recipientAddress,
+      policyId, rwaAttestationContext.networkId,
+      party === "sender" ? senderTier : recipientTier,
+      party === "sender" ? senderExpiry : recipientExpiry);
+    if (prepared.error) throw new Error(`${party} ${prepared.error}`);
+    return prepareCmtaSignature(input.text, input.signedPayloadHex,
+      prepared.payloadHex, rwaAttestationContext.trustedVkeys);
+  };
 
   // Reset state when modal opens
   useEffect(() => {
+    let cancelled = false;
     if (isOpen) {
       setStep("form");
       setQuantity("");
@@ -165,21 +222,37 @@ export function TransferModal({
       setIsKycToken(false);
       setIsKycExtendedToken(false);
       setIsRwaTokenToken(false);
+      setTokenContextReady(false);
+      setTokenContextError(null);
       setRwaTokenRequiresReceiverKyc(true);
       setRwaTokenRequiresSenderKyc(true);
       setRwaTokenTransfersPaused(false);
+      setRwaAttestationContext(null);
+      setRwaAttestationContextError(null);
+      setSenderSignature({ text: "", signedPayloadHex: "" });
+      setRecipientSignature({ text: "", signedPayloadHex: "" });
+      setSenderCopiedPayloadHex("");
+      setRecipientCopiedPayloadHex("");
+      setSenderTier("1");
+      setRecipientTier("1");
+      setSenderExpiry(localDateTimeValue(Date.now() + 60 * 60 * 1000));
+      setRecipientExpiry(localDateTimeValue(Date.now() + 60 * 60 * 1000));
+      setSenderProofNeededForChange(false);
 
       getTokenContext(policyId)
         .then((ctx) => {
+          if (cancelled) return;
           if (ctx.moduleId === "kyc") {
             setIsKycToken(true);
             const cachedProof = getKycProof(policyId, senderAddress);
             if (cachedProof) setKycProofState(cachedProof);
+            setTokenContextReady(true);
           } else if (ctx.moduleId === "kyc-extended") {
             setIsKycToken(true);
             setIsKycExtendedToken(true);
             const cachedProof = getKycProof(policyId, senderAddress);
             if (cachedProof) setKycProofState(cachedProof);
+            setTokenContextReady(true);
           } else if (ctx.moduleId === "rwa-token") {
             setIsKycToken(true);
             setIsRwaTokenToken(true);
@@ -188,17 +261,35 @@ export function TransferModal({
             setRwaTokenTransfersPaused(ctx.transfersPaused ?? false);
             const cachedProof = getKycProof(policyId, senderAddress);
             if (cachedProof) setKycProofState(cachedProof);
+            getRwaTokenGlobalState(policyId).then((gs) => {
+              if (cancelled) return;
+              setRwaAttestationContext({ networkId: gs.networkId, trustedVkeys: gs.trustedEntityVkeys });
+              setRwaTokenRequiresReceiverKyc(gs.requiresReceiverKyc);
+              setRwaTokenRequiresSenderKyc(gs.requiresSenderKyc);
+              setRwaTokenTransfersPaused(gs.transfersPaused);
+              setTokenContextReady(true);
+            }).catch((e) => {
+              if (!cancelled) {
+                const message = e instanceof Error ? e.message : String(e);
+                setRwaAttestationContextError(message);
+                setTokenContextError(message);
+              }
+            });
+          } else {
+            setTokenContextReady(true);
           }
         })
-        .catch(() => {});
+        .catch((e) => { if (!cancelled) setTokenContextError(e instanceof Error ? e.message : String(e)); });
     }
-  }, [isOpen, policyId]);
+    return () => { cancelled = true; };
+  }, [isOpen, policyId, senderAddress]);
 
   // Recipient MPF membership probe. We probe for kyc-extended and ALWAYS for
   // rwa-token so the admin can see the receiver's enrollment status even
   // when {@code requires_receiver_kyc} is false. Whether the probe gates the
   // Send button is decided separately in {@link recipientReady} below.
   useEffect(() => {
+    const token = ++recipientProbingToken.current;
     const needsProbe = isKycExtendedToken || isRwaTokenToken;
     if (!needsProbe) {
       setRecipientCheckStatus({ kind: "idle" });
@@ -213,24 +304,35 @@ export function TransferModal({
 
     let recipientPkh: string;
     let senderPkh: string;
+    let recipientType: 0 | 1 = 0;
+    let sameCredential = false;
     try {
-      recipientPkh = extractStakeCredHashFromAddress(addr);
-      senderPkh = extractStakeCredHashFromAddress(senderAddress);
+      if (isRwaTokenToken) {
+        const recipient = stakeIdentityFromBaseAddress(addr);
+        const sender = stakeIdentityFromBaseAddress(senderAddress);
+        recipientPkh = recipient.credentialHash;
+        senderPkh = sender.credentialHash;
+        recipientType = recipient.credentialType;
+        sameCredential = sameStakeIdentity(recipient, sender);
+      } else {
+        recipientPkh = extractStakeCredHashFromAddress(addr);
+        senderPkh = extractStakeCredHashFromAddress(senderAddress);
+        sameCredential = recipientPkh.toLowerCase() === senderPkh.toLowerCase();
+      }
     } catch {
       setRecipientCheckStatus({ kind: "idle" });
       return;
     }
 
-    if (recipientPkh.toLowerCase() === senderPkh.toLowerCase()) {
+    if (sameCredential) {
       setRecipientCheckStatus({ kind: "self" });
       return;
     }
 
     setRecipientCheckStatus({ kind: "checking" });
-    const token = ++recipientProbingToken.current;
 
     const probeFn = isRwaTokenToken
-      ? () => getRwaTokenInclusionProof(policyId, recipientPkh)
+      ? () => getRwaTokenInclusionProof(policyId, recipientPkh, recipientType)
       : () => getMpfInclusionProof(policyId, recipientPkh);
 
     probeFn()
@@ -287,6 +389,11 @@ export function TransferModal({
 
     if (!validateForm()) return;
 
+    if (!tokenContextReady) {
+      showToast({ title: "Token details unavailable", description: tokenContextError ?? "Wait for token verification to load", variant: "error" });
+      return;
+    }
+
     // Belt-and-braces guard: the Send button is disabled when transfers are
     // paused, but an Enter-key submit or dev-tools poke could still reach
     // here. Surface a clear toast rather than building a tx the on-chain
@@ -330,37 +437,35 @@ export function TransferModal({
         };
 
         if (isKycExtendedToken || isRwaTokenToken) {
-          // Sender proof: membership (preferred) or attestation cookie
           const ms = isRwaTokenToken
               ? rwaTokenSenderMembership.status
               : senderMembership.status;
           if (ms.kind === "verified" && ms.onChainSynced) {
             request.senderMpfProofCborHex = ms.proofCborHex;
             request.senderMpfValidUntilMs = ms.validUntilMs;
-          } else if (kycProof) {
+          } else if (isRwaTokenToken && parsedSenderAttestation.value) {
+            request.senderAttestation = freshSignatureAttestation("sender");
+          } else if (!isRwaTokenToken && kycProof) {
             request.kycPayload = kycProof.payloadHex;
             request.kycSignature = kycProof.signatureHex;
           } else if (!isRwaTokenToken || rwaTokenRequiresSenderKyc) {
-            throw new Error("Please complete KYC verification before sending");
-          } else if (rwaTokenSenderProofRequired) {
-            throw new Error(
-              "This token has requires_sender_kyc off but requires_receiver_kyc on, and "
-              + "the change coming back to you counts as a receiving address. Send your "
-              + "full balance, or complete KYC to enroll.");
+            throw new Error("Sender not verified: publish Merkle membership or paste a trusted-entity attestation");
           }
-          // Otherwise the sender loop is off on chain and no change comes back:
-          // the validator never inspects a sender proof, so we send none.
 
           // Receiver proof: required for kyc-extended (always) and for rwa-token
-          // when `requires_receiver_kyc` is true. Self-sends skip the proof either way.
+          // when `requires_receiver_kyc` is true. Same-credential sends reuse
+          // the sender proof if the receiver has no separate one.
           const receiverRequired =
               isKycExtendedToken || (isRwaTokenToken && rwaTokenRequiresReceiverKyc);
           if (receiverRequired) {
             if (recipientCheckStatus.kind === "verified") {
               request.mpfProofCborHex = recipientCheckStatus.proofCborHex;
               request.mpfValidUntilMs = recipientCheckStatus.validUntilMs;
-            } else if (recipientCheckStatus.kind !== "self") {
-              throw new Error("Recipient must complete KYC before receiving this token");
+            } else if (isRwaTokenToken && parsedRecipientAttestation.value) {
+              request.recipientAttestation = freshSignatureAttestation("receiver");
+            } else if (recipientCheckStatus.kind !== "self" ||
+                (!request.senderMpfProofCborHex && !request.senderAttestation)) {
+              throw new Error("Receiver not verified: publish Merkle membership or paste a trusted-entity attestation");
             }
           }
         } else if (kycProof) {
@@ -392,6 +497,8 @@ export function TransferModal({
       if (error instanceof Error) {
         errorMessage = error.message.includes("User declined") ? "Transaction was cancelled" : error.message;
       }
+      if (isRwaTokenToken && errorMessage.includes("sender proof required"))
+        setSenderProofNeededForChange(true);
       // Auto-trigger the one-shot transfer-logic stake-credential registration
       // when the backend reports it's missing. Conway requires a script's stake
       // credential to be registered on-chain before any withdraw-0 against it.
@@ -462,7 +569,7 @@ export function TransferModal({
         </div>
 
         {/* Content */}
-        <div className="p-6">
+        <div className="max-h-[calc(100vh-5rem)] overflow-y-auto p-6">
           {step === "kyc-sender" && isKycExtendedToken && (
             <KycVerificationFlow
               policyId={policyId}
@@ -489,19 +596,12 @@ export function TransferModal({
             <KycVerificationFlow
               policyId={policyId}
               senderAddress={senderAddress}
+              forceFresh
+              stageMembership
               onBack={() => setStep("form")}
-              onComplete={async (proof) => {
+              onComplete={(proof) => {
                 setKycProofState(proof);
-                try {
-                  await requestRwaTokenInclusion(policyId, {
-                    boundAddress: senderAddress,
-                    kycSessionId: getKeriSessionIdForWallet(senderAddress),
-                    validUntilMs: proof.validUntilMs,
-                  });
-                  rwaTokenSenderMembership.refresh();
-                } catch (err) {
-                  console.error("Failed to register sender in rwa-token allowlist:", err);
-                }
+                rwaTokenSenderMembership.refresh();
                 setStep("form");
               }}
             />
@@ -521,6 +621,9 @@ export function TransferModal({
 
           {step === "form" && (
             <form onSubmit={handleSubmit} className="space-y-5">
+              {tokenContextError && <p className="rounded-lg border border-red-700/40 bg-red-900/10 p-3 text-xs text-red-300">
+                Could not load live token details: {tokenContextError}
+              </p>}
               {/* Pause notice — fires when the rwa-token's GS datum has
                   transfers_paused=true. The on-chain transfer_logic validator
                   rejects every transfer in this state, so we surface a banner
@@ -663,6 +766,30 @@ export function TransferModal({
                 </div>
               )}
 
+              {isRwaTokenToken && !senderMpfReady &&
+                (rwaTokenRequiresSenderKyc || rwaTokenRequiresReceiverKyc) && (
+                <AttestationPaste
+                  party="Sender"
+                  address={senderAddress}
+                  policyId={policyId}
+                  networkId={rwaAttestationContext?.networkId ?? null}
+                  trustedIssuerCount={rwaAttestationContext?.trustedVkeys.length ?? null}
+                  tier={senderTier}
+                  onTierChange={(value) => { setSenderTier(value); setSenderCopiedPayloadHex(""); setSenderSignature({ text: "", signedPayloadHex: "" }); }}
+                  expiry={senderExpiry}
+                  onExpiryChange={(value) => { setSenderExpiry(value); setSenderCopiedPayloadHex(""); setSenderSignature({ text: "", signedPayloadHex: "" }); }}
+                  payloadHex={senderPayload.payloadHex}
+                  payloadError={senderPayload.error}
+                  onPayloadCopied={setSenderCopiedPayloadHex}
+                  required={rwaTokenRequiresSenderKyc || senderProofNeededForChange}
+                  text={senderSignature.text}
+                  onChange={(value) => setSenderSignature({ text: value, signedPayloadHex: senderCopiedPayloadHex })}
+                  attestation={parsedSenderAttestation.value}
+                  validUntilMs={parsedSenderAttestation.validUntilMs}
+                  error={parsedSenderAttestation.error ?? rwaAttestationContextError}
+                />
+              )}
+
               {/* Transaction Builder Toggle */}
               <div className="flex items-center justify-between px-3 py-2 bg-dark-900 rounded-lg">
                 <span className="text-xs text-dark-400">Tx Builder</span>
@@ -727,6 +854,7 @@ export function TransferModal({
                   value={quantity}
                   onChange={(e) => {
                     setQuantity(e.target.value);
+                    setSenderProofNeededForChange(false);
                     setErrors((prev) => ({ ...prev, quantity: "" }));
                   }}
                   placeholder="Enter amount"
@@ -742,6 +870,9 @@ export function TransferModal({
                   value={recipientAddress}
                   onChange={(e) => {
                     setRecipientAddress(e.target.value);
+                    setRecipientSignature({ text: "", signedPayloadHex: "" });
+                    setRecipientCopiedPayloadHex("");
+                    setSenderProofNeededForChange(false);
                     setErrors((prev) => ({ ...prev, recipientAddress: "" }));
                   }}
                   placeholder="addr1..."
@@ -750,6 +881,31 @@ export function TransferModal({
                 />
                 {isKycExtendedToken && <RecipientStatus status={recipientCheckStatus} />}
               </div>
+
+              {isRwaTokenToken && rwaTokenRequiresReceiverKyc &&
+                recipientCheckStatus.kind !== "verified" &&
+                !(recipientCheckStatus.kind === "self" && (senderMpfReady || !!parsedSenderAttestation.value)) && (
+                <AttestationPaste
+                  party="Receiver"
+                  address={recipientAddress}
+                  policyId={policyId}
+                  networkId={rwaAttestationContext?.networkId ?? null}
+                  trustedIssuerCount={rwaAttestationContext?.trustedVkeys.length ?? null}
+                  tier={recipientTier}
+                  onTierChange={(value) => { setRecipientTier(value); setRecipientCopiedPayloadHex(""); setRecipientSignature({ text: "", signedPayloadHex: "" }); }}
+                  expiry={recipientExpiry}
+                  onExpiryChange={(value) => { setRecipientExpiry(value); setRecipientCopiedPayloadHex(""); setRecipientSignature({ text: "", signedPayloadHex: "" }); }}
+                  payloadHex={recipientPayload.payloadHex}
+                  payloadError={recipientPayload.error}
+                  onPayloadCopied={setRecipientCopiedPayloadHex}
+                  required
+                  text={recipientSignature.text}
+                  onChange={(value) => setRecipientSignature({ text: value, signedPayloadHex: recipientCopiedPayloadHex })}
+                  attestation={parsedRecipientAttestation.value}
+                  validUntilMs={parsedRecipientAttestation.validUntilMs}
+                  error={parsedRecipientAttestation.error ?? rwaAttestationContextError}
+                />
+              )}
 
               {/* Submit */}
               <div className="flex gap-3 pt-2">
@@ -761,10 +917,12 @@ export function TransferModal({
                   variant="primary"
                   className="flex-1"
                   isLoading={isBuilding}
-                  disabled={isBuilding || !senderReady || !recipientReady || rwaTokenTransfersPaused}
+                  disabled={isBuilding || !tokenContextReady || !senderReady || !recipientReady || rwaTokenTransfersPaused}
                 >
                   {isBuilding
                     ? "Building..."
+                    : !tokenContextReady
+                      ? tokenContextError ? "Token unavailable" : "Loading token…"
                     : rwaTokenTransfersPaused
                       ? "Transfers paused"
                       : !senderReady
@@ -824,6 +982,133 @@ export function TransferModal({
 }
 
 // ── Sub-components ──────────────────────────────────────────────────────────
+
+function localDateTimeValue(timestamp: number): string {
+  const date = new Date(timestamp);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function AttestationPaste({ party, address, policyId, networkId, trustedIssuerCount, tier, onTierChange,
+  expiry, onExpiryChange, payloadHex, payloadError, onPayloadCopied, required, text, onChange,
+  attestation, validUntilMs, error }: {
+  party: "Sender" | "Receiver";
+  address: string;
+  policyId: string;
+  networkId: number | null;
+  trustedIssuerCount: number | null;
+  tier: string;
+  onTierChange: (value: string) => void;
+  expiry: string;
+  onExpiryChange: (value: string) => void;
+  payloadHex: string;
+  payloadError: string | null;
+  onPayloadCopied: (payloadHex: string) => void;
+  required: boolean;
+  text: string;
+  onChange: (value: string) => void;
+  attestation: CmtaAttestation | null;
+  validUntilMs: number | null;
+  error: string | null;
+}) {
+  const id = `${party.toLowerCase()}-cmta-attestation`;
+  const [expanded, setExpanded] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const currentPayloadRef = useRef(payloadHex);
+  currentPayloadRef.current = payloadHex;
+  useEffect(() => { setCopyStatus("idle"); }, [payloadHex]);
+  const copyPayload = async () => {
+    try {
+      if (networkId === null) throw new Error("Live CMTA token details are unavailable");
+      // Recheck expiry at the moment of copying, including after an idle dialog.
+      const freshPayload = buildCmtaAttestationPayloadHex(address, policyId, networkId,
+        Number(tier), new Date(expiry).getTime());
+      await navigator.clipboard.writeText(freshPayload);
+      if (currentPayloadRef.current !== freshPayload) return;
+      onPayloadCopied(freshPayload);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("failed");
+    }
+  };
+  return <div className={cn("rounded-lg border p-3", attestation
+    ? "border-success-700/40 bg-success-900/10" : "border-warning-700/40 bg-warning-900/10")}>
+    <button type="button" aria-expanded={expanded} aria-controls={`${id}-panel`}
+      onClick={() => setExpanded((open) => !open)}
+      className="flex w-full items-center justify-between gap-3 text-left">
+      <span className="space-y-0.5">
+        <span className={cn("block text-sm font-medium", attestation ? "text-success-300" : "text-warning-200")}>
+          {attestation ? `${party} signature provided` : `${party} not verified`}
+        </span>
+        <span className="block text-xs text-dark-300">
+          {attestation ? `Pending backend verification; claim expires ${new Date(validUntilMs!).toLocaleString()}`
+            : required ? "Provide a trusted-entity attestation" : "May need an attestation for token change"}
+        </span>
+      </span>
+      <ChevronDown aria-hidden="true" className={cn("h-4 w-4 shrink-0 text-dark-300 transition-transform", expanded && "rotate-180")} />
+    </button>
+    {error && text.trim() && !expanded && <p className="mt-2 text-xs text-red-400">{error}</p>}
+    <div id={`${id}-panel`} hidden={!expanded} className="mt-4 space-y-3 border-t border-dark-700/70 pt-4">
+      <p className="text-xs text-dark-300">
+        {required ? "Required without published Merkle membership. "
+          : "May be needed if selected token inputs return change to the sender. "}
+        Set the claim below, then give its payload to a trusted issuer. The issuer must hex-decode
+        and sign the 67 raw bytes with Ed25519. CIP-30 signData has a different format.
+      </p>
+      {trustedIssuerCount === 0 && <p className="text-xs text-red-400">
+        This token has no trusted issuer in its live global state. Ask the token admin to add one before signing.
+      </p>}
+      <div className="grid gap-3 sm:grid-cols-[7rem_1fr]">
+        <label className="space-y-1 text-xs text-dark-300">
+          <span className="block">KYC tier</span>
+          <input type="number" min="1" max="255" step="1" value={tier}
+            onChange={(e) => onTierChange(e.target.value)}
+            className="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-sm text-white focus:border-primary-500 focus:outline-none" />
+          <span className="block text-dark-400">1 User · 2 Institutional · 3 vLEI</span>
+        </label>
+        <label className="space-y-1 text-xs text-dark-300">
+          <span className="block">Attestation valid until (local time)</span>
+          <input type="datetime-local" value={expiry}
+            onChange={(e) => onExpiryChange(e.target.value)}
+            className="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-sm text-white focus:border-primary-500 focus:outline-none" />
+        </label>
+      </div>
+      <div className="space-y-1">
+        <label htmlFor={`${id}-payload`} className="text-xs text-dark-300">Payload to sign (hex)</label>
+        <div className="flex items-start gap-2">
+          <textarea id={`${id}-payload`} value={payloadHex} readOnly rows={3} spellCheck={false}
+            onCopy={(event) => {
+              if (payloadHex && event.currentTarget.selectionStart === 0
+                  && event.currentTarget.selectionEnd === payloadHex.length) {
+                onPayloadCopied(payloadHex);
+                setCopyStatus("copied");
+              }
+            }}
+            className="min-w-0 flex-1 resize-none rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 font-mono text-xs text-white focus:border-primary-500 focus:outline-none" />
+          <Button type="button" variant="outline" onClick={copyPayload} disabled={!payloadHex || trustedIssuerCount === 0}
+            className="shrink-0 px-3 text-xs"><Copy className="mr-1 h-3.5 w-3.5" />Copy</Button>
+        </div>
+        {payloadError && <p className="text-xs text-red-400">{payloadError}</p>}
+        {copyStatus === "copied" && <p role="status" className="text-xs text-success-400">Payload copied</p>}
+        {copyStatus === "failed" && <p role="alert" className="text-xs text-red-400">Copy failed; retry or select and copy the hex above</p>}
+        <p className="text-xs text-dark-400">This claim can be used for applicable transfers until expiry while the issuer remains trusted.</p>
+      </div>
+      <div className="space-y-1">
+        <label htmlFor={id} className="text-xs text-dark-300">Paste raw Ed25519 signature (hex)</label>
+        <textarea id={id} value={text} onChange={(e) => onChange(e.target.value)} rows={3}
+          spellCheck={false} placeholder="128 hex characters, with optional 0x prefix"
+          className="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 font-mono text-xs text-white placeholder:text-dark-500 focus:border-primary-500 focus:outline-none" />
+        <p className="text-xs text-dark-400">The backend checks this signature against the token&apos;s live trusted issuers and adds the matching key to the transaction proof.</p>
+        {error && text.trim() && <p className="text-xs text-red-400">{error}</p>}
+      </div>
+      {attestation && validUntilMs !== null && <div className="space-y-1 text-xs text-success-400">
+        <p>Signature format is valid; the backend verifies the issuer before building. Tier {parseInt(attestation.payloadHex.slice(56, 58), 16)};
+          expires {new Date(validUntilMs).toLocaleString()}.</p>
+        <p className="font-mono break-all">Stake credential: {attestation.payloadHex.slice(0, 56)}</p>
+      </div>}
+    </div>
+  </div>;
+}
 
 interface RecipientStatusProps {
   status: RecipientCheckStatus;

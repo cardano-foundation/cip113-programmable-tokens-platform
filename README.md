@@ -192,6 +192,7 @@ Create `.envDevnet` alongside the existing `.env`:
 
 ```bash
 export SPRING_PROFILES_ACTIVE=devnet
+export RWA_TOKEN_CREATION_AUDIENCE=http://localhost:8080/api/v1
 
 export WALLET_MNEMONIC="<24-word mnemonic funded on the devnet>"
 

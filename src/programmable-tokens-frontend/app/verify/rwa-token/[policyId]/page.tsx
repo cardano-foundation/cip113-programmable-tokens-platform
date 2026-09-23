@@ -9,15 +9,12 @@ import { useWallet } from "@/hooks/use-wallet";
 import { useRwaTokenMembershipStatus } from "@/hooks/useRwaTokenMembershipStatus";
 import {
   listRwaTokens,
-  requestRwaTokenInclusion,
   type RwaTokenSummary,
 } from "@/lib/api/rwa-token";
-import { bindSessionToToken } from "@/lib/api/kyc-extended";
 import { getTokenContext } from "@/lib/api/protocol";
 import { ConnectWalletPrompt } from "@/components/verify/ConnectWalletPrompt";
 import { VerifyTokenView } from "@/components/verify/VerifyTokenView";
 import { KycVerificationFlow } from "@/components/transfer/KycVerificationFlow";
-import { getKeriSessionIdForWallet } from "@/lib/utils/keri-session";
 
 const RENEW_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -88,17 +85,6 @@ export default function VerifyRwaTokenPage() {
     return () => { cancelled = true; };
   }, [policyId]);
 
-  // Bind the KERI session to this token so the next proof generation auto-inserts
-  // the user into the rwa-token allowlist.
-  useEffect(() => {
-    if (viewState.kind !== "ready") return;
-    if (!walletAddress) return;
-    bindSessionToToken(policyId).catch((e) => {
-      // eslint-disable-next-line no-console
-      console.warn("[verify/rwa-token] bindSessionToToken failed", e);
-    });
-  }, [viewState, walletAddress, policyId]);
-
   // Poll while publish is pending so the user sees the transition without reloading.
   useEffect(() => {
     if (status.kind !== "publish-pending") return;
@@ -154,18 +140,9 @@ export default function VerifyRwaTokenPage() {
             policyId={policyId}
             senderAddress={walletAddress}
             forceFresh
+            stageMembership
             onBack={() => setRunning(false)}
-            onComplete={async (proof) => {
-              try {
-                const sessionId = getKeriSessionIdForWallet(walletAddress!);
-                await requestRwaTokenInclusion(policyId, {
-                  boundAddress: walletAddress!,
-                  kycSessionId: sessionId,
-                  validUntilMs: proof.validUntilMs,
-                });
-              } catch (e) {
-                console.error("[verify/rwa-token] requestRwaTokenInclusion failed", e);
-              }
+            onComplete={() => {
               setRunning(false);
               refresh();
             }}

@@ -108,8 +108,8 @@ export function VerifyTokenView({
           <p className="text-sm text-dark-300">
             You haven&apos;t verified for this token yet. Complete KYC to be added to the
             on-chain allowlist — required so other holders can send this token to you.
-            (Sending tokens you already hold uses your own KYC attestation and doesn&apos;t
-            require being in the allowlist.)
+            Sending tokens you already hold may also require your membership proof,
+            depending on the token&apos;s sender KYC setting.
           </p>
         </div>
       </div>

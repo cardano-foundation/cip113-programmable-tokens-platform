@@ -29,6 +29,21 @@ public record TransferTokenRequest(String senderAddress,
                                    /** Hex CBOR of the recipient MPF inclusion proof (Aiken mpf.Proof Plutus Data) */
                                    String mpfProofCborHex,
                                    /** Recipient leaf valid_until (8-byte BE millis) — must match the leaf encoded value */
-                                   Long mpfValidUntilMs) {
+                                   Long mpfValidUntilMs,
+                                   /** CMTA sender proof, independent of the older 37-byte KYC fields. */
+                                   CmtaAttestation senderAttestation,
+                                   /** CMTA recipient proof, checked against the recipient stake credential. */
+                                   CmtaAttestation recipientAttestation) {
+
+    /** Preserve callers of the original transfer request shape. */
+    public TransferTokenRequest(String senderAddress, String unit, String quantity,
+                                String recipientAddress, String kycPayload, String kycSignature,
+                                Integer kycVkeyIndex, String senderMpfProofCborHex,
+                                Long senderMpfValidUntilMs, String mpfProofCborHex,
+                                Long mpfValidUntilMs) {
+        this(senderAddress, unit, quantity, recipientAddress, kycPayload, kycSignature,
+                kycVkeyIndex, senderMpfProofCborHex, senderMpfValidUntilMs,
+                mpfProofCborHex, mpfValidUntilMs, null, null);
+    }
 
 }

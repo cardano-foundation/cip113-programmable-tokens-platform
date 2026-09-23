@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ArrowLeft, Loader2, Shield, RefreshCw } from "lucide-react";
 import { useRwaTokenMembershipStatus } from "@/hooks/useRwaTokenMembershipStatus";
-import { extractStakeCredHashFromAddress } from "@/lib/utils/address";
+import { sameStakeIdentity, stakeIdentityFromBaseAddress } from "@/lib/rwa/attestation";
 import { getRwaTokenInclusionProof } from "@/lib/api/rwa-token";
 import { ApiException } from "@/types/api";
 import { KycVerificationFlow } from "./KycVerificationFlow";
@@ -108,20 +108,20 @@ export function RwaTokenVerificationFlow({
       return;
     }
 
-    let recipientPkh: string;
-    let senderPkh: string;
+    let recipient: ReturnType<typeof stakeIdentityFromBaseAddress>;
+    let sender: ReturnType<typeof stakeIdentityFromBaseAddress>;
     try {
-      recipientPkh = extractStakeCredHashFromAddress(recipientAddress);
-      senderPkh = extractStakeCredHashFromAddress(senderAddress);
+      recipient = stakeIdentityFromBaseAddress(recipientAddress);
+      sender = stakeIdentityFromBaseAddress(senderAddress);
     } catch (e) {
       setPhase({ kind: "error", message: e instanceof Error ? e.message : String(e) });
       return;
     }
-    if (recipientPkh.toLowerCase() === senderPkh.toLowerCase()) {
+    if (sameStakeIdentity(recipient, sender)) {
       onComplete({ sender: phase.sender, receiverProofCborHex: null, receiverValidUntilMs: null });
       return;
     }
-    getRwaTokenInclusionProof(policyId, recipientPkh)
+    getRwaTokenInclusionProof(policyId, recipient.credentialHash, recipient.credentialType)
       .then((proof) => {
         if (cancelled) return;
         onComplete({

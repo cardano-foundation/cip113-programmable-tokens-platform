@@ -1,7 +1,8 @@
 /** API client for the rwa-token module. */
 
-import { apiGet, apiPost, apiDelete } from './client';
+import { apiGet, apiPost, apiPostRaw, apiDelete } from './client';
 import type { Cip68MetadataRequest } from '@/types/api';
+import { signRwaCreationRequest } from '@/lib/rwa/creation-auth';
 
 export interface RwaTokenInclusionProof {
   memberPkh: string;
@@ -11,22 +12,8 @@ export interface RwaTokenInclusionProof {
   rootHashLocal: string;
 }
 
-export const getRwaTokenInclusionProof = (policyId: string, memberPkh: string) =>
-  apiGet<RwaTokenInclusionProof>(`/rwa-token/${policyId}/proofs/${memberPkh}`);
-
-export interface RwaTokenInclusionResponse {
-  memberPkh: string;
-  currentRootLocal: string;
-}
-
-export const requestRwaTokenInclusion = (
-  policyId: string,
-  body: { boundAddress: string; kycSessionId?: string; validUntilMs: number },
-) =>
-  apiPost<typeof body, RwaTokenInclusionResponse>(
-    `/rwa-token/${policyId}/members`,
-    body,
-  );
+export const getRwaTokenInclusionProof = (policyId: string, memberPkh: string, credentialType: 0 | 1) =>
+  apiGet<RwaTokenInclusionProof>(`/rwa-token/${policyId}/proofs/${memberPkh}?credentialType=${credentialType}`);
 
 export interface RwaTokenSummary {
   policyId: string;
@@ -45,9 +32,11 @@ export const listRwaTokens = () =>
  *  admin mint more. */
 export interface RwaTokenGlobalState {
   policyId: string;
+  globalStatePolicyId: string;
   transfersPaused: boolean;
   mintableAmount: number;
   trustedEntityVkeys: string[];
+  networkId: number;
   securityInfoHex: string;
   /** Root hash currently committed to the on-chain GS datum. */
   memberRootHash: string;
@@ -55,6 +44,7 @@ export interface RwaTokenGlobalState {
    *  differs from {@link memberRootHash}, an admin needs to publish a new
    *  UpdateMemberRootHash tx to bring the chain in sync. */
   memberRootHashLocal: string;
+  pendingMemberCount: number;
   requiresReceiverKyc: boolean;
   /** Written by SetRequiresSenderKyc and ENFORCED on chain: transfer_logic_script.ak:123
    *  gates the per-sender KYC loop on this flag, independently of {@link requiresReceiverKyc}
@@ -162,11 +152,13 @@ export interface RwaTokenInitResponse {
 /** Build the genesis tx that mints the GS NFT + denylist root + power-users root.
  *  Frontend signs + submits the returned CBOR. The bootstrap admin is auto-seeded
  *  into the off-chain power-user table at the same time. */
-export const initRwaTokenGlobalState = (body: RwaTokenInitRequest) =>
-  apiPost<RwaTokenInitRequest, RwaTokenInitResponse>(
-    `/rwa-token/init`,
-    { moduleId: 'rwa-token', quantity: '0', ...body },
-  );
+export const initRwaTokenGlobalState = async (body: RwaTokenInitRequest, rawApi: unknown) => {
+  const path = '/rwa-token/init' as const;
+  const serializedBody = JSON.stringify({ moduleId: 'rwa-token', quantity: '0', ...body });
+  const headers = await signRwaCreationRequest({ rawApi, feePayerAddress: body.feePayerAddress,
+    path, serializedBody });
+  return apiPostRaw<RwaTokenInitResponse>(path, serializedBody, { headers });
+};
 
 // ── Chained registration (genesis + AddPowerUser + registration in one round-trip) ──
 
@@ -216,11 +208,13 @@ export interface RwaTokenChainBuildResponse {
  *  The frontend signs them all in a single CIP-30 signTxs popup and posts the signed
  *  CBORs, IN THIS ORDER, to {@link submitTokenChain}. Steps 3 and 5 are optional; the
  *  order of the rest is load-bearing, because each spends the previous one's change. */
-export const buildRwaTokenChain = (body: RwaTokenInitRequest) =>
-  apiPost<RwaTokenInitRequest, RwaTokenChainBuildResponse>(
-    `/rwa-token/build-chain`,
-    { moduleId: 'rwa-token', quantity: '0', ...body },
-  );
+export const buildRwaTokenChain = async (body: RwaTokenInitRequest, rawApi: unknown) => {
+  const path = '/rwa-token/build-chain' as const;
+  const serializedBody = JSON.stringify({ moduleId: 'rwa-token', quantity: '0', ...body });
+  const headers = await signRwaCreationRequest({ rawApi, feePayerAddress: body.feePayerAddress,
+    path, serializedBody });
+  return apiPostRaw<RwaTokenChainBuildResponse>(path, serializedBody, { headers });
+};
 
 export interface SubmitChainResponse {
   txHashes: string[];
@@ -354,27 +348,45 @@ export const buildGlobalStateUpdateChain = (
  *  current leaves as published. Previously the autonomous sync job did this
  *  after submit+confirm — with user-driven publishing, the frontend has to
  *  call back. Idempotent. */
-export const acknowledgeRootPublish = (
-  policyId: string,
-  body: { txHash: string; newRootHashHex: string },
-) =>
-  apiPost<typeof body, {
-    policyId: string;
-    memberRootHashOnchain: string;
-    lastRootUpdateTxHash: string;
-    lastRootUpdateAt: string;
-    leavesMarkedPublished: number;
-  }>(`/rwa-token/${policyId}/global-state/root-published`, body);
+export interface RwaMemberLeaf {
+  credentialHash: string;
+  credentialType: number;
+  validUntilMs: number;
+}
+
+export interface RwaMemberList {
+  baselineRootHash: string;
+  baseline: RwaMemberLeaf[];
+  pending: RwaMemberLeaf[];
+}
+
+export const listRwaMembers = (policyId: string, authHeaders: Record<string, string>) =>
+  apiGet<RwaMemberList>(`/rwa-token/${policyId}/members`, { headers: authHeaders, cache: "no-store" });
+
+export interface RwaMemberCandidate {
+  unsignedCborTx: string;
+  txHash: string;
+  baselineRootHash: string;
+  newRootHashHex: string;
+  baseline: RwaMemberLeaf[];
+  added: RwaMemberLeaf[];
+  leaves: RwaMemberLeaf[];
+}
 
 /** User-signed UpdateMemberRootHash. Backend computes the current local MPF
  *  root from its allowlist DB, builds the GS-spend tx with that root as the
  *  new value, returns unsigned CBOR. Frontend signs with the user's wallet
  *  (which must be the on-chain admin per the GS datum). Returns the unsigned
  *  CBOR + the root hash being published, so the UI can show what's being set. */
-export const buildUpdateMemberRootHashTx = (policyId: string, feePayerAddress: string) =>
-  apiPost<{ feePayerAddress: string }, { unsignedCborTx: string; newRootHashHex: string }>(
+export const buildUpdateMemberRootHashTx = (
+  policyId: string,
+  body: { feePayerAddress: string; manualMember?: RwaMemberLeaf; selectedPendingMembers: RwaMemberLeaf[] },
+  authHeaders: Record<string, string>,
+) =>
+  apiPost<typeof body, RwaMemberCandidate>(
     `/rwa-token/${policyId}/update-member-root-hash`,
-    { feePayerAddress },
+    body,
+    { headers: authHeaders, cache: "no-store" },
   );
 
 /** One-shot admin tx: register the transfer-logic stake credential on chain.

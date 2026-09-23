@@ -13,7 +13,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { extractStakeCredHashFromAddress } from "@/lib/utils/address";
+import { stakeIdentityFromBaseAddress } from "@/lib/rwa/attestation";
 import { getRwaTokenInclusionProof } from "@/lib/api/rwa-token";
 import { ApiException } from "@/types/api";
 
@@ -46,14 +46,14 @@ function cacheKey(policyId: string, walletAddress: string | null) {
 }
 
 async function probe(policyId: string, walletAddress: string): Promise<RwaTokenMembershipStatus> {
-  let memberPkh: string;
+  let identity: ReturnType<typeof stakeIdentityFromBaseAddress>;
   try {
-    memberPkh = extractStakeCredHashFromAddress(walletAddress);
+    identity = stakeIdentityFromBaseAddress(walletAddress);
   } catch (e) {
     return { kind: "error", cause: e };
   }
   try {
-    const proof = await getRwaTokenInclusionProof(policyId, memberPkh);
+    const proof = await getRwaTokenInclusionProof(policyId, identity.credentialHash, identity.credentialType);
     return {
       kind: "verified",
       validUntilMs: proof.validUntilMs,

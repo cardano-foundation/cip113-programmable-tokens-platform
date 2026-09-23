@@ -467,26 +467,21 @@ public class KeriService {
         kycSessionRepository.save(kyc);
     }
 
-    /**
-     * Bind the session to a kyc-extended programmable token policy. After binding, the next
-     * KERI proof generation will auto-upsert the session's PKH into the per-policy MPF tree.
-     *
-     * @throws IllegalArgumentException if the policy is not a kyc-extended token
-     */
+    /** Bind a verified session to a module with a KERI membership hook. */
     public void bindSessionToToken(String sessionId, String policyId) {
         KycSessionEntity kyc = kycSessionRepository.findById(sessionId)
                 .orElseThrow(() -> new NoSuchElementException("Session not found: " + sessionId));
         if (programmableTokenRegistryRepository == null) {
-            throw new IllegalStateException("kyc-extended discovery not available");
+            throw new IllegalStateException("token discovery not available");
         }
         var reg = programmableTokenRegistryRepository.findByPolicyId(policyId)
                 .orElseThrow(() -> new IllegalArgumentException("Token not registered: " + policyId));
-        if (!"kyc-extended".equals(reg.getModuleId())) {
-            throw new IllegalArgumentException("Token module is not 'kyc-extended': " + reg.getModuleId());
+        if (!"kyc-extended".equals(reg.getModuleId()) && !"rwa-token".equals(reg.getModuleId())) {
+            throw new IllegalArgumentException("Token module has no KERI membership hook: " + reg.getModuleId());
         }
         kyc.setBoundTokenPolicyId(policyId);
         kycSessionRepository.save(kyc);
-        log.info("Session {} bound to kyc-extended token {}", sessionId, policyId);
+        log.info("Session {} bound to {} token {}", sessionId, reg.getModuleId(), policyId);
     }
 
     // ── KYC proof generation ──────────────────────────────────────────────────
@@ -537,6 +532,9 @@ public class KeriService {
         } catch (Exception e) {
             log.warn("Membership hook for module '{}' threw for policy {} session {}: {}",
                     moduleId, boundPolicyId, kyc.getSessionId(), e.getMessage());
+            if ("rwa-token".equals(moduleId)) {
+                throw new IllegalStateException("CMTA membership staging failed: " + e.getMessage(), e);
+            }
         }
     }
 

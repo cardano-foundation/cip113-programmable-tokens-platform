@@ -1,6 +1,7 @@
 package org.cardanofoundation.cip113.controller;
 
 import com.bloxbean.cardano.client.util.HexUtil;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.entity.RwaTokenDenylistEntryEntity;
@@ -21,10 +22,16 @@ import org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
 import org.cardanofoundation.cip113.scheduling.AdminSigningKeyProvider;
 import org.cardanofoundation.cip113.service.RwaTokenAllowlistService;
-import org.cardanofoundation.cip113.util.AddressUtil;
+import org.cardanofoundation.cip113.service.RwaTokenAdminRequestVerifier;
+import org.cardanofoundation.cip113.service.RwaTokenCreationRequestVerifier;
+import org.cardanofoundation.cip113.service.RwaTokenCreationService;
+import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.CacheControl;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -57,14 +64,18 @@ public class RwaTokenController {
     private final RwaTokenPowerUserRepository powerUserRepo;
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
     private final RwaTokenAllowlistService allowlistService;
+    private final RwaTokenAdminRequestVerifier adminRequestVerifier;
+    private final RwaTokenCreationRequestVerifier creationRequestVerifier;
+    private final RwaTokenCreationService creationService;
+    private final ObjectMapper objectMapper;
     private final AdminSigningKeyProvider adminSigningKeyProvider;
     private final ModuleHandlerFactory handlerFactory;
     private final ProtocolBootstrapService protocolBootstrapService;
 
     // ── Discovery ────────────────────────────────────────────────────────────
 
-    /** Backend admin pkh + address. Token registrations must use this pkh as
-     *  {@code issuerAdminPkh} so the backend can autonomously sign root updates. */
+    /** Legacy backend signer discovery. RWA registrations use the issuer wallet
+     *  as GS admin; this endpoint grants no RWA member-root authority. */
     @GetMapping("/admin-pkh")
     public ResponseEntity<?> getAdminPkh() {
         if (!adminSigningKeyProvider.isAvailable()) {
@@ -184,6 +195,10 @@ public class RwaTokenController {
                 }
                 @SuppressWarnings("unchecked")
                 Map<String, Object> change = (Map<String, Object>) m;
+                if ("UpdateMemberRootHash".equals(change.get("action"))) {
+                    return ResponseEntity.badRequest().body(Map.of("error",
+                            "member roots must be published through the reviewed members flow"));
+                }
                 changes.add(new RwaTokenModuleHandler.GsChangeSpec(
                         (String) change.get("action"),
                         (Boolean) change.get("transfersPaused"),
@@ -210,7 +225,6 @@ public class RwaTokenController {
                             .getPaymentCredentialHash()
                             .orElseThrow(() -> new IllegalArgumentException(
                                     "feePayerAddress has no payment credential: " + feePayerAddress)));
-
             RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
                     .getHandler("rwa-token", RwaTokenContext.emptyContext());
             TransactionContext<List<String>> result = handler.buildGlobalStateUpdateChain(
@@ -226,61 +240,32 @@ public class RwaTokenController {
         }
     }
 
-    /** Frontend callback after a successful manual root-publish. Updates the DB
-     *  row's {@code memberRootHashOnchain / lastRootUpdateTxHash / lastRootUpdateAt}
-     *  and marks the current leaves as published. Previously the autonomous
-     *  RwaTokenRootSyncJob did this after submit+confirm; with that job
-     *  gone, the user-triggered path needs an explicit acknowledgement so the
-     *  DB stays in sync with the chain.
-     *
-     *  <p>Body: {@code { txHash, newRootHashHex }}. Idempotent — safe to call
-     *  multiple times for the same tx hash. */
-    @PostMapping("/{policyId}/global-state/root-published")
-    public ResponseEntity<?> acknowledgeRootPublish(@PathVariable String policyId,
-                                                    @RequestBody Map<String, Object> body) {
+    /** The visible baseline and staged Veridian leaves. This read has no authority to publish. */
+    @GetMapping("/{policyId}/members")
+    public ResponseEntity<?> listMembers(@PathVariable String policyId, @org.springframework.web.bind.annotation.RequestHeader HttpHeaders headers) {
         try {
-            String txHash = (String) body.get("txHash");
-            String newRootHashHex = (String) body.get("newRootHashHex");
-            if (txHash == null || txHash.isBlank() || newRootHashHex == null || newRootHashHex.isBlank()) {
-                return ResponseEntity.badRequest().body(Map.of("error",
-                        "txHash and newRootHashHex are required"));
-            }
-            java.util.Optional<RwaTokenRegistrationEntity> regOpt = registrationRepo.findByProgrammableTokenPolicyId(policyId);
-            if (regOpt.isEmpty()) {
-                return ResponseEntity.status(404).body(Map.of("error",
-                        "rwa-token registration not found for " + policyId));
-            }
-            RwaTokenRegistrationEntity reg = regOpt.get();
-            reg.setMemberRootHashOnchain(newRootHashHex);
-            reg.setMemberRootHashLocal(newRootHashHex);
-            reg.setLastRootUpdateTxHash(txHash);
-            reg.setLastRootUpdateAt(java.time.Instant.now());
-            registrationRepo.save(reg);
-            int marked = allowlistService.markLeavesPublished(policyId, java.time.Instant.now());
-            log.info("rwa-token root publish ack: policy={} tx={} root={} leaves_marked={}",
-                    policyId, txHash, newRootHashHex, marked);
-            return ResponseEntity.ok(Map.of(
-                    "policyId", policyId,
-                    "memberRootHashOnchain", newRootHashHex,
-                    "lastRootUpdateTxHash", txHash,
-                    "lastRootUpdateAt", reg.getLastRootUpdateAt().toString(),
-                    "leavesMarkedPublished", marked));
+            authorizeAdminRequest(policyId, "GET", "/rwa-token/" + policyId + "/members", "", headers);
+            byte[] root = allowlistService.liveOnchainRoot(policyId);
+            return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(Map.of(
+                    "baselineRootHash", HexUtil.encodeHexString(root),
+                    "baseline", allowlistService.activeLeaves(policyId, root),
+                    "pending", allowlistService.pendingLeaves(policyId)));
+        } catch (ResponseStatusException e) {
+            return ResponseEntity.status(e.getStatusCode()).cacheControl(CacheControl.noStore())
+                    .body(Map.of("error", e.getReason() == null ? "admin authentication failed" : e.getReason()));
         } catch (Exception e) {
-            log.error("rwa-token acknowledgeRootPublish failed for policy={}", policyId, e);
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            return ResponseEntity.status(503).body(Map.of("error", e.getMessage()));
         }
     }
 
-    /** User-signed UpdateMemberRootHash tx. Admin opens the admin panel, clicks
-     *  "Publish member root", backend computes the current local MPF root from
-     *  the allowlist service, builds the GS-spend tx with the new root as the
-     *  redeemer's action payload, and returns the unsigned CBOR. Frontend signs
-     *  with the user's wallet (must be the on-chain admin per the GS datum)
-     *  and submits. Body: {@code { feePayerAddress }} (must equal the admin
-     *  wallet whose payment cred = on-chain {@code admin_credential_hash}). */
+    /** Build a candidate UpdateMemberRootHash transaction from the selected
+     *  staged members and optional manual member. The live GS admin authorizes
+     *  this request with CIP-30 signData, then reviews and signs the transaction
+     *  with the wallet before submitting it. */
     @PostMapping("/{policyId}/update-member-root-hash")
     public ResponseEntity<?> updateMemberRootHash(@PathVariable String policyId,
-                                                  @RequestBody Map<String, Object> body) {
+                                                  @RequestBody Map<String, Object> body,
+                                                  @org.springframework.web.bind.annotation.RequestHeader HttpHeaders headers) {
         try {
             String feePayerAddress = (String) body.get("feePayerAddress");
             if (feePayerAddress == null || feePayerAddress.isBlank()) {
@@ -291,7 +276,27 @@ public class RwaTokenController {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
 
-            byte[] currentLocalRoot = allowlistService.currentRoot(policyId);
+            Object manualObj = body.get("manualMember");
+            RwaTokenAllowlistService.MemberLeaf manual = manualObj == null ? null : parseMember(manualObj);
+            Object selectedObj = body.get("selectedPendingMembers");
+            if (!(selectedObj instanceof List<?> rawSelected) || rawSelected.size() > 100)
+                return ResponseEntity.badRequest().body(Map.of("error", "selectedPendingMembers must be an array of at most 100"));
+            List<RwaTokenAllowlistService.MemberLeaf> selectedMembers = rawSelected.stream()
+                    .map(this::parseMember).toList();
+            java.util.Set<String> selected = new java.util.HashSet<>();
+            for (var leaf : selectedMembers) {
+                if (!selected.add(leaf.credentialType() + ":" + leaf.credentialHash()))
+                    return ResponseEntity.badRequest().body(Map.of("error", "duplicate pending member"));
+            }
+            String canonicalBody = RwaTokenAdminRequestVerifier.canonicalBody(feePayerAddress, manual, selectedMembers);
+            authorizeAdminRequest(policyId, "POST", "/rwa-token/" + policyId + "/update-member-root-hash",
+                    canonicalBody, headers);
+            var candidate = allowlistService.prepareCandidate(policyId, manual, selected);
+            for (var leaf : selectedMembers) {
+                if (!candidate.added().contains(leaf))
+                    return ResponseEntity.status(409).body(Map.of("error", "pending member expiry changed; refresh and review"));
+            }
+            byte[] currentLocalRoot = HexUtil.decodeHexString(candidate.rootHash());
 
             String signerPkh = com.bloxbean.cardano.client.util.HexUtil.encodeHexString(
                     new com.bloxbean.cardano.client.address.Address(feePayerAddress)
@@ -301,19 +306,65 @@ public class RwaTokenController {
 
             RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
                     .getHandler("rwa-token", RwaTokenContext.emptyContext());
+            var liveAdmin = handler.readGlobalState(policyId).orElseThrow(() ->
+                    new ResponseStatusException(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+                            "live GS is unavailable"));
+            if (!signerPkh.equalsIgnoreCase(liveAdmin.adminCredentialHash())) {
+                return ResponseEntity.status(403).cacheControl(CacheControl.noStore())
+                        .body(Map.of("error", "feePayerAddress must belong to the live GS admin"));
+            }
             TransactionContext<Void> result = handler.buildUpdateMemberRootHashTransaction(
                     policyId, currentLocalRoot, feePayerAddress, signerPkh, protocolParams);
             if (!result.isSuccessful()) {
                 return ResponseEntity.badRequest().body(Map.of("error",
                         result.error() != null ? result.error() : "build failed"));
             }
-            return ResponseEntity.ok(Map.of(
+            String txHash = TransactionUtil.getTxHash(HexUtil.decodeHexString(result.unsignedCborTx()));
+            allowlistService.saveCandidate(policyId, candidate, txHash);
+            return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(Map.of(
                     "unsignedCborTx", result.unsignedCborTx(),
-                    "newRootHashHex", com.bloxbean.cardano.client.util.HexUtil.encodeHexString(currentLocalRoot)));
+                    "txHash", txHash,
+                    "baselineRootHash", candidate.baselineRootHash(),
+                    "newRootHashHex", candidate.rootHash(),
+                    "baseline", candidate.baseline(),
+                    "added", candidate.added(),
+                    "leaves", candidate.leaves()));
+        } catch (ResponseStatusException e) {
+            return ResponseEntity.status(e.getStatusCode()).cacheControl(CacheControl.noStore())
+                    .body(Map.of("error", e.getReason() == null ? "admin authentication failed" : e.getReason()));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
             log.error("rwa-token UpdateMemberRootHash failed for policy={}", policyId, e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
+    }
+
+    private RwaTokenAllowlistService.MemberLeaf parseMember(Object value) {
+        if (!(value instanceof Map<?, ?> map)
+                || !(map.get("credentialHash") instanceof String hash)
+                || !(map.get("credentialType") instanceof Integer type)
+                || !(map.get("validUntilMs") instanceof Number expiry)
+                || !hash.matches("(?i)[0-9a-f]{56}")
+                || (type != 0 && type != 1)
+                || !(expiry instanceof Integer || expiry instanceof Long)
+                || expiry.longValue() < 0) throw new IllegalArgumentException("invalid member credential or expiry");
+        return new RwaTokenAllowlistService.MemberLeaf(hash.toLowerCase(java.util.Locale.ROOT),
+                type.shortValue(), expiry.longValue());
+    }
+
+    private void authorizeAdminRequest(String policyId, String method, String path,
+                                       String canonicalBody, HttpHeaders headers) {
+        var registration = registrationRepo.findByProgrammableTokenPolicyId(policyId)
+                .orElseThrow(() -> new ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND,
+                        "rwa-token registration not found"));
+        RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
+                .getHandler("rwa-token", RwaTokenContext.emptyContext());
+        var gs = handler.readGlobalState(policyId).orElseThrow(() ->
+                new ResponseStatusException(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+                        "live GS is unavailable"));
+        adminRequestVerifier.verifyAndConsume(policyId, registration.getGlobalStatePolicyId(),
+                gs.adminCredentialHash(), method, path, canonicalBody, headers);
     }
 
     /** One-shot admin tx that registers the module's transfer-logic stake
@@ -408,20 +459,17 @@ public class RwaTokenController {
      *  addPowerUserTxHash, publishScriptsTxHash, registrationTxHash,
      *  registerTransferLogicTxHash?, registerThirdPartyTransferLogicTxHash? } }. */
     @PostMapping("/build-chain")
-    public ResponseEntity<?> buildChain(@RequestBody RwaTokenRegisterRequest request) {
+    public ResponseEntity<?> buildChain(@RequestBody byte[] rawBody,
+                                        @org.springframework.web.bind.annotation.RequestHeader HttpHeaders headers) {
         try {
+            RwaTokenRegisterRequest request = objectMapper.readValue(rawBody, RwaTokenRegisterRequest.class);
+            creationRequestVerifier.verifyCreationAndConsume(
+                    "/rwa-token/build-chain", rawBody, request.getFeePayerAddress(), headers);
             ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
-            RwaTokenModuleHandler handler = (RwaTokenModuleHandler)
-                    handlerFactory.getHandler("rwa-token", RwaTokenContext.emptyContext());
-            TransactionContext<RwaTokenModuleHandler.ChainBuildResult> result = handler.buildFullRegistrationChain(request, protocolParams);
-            if (!result.isSuccessful()) {
-                return ResponseEntity.badRequest().body(Map.of(
-                        "error", result.error() != null ? result.error() : "chain build failed"));
-            }
-            RwaTokenModuleHandler.ChainBuildResult meta = result.metadata();
+            RwaTokenModuleHandler.ChainBuildResult meta = creationService.buildChain(request, protocolParams);
             // Use HashMap (Map.of caps at 10 entries; we now have 12).
             // Null-value entries (e.g. the optional 4th tx) are skipped so the
             // JSON response omits them, keeping the wire shape forward-compat.
@@ -454,6 +502,10 @@ public class RwaTokenController {
             resp.put("addPowerUserTxHash", meta.addPowerUserTxHash());
             resp.put("registrationTxHash", meta.registrationTxHash());
             return ResponseEntity.ok(resp);
+        } catch (ResponseStatusException e) {
+            throw e;
+        } catch (RwaTokenCreationService.BuildFailed e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
             log.error("rwa-token build-chain failed", e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
@@ -461,28 +513,30 @@ public class RwaTokenController {
     }
 
     @PostMapping("/init")
-    public ResponseEntity<?> initGlobalState(@RequestBody RwaTokenRegisterRequest request) {
+    public ResponseEntity<?> initGlobalState(@RequestBody byte[] rawBody,
+                                             @org.springframework.web.bind.annotation.RequestHeader HttpHeaders headers) {
         try {
+            RwaTokenRegisterRequest request = objectMapper.readValue(rawBody, RwaTokenRegisterRequest.class);
+            creationRequestVerifier.verifyCreationAndConsume(
+                    "/rwa-token/init", rawBody, request.getFeePayerAddress(), headers);
             ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
             if (protocolParams == null) {
                 return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
             }
-            RwaTokenModuleHandler handler = (RwaTokenModuleHandler)
-                    handlerFactory.getHandler("rwa-token", RwaTokenContext.emptyContext());
-            TransactionContext<TransactionContext.RegistrationResult> result = handler.buildGlobalStateInitTransaction(request, protocolParams);
-            if (!result.isSuccessful()) {
-                return ResponseEntity.badRequest().body(Map.of(
-                        "error", result.error() != null ? result.error() : "init failed"));
-            }
+            var result = creationService.init(request, protocolParams);
             // The wizard expects {globalStatePolicyId} for kyc-extended parity, but
             // the value we return here is actually the prog-token (issuance) policy id —
             // that's what the registration tx is keyed on downstream. We also return
             // {programmableTokenPolicyId} explicitly so clients have an unambiguous name.
-            String progTokenPolicyId = result.metadata() != null ? result.metadata().policyId() : null;
+            String progTokenPolicyId = result.metadata().policyId();
             return ResponseEntity.ok(Map.of(
                     "unsignedCborTx", result.unsignedCborTx(),
                     "globalStatePolicyId", progTokenPolicyId,
                     "programmableTokenPolicyId", progTokenPolicyId));
+        } catch (ResponseStatusException e) {
+            throw e;
+        } catch (RwaTokenCreationService.BuildFailed e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
             log.error("rwa-token init failed", e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
@@ -504,22 +558,24 @@ public class RwaTokenController {
         try {
             RwaTokenModuleHandler handler = (RwaTokenModuleHandler)
                     handlerFactory.getHandler("rwa-token", RwaTokenContext.emptyContext());
-            // Compute the current local MPF root so the admin UI can show whether
-            // the on-chain root is stale (i.e. needs a publish). The local root
-            // is the SHA-256 of the merkleized leaf set in the backend's
-            // allowlist DB; the on-chain root is what's currently in the GS datum.
-            String localRootHex = com.bloxbean.cardano.client.util.HexUtil.encodeHexString(
-                    allowlistService.currentRoot(policyId));
+            byte[] activeRoot = allowlistService.liveOnchainRoot(policyId);
+            allowlistService.activeLeaves(policyId, activeRoot);
+            int pendingCount = allowlistService.pendingLeaves(policyId).size();
+            String localRootHex = HexUtil.encodeHexString(activeRoot);
             return handler.readGlobalState(policyId)
                     .<ResponseEntity<?>>map(gs -> {
                         Map<String, Object> resp = new java.util.HashMap<>();
                         resp.put("policyId", gs.policyId());
+                        registrationRepo.findByProgrammableTokenPolicyId(policyId)
+                                .ifPresent(reg -> resp.put("globalStatePolicyId", reg.getGlobalStatePolicyId()));
                         resp.put("transfersPaused", gs.transfersPaused());
                         resp.put("mintableAmount", gs.mintableAmount());
                         resp.put("trustedEntityVkeys", gs.trustedEntityVkeys());
+                        resp.put("networkId", gs.networkId());
                         resp.put("securityInfoHex", gs.securityInfoHex() != null ? gs.securityInfoHex() : "");
                         resp.put("memberRootHash", gs.memberRootHash() != null ? gs.memberRootHash() : "");
                         resp.put("memberRootHashLocal", localRootHex);
+                        resp.put("pendingMemberCount", pendingCount);
                         resp.put("requiresReceiverKyc", gs.requiresReceiverKyc());
                         // D4: the UI cannot offer SetRequiresSenderKyc without knowing
                         // the current value to diff against.
@@ -568,13 +624,22 @@ public class RwaTokenController {
             byte[] pkhBytes = HexUtil.decodeHexString(memberPkh);
             long now = System.currentTimeMillis();
 
-            // A hash can have a leaf under BOTH credential forms — they are different
-            // holders — so this is a list, and a singular query here would 500 as soon as
-            // both exist. With one leaf the form is unambiguous and the caller need not
-            // supply it; with two it must, or we would silently pick one.
-            List<org.cardanofoundation.cip113.entity.RwaTokenMemberLeafEntity> matches =
+            // Manual members exist only in the immutable confirmed snapshot. The
+            // staging table alone never authorises a proof.
+            List<RwaTokenAllowlistService.MemberLeaf> matches = allowlistService.activeLeaves(policyId).stream()
+                    .filter(l -> l.credentialHash().equalsIgnoreCase(memberPkh)).toList();
+            List<org.cardanofoundation.cip113.entity.RwaTokenMemberLeafEntity> staged =
                     memberLeafRepo.findByProgrammableTokenPolicyIdAndMemberPkh(policyId, memberPkh);
             if (matches.isEmpty()) {
+                if (!staged.isEmpty()) {
+                    var liveStage = staged.stream().filter(l -> l.getValidUntilMs() >= now).findFirst();
+                    if (liveStage.isEmpty()) return ResponseEntity.status(410).body(Map.of(
+                            "error", "staged membership has expired; run verification again",
+                            "validUntilMs", staged.getFirst().getValidUntilMs()));
+                    return ResponseEntity.status(425).body(Map.of(
+                            "error", "member is staged; admin root publication is pending",
+                            "addedAt", liveStage.get().getAddedAt().toEpochMilli()));
+                }
                 return ResponseEntity.status(404).body(Map.of("error", "member not found in allowlist"));
             }
             if (credentialType == null && matches.size() > 1) {
@@ -583,22 +648,22 @@ public class RwaTokenController {
                         + "policy; pass ?credentialType=0 (VerificationKey) or 1 (Script) to say "
                         + "which holder you mean"));
             }
-            short wantType = credentialType != null ? credentialType : matches.getFirst().getCredentialType();
-            java.util.Optional<org.cardanofoundation.cip113.entity.RwaTokenMemberLeafEntity> existing =
-                    matches.stream().filter(l -> l.getCredentialType() == wantType).findFirst();
+            short wantType = credentialType != null ? credentialType : matches.getFirst().credentialType();
+            java.util.Optional<RwaTokenAllowlistService.MemberLeaf> existing =
+                    matches.stream().filter(l -> l.credentialType() == wantType).findFirst();
             if (existing.isEmpty()) {
                 return ResponseEntity.status(404).body(Map.of("error",
                         "member not found in allowlist under credential type " + wantType));
             }
-            if (existing.get().getValidUntilMs() < now) {
+            if (existing.get().validUntilMs() < now) {
+                boolean refreshStaged = staged.stream().anyMatch(l -> l.getCredentialType() == wantType
+                        && l.getValidUntilMs() > now);
+                if (refreshStaged) return ResponseEntity.status(425).body(Map.of(
+                        "error", "renewed expiry is staged; admin root publication is pending",
+                        "addedAt", staged.stream().filter(l -> l.getCredentialType() == wantType)
+                                .findFirst().orElseThrow().getAddedAt().toEpochMilli()));
                 return ResponseEntity.status(410).body(Map.of("error", "member leaf has expired",
-                        "validUntilMs", existing.get().getValidUntilMs()));
-            }
-            if (existing.get().getPublishedAt() == null) {
-                return ResponseEntity.status(425).body(Map.of(
-                        "error", "member added to local allowlist but on-chain publish is pending",
-                        "addedAt", existing.get().getAddedAt().toEpochMilli(),
-                        "memberPkh", memberPkh));
+                        "validUntilMs", existing.get().validUntilMs()));
             }
 
             java.util.Optional<RwaTokenAllowlistService.MpfLeafView> view =
@@ -618,53 +683,6 @@ public class RwaTokenController {
             return ResponseEntity.badRequest().body(Map.of("error", "invalid memberPkh hex"));
         } catch (Exception e) {
             log.error("getMemberProof failed for policy={} memberPkh={}", policyId, memberPkh, e);
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
-        }
-    }
-
-    /** Admin/test-only: upsert an allowlist member manually. Regular users land
-     *  in the tree via the KERI auto-upsert hook ({@code RwaTokenMembershipHook}). */
-    @PostMapping("/{policyId}/members")
-    public ResponseEntity<?> upsertMember(@PathVariable String policyId, @RequestBody Map<String, Object> body) {
-        if (!"rwa-token".equals(programmableTokenRegistryRepository.findByPolicyId(policyId)
-                .map(reg -> reg.getModuleId()).orElse(""))) {
-            return ResponseEntity.badRequest().body(Map.of("error", "policyId is not a rwa-token"));
-        }
-        String boundAddress = (String) body.get("boundAddress");
-        if (boundAddress == null || boundAddress.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "boundAddress is required"));
-        }
-        Object validUntilObj = body.get("validUntilMs");
-        if (!(validUntilObj instanceof Number)) {
-            return ResponseEntity.badRequest().body(Map.of("error", "validUntilMs is required (number)"));
-        }
-        long validUntilMs = ((Number) validUntilObj).longValue();
-        String sessionId = (String) body.getOrDefault("kycSessionId", null);
-
-        // Identity is the stake credential — see RwaTokenModuleHandler#buildTransferTransaction.
-        byte[] pkh = AddressUtil.extractStakeCredHashFromAddress(boundAddress);
-        if (pkh == null) {
-            return ResponseEntity.badRequest().body(Map.of("error",
-                    "could not derive stake credential hash from boundAddress (base address required)"));
-        }
-        // The credential form is the first byte of the MPF leaf key, so it is part of the
-        // member's identity. Refuse rather than assume VerificationKey: a wrong byte
-        // enrolls a leaf the holder can never prove against, and nothing surfaces until a
-        // transfer fails evaluation.
-        Short credentialType = AddressUtil.extractStakeCredentialTypeFromAddress(boundAddress);
-        if (credentialType == null) {
-            return ResponseEntity.badRequest().body(Map.of("error",
-                    "could not determine whether the stake credential of boundAddress is a "
-                    + "verification key or a script"));
-        }
-        try {
-            allowlistService.putMember(policyId, pkh, credentialType, validUntilMs, boundAddress, sessionId);
-            byte[] localRoot = allowlistService.currentRoot(policyId);
-            return ResponseEntity.ok(Map.of(
-                    "memberPkh", HexUtil.encodeHexString(pkh),
-                    "currentRootLocal", HexUtil.encodeHexString(localRoot)));
-        } catch (Exception e) {
-            log.error("upsertMember failed for policy={} address={}", policyId, boundAddress, e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
     }
