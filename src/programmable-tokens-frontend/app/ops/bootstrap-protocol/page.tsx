@@ -37,6 +37,7 @@ import { MiningPanel } from "@/components/mining/mining-panel";
 import { spliceMinedBody } from "@/lib/mining/locate";
 import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
 import { CosignaturePanel, type CosignatureState } from "@/components/deployment/cosignature-panel";
+import { SdkRecordDownload } from "@/components/deployment/sdk-record-download";
 import { assembleUpgradeTx } from "@/lib/upgrade/witness";
 import { waitForTxConfirmation } from "@/lib/utils/tx-confirmation";
 import { buildSyncStart } from "@/lib/deployment/record";
@@ -307,6 +308,29 @@ export default function BootstrapProtocolPage() {
       setVerification({ ok: false, checks: [], mismatches: [], error: (e as Error).message });
     }
   }, [pastedDeployment, loadBlueprint]);
+
+  // The SDK-shaped download is derived from the SAME record the platform download
+  // emits — one deployment must not be able to produce two artefacts that disagree.
+  const verifiedEntry = useMemo(() => {
+    if (!verifiedParams || !verification?.ok) return null;
+    try {
+      return toBootstrapRecord(verifiedParams, verification)[0] ?? null;
+    } catch {
+      return null;
+    }
+  }, [verifiedParams, verification]);
+
+  const deployedEntry = useMemo(() => {
+    if (!planned?.verification.ok || !deployComplete) return null;
+    try {
+      return toBootstrapRecord(
+        planned.plan.deployment as unknown as Record<string, unknown>,
+        planned.verification,
+      )[0] ?? null;
+    } catch {
+      return null;
+    }
+  }, [planned, deployComplete]);
 
   const downloadVerifiedRecord = useCallback(() => {
     if (!verifiedParams || !verification) return;
@@ -1052,13 +1076,18 @@ export default function BootstrapProtocolPage() {
               </p>
             )}
             {deployComplete ? (
-              <button
-                type="button"
-                onClick={downloadDeployedRecord}
-                className="rounded border border-green-700 px-3 py-1.5 text-xs text-green-200"
-              >
-                Download bootstrap record
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={downloadDeployedRecord}
+                  className="rounded border border-green-700 px-3 py-1.5 text-xs text-green-200"
+                >
+                  Download bootstrap record
+                </button>
+                {deployedEntry && (
+                  <SdkRecordDownload entry={deployedEntry} network={network} />
+                )}
+              </>
             ) : (
               <p className="rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-200">
                 Partial deployment — no bootstrap record is offered. The record would name
@@ -1135,6 +1164,9 @@ export default function BootstrapProtocolPage() {
                 >
                   Download bootstrap record
                 </button>
+                {verifiedEntry && (
+                  <SdkRecordDownload entry={verifiedEntry} network={network} />
+                )}
               </>
             ) : (
               <p className="text-xs text-red-300">
