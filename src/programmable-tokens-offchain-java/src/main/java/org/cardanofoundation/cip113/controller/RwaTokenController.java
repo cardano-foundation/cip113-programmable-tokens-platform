@@ -17,6 +17,7 @@ import org.cardanofoundation.cip113.service.module.ModuleHandlerFactory;
 import org.cardanofoundation.cip113.service.module.context.RwaTokenContext;
 import org.cardanofoundation.cip113.repository.RwaTokenDenylistEntryRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenMemberLeafRepository;
+import org.cardanofoundation.cip113.entity.RwaTokenMemberLeafEntity;
 import org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
 import org.cardanofoundation.cip113.scheduling.AdminSigningKeyProvider;
@@ -256,15 +257,48 @@ public class RwaTokenController {
             reg.setLastRootUpdateTxHash(txHash);
             reg.setLastRootUpdateAt(java.time.Instant.now());
             registrationRepo.save(reg);
-            int marked = allowlistService.markLeavesPublished(policyId, java.time.Instant.now());
+
+            // Mark by VERIFIED LEAF SET, not by a timestamp. The previous version marked
+            // every leaf added at-or-before `Instant.now()` — evaluated here, AFTER the
+            // publish — so a member enrolled between building the root and this call was
+            // marked published without being in the root that went on chain. Nothing
+            // downstream could tell: the admin list and the proof endpoint both trust
+            // publishedAt, and the first thing to disagree was the validator, at transfer
+            // time. See RwaTokenAllowlistService#markPublishedIfRootMatches.
+            RwaTokenAllowlistService.AckResult ack = allowlistService.markPublishedIfRootMatches(
+                    policyId, HexUtil.decodeHexString(newRootHashHex));
+            if (!ack.matched()) {
+                // Deliberately 200, not an error: the transaction is on chain and the
+                // registration above is correct. Only the leaf marking was skipped, and
+                // skipping it leaves members PENDING — refused rather than wrongly
+                // admitted. Publishing again resolves it.
+                log.warn("rwa-token root publish ack: policy={} tx={} acked root={} but local "
+                         + "leaf set now hashes to {} — members changed during the publish, "
+                         + "no leaves marked", policyId, txHash, newRootHashHex,
+                         HexUtil.encodeHexString(ack.currentRoot()));
+                Map<String, Object> drifted = new java.util.LinkedHashMap<>();
+                drifted.put("policyId", policyId);
+                drifted.put("memberRootHashOnchain", newRootHashHex);
+                drifted.put("lastRootUpdateTxHash", txHash);
+                drifted.put("lastRootUpdateAt", reg.getLastRootUpdateAt().toString());
+                drifted.put("leavesMarkedPublished", 0);
+                drifted.put("rootDrifted", true);
+                drifted.put("currentLocalRoot", HexUtil.encodeHexString(ack.currentRoot()));
+                drifted.put("message", "The allowlist changed while this root was being "
+                        + "published, so no members were marked on chain. Publish again to "
+                        + "cover them.");
+                return ResponseEntity.ok(drifted);
+            }
             log.info("rwa-token root publish ack: policy={} tx={} root={} leaves_marked={}",
-                    policyId, txHash, newRootHashHex, marked);
-            return ResponseEntity.ok(Map.of(
-                    "policyId", policyId,
-                    "memberRootHashOnchain", newRootHashHex,
-                    "lastRootUpdateTxHash", txHash,
-                    "lastRootUpdateAt", reg.getLastRootUpdateAt().toString(),
-                    "leavesMarkedPublished", marked));
+                    policyId, txHash, newRootHashHex, ack.marked());
+            Map<String, Object> ok = new java.util.LinkedHashMap<>();
+            ok.put("policyId", policyId);
+            ok.put("memberRootHashOnchain", newRootHashHex);
+            ok.put("lastRootUpdateTxHash", txHash);
+            ok.put("lastRootUpdateAt", reg.getLastRootUpdateAt().toString());
+            ok.put("leavesMarkedPublished", ack.marked());
+            ok.put("rootDrifted", false);
+            return ResponseEntity.ok(ok);
         } catch (Exception e) {
             log.error("rwa-token acknowledgeRootPublish failed for policy={}", policyId, e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
@@ -620,6 +654,58 @@ public class RwaTokenController {
             log.error("getMemberProof failed for policy={} memberPkh={}", policyId, memberPkh, e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
+    }
+
+    /**
+     * The allowlist, as an admin needs to read it.
+     *
+     * <p>Two derived flags carry the whole operational story, and neither is inferable
+     * from the raw row by a caller who does not know this module:
+     *
+     * <ul>
+     *   <li>{@code published} — {@code publishedAt} is set, meaning this leaf was part of
+     *       a root that reached the chain. A member added but NOT yet published is in the
+     *       local trie and in no validator's view: transfers to them still fail. The fix
+     *       is the "Publish current root" action, not a re-add, so the distinction has to
+     *       be visible or an admin re-adds forever and nothing changes.
+     *   <li>{@code expired} — {@code validUntilMs} is in the past. An expired leaf is
+     *       still a row and still in the tree, but {@code containsValid} rejects it, so
+     *       it reads as "present" everywhere except where it counts.
+     * </ul>
+     *
+     * <p>{@code credentialType} is returned because it is part of the member's identity
+     * (it is the first byte of the MPF leaf key), so one PKH can legitimately appear
+     * twice — once as VerificationKey, once as Script. Rendering the hash alone would
+     * show what looks like a duplicate row.
+     */
+    @GetMapping("/{policyId}/members")
+    public ResponseEntity<?> listMembers(@PathVariable String policyId) {
+        if (!"rwa-token".equals(programmableTokenRegistryRepository.findByPolicyId(policyId)
+                .map(reg -> reg.getModuleId()).orElse(""))) {
+            return ResponseEntity.badRequest().body(Map.of("error", "policyId is not a rwa-token"));
+        }
+        long now = System.currentTimeMillis();
+        List<Map<String, Object>> members = memberLeafRepo
+                .findByProgrammableTokenPolicyId(policyId).stream()
+                .sorted(java.util.Comparator.comparing(
+                        RwaTokenMemberLeafEntity::getAddedAt,
+                        java.util.Comparator.nullsLast(java.util.Comparator.reverseOrder())))
+                .limit(LIST_CAP)
+                .map(e -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("memberPkh", e.getMemberPkh());
+                    m.put("credentialType", e.getCredentialType());
+                    m.put("boundAddress", e.getBoundAddress());
+                    m.put("kycSessionId", e.getKycSessionId());
+                    m.put("validUntilMs", e.getValidUntilMs());
+                    m.put("addedAt", e.getAddedAt() == null ? null : e.getAddedAt().toString());
+                    m.put("publishedAt", e.getPublishedAt() == null ? null : e.getPublishedAt().toString());
+                    m.put("published", e.getPublishedAt() != null);
+                    m.put("expired", e.getValidUntilMs() < now);
+                    return m;
+                })
+                .toList();
+        return ResponseEntity.ok(members);
     }
 
     /** Admin/test-only: upsert an allowlist member manually. Regular users land

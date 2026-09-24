@@ -112,6 +112,48 @@ public class RwaTokenAllowlistService {
     }
 
     @Transactional
+    /** Outcome of an ack. {@code matched} false means the local leaf set no longer
+     *  produces the root that was published, so NOTHING was marked. */
+    public record AckResult(boolean matched, int marked, byte[] currentRoot) {}
+
+    /**
+     * Mark published exactly the leaves that produce {@code publishedRoot} — or nothing.
+     *
+     * <p>Replaces marking by time window. The window version took {@code Instant.now()}
+     * at ACK time and marked every leaf added at-or-before it, so a member enrolled
+     * between building the root and acknowledging it was marked published while being
+     * absent from the root that actually went on chain. That member then reads as "on
+     * chain" everywhere — the admin list, the proof endpoint — and the first thing to
+     * disagree is the validator, at transfer time, which is the worst place to find out.
+     *
+     * <p>The check is the leaf set's own root, not a timestamp, so it cannot drift: if
+     * the current set hashes to what was published, that set IS what was published, and
+     * every member of it is genuinely on chain.
+     *
+     * <p>When it does NOT match — someone enrolled during the publish — nothing is
+     * marked and the caller is told. That leaves members reading as pending when some
+     * of them are in fact published, which is the SAFE direction (a pending member is
+     * refused, not wrongly admitted) and self-healing: the next publish covers everyone
+     * and matches.
+     */
+    @Transactional
+    public AckResult markPublishedIfRootMatches(String policyId, byte[] publishedRoot) {
+        TrieSnapshot snapshot = snapshotForPublish(policyId);
+        if (publishedRoot == null || !java.util.Arrays.equals(snapshot.root(), publishedRoot)) {
+            return new AckResult(false, 0, snapshot.root());
+        }
+        return new AckResult(true, markLeavesPublishedById(snapshot.leafIds()), snapshot.root());
+    }
+
+    /**
+     * @deprecated Marks by TIME WINDOW, which cannot express "the leaves that are in the
+     * published root". A member enrolled between building a root and marking it is
+     * inside the window but outside the root, and is then reported as on chain while
+     * the validator refuses them. Now unused — use
+     * {@link #markPublishedIfRootMatches(String, byte[])}, which verifies the leaf set
+     * against the root it claims to be. Kept only so the reason survives.
+     */
+    @Deprecated
     public int markLeavesPublished(String policyId, Instant attemptStartedAt) {
         return leafRepo.markLeavesPublished(policyId, attemptStartedAt, Instant.now());
     }

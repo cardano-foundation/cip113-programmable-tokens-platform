@@ -54,3 +54,8 @@ frontend.log
 
 # Output of `npm run test:upgrade`. Generated, never committed.
 .upgrade-build/
+.registry-build/
+.mine-build/
+.witness-build/
+.hash-build/
+.sdkrec-build/

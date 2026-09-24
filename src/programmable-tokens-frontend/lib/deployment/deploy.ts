@@ -194,6 +194,16 @@ export interface PlanDeploymentInput {
   alwaysFailNonce: string;
   /** Three existing wallet UTxOs. Omit and the plan opens by creating them. */
   seeds?: DeploymentSeeds;
+  /**
+   * Whether the dispatcher permits unfracking. Default: yes.
+   *
+   * False compiles `programmable_logic_global` against the disabled sentinel. The unfracking
+   * validator is still deployed, registered and published either way — only the value the
+   * dispatcher was compiled against differs, and the deployment records both.
+   */
+  unfrackingEnabled?: boolean;
+  /** Add the ~1 ADA self-output the miner needs to the last transaction. Build-time only. */
+  mineable?: boolean;
 }
 
 /**
@@ -224,7 +234,64 @@ export interface DeploymentPlan {
   verification: VerificationResult;
 }
 
+/**
+ * Fold a mined body back into a plan.
+ *
+ * ⛔ MINING MOVES THE TRANSACTION ID, AND SEVEN RECORDED FIELDS POINT AT IT. Every
+ * `*RefInput` in the deployment names the reference-script transaction by hash, so a plan whose
+ * step was mined but whose record still carries the pre-mining hash would deploy correctly and
+ * then hand out reference inputs that resolve to nothing. The record and the bytes have to move
+ * together, which is what this does — and why the panel hands the mined body here rather than
+ * replacing the step in place.
+ */
+export function applyMinedStep(
+  plan: BootstrapPlan,
+  mined: { signedBodyTxHash: string; unsignedCbor: string },
+): BootstrapPlan {
+  if (!plan.mining) throw new Error("this plan has no mineable step");
+  const steps = plan.steps.map((s, i) =>
+    i === plan.mining!.stepIndex ? { ...s, unsignedCbor: mined.unsignedCbor } : s,
+  );
+  const d = plan.deployment as unknown as Record<string, { txHash: string; outputIndex: number }>;
+  const repointed: Record<string, { txHash: string; outputIndex: number }> = {};
+  for (const key of Object.keys(d)) {
+    if (key.endsWith("RefInput")) {
+      repointed[key] = { ...d[key], txHash: mined.signedBodyTxHash };
+    }
+  }
+  return {
+    ...plan,
+    steps,
+    deployment: { ...plan.deployment, ...repointed } as typeof plan.deployment,
+  };
+}
+
 export async function planDeployment(input: PlanDeploymentInput): Promise<DeploymentPlan> {
+  // ⛔ REFUSED UNDER alpha.5 UNTIL THE PORT IS MIGRATED.
+  //
+  // `buildBootstrapPlan` is the alpha.4 harness port. alpha.5 added one requirement
+  // to `protocol_params.mint` — the genesis must carry a withdraw-0 from the upgrade
+  // credential, needing the multisig config UTxO as a reference input and the
+  // participants in `extra_signatories` — and it moved the stake registrations ahead
+  // of the genesis. The port does none of that.
+  //
+  // Without this guard the failure is the expensive kind: the plan BUILDS, every hash
+  // VERIFIES — verification re-derives from the blueprint and knows nothing about
+  // transaction shape — and the genesis is rejected at SUBMISSION, after the earlier
+  // transactions have landed and spent their one-shot seeds, which cannot be reused.
+  //
+  // Measured rather than predicted: the backend's own offline fixture builds this
+  // same genesis shape against the alpha.5 blueprint and Aiken refuses it with
+  // `RedeemerError { tag: "Mint", index: 1, EvaluationFailure }`.
+  throw new Error(
+    "This deployment builder targets CIP-113 alpha.4, and the platform now pins the " +
+      "alpha.5 blueprint. alpha.5's genesis requires a withdraw-0 from the upgrade " +
+      "credential, the multisig config UTxO as a reference input, and the authority " +
+      "signers — none of which this builder supplies. It would be rejected on chain " +
+      "after the earlier transactions had already spent their one-shot seeds. " +
+      "Migration to the SDK's exported bootstrap is in progress.",
+  );
+
   const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
   const { chain, client } = signingClient(input.network, input.rawWalletApi);
 
@@ -238,6 +305,8 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Deploy
     maxInlineDatumBytes: input.maxInlineDatumBytes,
     alwaysFailNonce: input.alwaysFailNonce,
     seeds: input.seeds,
+    unfrackingEnabled: input.unfrackingEnabled,
+    mineable: input.mineable,
     isStakeRegistered: (rewardAddress) =>
       isStakeRegisteredViaBlockfrost(input.network, projectId, rewardAddress),
   });

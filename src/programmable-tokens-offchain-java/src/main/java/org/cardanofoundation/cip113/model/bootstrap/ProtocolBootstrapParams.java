@@ -3,7 +3,7 @@ package org.cardanofoundation.cip113.model.bootstrap;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 /**
- * One CIP-113 0.5.0-alpha.4 deployment, in the same shape as SDK 0.9.x
+ * One CIP-113 0.5.0-alpha.5 deployment, in the same shape as SDK 0.9.x
  * {@code DeploymentParams}.
  *
  * <p>This development platform deliberately supports only the current contract surface.

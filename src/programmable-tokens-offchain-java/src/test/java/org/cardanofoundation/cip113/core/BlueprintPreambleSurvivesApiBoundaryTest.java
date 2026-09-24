@@ -44,7 +44,7 @@ class BlueprintPreambleSurvivesApiBoundaryTest {
 
         assertNotNull(plutus.preamble(), "preamble was dropped when reading plutus.json");
         assertEquals("cardano-foundation/cip113-programmable-tokens", plutus.preamble().title());
-        assertEquals("0.5.0-alpha.4", plutus.preamble().version());
+        assertEquals("0.5.0-alpha.5", plutus.preamble().version());
         assertNotNull(plutus.preamble().compiler(), "compiler dropped — the SDK's provenance gate reads it");
         assertEquals("Aiken", plutus.preamble().compiler().name());
         assertTrue(plutus.preamble().compiler().version().startsWith("v1.1.23"),
@@ -56,7 +56,7 @@ class BlueprintPreambleSurvivesApiBoundaryTest {
                 "the SERVED blueprint has no preamble — consumers cannot tell which protocol "
                         + "version these validators belong to, and an SDK version gate will read "
                         + "\"unknown v0.0.0\"");
-        assertEquals("0.5.0-alpha.4", served.path("preamble").path("version").asText());
+        assertEquals("0.5.0-alpha.5", served.path("preamble").path("version").asText());
         assertEquals("cardano-foundation/cip113-programmable-tokens",
                 served.path("preamble").path("title").asText());
     }

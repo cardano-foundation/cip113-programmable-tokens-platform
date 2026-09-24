@@ -893,14 +893,29 @@ function RwaTokenGlobalStatePanel({
         ?? onchain?.memberRootHashLocal
         ?? "";
       if (newRoot) {
-        await acknowledgeRootPublish(policyId, {
+        const ack = await acknowledgeRootPublish(policyId, {
           txHash: txHashes[rootIdx],
           newRootHashHex: newRoot,
         });
+        // A 200 with `rootDrifted` marked NOTHING: the allowlist changed while the
+        // root was in flight, so the members this publish was for are still pending
+        // and will still be refused at transfer. Unlike an ack transport failure,
+        // this does NOT resolve itself on the next refresh — it needs another
+        // publish — so it is said out loud rather than left to a console nobody has
+        // open.
+        if (ack.rootDrifted) {
+          showToast({
+            title: "Root published, members not marked",
+            description:
+              ack.message ??
+              "The allowlist changed while the root was being published. Publish the member root again to cover them.",
+            variant: "error",
+          });
+        }
       }
     } catch (ackErr) {
-      // Non-fatal: the chain has the new root regardless; the DB just
-      // shows stale "needs publish" until the next refresh fixes it.
+      // Transport-level failure only. Non-fatal: the chain has the new root
+      // regardless, and re-acking (or re-publishing) fixes the bookkeeping.
       console.warn("root-publish ack failed:", ackErr);
     }
   };

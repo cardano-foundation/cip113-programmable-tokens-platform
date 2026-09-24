@@ -144,7 +144,11 @@ uplc-link:
 wallet:
   mnemonic: ""
 
-# Sole supported Preview deployment: CIP-113 0.5.0-alpha.4 / bootstrap schema 3.
+# Sole supported Preview deployment: CIP-113 0.5.0-alpha.5 / bootstrap schema 3.
+# ⛔ NO PREVIEW INSTANCE EXISTS YET. alpha.5 moves eight of twelve script hashes, so the
+# alpha.4 instance this pointed at is abandoned, not upgraded; protocol-bootstraps-preview.json
+# is an empty array until the redeploy. The backend fails closed on an empty file, which is
+# the intended state — it must not serve an instance that is no longer current.
 # The explicit pin prevents an operator typo or stale environment value from silently
 # selecting a different protocol instance.
 programmable:

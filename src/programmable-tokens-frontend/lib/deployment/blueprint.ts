@@ -6,7 +6,7 @@
  * empty array — so on a network with no deployed protocol the backend cannot start, let alone
  * serve a blueprint. Bootstrapping cannot depend on it.
  *
- * The SDK ships the artifact instead: `blueprints/standard/v0.5.0-alpha.4/plutus.json`,
+ * The SDK ships the artifact instead: `blueprints/standard/v0.5.0-alpha.5/plutus.json`,
  * byte-identical to the one this platform pins (sha256 5ff5d6d2…0b46, verified). Alongside it
  * is UPSTREAM_PIN.json recording the repo, commit and compiler — which is also what CIP-171
  * provenance for the deployment needs.
@@ -18,9 +18,21 @@
  */
 import type { PlutusBlueprint } from "@easy1staking/cip113-sdk-ts";
 
-/** The alpha.4 artifact this platform pins, from contracts-pin.json. */
+/**
+ * The blueprint revision this platform deploys, as it is named inside the SDK's
+ * `blueprints/standard/` directory.
+ *
+ * ⛔ ONE CONSTANT because there are TWO routes — the bytes and the pin are served
+ * separately, and each used to spell this version out for itself. Two independent
+ * spellings of one revision is a revision that can be half-upgraded: the bytes move
+ * and the pin does not, and the failure arrives as "sha256 does not match its pin",
+ * which reads like a corrupted artefact rather than a missed edit.
+ */
+export const PINNED_CORE_BLUEPRINT_DIR = "v0.5.0-alpha.5";
+
+/** The alpha.5 artifact this platform pins. */
 export const PINNED_CORE_BLUEPRINT_SHA256 =
-  "5ff5d6d2990d815973e4edcf6d46e7c3d0ff4bf3cb7c17a3e672e091b7ea0b46";
+  "ca53475332b5932f021fa134f823b932b05433ccd335bbf6251f18167826da66";
 
 export interface UpstreamPin {
   artifact: string;

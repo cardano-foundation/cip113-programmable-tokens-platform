@@ -11,6 +11,7 @@
  * derivation used one seed for everything, or swapped issuance_logic's two adjacent PolicyId
  * parameters, the hashes below would not match.
  */
+const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -27,15 +28,28 @@ async function main() {
     __dirname,
     "../programmable-tokens-offchain-java/src/main/resources",
   );
-  const blueprint = JSON.parse(
-    fs.readFileSync(path.join(backendResources, "plutus.json"), "utf8"),
-  );
+  // Both blueprints, from the SDK's own bundle, so the comparison is between two
+  // real artefacts rather than between one artefact and our description of it.
+  const bp = (dir) =>
+    JSON.parse(
+      fs.readFileSync(
+        path.resolve(
+          __dirname,
+          `node_modules/@easy1staking/cip113-sdk-ts/blueprints/standard/${dir}/plutus.json`,
+        ),
+        "utf8",
+      ),
+    );
+  const blueprintAlpha4 = bp("v0.5.0-alpha.4");
+  const blueprint = bp("v0.5.0-alpha.5");
+
+  // The alpha.4 preview instance, now a fixture. Its seeds are the FIXED INPUTS both
+  // derivations run at, so any difference below is the blueprint's and nothing else.
   const deployment = JSON.parse(
-    fs.readFileSync(path.join(backendResources, "protocol-bootstraps-preview.json"), "utf8"),
+    fs.readFileSync("./test-fixtures/platform-record-alpha4-preview.json", "utf8"),
   )[0];
 
-  const derived = derive({
-    blueprint,
+  const fixedInputs = {
     seeds: {
       paramsSeed: deployment.protocolParams.txInput,
       issuanceSeed: deployment.issuance.txInput,
@@ -43,9 +57,16 @@ async function main() {
     },
     alwaysFailHash: deployment.issuance.alwaysFailScriptHash,
     maxInlineDatumBytes: deployment.maxInlineDatumBytes,
-  });
+  };
 
-  const expected = {
+  const derivedAlpha4 = derive({ blueprint: blueprintAlpha4, ...fixedInputs });
+  const derived = derive({ blueprint, ...fixedInputs });
+
+  // ---- ANCHOR: alpha.4 still reproduces the real recorded instance --------
+  // Without this the comparison below floats free — two derivations could differ
+  // exactly as expected while BOTH were wrong, because nothing tied either of them
+  // to a deployment that actually exists on chain.
+  const recorded = {
     registryPolicy: deployment.registry.scriptHash,
     paramsPolicy: deployment.protocolParams.policyId,
     programmableLogicBase: deployment.programmableLogicBase.scriptHash,
@@ -56,26 +77,128 @@ async function main() {
     programmableLogicGlobal: deployment.programmableLogicGlobal.scriptHash,
     upgradeMultisig: deployment.upgradeMultisig.scriptHash,
   };
-
-  let failed = 0;
-  for (const [name, want] of Object.entries(expected)) {
-    const got = derived[name];
-    const ok = got === want;
-    if (!ok) failed++;
-    console.log(`  ${ok ? "OK  " : "FAIL"} ${name.padEnd(24)} ${ok ? got : `got ${got}\n       want ${want}`}`);
+  for (const [name, want] of Object.entries(recorded)) {
+    assert.strictEqual(
+      derivedAlpha4[name],
+      want,
+      `alpha.4 derivation no longer reproduces the recorded preview instance at ${name}`,
+    );
   }
+  console.log(`  OK   alpha.4 still reproduces the recorded preview instance (${Object.keys(recorded).length} hashes)`);
+
+  // ---- THE CASCADE, ASSERTED IN BOTH DIRECTIONS --------------------------
+  // Everything downstream of the params policy moves; what hangs off seeds and
+  // nonces does not. Asserting only that "these moved" would pass if EVERY hash
+  // moved, and asserting only that "these held" would pass if none did. Both
+  // lists, both directions, or the measurement is half a measurement.
+  const MOVES = [
+    "paramsPolicy",
+    "programmableLogicBase",
+    "transfer",
+    "thirdParty",
+    "unfracking",
+    "issuanceLogic",
+    "programmableLogicGlobal",
+  ];
+  const SURVIVES = ["registryPolicy", "upgradeMultisig"];
+
+  for (const name of MOVES) {
+    assert.notStrictEqual(
+      derived[name],
+      derivedAlpha4[name],
+      `${name} is downstream of the params policy and MUST move from alpha.4 to alpha.5`,
+    );
+  }
+  for (const name of SURVIVES) {
+    assert.strictEqual(
+      derived[name],
+      derivedAlpha4[name],
+      `${name} hangs off a seed or nonce and MUST NOT move between blueprint revisions`,
+    );
+  }
+  // Nothing checked is left unclassified — a hash added later would otherwise be
+  // silently outside both lists and asserted in neither direction.
+  const classified = new Set([...MOVES, ...SURVIVES]);
+  for (const name of Object.keys(recorded)) {
+    assert.ok(classified.has(name), `${name} is in neither MOVES nor SURVIVES — classify it`);
+  }
+  console.log(`  OK   alpha.4 -> alpha.5: ${MOVES.length} hashes move, ${SURVIVES.length} hold, both asserted`);
 
   console.log(`\n  parameterizations recorded: ${derived.parameterizations.length} (CIP-171 payload)`);
-  if (failed > 0) {
-    throw new Error(`${failed} derived hash(es) do not match the live Preview deployment`);
+
+  // ---- unfracking disabled: the dispatcher moves, the validator does not ----
+  //
+  // Giovanni's launch shape: the unfracking validator is built, deployed, registered and
+  // published as normal, and ONLY the value programmable_logic_global was compiled against
+  // differs. So a deployment with unfracking disabled carries BOTH values, and neither implies
+  // the other — which is exactly why unfrackingParameter has to be recorded rather than derived.
+  const { UNFRACKING_DISABLED } = await import("@easy1staking/cip113-sdk-ts");
+
+  const enabled = derive({
+    blueprint,
+    seeds: {
+      paramsSeed: deployment.protocolParams.txInput,
+      issuanceSeed: deployment.issuance.txInput,
+      multisigSeed: deployment.upgradeMultisig.txInput,
+    },
+    alwaysFailHash: deployment.issuance.alwaysFailScriptHash,
+    maxInlineDatumBytes: deployment.maxInlineDatumBytes,
+  });
+  const disabled = derive({
+    blueprint,
+    seeds: {
+      paramsSeed: deployment.protocolParams.txInput,
+      issuanceSeed: deployment.issuance.txInput,
+      multisigSeed: deployment.upgradeMultisig.txInput,
+    },
+    alwaysFailHash: deployment.issuance.alwaysFailScriptHash,
+    maxInlineDatumBytes: deployment.maxInlineDatumBytes,
+    unfrackingEnabled: false,
+  });
+
+  if (enabled.unfrackingParameter !== enabled.unfracking) {
+    throw new Error("with unfracking enabled, the parameter must be the real unfracking hash");
   }
-  console.log("  forward derivation reproduces the live Preview deployment\n");
+  if (disabled.unfrackingParameter !== UNFRACKING_DISABLED) {
+    throw new Error(`disabled deployment recorded ${disabled.unfrackingParameter}, not the sentinel`);
+  }
+  console.log("  OK   the recorded parameter is the real hash when enabled, the sentinel when not");
+
+  // THE VALIDATOR IS UNAFFECTED. Every other hash must be identical — only the dispatcher moves.
+  if (disabled.unfracking !== enabled.unfracking) {
+    throw new Error("disabling unfracking changed the unfracking script itself; it should not");
+  }
+  for (const k of ["transfer", "thirdParty", "issuanceLogic", "registryPolicy", "paramsPolicy",
+                   "programmableLogicBase", "upgradeMultisig", "alwaysFailHash"]) {
+    if (disabled[k] !== enabled[k]) throw new Error(`disabling unfracking moved ${k}, which it must not`);
+  }
+  console.log("  OK   disabling unfracking leaves every script except the dispatcher untouched");
+
+  // ⭐ AND THE DISPATCHER MUST MOVE. THIS IS THE ASSERTION THAT MAKES THE OTHER TWO MEAN ANYTHING.
+  //
+  // The two checks above say the recorded parameter differs and that no other script changed.
+  // Neither would notice if the parameter were never reaching the compilation at all — a
+  // deployment could record UNFRACKING_DISABLED while running a dispatcher compiled against the
+  // real hash, claiming unfracking was off while permitting it. Only the dispatcher's own hash
+  // moving proves the sentinel reached the script.
+  if (disabled.programmableLogicGlobal === enabled.programmableLogicGlobal) {
+    throw new Error(
+      "the dispatcher hash is unchanged by the sentinel — the parameter is not reaching the " +
+      "compilation, and a disabled deployment would be indistinguishable from an enabled one");
+  }
+  console.log(`  OK   the dispatcher moves: ${enabled.programmableLogicGlobal.slice(0, 12)}… -> ${disabled.programmableLogicGlobal.slice(0, 12)}…`);
+
 
   // ---- the bootstrap record the platform has to be able to load -------------
   const { buildBootstrapRecord } = await import("./.deploy-build/deployment/record.js");
   const refTx = deployment.programmableBaseRefInput.txHash;
+  // ⛔ alpha.4's derivation, deliberately. This section tests the RECORD BUILDER —
+  // field names, ordering, the two misleading issuance keys — against a real
+  // recorded instance. Feeding it the alpha.5 derivation would compare alpha.5
+  // hashes to an alpha.4 record and fail on eight fields for a reason that has
+  // nothing to do with the builder.
   const emitted = buildBootstrapRecord({
-    derived,
+    derived: derivedAlpha4,
     seeds: {
       paramsSeed: deployment.protocolParams.txInput,
       issuanceSeed: deployment.issuance.txInput,
@@ -200,7 +323,11 @@ async function main() {
   // into a sibling repository.
   const { schemaVersion, ...deploymentParams } = deployment;
 
-  const verified = verifyDeployment(blueprint, deploymentParams);
+  // alpha.4's blueprint against alpha.4's deployment. verifyDeployment is
+  // version-agnostic — it re-derives from whatever blueprint it is handed — so
+  // pairing it with alpha.5 here would test that two different protocol versions
+  // disagree, which they do by design and which this section is not about.
+  const verified = verifyDeployment(blueprintAlpha4, deploymentParams);
   if (!verified.ok) {
     console.log("  FAIL verification rejected a known-good deployment:",
       verified.error ?? verified.mismatches.map((m) => m.name).join(", "));
@@ -225,7 +352,7 @@ async function main() {
   // A transcribed-by-hand or copied-from-elsewhere hash must not pass.
   const tampered = JSON.parse(JSON.stringify(deploymentParams));
   tampered.transfer.scriptHash = "00" + tampered.transfer.scriptHash.slice(2);
-  const bad = verifyDeployment(blueprint, tampered);
+  const bad = verifyDeployment(blueprintAlpha4, tampered);
   if (bad.ok) throw new Error("verification accepted a tampered transfer hash");
   console.log("  OK   a tampered script hash is rejected");
 

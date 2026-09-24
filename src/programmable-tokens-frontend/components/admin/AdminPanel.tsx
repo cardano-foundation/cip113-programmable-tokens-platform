@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Coins, Shield, AlertTriangle, Flame, Settings } from "lucide-react";
+import { Coins, Shield, AlertTriangle, Flame, Settings, ExternalLink } from "lucide-react";
+import Link from "next/link";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { MintSection } from "./MintSection";
@@ -93,9 +94,13 @@ export function AdminPanel({ tokens, adminAddress }: AdminPanelProps) {
   const hasKycAdminTokens = tokens.some(
     (t) => t.moduleId === "kyc" && t.roles.includes("ISSUER_ADMIN")
   );
-  const hasRwaTokenAdminTokens = tokens.some((t) =>
+  // One list, two consumers — the Global State tab's availability and the CMTAT
+  // link strip below. Derived once so the two cannot drift into disagreeing about
+  // which tokens this wallet can administer.
+  const rwaTokenAdminTokens = tokens.filter((t) =>
     hasRwaTokenCapability(t, RwaTokenCapability.ADMIN)
   );
+  const hasRwaTokenAdminTokens = rwaTokenAdminTokens.length > 0;
 
   const availableTabs = tabs.filter((tab) => {
     if (tab.id === "global-state") {
@@ -136,6 +141,40 @@ export function AdminPanel({ tokens, adminAddress }: AdminPanelProps) {
             {tokens.length} Token{tokens.length !== 1 ? "s" : ""}
           </Badge>
         </div>
+
+        {/* CMTAT / rwa-token tokens are administered on their own page: the BaFin
+            global state, the MPF allowlist and the power-user table have no
+            equivalent in these five tabs, and that page is otherwise reachable
+            only by typing its URL. Rendered only for tokens where the connected
+            wallet actually holds ADMIN, so it never advertises a page that would
+            refuse the visitor. */}
+        {rwaTokenAdminTokens.length > 0 && (
+          <div className="mt-4 rounded border border-dark-700 bg-dark-900/60 p-3 space-y-2">
+            <p className="text-xs font-semibold text-dark-200">
+              Security token (CMTAT) administration
+            </p>
+            <p className="text-[11px] text-dark-400">
+              Allowlist, member root publishing, power users and global state live on the
+              token&apos;s own admin page.
+            </p>
+            <div className="flex flex-wrap gap-2 pt-1">
+              {rwaTokenAdminTokens.map((t) => (
+                <Link
+                  key={t.policyId}
+                  href={`/admin/rwa-token/${t.policyId}`}
+                  className="inline-flex items-center gap-1.5 rounded border border-dark-600 bg-dark-800 px-2.5 py-1.5 text-xs text-dark-100 transition-colors hover:border-primary-500/40 hover:text-primary-400"
+                >
+                  <Shield className="h-3.5 w-3.5" />
+                  <span className="font-medium">{t.assetNameDisplay || "Unnamed token"}</span>
+                  <span className="font-mono text-[10px] text-dark-500">
+                    {t.policyId.slice(0, 8)}…
+                  </span>
+                  <ExternalLink className="h-3 w-3" />
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="flex gap-2 mt-4">

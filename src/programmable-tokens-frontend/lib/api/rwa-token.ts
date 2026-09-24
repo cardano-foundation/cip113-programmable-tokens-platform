@@ -19,6 +19,33 @@ export interface RwaTokenInclusionResponse {
   currentRootLocal: string;
 }
 
+/** One row of the allowlist, as the admin list endpoint returns it.
+ *
+ * `published` and `expired` are computed server-side and are the two fields an
+ * admin actually acts on — see the javadoc on `RwaTokenController#listMembers`.
+ * A member who is present but not `published` is in the local trie only, and
+ * transfers to them still fail until the root is published.
+ *
+ * `credentialType` is part of the member's IDENTITY (it is the first byte of the
+ * MPF leaf key), so the same `memberPkh` can legitimately appear twice — once as
+ * VerificationKey (0), once as Script (1). Key React lists on both, never on the
+ * hash alone, or one row silently replaces the other.
+ */
+export interface RwaTokenMember {
+  memberPkh: string;
+  credentialType: number;
+  boundAddress: string | null;
+  kycSessionId: string | null;
+  validUntilMs: number;
+  addedAt: string | null;
+  publishedAt: string | null;
+  published: boolean;
+  expired: boolean;
+}
+
+export const listRwaTokenMembers = (policyId: string) =>
+  apiGet<RwaTokenMember[]>(`/rwa-token/${policyId}/members`);
+
 export const requestRwaTokenInclusion = (
   policyId: string,
   body: { boundAddress: string; kycSessionId?: string; validUntilMs: number },
@@ -364,6 +391,16 @@ export const acknowledgeRootPublish = (
     lastRootUpdateTxHash: string;
     lastRootUpdateAt: string;
     leavesMarkedPublished: number;
+    /** True when the allowlist changed while the root was in flight, so the local
+     *  leaf set no longer hashes to the published root and NO member was marked.
+     *  A 200 with `rootDrifted` is not a success — the transaction landed, but the
+     *  members it was published for still read as pending and will still be refused
+     *  at transfer. Publishing again resolves it. Treat it as a visible outcome,
+     *  never as noise: an unreported zero here is the exact shape of the bug this
+     *  field exists to prevent. */
+    rootDrifted?: boolean;
+    currentLocalRoot?: string;
+    message?: string;
   }>(`/rwa-token/${policyId}/global-state/root-published`, body);
 
 /** User-signed UpdateMemberRootHash. Backend computes the current local MPF
