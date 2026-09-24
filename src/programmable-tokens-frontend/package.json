@@ -21,7 +21,7 @@
     "test:sdkrecord": "tsc lib/deployment/sdk-record.ts --outDir .sdkrec-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .sdkrec-build && node test-sdk-record.js"
   },
   "dependencies": {
-    "@easy1staking/cip113-sdk-ts": "^0.11.0",
+    "@easy1staking/cip113-sdk-ts": "^0.12.0",
     "@hookform/resolvers": "^3.9.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^1.8.0",

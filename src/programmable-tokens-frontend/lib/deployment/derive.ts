@@ -59,14 +59,19 @@ export interface DeriveCoreDeploymentInput {
    * so changing it means redeploying all four and upgrading the protocol. It is a deployment
    * choice, not a setting.
    *
-   * ⛔ 1024 IS A DEVNET FIXTURE VALUE THAT NOBODY CHOSE. The SDK's own constant says so:
+   * ⚠ 1024 IS THE AGREED STARTING POINT, NOT A DERIVED ONE. Giovanni ruled on
+   * 2026-09-23: "datum size should be configurable from the UI and 1024 is the
+   * starting point." So it is a deliberate provisional choice — which is a
+   * different thing from a value nobody chose, and a different thing again from
+   * one a cost model produced. The SDK's own constant says why it is neither:
    * "a security parameter with no upstream guidance; 1024 is what upstream's own test
    * fixtures use and is NOT a recommendation. The production value is deferred."
    *
-   * ⚠ That deployed instances carry 1024 is NOT evidence for 1024. They inherited the same
-   * unchosen default, and citing them back as precedent is precisely how a fixture becomes a
-   * decision nobody made. This comment used to read "Live preview uses 1024", which did
-   * exactly that.
+   * ⚠ That deployed instances carry 1024 is still NOT evidence for 1024 — they
+   * inherited it, and citing them back as precedent is how a fixture becomes a
+   * decision nobody made. This comment used to read "Live preview uses 1024",
+   * which did exactly that. The ruling above makes 1024 a chosen starting value;
+   * it does not make the deployments that already carried it into support for it.
    *
    * A real value would come from a cost model — upstream's
    * `validators/programmable_logic/datum_size_cost.test.ak` is where that lives. Until one is

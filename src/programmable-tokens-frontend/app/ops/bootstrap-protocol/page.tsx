@@ -728,11 +728,12 @@ export default function BootstrapProtocolPage() {
             not a setting.
           </p>
           <p className="text-xs text-accent-300">
-            1024 is a devnet fixture value that nobody chose. Upstream ships no guidance for this
-            parameter and the SDK&apos;s own constant calls 1024 &ldquo;what upstream&apos;s test
-            fixtures use&rdquo; and explicitly not a recommendation. That existing deployments
-            carry it is not support for it — they inherited the same default. If a cost model has
-            since been settled, use that number here instead.
+            1024 is the agreed starting point, not a derived one. Upstream ships no guidance for
+            this parameter and the SDK&apos;s own constant calls 1024 &ldquo;what upstream&apos;s
+            test fixtures use&rdquo; and explicitly not a recommendation — so it is a deliberate
+            provisional choice rather than a cost model, and worth revisiting when one exists.
+            Change it here before deploying if you have a better number; it cannot be changed
+            afterwards.
           </p>
         </div>
 

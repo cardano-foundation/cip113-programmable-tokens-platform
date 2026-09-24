@@ -267,6 +267,31 @@ export function applyMinedStep(
 }
 
 export async function planDeployment(input: PlanDeploymentInput): Promise<DeploymentPlan> {
+  // ⛔ REFUSED UNDER alpha.5 UNTIL THE PORT IS MIGRATED.
+  //
+  // `buildBootstrapPlan` is the alpha.4 harness port. alpha.5 added one requirement
+  // to `protocol_params.mint` — the genesis must carry a withdraw-0 from the upgrade
+  // credential, needing the multisig config UTxO as a reference input and the
+  // participants in `extra_signatories` — and it moved the stake registrations ahead
+  // of the genesis. The port does none of that.
+  //
+  // Without this guard the failure is the expensive kind: the plan BUILDS, every hash
+  // VERIFIES — verification re-derives from the blueprint and knows nothing about
+  // transaction shape — and the genesis is rejected at SUBMISSION, after the earlier
+  // transactions have landed and spent their one-shot seeds, which cannot be reused.
+  //
+  // Measured rather than predicted: the backend's own offline fixture builds this
+  // same genesis shape against the alpha.5 blueprint and Aiken refuses it with
+  // `RedeemerError { tag: "Mint", index: 1, EvaluationFailure }`.
+  throw new Error(
+    "This deployment builder targets CIP-113 alpha.4, and the platform now pins the " +
+      "alpha.5 blueprint. alpha.5's genesis requires a withdraw-0 from the upgrade " +
+      "credential, the multisig config UTxO as a reference input, and the authority " +
+      "signers — none of which this builder supplies. It would be rejected on chain " +
+      "after the earlier transactions had already spent their one-shot seeds. " +
+      "Migration to the SDK's exported bootstrap is in progress.",
+  );
+
   const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
   const { chain, client } = signingClient(input.network, input.rawWalletApi);
 
