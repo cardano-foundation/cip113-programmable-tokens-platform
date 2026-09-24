@@ -15,33 +15,33 @@ import org.cardanofoundation.cip113.repository.GlobalStateInitRepository;
 import org.cardanofoundation.cip113.repository.KycExtendedTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.KycTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
-import org.cardanofoundation.cip113.service.substandard.DummySubstandardHandler;
-import org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler;
-import org.cardanofoundation.cip113.service.substandard.KycExtendedSubstandardHandler;
-import org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler;
-import org.cardanofoundation.cip113.service.substandard.KycSubstandardHandler;
-import org.cardanofoundation.cip113.service.substandard.SubstandardHandlerFactory;
-import org.cardanofoundation.cip113.service.substandard.capabilities.BasicOperations;
+import org.cardanofoundation.cip113.service.module.DummyModuleHandler;
+import org.cardanofoundation.cip113.service.module.FreezeAndSeizeHandler;
+import org.cardanofoundation.cip113.service.module.KycExtendedModuleHandler;
+import org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler;
+import org.cardanofoundation.cip113.service.module.KycModuleHandler;
+import org.cardanofoundation.cip113.service.module.ModuleHandlerFactory;
+import org.cardanofoundation.cip113.service.module.capabilities.BasicOperations;
 import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
-import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
-import org.cardanofoundation.cip113.service.substandard.context.KycContext;
-import org.cardanofoundation.cip113.service.substandard.context.KycExtendedContext;
-import org.cardanofoundation.cip113.service.substandard.context.RwaTokenContext;
+import org.cardanofoundation.cip113.service.module.context.FreezeAndSeizeContext;
+import org.cardanofoundation.cip113.service.module.context.KycContext;
+import org.cardanofoundation.cip113.service.module.context.KycExtendedContext;
+import org.cardanofoundation.cip113.service.module.context.RwaTokenContext;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
 /**
  * Service orchestration layer for token operations.
- * This service coordinates between controllers, substandard handlers, and protocol services.
- * It handles substandard routing and provides a clean separation between API and business logic.
+ * This service coordinates between controllers, module handlers, and protocol services.
+ * It handles module routing and provides a clean separation between API and business logic.
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class TokenOperationsService {
 
-    private final SubstandardHandlerFactory handlerFactory;
+    private final ModuleHandlerFactory handlerFactory;
 
     private final ProtocolBootstrapService protocolBootstrapService;
 
@@ -73,8 +73,8 @@ public class TokenOperationsService {
      */
     @SuppressWarnings("unchecked")
     public TransactionContext<List<String>> preRegisterToken(RegisterTokenRequest request, String protocolTxHash) {
-        log.info("Pre-registering token with substandard: {}, protocol: {}",
-                request.getSubstandardId(), protocolTxHash);
+        log.info("Pre-registering token with module: {}, protocol: {}",
+                request.getModuleId(), protocolTxHash);
 
         // Get protocol bootstrap params
         var protocolParams = resolveProtocolParams(protocolTxHash);
@@ -121,8 +121,8 @@ public class TokenOperationsService {
                     "Unknown request type: " + request.getClass().getSimpleName());
         };
 
-        log.info("Pre-registration transaction built successfully for substandard: {}",
-                request.getSubstandardId());
+        log.info("Pre-registration transaction built successfully for module: {}",
+                request.getModuleId());
 
         return txContext;
     }
@@ -137,8 +137,8 @@ public class TokenOperationsService {
      */
     @SuppressWarnings("unchecked")
     public TransactionContext<RegistrationResult> registerToken(RegisterTokenRequest request, String protocolTxHash) {
-        log.info("Registering token with substandard: {}, protocol: {}",
-                request.getSubstandardId(), protocolTxHash);
+        log.info("Registering token with module: {}, protocol: {}",
+                request.getModuleId(), protocolTxHash);
 
         // Get protocol bootstrap params
         var protocolParams = resolveProtocolParams(protocolTxHash);
@@ -185,8 +185,8 @@ public class TokenOperationsService {
                     "Unknown request type: " + request.getClass().getSimpleName());
         };
 
-        log.info("Registration transaction built successfully for substandard: {}",
-                request.getSubstandardId());
+        log.info("Registration transaction built successfully for module: {}",
+                request.getModuleId());
 
         return txContext;
     }
@@ -243,10 +243,10 @@ public class TokenOperationsService {
         // Get protocol bootstrap params
         var protocolParams = resolveProtocolParams(protocolTxHash);
 
-        // Resolve substandard from policyId via unified registry
-        String substandardId = resolveSubstandardId(request.tokenPolicyId());
+        // Resolve module from policyId via unified registry
+        String moduleId = resolveModuleId(request.tokenPolicyId());
 
-        var context = switch (substandardId) {
+        var context = switch (moduleId) {
             case "freeze-and-seize" -> {
                 var dataOpt = freezeAndSeizeTokenRegistrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId())
                         .flatMap(token -> blacklistInitRepository.findByBlacklistNodePolicyId(token.getBlacklistInit().getBlacklistNodePolicyId())
@@ -310,23 +310,23 @@ public class TokenOperationsService {
             default -> null;
         };
 
-        // Get substandard handler with BasicOperations capability
-        var handler = context != null ? handlerFactory.getHandler(substandardId, context) : handlerFactory.getHandler(substandardId);
+        // Get module handler with BasicOperations capability
+        var handler = context != null ? handlerFactory.getHandler(moduleId, context) : handlerFactory.getHandler(moduleId);
         var txContext = switch (handler) {
-            case DummySubstandardHandler dummySubstandardHandler ->
-                    dummySubstandardHandler.buildMintTransaction(request, protocolParams);
+            case DummyModuleHandler dummyModuleHandler ->
+                    dummyModuleHandler.buildMintTransaction(request, protocolParams);
             case FreezeAndSeizeHandler freezeAndSeizeHandler ->
                     freezeAndSeizeHandler.buildMintTransaction(request, protocolParams);
-            case KycSubstandardHandler kycSubstandardHandler ->
-                    kycSubstandardHandler.buildMintTransaction(request, protocolParams);
-            case KycExtendedSubstandardHandler kxHandler ->
+            case KycModuleHandler kycModuleHandler ->
+                    kycModuleHandler.buildMintTransaction(request, protocolParams);
+            case KycExtendedModuleHandler kxHandler ->
                     kxHandler.buildMintTransaction(request, protocolParams);
-            case RwaTokenSubstandardHandler stHandler ->
+            case RwaTokenModuleHandler stHandler ->
                     stHandler.buildMintTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
 
-        log.info("Mint transaction built successfully for substandard: {}", substandardId);
+        log.info("Mint transaction built successfully for module: {}", moduleId);
 
         return txContext;
     }
@@ -345,10 +345,10 @@ public class TokenOperationsService {
         // Get protocol bootstrap params
         var protocolParams = resolveProtocolParams(protocolTxHash);
 
-        // Resolve substandard from policyId via unified registry
-        String substandardId = resolveSubstandardId(request.tokenPolicyId());
+        // Resolve module from policyId via unified registry
+        String moduleId = resolveModuleId(request.tokenPolicyId());
 
-        var context = switch (substandardId) {
+        var context = switch (moduleId) {
             case "freeze-and-seize" -> {
                 var dataOpt = freezeAndSeizeTokenRegistrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId())
                         .flatMap(token -> blacklistInitRepository.findByBlacklistNodePolicyId(token.getBlacklistInit().getBlacklistNodePolicyId())
@@ -412,23 +412,23 @@ public class TokenOperationsService {
             default -> null;
         };
 
-        // Get substandard handler with BasicOperations capability
-        var handler = context != null ? handlerFactory.getHandler(substandardId, context) : handlerFactory.getHandler(substandardId);
+        // Get module handler with BasicOperations capability
+        var handler = context != null ? handlerFactory.getHandler(moduleId, context) : handlerFactory.getHandler(moduleId);
         var txContext = switch (handler) {
-            case DummySubstandardHandler dummySubstandardHandler ->
-                    dummySubstandardHandler.buildBurnTransaction(request, protocolParams);
+            case DummyModuleHandler dummyModuleHandler ->
+                    dummyModuleHandler.buildBurnTransaction(request, protocolParams);
             case FreezeAndSeizeHandler freezeAndSeizeHandler ->
                     freezeAndSeizeHandler.buildBurnTransaction(request, protocolParams);
-            case KycSubstandardHandler kycSubstandardHandler ->
-                    kycSubstandardHandler.buildBurnTransaction(request, protocolParams);
-            case KycExtendedSubstandardHandler kxHandler ->
+            case KycModuleHandler kycModuleHandler ->
+                    kycModuleHandler.buildBurnTransaction(request, protocolParams);
+            case KycExtendedModuleHandler kxHandler ->
                     kxHandler.buildBurnTransaction(request, protocolParams);
-            case RwaTokenSubstandardHandler stHandler ->
+            case RwaTokenModuleHandler stHandler ->
                     stHandler.buildBurnTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
 
-        log.info("Burn transaction built successfully for substandard: {}", substandardId);
+        log.info("Burn transaction built successfully for module: {}", moduleId);
 
         return txContext;
     }
@@ -450,10 +450,10 @@ public class TokenOperationsService {
         // Get protocol bootstrap params
         var protocolParams = resolveProtocolParams(protocolTxHash);
 
-        // Resolve substandard from policyId via unified registry
-        String substandardId = resolveSubstandardId(programmableToken.policyId());
+        // Resolve module from policyId via unified registry
+        String moduleId = resolveModuleId(programmableToken.policyId());
 
-        var context = switch (substandardId) {
+        var context = switch (moduleId) {
             case "freeze-and-seize" -> {
                 var dataOpt = freezeAndSeizeTokenRegistrationRepository.findByProgrammableTokenPolicyId(programmableToken.policyId())
                         .flatMap(token -> blacklistInitRepository.findByBlacklistNodePolicyId(token.getBlacklistInit().getBlacklistNodePolicyId())
@@ -517,23 +517,23 @@ public class TokenOperationsService {
             default -> null;
         };
 
-        // Get substandard handler with BasicOperations capability
-        var handler = context != null ? handlerFactory.getHandler(substandardId, context) : handlerFactory.getHandler(substandardId);
+        // Get module handler with BasicOperations capability
+        var handler = context != null ? handlerFactory.getHandler(moduleId, context) : handlerFactory.getHandler(moduleId);
         var txContext = switch (handler) {
-            case DummySubstandardHandler dummySubstandardHandler ->
-                    dummySubstandardHandler.buildTransferTransaction(request, protocolParams);
+            case DummyModuleHandler dummyModuleHandler ->
+                    dummyModuleHandler.buildTransferTransaction(request, protocolParams);
             case FreezeAndSeizeHandler freezeAndSeizeHandler ->
                     freezeAndSeizeHandler.buildTransferTransaction(request, protocolParams);
-            case KycSubstandardHandler kycSubstandardHandler ->
-                    kycSubstandardHandler.buildTransferTransaction(request, protocolParams);
-            case KycExtendedSubstandardHandler kxHandler ->
+            case KycModuleHandler kycModuleHandler ->
+                    kycModuleHandler.buildTransferTransaction(request, protocolParams);
+            case KycExtendedModuleHandler kxHandler ->
                     kxHandler.buildTransferTransaction(request, protocolParams);
-            case RwaTokenSubstandardHandler stHandler ->
+            case RwaTokenModuleHandler stHandler ->
                     stHandler.buildTransferTransaction(request, protocolParams);
             default -> throw new UnsupportedOperationException();
         };
 
-        log.info("Transfer transaction built successfully for substandard: {}", substandardId);
+        log.info("Transfer transaction built successfully for module: {}", moduleId);
 
         return txContext;
     }
@@ -568,37 +568,37 @@ public class TokenOperationsService {
     }
 
     /**
-     * Resolve substandard ID from the unified programmable token registry.
+     * Resolve module ID from the unified programmable token registry.
      *
      * @param policyId The programmable token policy ID
-     * @return The substandard ID
+     * @return The module ID
      * @throws IllegalArgumentException if the token is not registered
      */
-    private String resolveSubstandardId(String policyId) {
-        log.debug("Resolving substandard for policy ID: {}", policyId);
+    private String resolveModuleId(String policyId) {
+        log.debug("Resolving module for policy ID: {}", policyId);
 
         return programmableTokenRegistryRepository.findByPolicyId(policyId)
-                .map(ProgrammableTokenRegistryEntity::getSubstandardId)
+                .map(ProgrammableTokenRegistryEntity::getModuleId)
                 .orElseThrow(() -> new IllegalArgumentException(
                         "Token not registered in programmable token registry: " + policyId));
     }
 
     /**
-     * Check if a substandard is supported
+     * Check if a module is supported
      *
-     * @param substandardId The substandard identifier
+     * @param moduleId The module identifier
      * @return true if supported, false otherwise
      */
-    public boolean isSubstandardSupported(String substandardId) {
-        return handlerFactory.hasHandler(substandardId);
+    public boolean isModuleSupported(String moduleId) {
+        return handlerFactory.hasHandler(moduleId);
     }
 
     /**
-     * Get all supported substandard IDs
+     * Get all supported module IDs
      *
-     * @return Set of supported substandard IDs
+     * @return Set of supported module IDs
      */
-    public java.util.Set<String> getSupportedSubstandards() {
-        return handlerFactory.getRegisteredSubstandards();
+    public java.util.Set<String> getSupportedModules() {
+        return handlerFactory.getRegisteredModules();
     }
 }

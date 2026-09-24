@@ -23,19 +23,19 @@ export interface ProtocolBlueprint {
   };
 }
 
-export interface SubstandardValidator {
+export interface ModuleValidator {
   title: string;
   script_hash: string;
   script_bytes: string;
 }
 
-export interface SubstandardBlueprint {
+export interface ModuleBlueprint {
   id: string;
-  /** Display name from the substandard\'s metadata.json; falls back to the capitalised id. */
+  /** Display name from the module\'s metadata.json; falls back to the capitalised id. */
   name?: string;
   /** One-paragraph summary from metadata.json; may be empty. */
   description?: string;
-  validators: SubstandardValidator[];
+  validators: ModuleValidator[];
 }
 
 export interface Cip68TokenMetadata {
@@ -49,7 +49,7 @@ export interface Cip68TokenMetadata {
 
 export interface TokenContext {
   policyId: string;
-  substandardId: string;
+  moduleId: string;
   assetName?: string;
   /** The token's transfer-logic script hash, as the registry node records it. Absent when the
    *  registry node has not been indexed — which is different from "indexed, no provenance
@@ -71,7 +71,7 @@ export interface TokenContext {
    *  about us, and a UI must not render them the same way. */
   cip68Status?: 'NOT_CIP68' | 'REFERENCE_TOKEN_NOT_FOUND' | 'NO_READABLE_DATUM' | null;
   /** RWA-token only: whether the on-chain validator requires the recipient
-   *  to be in the allowlist. `null` for substandards that don't carry this flag. */
+   *  to be in the allowlist. `null` for modules that don't carry this flag. */
   requiresReceiverKyc?: boolean | null;
   /** RWA-token only: whether the on-chain validator requires the SENDER to be in
    *  the allowlist. INDEPENDENT of {@link TokenContext.requiresReceiverKyc} —
@@ -79,11 +79,11 @@ export interface TokenContext {
    *  loop and `:157` reads `requires_receiver_kyc` for the per-destination loop.
    *  The backend has always returned this field; dropping it from this type is
    *  what made the transfer form demand sender KYC on a token that has it off.
-   *  `null` for substandards that don't carry this flag. */
+   *  `null` for modules that don't carry this flag. */
   requiresSenderKyc?: boolean | null;
   /** RWA-token only: whether on-chain transfers are currently paused (set
    *  via the GlobalState {@code PauseTransfers} admin action). When true, the
-   *  TransferModal disables Send and surfaces a notice. `null` for substandards
+   *  TransferModal disables Send and surfaces a notice. `null` for modules
    *  that don't carry this flag. */
   transfersPaused?: boolean | null;
 }

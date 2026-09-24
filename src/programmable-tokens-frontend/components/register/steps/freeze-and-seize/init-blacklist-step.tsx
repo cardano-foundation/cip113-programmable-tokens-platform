@@ -127,10 +127,10 @@ export function InitBlacklistStep({
         variant: 'default',
       });
 
-      // Call the blacklist init API with substandardId
+      // Call the blacklist init API with moduleId
       const response = await initBlacklist(
         {
-          substandardId: 'freeze-and-seize',
+          moduleId: 'freeze-and-seize',
           adminAddress,
           feePayerAddress: adminAddress,
           assetName: stringToHex(tokenDetails?.assetName || ''),
@@ -249,7 +249,7 @@ export function InitBlacklistStep({
       <div>
         <h3 className="text-lg font-semibold text-white mb-2">Initialize Blacklist</h3>
         <p className="text-dark-300 text-sm">
-          The freeze-and-seize substandard requires a blacklist to track frozen addresses.
+          The freeze-and-seize module requires a blacklist to track frozen addresses.
           This step creates the blacklist node on-chain.
         </p>
       </div>

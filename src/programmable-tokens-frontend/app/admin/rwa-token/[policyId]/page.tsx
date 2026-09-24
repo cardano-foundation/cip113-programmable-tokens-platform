@@ -41,24 +41,24 @@ export default function RwaTokenAdminPage() {
   // published/pending badges — they are the whole point of this page and are
   // exactly what a publish changes.
   const [publishCount, setPublishCount] = useState(0);
-  const [substandardOk, setSubstandardOk] = useState<boolean | null>(null);
+  const [moduleOk, setModuleOk] = useState<boolean | null>(null);
   const [requiresReceiverKyc, setRequiresReceiverKyc] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (!policyId) return;
     getTokenContext(policyId)
       .then((ctx) => {
-        if (ctx.substandardId !== "rwa-token") {
-          setSubstandardOk(false);
+        if (ctx.moduleId !== "rwa-token") {
+          setModuleOk(false);
           return;
         }
-        setSubstandardOk(true);
+        setModuleOk(true);
         setRequiresReceiverKyc(ctx.requiresReceiverKyc ?? null);
       })
-      .catch(() => setSubstandardOk(false));
+      .catch(() => setModuleOk(false));
   }, [policyId]);
 
-  if (substandardOk === null) {
+  if (moduleOk === null) {
     return (
       <PageContainer>
         <div className="max-w-4xl mx-auto py-10 flex items-center gap-2 text-sm text-dark-300">
@@ -68,7 +68,7 @@ export default function RwaTokenAdminPage() {
     );
   }
 
-  if (substandardOk === false) {
+  if (moduleOk === false) {
     return (
       <PageContainer>
         <div className="max-w-4xl mx-auto py-10">

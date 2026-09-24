@@ -15,7 +15,7 @@ import { getPaymentKeyHash } from '@/lib/utils/address';
 import { toCip68Wire } from '@/lib/utils/cip68-wire';
 import { extractKnownCredential } from '@/lib/utils/known-credential';
 import { noteKnownRegistration } from '@/lib/api';
-import { labelAssetNameHex, userTokenLabelForSubstandard } from '@/lib/utils/cip68';
+import { labelAssetNameHex, userTokenLabelForModule } from '@/lib/utils/cip68';
 import { getExplorerTxUrl } from '@/lib/utils/format';
 import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import type { FreezeAndSeizeRegisterRequest } from '@/types/api';
@@ -222,7 +222,7 @@ export function CombinedBuildSignSubmitStep({
 
         const initResponse = await initBlacklist(
           {
-            substandardId: 'freeze-and-seize',
+            moduleId: 'freeze-and-seize',
             adminAddress,
             feePayerAddress: adminAddress,
             assetName: stringToHex(tokenDetails.assetName),
@@ -248,7 +248,7 @@ export function CombinedBuildSignSubmitStep({
 
         const adminPubKeyHash = getPaymentKeyHash(adminAddress);
         const regRequest: FreezeAndSeizeRegisterRequest = {
-          substandardId: 'freeze-and-seize',
+          moduleId: 'freeze-and-seize',
           feePayerAddress: adminAddress,
           assetName: stringToHex(tokenDetails.assetName),
           quantity: tokenDetails.quantity,
@@ -270,7 +270,7 @@ export function CombinedBuildSignSubmitStep({
               // parameter and the mint endpoint stays open — so the label is (333) whatever the
               // registered quantity is. Passed explicitly rather than left to the default,
               // because this must not silently drift from Cip68.userTokenLabel on the backend.
-              userTokenLabelForSubstandard('freeze-and-seize', tokenDetails.quantity ?? '0'),
+              userTokenLabelForModule('freeze-and-seize', tokenDetails.quantity ?? '0'),
               stringToHex(tokenDetails.assetName)
             )
           );
@@ -620,7 +620,7 @@ export function CombinedBuildSignSubmitStep({
                 </p>
               </div>
               <div>
-                <span className="text-dark-400">Substandard</span>
+                <span className="text-dark-400">Module</span>
                 <p className="text-white font-medium capitalize">Freeze & Seize</p>
               </div>
               {tokenDetails.recipientAddress && (

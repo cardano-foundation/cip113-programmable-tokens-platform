@@ -7,8 +7,8 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 /**
- * Unified registry mapping programmable token policy IDs to their substandard.
- * All substandards insert here during token registration.
+ * Unified registry mapping programmable token policy IDs to their module.
+ * All modules insert here during token registration.
  */
 @Entity
 @Table(name = "programmable_token_registry")
@@ -26,10 +26,10 @@ public class ProgrammableTokenRegistryEntity {
     private String policyId;
 
     /**
-     * Substandard identifier (e.g., "dummy", "freeze-and-seize").
+     * Module identifier (e.g., "dummy", "freeze-and-seize").
      */
-    @Column(name = "substandard_id", nullable = false, length = 50)
-    private String substandardId;
+    @Column(name = "module_id", nullable = false, length = 50)
+    private String moduleId;
 
     /**
      * Asset name in hex encoding.

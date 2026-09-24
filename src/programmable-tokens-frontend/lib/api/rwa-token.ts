@@ -1,4 +1,4 @@
-/** API client for the rwa-token substandard. */
+/** API client for the rwa-token module. */
 
 import { apiGet, apiPost, apiDelete } from './client';
 import type { Cip68MetadataRequest } from '@/types/api';
@@ -173,7 +173,7 @@ export interface RwaTokenInitRequest {
   seedRecipientInAllowlistAtGenesis?: boolean;
   // Fields below are required by the discriminated request shape on the backend
   // but carry no meaning here:
-  substandardId?: 'rwa-token';
+  moduleId?: 'rwa-token';
   /** IGNORED. buildFullRegistrationChain overwrites it with
    *  {@link initialMintQuantity} before delegating to the registration builder,
    *  and /init mints nothing at all. Both helpers below default it to '0' purely
@@ -192,7 +192,7 @@ export interface RwaTokenInitResponse {
 export const initRwaTokenGlobalState = (body: RwaTokenInitRequest) =>
   apiPost<RwaTokenInitRequest, RwaTokenInitResponse>(
     `/rwa-token/init`,
-    { substandardId: 'rwa-token', quantity: '0', ...body },
+    { moduleId: 'rwa-token', quantity: '0', ...body },
   );
 
 // ── Chained registration (genesis + AddPowerUser + registration in one round-trip) ──
@@ -246,7 +246,7 @@ export interface RwaTokenChainBuildResponse {
 export const buildRwaTokenChain = (body: RwaTokenInitRequest) =>
   apiPost<RwaTokenInitRequest, RwaTokenChainBuildResponse>(
     `/rwa-token/build-chain`,
-    { substandardId: 'rwa-token', quantity: '0', ...body },
+    { moduleId: 'rwa-token', quantity: '0', ...body },
   );
 
 export interface SubmitChainResponse {

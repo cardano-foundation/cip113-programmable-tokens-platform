@@ -19,7 +19,7 @@ import { Cip171ProvenanceBadge } from "@/components/cip171/provenance-badge";
 import { CopyButton } from "@/components/ui/copy-button";
 import { truncateAddress } from "@/lib/utils/format";
 import { loadRegistry, entryMatches, type RegistryEntry, type RegistryView } from "@/lib/registry/load";
-import { LABELLED_SUBSTANDARDS, substandardLabel } from "@/lib/registry/substandards";
+import { LABELLED_MODULES, moduleLabel } from "@/lib/registry/modules";
 import { isHookSet } from "@/lib/registry/walk";
 import { MAX_NEXT, SENTINEL_KEY } from "@/lib/registry/types";
 
@@ -72,7 +72,7 @@ export default function RegistryPage() {
     return view.entries.filter(
       (e) =>
         entryMatches(e, query) &&
-        (types.size === 0 || (e.context?.substandardId ? types.has(e.context.substandardId) : false)),
+        (types.size === 0 || (e.context?.moduleId ? types.has(e.context.moduleId) : false)),
     );
   }, [view, query, types]);
 
@@ -121,8 +121,8 @@ export default function RegistryPage() {
           </label>
 
           <div className="flex flex-wrap gap-1.5">
-            {LABELLED_SUBSTANDARDS.map((id) => {
-              const l = substandardLabel(id);
+            {LABELLED_MODULES.map((id) => {
+              const l = moduleLabel(id);
               const on = types.has(id);
               return (
                 <button

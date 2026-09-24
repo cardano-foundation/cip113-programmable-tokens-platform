@@ -1,0 +1,37 @@
+name: Modules (Aiken)
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/modules/**"
+      - ".github/workflows/modules.yml"
+  pull_request:
+    paths:
+      - "src/modules/**"
+      - ".github/workflows/modules.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - name: dummy
+            aiken-version: v1.1.21
+          - name: freeze-and-seize
+            aiken-version: v1.1.21
+          - name: kyc
+            aiken-version: v1.1.21
+    defaults:
+      run:
+        working-directory: src/modules/${{ matrix.module.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aiken-lang/setup-aiken@v1
+        with:
+          version: ${{ matrix.module.aiken-version }}
+      - run: aiken fmt --check
+      - run: aiken check -D
+      - run: aiken build

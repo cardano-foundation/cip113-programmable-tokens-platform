@@ -2,7 +2,7 @@
 
 A Next.js reference web application for interacting with CIP-113 programmable tokens on Cardano.
 
-Part of the [CIP-113 platform repository](../../README.md). The on-chain Aiken implementation lives in [cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2).
+Part of the [CIP-113 platform repository](../../README.md). The on-chain Aiken implementation lives in [cardano-foundation/cip113-programmable-tokens](https://github.com/cardano-foundation/cip113-programmable-tokens).
 
 ## Features
 
@@ -46,14 +46,15 @@ Part of the [CIP-113 platform repository](../../README.md). The on-chain Aiken i
 3. Create an environment file:
 
    ```bash
-   cp .env.preview.example .env.preview
+   cp .env.preview.example .env.local
    ```
 
-4. Add your Blockfrost API key to `.env.preview`:
+4. Add your Blockfrost API key and backend origin to `.env.local`:
 
    ```
    NEXT_PUBLIC_BLOCKFROST_API_KEY=your_preview_api_key_here
    NEXT_PUBLIC_NETWORK=preview
+   NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
    ```
 
 ### Development
@@ -86,9 +87,6 @@ programmable-tokens-frontend/
 │   ├── admin/              # Admin panel (mint / burn / blacklist / seize)
 │   ├── layout/             # Layout components
 │   └── ui/                 # Reusable UI components
-├── config/
-│   ├── cip113-blueprint.json
-│   └── substandards/
 ├── contexts/
 ├── hooks/
 ├── lib/
@@ -105,16 +103,16 @@ NEXT_PUBLIC_NETWORK=preview   # or preprod, mainnet
 
 ### CIP-113 Blueprint
 
-Core CIP-113 contract blueprints live in `config/cip113-blueprint.json`.
+The backend serves the pinned CIP-113 core and module blueprints. Their source and hashes are documented in [contract provenance](../../docs/CONTRACTS.md).
 
 ### Protocol Bootstrap
 
 The frontend obtains the active schema-3 deployment from the backend. It validates that record
 with the CIP-113 SDK and uses it directly; legacy deployment adapters are intentionally absent.
 
-### Substandards
+### Modules
 
-Transfer-logic configurations live in `config/substandards/`. For the on-chain substandard implementations, see [`../substandards/`](../substandards/).
+The backend lists available modules at `/api/v1/modules`. The four first-party Aiken projects are in [`../modules/`](../modules/); the RWA-token blueprint is supplied from upstream.
 
 ## Testing
 
@@ -128,8 +126,8 @@ npm run build
 
 - Platform overview: [root README](../../README.md)
 - Off-chain backend: [../programmable-tokens-offchain-java/](../programmable-tokens-offchain-java/)
-- Substandards: [../substandards/](../substandards/)
-- On-chain core: [cardano-foundation/cip113-programmable-tokens-2](https://github.com/cardano-foundation/cip113-programmable-tokens-2)
+- Modules: [../modules/](../modules/)
+- On-chain core: [cardano-foundation/cip113-programmable-tokens](https://github.com/cardano-foundation/cip113-programmable-tokens)
 
 ## License
 

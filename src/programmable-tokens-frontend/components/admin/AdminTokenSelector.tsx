@@ -143,7 +143,7 @@ export function AdminTokenSelector({
                     Policy: {token.policyId.substring(0, 20)}...
                   </p>
                   <p className="text-xs text-dark-500 mt-1">
-                    Standard: {token.substandardId}
+                    Standard: {token.moduleId}
                   </p>
                 </div>
                 <div className="flex flex-col gap-1 items-end">

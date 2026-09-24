@@ -40,9 +40,9 @@ public class TransferTokenTest extends AbstractPreviewTest {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    private static final String SUBSTANDARD_ISSUE_CONTRACT = "585701010029800aba2aba1aab9eaab9dab9a4888896600264646644b30013370e900218031baa00289919b87375a6012008906400980418039baa0028a504014600c600e002600c004600c00260066ea801a29344d9590011";
+    private static final String MODULE_ISSUE_CONTRACT = "585701010029800aba2aba1aab9eaab9dab9a4888896600264646644b30013370e900218031baa00289919b87375a6012008906400980418039baa0028a504014600c600e002600c004600c00260066ea801a29344d9590011";
 
-    private static final String SUBSTANDARD_TRANSFER_CONTRACT = "585701010029800aba2aba1aab9eaab9dab9a4888896600264646644b30013370e900218031baa00289919b87375a6012008904801980418039baa0028a504014600c600e002600c004600c00260066ea801a29344d9590011";
+    private static final String MODULE_TRANSFER_CONTRACT = "585701010029800aba2aba1aab9eaab9dab9a4888896600264646644b30013370e900218031baa00289919b87375a6012008904801980418039baa0028a504014600c600e002600c004600c00260066ea801a29344d9590011";
 
     private String DIRECTORY_SPEND_CONTRACT, PROGRAMMABLE_LOGIC_BASE_CONTRACT, PROGRAMMABLE_LOGIC_GLOBAL_CONTRACT;
 
@@ -88,15 +88,15 @@ public class TransferTokenTest extends AbstractPreviewTest {
         }
         var walletUtxos = utxosOpt.getValue();
 
-        var substandardIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(SUBSTANDARD_ISSUE_CONTRACT, PlutusVersion.v3);
-        log.info("substandardIssueContract: {}", substandardIssueContract.getPolicyId());
-        var substandardIssueAddress = AddressProvider.getRewardAddress(substandardIssueContract, network);
-        log.info("substandardIssueAddress: {}", substandardIssueAddress.getAddress());
+        var moduleIssueContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(MODULE_ISSUE_CONTRACT, PlutusVersion.v3);
+        log.info("moduleIssueContract: {}", moduleIssueContract.getPolicyId());
+        var moduleIssueAddress = AddressProvider.getRewardAddress(moduleIssueContract, network);
+        log.info("moduleIssueAddress: {}", moduleIssueAddress.getAddress());
 
-        var substandardTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(SUBSTANDARD_TRANSFER_CONTRACT, PlutusVersion.v3);
-        log.info("substandardTransferContract: {}", substandardTransferContract.getPolicyId());
-        var substandardTransferAddress = AddressProvider.getRewardAddress(substandardTransferContract, network);
-        log.info("substandardTransferAddress: {}", substandardTransferAddress.getAddress());
+        var moduleTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(MODULE_TRANSFER_CONTRACT, PlutusVersion.v3);
+        log.info("moduleTransferContract: {}", moduleTransferContract.getPolicyId());
+        var moduleTransferAddress = AddressProvider.getRewardAddress(moduleTransferContract, network);
+        log.info("moduleTransferAddress: {}", moduleTransferAddress.getAddress());
 
 
         // Programmable Logic Global parameterization
@@ -234,7 +234,7 @@ public class TransferTokenTest extends AbstractPreviewTest {
                 .collectFrom(walletUtxos)
                 .collectFrom(progTokenUtxo, ConstrPlutusData.of(0))
                 // must be first Provide proofs
-                .withdraw(substandardTransferAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(200))
+                .withdraw(moduleTransferAddress.getAddress(), BigInteger.ZERO, BigIntPlutusData.of(200))
                 .withdraw(programmableLogicGlobalAddress.getAddress(), BigInteger.ZERO, programmableGlobalRedeemer)
                 .payToContract(aliceAddress.getAddress(), ValueUtil.toAmountList(tokenValue1), ConstrPlutusData.of(0))
                 .payToContract(bobAddress.getAddress(), ValueUtil.toAmountList(tokenValue2), ConstrPlutusData.of(0))
@@ -248,7 +248,7 @@ public class TransferTokenTest extends AbstractPreviewTest {
                         .index(directoryUtxo.getOutputIndex())
                         .build())
                 .attachRewardValidator(programmableLogicGlobalContract) // global
-                .attachRewardValidator(substandardTransferContract)
+                .attachRewardValidator(moduleTransferContract)
                 .attachSpendingValidator(programmableLogicBaseContract) // base
                 .withChangeAddress(aliceAccount.baseAddress());
 
@@ -281,15 +281,15 @@ public class TransferTokenTest extends AbstractPreviewTest {
 
         var dummyTransferScript = "5857010100323232323225333002323232323253330073370e900218041baa0011323370e6eb400d209003300a300937540022940c024c02800cc020008c01c008c01c004c010dd50008a4c26cacae6955ceaab9e5742ae881";
 
-        var substandardTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(dummyTransferScript, PlutusVersion.v3);
-        log.info("substandardTransferContract: {}", substandardTransferContract.getPolicyId());
+        var moduleTransferContract = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(dummyTransferScript, PlutusVersion.v3);
+        log.info("moduleTransferContract: {}", moduleTransferContract.getPolicyId());
 
-        var substandardTransferAddress = AddressProvider.getRewardAddress(substandardTransferContract, network);
-        log.info("substandardTransferAddress: {}", substandardTransferAddress.getAddress());
+        var moduleTransferAddress = AddressProvider.getRewardAddress(moduleTransferContract, network);
+        log.info("moduleTransferAddress: {}", moduleTransferAddress.getAddress());
 
         var registerAddressTx = new Tx()
                 .from(adminAccount.baseAddress())
-                .registerStakeAddress(substandardTransferAddress.getAddress())
+                .registerStakeAddress(moduleTransferAddress.getAddress())
                 .withChangeAddress(adminAccount.baseAddress());
 
         quickTxBuilder.compose(registerAddressTx)

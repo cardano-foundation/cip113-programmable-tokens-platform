@@ -19,9 +19,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
-/** Per-policy MPF allowlist tree for the rwa-token substandard.
+/** Per-policy MPF allowlist tree for the rwa-token module.
  *  Independent of {@code MpfTreeService} (kyc-extended's tree) so the two
- *  substandards have no shared state — deleting kyc-extended later leaves
+ *  modules have no shared state — deleting kyc-extended later leaves
  *  this service untouched. */
 @Service
 @Slf4j
@@ -307,7 +307,7 @@ public class RwaTokenAllowlistService {
 
     private byte[] resolveOnchainRoot(String policyId) {
         // Default to empty bytes (matches the genesis GS datum's
-        // member_root_hash field — see RwaTokenSubstandardHandler's
+        // member_root_hash field — see RwaTokenModuleHandler's
         // buildInitialGlobalStateDatum) so the equality gate against
         // currentRoot()-for-empty-trie doesn't fire phantom publishes.
         return tokenRegRepo.findByProgrammableTokenPolicyId(policyId)

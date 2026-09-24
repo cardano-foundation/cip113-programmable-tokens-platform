@@ -16,24 +16,24 @@ import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryReposito
 import org.cardanofoundation.cip113.repository.GlobalStateInitRepository;
 import org.cardanofoundation.cip113.service.BlacklistQueryService;
 import org.cardanofoundation.cip113.service.ComplianceOperationsService;
-import org.cardanofoundation.cip113.service.substandard.capabilities.BlacklistManageable.AddToBlacklistRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.BlacklistManageable.BlacklistInitRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.BlacklistManageable.RemoveFromBlacklistRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.Seizeable.MultiSeizeRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.Seizeable.SeizeRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable.AddTrustedEntityRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable.GlobalStateInitRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable.GlobalStateUpdateRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.GlobalStateManageable.RemoveTrustedEntityRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable.AddToWhitelistRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable.RemoveFromWhitelistRequest;
-import org.cardanofoundation.cip113.service.substandard.capabilities.WhitelistManageable.WhitelistInitRequest;
-import org.cardanofoundation.cip113.service.substandard.KycExtendedSubstandardHandler;
-import org.cardanofoundation.cip113.service.substandard.KycSubstandardHandler;
-import org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext;
-import org.cardanofoundation.cip113.service.substandard.context.KycContext;
-import org.cardanofoundation.cip113.service.substandard.context.KycExtendedContext;
-import org.cardanofoundation.cip113.service.substandard.context.SubstandardContext;
+import org.cardanofoundation.cip113.service.module.capabilities.BlacklistManageable.AddToBlacklistRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.BlacklistManageable.BlacklistInitRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.BlacklistManageable.RemoveFromBlacklistRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.Seizeable.MultiSeizeRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.Seizeable.SeizeRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.GlobalStateManageable.AddTrustedEntityRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.GlobalStateManageable.GlobalStateInitRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.GlobalStateManageable.GlobalStateUpdateRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.GlobalStateManageable.RemoveTrustedEntityRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.WhitelistManageable.AddToWhitelistRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.WhitelistManageable.RemoveFromWhitelistRequest;
+import org.cardanofoundation.cip113.service.module.capabilities.WhitelistManageable.WhitelistInitRequest;
+import org.cardanofoundation.cip113.service.module.KycExtendedModuleHandler;
+import org.cardanofoundation.cip113.service.module.KycModuleHandler;
+import org.cardanofoundation.cip113.service.module.context.FreezeAndSeizeContext;
+import org.cardanofoundation.cip113.service.module.context.KycContext;
+import org.cardanofoundation.cip113.service.module.context.KycExtendedContext;
+import org.cardanofoundation.cip113.service.module.context.ModuleContext;
 import org.cardanofoundation.cip113.service.UnknownProtocolVersionException;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.ResponseEntity;
@@ -49,9 +49,9 @@ import org.springframework.web.bind.annotation.*;
  *   <li><b>Seize</b> - Asset recovery from blacklisted addresses</li>
  * </ul>
  *
- * <p>All endpoints require a substandard that supports the relevant capability.
- * For example, blacklist operations require a substandard implementing
- * {@link org.cardanofoundation.cip113.service.substandard.capabilities.BlacklistManageable}.</p>
+ * <p>All endpoints require a module that supports the relevant capability.
+ * For example, blacklist operations require a module implementing
+ * {@link org.cardanofoundation.cip113.service.module.capabilities.BlacklistManageable}.</p>
  */
 @RestController
 @RequestMapping("${apiPrefix}/compliance")
@@ -88,19 +88,19 @@ public class ComplianceController {
     public ResponseEntity<?> initBlacklist(@RequestBody BlacklistInitRequest request,
                                            @RequestParam(required = false) String protocolTxHash) {
 
-        log.info("POST /compliance/blacklist/init - substandardId: {}, admin: {}",
-                request.substandardId(), request.adminAddress());
+        log.info("POST /compliance/blacklist/init - moduleId: {}, admin: {}",
+                request.moduleId(), request.adminAddress());
 
         try {
-            // Resolve substandard from policyId via unified registry
-            var substandardId = request.substandardId();
+            // Resolve module from policyId via unified registry
+            var moduleId = request.moduleId();
 
-            var context = switch (substandardId) {
+            var context = switch (moduleId) {
                 case "freeze-and-seize" -> FreezeAndSeizeContext.emptyContext();
                 default -> null;
             };
 
-            var txContext = complianceOperationsService.initBlacklist(substandardId, request, protocolTxHash, context);
+            var txContext = complianceOperationsService.initBlacklist(moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(new BlacklistInitResponse(txContext.metadata().policyId(), txContext.unsignedCborTx()));
@@ -138,10 +138,10 @@ public class ComplianceController {
                 request.tokenPolicyId(), request.targetAddress());
 
         try {
-            // Resolve substandard from policyId via unified registry
-            var substandardId = resolveSubstandardId(request.tokenPolicyId());
+            // Resolve module from policyId via unified registry
+            var moduleId = resolveModuleId(request.tokenPolicyId());
 
-            var context = switch (substandardId) {
+            var context = switch (moduleId) {
                 case "freeze-and-seize" -> {
                     var dataOpt = freezeAndSeizeTokenRegistrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId())
                             .flatMap(token -> blacklistInitRepository.findByBlacklistNodePolicyId(token.getBlacklistInit().getBlacklistNodePolicyId())
@@ -171,7 +171,7 @@ public class ComplianceController {
             };
 
             var txContext = complianceOperationsService.addToBlacklist(
-                    substandardId, request, protocolTxHash, context);
+                    moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -208,10 +208,10 @@ public class ComplianceController {
                 request.tokenPolicyId(), request.targetAddress());
 
         try {
-            // Resolve substandard from policyId via unified registry
-            var substandardId = resolveSubstandardId(request.tokenPolicyId());
+            // Resolve module from policyId via unified registry
+            var moduleId = resolveModuleId(request.tokenPolicyId());
 
-            var context = switch (substandardId) {
+            var context = switch (moduleId) {
                 case "freeze-and-seize" -> {
                     var dataOpt = freezeAndSeizeTokenRegistrationRepository.findByProgrammableTokenPolicyId(request.tokenPolicyId())
                             .flatMap(token -> blacklistInitRepository.findByBlacklistNodePolicyId(token.getBlacklistInit().getBlacklistNodePolicyId())
@@ -241,7 +241,7 @@ public class ComplianceController {
             };
 
             var txContext = complianceOperationsService.removeFromBlacklist(
-                    substandardId, request, protocolTxHash, context);
+                    moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -316,7 +316,7 @@ public class ComplianceController {
     }
 
     // ========== Whitelist Endpoints ==========
-    // Used by substandardss that maintain an on-chain address whitelist (linked-list pattern).
+    // Used by moduless that maintain an on-chain address whitelist (linked-list pattern).
     // KYC does NOT use these endpoints — it uses the /global-state/* endpoints instead.
 
     /**
@@ -337,14 +337,14 @@ public class ComplianceController {
                 request.tokenPolicyId(), request.adminAddress());
 
         try {
-            var substandardId = request.substandardId() != null && !request.substandardId().isBlank()
-                    ? request.substandardId()
-                    : resolveSubstandardId(request.tokenPolicyId());
+            var moduleId = request.moduleId() != null && !request.moduleId().isBlank()
+                    ? request.moduleId()
+                    : resolveModuleId(request.tokenPolicyId());
 
-            SubstandardContext context = null; // extend with a switch when a whitelist-based substandard needs context
+            ModuleContext context = null; // extend with a switch when a whitelist-based module needs context
 
             var txContext = complianceOperationsService.initWhitelist(
-                    substandardId, request, protocolTxHash, context);
+                    moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -381,12 +381,12 @@ public class ComplianceController {
                 request.policyId(), request.targetCredential());
 
         try {
-            var substandardId = resolveSubstandardId(request.policyId());
+            var moduleId = resolveModuleId(request.policyId());
 
-            SubstandardContext context = null; // extend with a switch when a whitelist-based substandard needs context
+            ModuleContext context = null; // extend with a switch when a whitelist-based module needs context
 
             var txContext = complianceOperationsService.addToWhitelist(
-                    substandardId, request, protocolTxHash, context);
+                    moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -423,12 +423,12 @@ public class ComplianceController {
                 request.policyId(), request.targetCredential());
 
         try {
-            var substandardId = resolveSubstandardId(request.policyId());
+            var moduleId = resolveModuleId(request.policyId());
 
-            SubstandardContext context = null; // extend with a switch when a whitelist-based substandard needs context
+            ModuleContext context = null; // extend with a switch when a whitelist-based module needs context
 
             var txContext = complianceOperationsService.removeFromWhitelist(
-                    substandardId, request, protocolTxHash, context);
+                    moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -449,7 +449,7 @@ public class ComplianceController {
     }
 
     // ========== Global State Endpoints ==========
-    // Used by the KYC substandard. Routes through GlobalStateManageable — not WhitelistManageable.
+    // Used by the KYC module. Routes through GlobalStateManageable — not WhitelistManageable.
 
     /**
      * Initialize the global state UTxO for a KYC token deployment.
@@ -463,20 +463,20 @@ public class ComplianceController {
             @RequestBody GlobalStateInitRequest request,
             @RequestParam(required = false) String protocolTxHash) {
 
-        log.info("POST /compliance/global-state/init - substandardId: {}, admin: {}",
-                request.substandardId(), request.adminAddress());
+        log.info("POST /compliance/global-state/init - moduleId: {}, admin: {}",
+                request.moduleId(), request.adminAddress());
 
         try {
-            var substandardId = request.substandardId();
+            var moduleId = request.moduleId();
 
-            var context = switch (substandardId) {
+            var context = switch (moduleId) {
                 case "kyc" -> KycContext.emptyContext();
                 case "kyc-extended" -> KycExtendedContext.emptyContext();
-                default -> (SubstandardContext) null;
+                default -> (ModuleContext) null;
             };
 
             var txContext = complianceOperationsService.initGlobalState(
-                    substandardId, request, protocolTxHash, context);
+                    moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -512,9 +512,9 @@ public class ComplianceController {
                 request.policyId(), request.verificationKey());
 
         try {
-            var substandardId = resolveSubstandardId(request.policyId());
+            var moduleId = resolveModuleId(request.policyId());
 
-            var context = switch (substandardId) {
+            var context = switch (moduleId) {
                 case "kyc" -> {
                     var kycData = kycTokenRegistrationRepository
                             .findByProgrammableTokenPolicyId(request.policyId())
@@ -530,11 +530,11 @@ public class ComplianceController {
                             .build();
                 }
                 case "kyc-extended" -> buildKycExtendedContext(request.policyId());
-                default -> (SubstandardContext) null;
+                default -> (ModuleContext) null;
             };
 
             var txContext = complianceOperationsService.addTrustedEntity(
-                    substandardId, request, protocolTxHash, context);
+                    moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -570,9 +570,9 @@ public class ComplianceController {
                 request.policyId(), request.verificationKey());
 
         try {
-            var substandardId = resolveSubstandardId(request.policyId());
+            var moduleId = resolveModuleId(request.policyId());
 
-            var context = switch (substandardId) {
+            var context = switch (moduleId) {
                 case "kyc" -> {
                     var kycData = kycTokenRegistrationRepository
                             .findByProgrammableTokenPolicyId(request.policyId())
@@ -588,11 +588,11 @@ public class ComplianceController {
                             .build();
                 }
                 case "kyc-extended" -> buildKycExtendedContext(request.policyId());
-                default -> (SubstandardContext) null;
+                default -> (ModuleContext) null;
             };
 
             var txContext = complianceOperationsService.removeTrustedEntity(
-                    substandardId, request, protocolTxHash, context);
+                    moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -625,15 +625,15 @@ public class ComplianceController {
         log.info("GET /compliance/global-state/read - policyId: {}", policyId);
 
         try {
-            var substandardId = resolveSubstandardId(policyId);
-            if ("kyc-extended".equals(substandardId)) {
+            var moduleId = resolveModuleId(policyId);
+            if ("kyc-extended".equals(moduleId)) {
                 var ctx = buildKycExtendedContext(policyId);
-                var handler = applicationContext.getBean(KycExtendedSubstandardHandler.class);
+                var handler = applicationContext.getBean(KycExtendedModuleHandler.class);
                 handler.setContext((KycExtendedContext) ctx);
                 var result = handler.readGlobalState(policyId);
                 return result.isPresent() ? ResponseEntity.ok(result.get()) : ResponseEntity.notFound().build();
             }
-            var handler = applicationContext.getBean(KycSubstandardHandler.class);
+            var handler = applicationContext.getBean(KycModuleHandler.class);
             var result = handler.readGlobalState(policyId);
 
             if (result.isEmpty()) {
@@ -657,7 +657,7 @@ public class ComplianceController {
      * Build a kyc-extended context (issuer + global-state init UTxO) from the
      * registration row. Mirrors {@code TokenOperationsService.buildKycExtendedContext}.
      */
-    private SubstandardContext buildKycExtendedContext(String policyId) {
+    private ModuleContext buildKycExtendedContext(String policyId) {
         var reg = kycExtendedTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId)
                 .orElseThrow(() -> new RuntimeException(
                         "could not find kyc-extended token registration data for policy: " + policyId));
@@ -682,11 +682,11 @@ public class ComplianceController {
      * registration row. Mirrors the rwa-token arm in
      * {@code TokenOperationsService.transferToken / mintToken / burnToken}.
      */
-    private SubstandardContext buildRwaTokenContext(String policyId) {
+    private ModuleContext buildRwaTokenContext(String policyId) {
         var reg = rwaTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId)
                 .orElseThrow(() -> new RuntimeException(
                         "could not find rwa-token registration data for policy: " + policyId));
-        return org.cardanofoundation.cip113.service.substandard.context.RwaTokenContext.builder()
+        return org.cardanofoundation.cip113.service.module.context.RwaTokenContext.builder()
                 .issuerAdminPkh(reg.getIssuerAdminPkh())
                 .globalStatePolicyId(reg.getGlobalStatePolicyId())
                 .denylistPolicyId(reg.getDenylistPolicyId())
@@ -719,9 +719,9 @@ public class ComplianceController {
                 request.policyId(), request.action());
 
         try {
-            var substandardId = resolveSubstandardId(request.policyId());
+            var moduleId = resolveModuleId(request.policyId());
 
-            var context = switch (substandardId) {
+            var context = switch (moduleId) {
                 case "kyc" -> {
                     var kycDataOpt = kycTokenRegistrationRepository
                             .findByProgrammableTokenPolicyId(request.policyId());
@@ -730,7 +730,7 @@ public class ComplianceController {
                     }
                     var kycData = kycDataOpt.get();
                     var gsInit = kycData.getGlobalStateInit();
-                    yield (SubstandardContext) KycContext.builder()
+                    yield (ModuleContext) KycContext.builder()
                             .issuerAdminPkh(kycData.getIssuerAdminPkh())
                             .globalStatePolicyId(gsInit.getGlobalStatePolicyId())
                             .globalStateInitTxInput(TransactionInput.builder()
@@ -744,7 +744,7 @@ public class ComplianceController {
             };
 
             var txContext = complianceOperationsService.updateGlobalState(
-                    substandardId, request, protocolTxHash, context);
+                    moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -786,10 +786,10 @@ public class ComplianceController {
 
             var progToken = AssetType.fromUnit(request.unit());
 
-            // Resolve substandard from policyId via unified registry
-            var substandardId = resolveSubstandardId(progToken.policyId());
+            // Resolve module from policyId via unified registry
+            var moduleId = resolveModuleId(progToken.policyId());
 
-            var context = switch (substandardId) {
+            var context = switch (moduleId) {
                 case "freeze-and-seize" -> {
                     var dataOpt = freezeAndSeizeTokenRegistrationRepository.findByProgrammableTokenPolicyId(progToken.policyId())
                             .flatMap(token -> blacklistInitRepository.findByBlacklistNodePolicyId(token.getBlacklistInit().getBlacklistNodePolicyId())
@@ -825,7 +825,7 @@ public class ComplianceController {
 
 
             var txContext = complianceOperationsService.seize(
-                    substandardId, request, protocolTxHash, context);
+                    moduleId, request, protocolTxHash, context);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -862,11 +862,11 @@ public class ComplianceController {
                 request.policyId(), request.utxoReferences().size(), request.destinationAddress());
 
         try {
-            // Resolve substandard from policyId via unified registry
-            var substandardId = resolveSubstandardId(request.policyId());
+            // Resolve module from policyId via unified registry
+            var moduleId = resolveModuleId(request.policyId());
 
             var txContext = complianceOperationsService.multiSeize(
-                    substandardId, request, protocolTxHash, null);
+                    moduleId, request, protocolTxHash, null);
 
             if (txContext.isSuccessful()) {
                 return ResponseEntity.ok(txContext);
@@ -889,15 +889,15 @@ public class ComplianceController {
     // ========== Helper Methods ==========
 
     /**
-     * Resolve substandard ID from the unified programmable token registry.
+     * Resolve module ID from the unified programmable token registry.
      *
      * @param policyId The programmable token policy ID
-     * @return The substandard ID
+     * @return The module ID
      * @throws IllegalArgumentException if the token is not registered
      */
-    private String resolveSubstandardId(String policyId) {
+    private String resolveModuleId(String policyId) {
         return programmableTokenRegistryRepository.findByPolicyId(policyId)
-                .map(ProgrammableTokenRegistryEntity::getSubstandardId)
+                .map(ProgrammableTokenRegistryEntity::getModuleId)
                 .orElseThrow(() -> new IllegalArgumentException(
                         "Token not registered in programmable token registry: " + policyId));
     }

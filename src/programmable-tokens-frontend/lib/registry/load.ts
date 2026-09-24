@@ -6,7 +6,7 @@
  * carrying both, so it is fetched first purely to translate. A wrong id does not error there; it
  * returns an empty list, which reads exactly like a protocol with nothing registered.
  *
- * Substandard and asset name come from `/token-context/{policyId}`, one call per token. Those are
+ * Module and asset name come from `/token-context/{policyId}`, one call per token. Those are
  * fetched with `allSettled` on purpose: a token whose context is missing must still appear in the
  * registry, because the registry is the on-chain truth and the context row is a database
  * convenience. It shows as unlabelled rather than vanishing.
@@ -14,7 +14,7 @@
 import { getRegistryProtocols, getRegistryNodes, protocolParamsIdFor } from '../api/registry';
 import { getTokenContext } from '../api/protocol';
 import { walkRegistry, tokensOf, type WalkResult } from './walk';
-import { substandardLabel, type SubstandardLabel } from './substandards';
+import { moduleLabel, type ModuleLabel } from './modules';
 import type { RegistryNode } from './types';
 import type { TokenContext } from '@/types/protocol';
 
@@ -22,7 +22,7 @@ export interface RegistryEntry {
   node: RegistryNode;
   /** Absent when the backend has no row for this token — not an error. */
   context: TokenContext | null;
-  label: SubstandardLabel;
+  label: ModuleLabel;
   /** True when the walk never reached this node. */
   orphaned: boolean;
 }
@@ -63,7 +63,7 @@ export async function loadRegistry(protocolTxHash: string | undefined): Promise<
     return {
       node,
       context,
-      label: substandardLabel(context?.substandardId),
+      label: moduleLabel(context?.moduleId),
       orphaned: !walk.reached.has(node.key),
     };
   });
@@ -85,6 +85,6 @@ export function entryMatches(entry: RegistryEntry, query: string): boolean {
     entry.node.key.toLowerCase().includes(q) ||
     entry.label.label.toLowerCase().includes(q) ||
     (entry.context?.assetName ?? '').toLowerCase().includes(q) ||
-    (entry.context?.substandardId ?? '').toLowerCase().includes(q)
+    (entry.context?.moduleId ?? '').toLowerCase().includes(q)
   );
 }

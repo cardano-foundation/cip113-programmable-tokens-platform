@@ -29,7 +29,7 @@ alpha.4 there before using the preprod profile.
 | JDK | 21 |
 | Docker | for Postgres, and for Yaci DevKit if you run it containerised |
 | [Yaci DevKit](https://github.com/bloxbean/yaci-devkit) | the devnet node + indexer |
-| `aiken` | v1.1.23 — only needed to rebuild contracts, not to run the platform |
+| `aiken` | v1.1.23 for core/RWA; v1.1.21 for first-party modules — only needed to rebuild contracts |
 
 The compiled blueprints are committed under the backend's resources, so you do **not** need
 aiken for a normal bring-up. Their upstream provenance is in
@@ -221,11 +221,12 @@ SPRING_PROFILES_ACTIVE=devnet ./gradlew bootRun
 
 On startup it will:
 
-1. run Flyway migrations — including **V22**, which adds the delegate-credential columns to
-   `protocol_params`;
-2. load `protocol-bootstraps-devnet.json`, **skip** any record it cannot use — logging a
-   warning per record — and refuse to start only if none is usable, or if
-   `default.txHash` names one that was skipped. The check is a schema-version and
+1. run Flyway migrations through **V24**: V22 adds delegate-credential columns to
+   `protocol_params`, V23 records alpha.4 protocol parameters, and V24 renames
+   `programmable_token_registry.substandard_id` to `module_id` for existing databases;
+2. load `protocol-bootstraps-devnet.json` and **fail startup** if any record has an
+   unsupported schema or missing components, if the file is empty, or if
+   `default.txHash` names no record in the file. The check is a schema-version and
    presence check: it does not verify that the recorded hashes are internally consistent,
    so a hand-edited record can still pass it;
 3. resolve every core validator out of `plutus.json` and refuse to start if any is missing —
@@ -272,8 +273,9 @@ That distinction is why §7 exists at all.
 
 ## Rebuilding the contracts (optional)
 
-The Aiken source is not vendored here — only the compiled blueprints are. To rebuild or audit
-them, clone the upstream repository at the pinned commit; the commands are in
+The core and RWA Aiken source lives upstream; first-party module sources are in `src/modules/`.
+To rebuild or audit the core and RWA blueprints, clone the upstream repositories at their pinned
+commits. The commands are in
 [docs/CONTRACTS.md](CONTRACTS.md), which also explains why the rwa-token blueprint is a
 rebuild rather than upstream's committed file.
 
@@ -293,10 +295,8 @@ override the same pair for the same reason. Deleting those two lines is enough t
 startup.
 
 **"declares schemaVersion=none (pre-versioning)"** — a deployment record from before the
-validator split. As a warning during load it is harmless: that record is simply skipped and
-the rest of the file is used. As a startup *failure* it means either every record in the file
-is pre-split, or `default.txHash` names one that is. Redeploy (§4); there is no way to read
-the old one.
+validator split. The backend rejects the entire file at startup even if other records are
+current. Remove the old record and redeploy (§4); there is no way to use the old deployment.
 
 **"The core blueprint on the classpath does not contain every validator"** — `plutus.json`
 and the code disagree. If you re-vendored, work through `CoreBlueprintSurfaceTest`'s output.

@@ -28,7 +28,7 @@ export function TokenDetailsStep({
   // rest the form is not rendered at all — collecting metadata that goes nowhere is exactly the
   // bug this gate exists to prevent.
   const cip68Supported = supportsCIP68(wizardState?.flowId);
-  // CIP-171 provenance is offered for every substandard, but is only usable once the record's
+  // CIP-171 provenance is offered for every module, but is only usable once the record's
   // fields can actually be sourced. The option is rendered either way: hiding it would make the
   // capability indistinguishable from one that was never built.
   const cip171Available = isCip171Available(wizardState?.flowId ?? '');
@@ -242,7 +242,7 @@ export function TokenDetailsStep({
         />
       </div>
 
-      {/* CIP-68 Metadata Section — only for substandards that actually mint the pair */}
+      {/* CIP-68 Metadata Section — only for modules that actually mint the pair */}
       {cip68Supported && (
         <div className="border-t border-dark-700 pt-4">
           <label className="flex items-center gap-3 cursor-pointer">
@@ -263,7 +263,7 @@ export function TokenDetailsStep({
         </div>
       )}
 
-      {/* CIP-171 provenance — offered for every substandard, usable only when the record's
+      {/* CIP-171 provenance — offered for every module, usable only when the record's
           fields can be sourced. Rendered disabled-with-a-reason rather than hidden, the same
           way the tx-builder toggle handles an unavailable SDK: an option that vanishes is
           indistinguishable from one that was never built, and the reason is what someone

@@ -250,7 +250,7 @@ export function KycConfigStep({
 
       const isKycExtended = wizardState.flowId === 'kyc-extended';
       const isRwaToken = wizardState.flowId === 'rwa-token';
-      const flowSubstandardId = isKycExtended ? 'kyc-extended' : 'kyc';
+      const flowModuleId = isKycExtended ? 'kyc-extended' : 'kyc';
 
       // kyc-extended parameterises the global-state script with the BACKEND's
       // signing key PKH so the backend can autonomously sign UpdateMemberRootHash.
@@ -286,7 +286,7 @@ export function KycConfigStep({
       // typically reject mempool-chained txs) never sees the chain.
       //
       // The registration tx always inserts the prog-token policy into the
-      // CIP-113 directory and registers the substandard's stake credentials.
+      // CIP-113 directory and registers the module's stake credentials.
       // Whether it ALSO mints the first supply is up to `initialMintQuantity`
       // below: non-zero folds a MintSecurity GlobalState spend into the same
       // transaction; zero leaves the first mint as a separate admin action.
@@ -490,7 +490,7 @@ export function KycConfigStep({
 
       const response = await initGlobalState(
         {
-          substandardId: flowSubstandardId,
+          moduleId: flowModuleId,
           adminAddress,
           adminPkh,
           initialVkeys: trustedEntities,

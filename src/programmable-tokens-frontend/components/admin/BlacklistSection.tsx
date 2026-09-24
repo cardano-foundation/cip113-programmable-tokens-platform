@@ -31,7 +31,7 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
   const { wallet } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
-  const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
+  const { getProtocol, ensureModule, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   // Default to the backend builder even when the SDK is available. Parity means the SDK
   // CAN build a transaction, not that it becomes the default route (PLAN.md A-5) — the
   // SDK path is opt-in per operation via the toggle until T-018 has verified all seven
@@ -46,7 +46,7 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
   //     denylist mutations (AddDenylist / RemoveDenylist) are admin-gated
   //     directly in the GS validator, not a separate PowerUser role
   const manageableTokens = tokens.filter((t) => {
-    if (t.substandardId === "rwa-token") {
+    if (t.moduleId === "rwa-token") {
       return hasRwaTokenCapability(t, RwaTokenCapability.ADMIN);
     }
     return t.roles.includes("BLACKLIST_MANAGER");
@@ -100,19 +100,19 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
       // SDK (cip113-sdk-ts) only knows about dummy + freeze-and-seize.
       // rwa-token MUST go through the backend path (its on-chain denylist
       // mutations are wired into /compliance/blacklist/{add,remove} now via the
-      // BlacklistManageable interface on RwaTokenSubstandardHandler).
-      const forceBackend = selectedToken.substandardId === "rwa-token";
+      // BlacklistManageable interface on RwaTokenModuleHandler).
+      const forceBackend = selectedToken.moduleId === "rwa-token";
 
       if (txBuilder === "sdk" && !forceBackend) {
-        await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
+        await ensureModule(selectedToken.policyId, selectedToken.assetName);
         const protocol = await getProtocol();
         const params = {
           // Route explicitly. 0.4.0 made this REQUIRED rather than falling back to
-          // trying every registered substandard: freeze/unfreeze are administrative
+          // trying every registered module: freeze/unfreeze are administrative
           // operations over someone else's tokens, and a try-all reports "no
-          // substandard can handle this" when the truth is "it was handled and the
+          // module can handle this" when the truth is "it was handled and the
           // chain refused". Passing the token's own id keeps that distinction.
-          substandardId: selectedToken.substandardId,
+          substandardId: selectedToken.moduleId,
           feePayerAddress: adminAddress,
           tokenPolicyId: selectedToken.policyId,
           assetName: selectedToken.assetName,
@@ -155,7 +155,7 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
       setTxHash(submittedTxHash);
       setStep("success");
 
-      const isDenylist = selectedToken?.substandardId === "rwa-token";
+      const isDenylist = selectedToken?.moduleId === "rwa-token";
       const listName = isDenylist ? "Denylist" : "Blacklist";
       showToast({
         title: `${action === "add" ? "Added to" : "Removed from"} ${listName}`,
@@ -331,7 +331,7 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
         disabled={isBuilding || !selectedToken}
         error={errors.targetAddress}
         helperText={
-          selectedToken?.substandardId === "rwa-token"
+          selectedToken?.moduleId === "rwa-token"
             ? (action === "add"
                 ? "Address whose stake credential will be added to the on-chain denylist. Transfers to it will be rejected."
                 : "Address whose stake credential will be removed from the denylist. Transfers to it will be allowed again.")
@@ -351,8 +351,8 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
         {isBuilding
           ? "Building Transaction..."
           : action === "add"
-          ? (selectedToken?.substandardId === "rwa-token" ? "Add to Denylist" : "Add to Blacklist")
-          : (selectedToken?.substandardId === "rwa-token" ? "Remove from Denylist" : "Remove from Blacklist")}
+          ? (selectedToken?.moduleId === "rwa-token" ? "Add to Denylist" : "Add to Blacklist")
+          : (selectedToken?.moduleId === "rwa-token" ? "Remove from Denylist" : "Remove from Blacklist")}
       </Button>
     </form>
   );

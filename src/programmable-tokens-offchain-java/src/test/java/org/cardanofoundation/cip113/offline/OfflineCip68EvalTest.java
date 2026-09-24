@@ -12,7 +12,7 @@ import org.cardanofoundation.cip113.model.onchain.RegistryNodeParser;
 import org.cardanofoundation.cip113.repository.CustomStakeRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.service.AccountService;
-import org.cardanofoundation.cip113.service.substandard.DummySubstandardHandler;
+import org.cardanofoundation.cip113.service.module.DummyModuleHandler;
 import org.cardanofoundation.cip113.util.Cip68;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -23,10 +23,10 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * Offline build + real phase-2 evaluation of the CIP-68 registration paths, driving the
- * <em>production</em> substandard handlers against a virtually-submitted protocol bootstrap.
+ * <em>production</em> module handlers against a virtually-submitted protocol bootstrap.
  *
  * <p>Nothing is re-implemented here: the handler under test is the same
- * {@code DummySubstandardHandler} the REST layer uses, constructed by hand with offline
+ * {@code DummyModuleHandler} the REST layer uses, constructed by hand with offline
  * collaborators (see {@link HandlerFixtures}). The handler never sets an explicit tx evaluator,
  * so the {@code TransactionProcessor} injected into its {@link QuickTxBuilder} <em>is</em> the
  * evaluator — and ours runs the real aiken/uplc machine. A script that traps therefore fails the
@@ -94,7 +94,7 @@ public class OfflineCip68EvalTest {
         Assertions.assertFalse(adminUtxos.isEmpty(), "admin must retain change across the split bootstrap");
     }
 
-    // ------------------------------------------------------------------ dummy substandard
+    // ------------------------------------------------------------------ dummy module
 
     @Test
     public void dummyRegistrationWithCip68MintsThePairAndEvaluates() throws Exception {
@@ -164,7 +164,7 @@ public class OfflineCip68EvalTest {
      * token, and that is deliberate. {@code (222)} asserts non-fungibility — one unit, forever —
      * and nothing in {@code validators/transfer.ak} caps lifetime supply: {@code issue} is
      * {@code redeemer == 100} and {@code buildMintTransaction} will mint more of the same name
-     * tomorrow. A {@code (222)} here would be a promise the substandard cannot keep, and no
+     * tomorrow. A {@code (222)} here would be a promise the module cannot keep, and no
      * off-chain guard can keep it either, since whoever holds the minting authority can build the
      * transaction without this backend. So {@code dummy} and {@code freeze-and-seize} are always
      * {@code (333)}; {@code rwa-token} is the only one that may claim {@code (222)}, because
@@ -189,7 +189,7 @@ public class OfflineCip68EvalTest {
         Assertions.assertEquals(Cip68.LABEL_FT, userToken.label().intValue(),
                 "dummy cannot cap lifetime supply, so even a one-unit registration must take (333)");
         Assertions.assertNotEquals(Cip68.LABEL_NFT, userToken.label().intValue(),
-                "a (222) here would be a non-fungibility claim the substandard cannot enforce");
+                "a (222) here would be a non-fungibility claim the module cannot enforce");
         Assertions.assertEquals(BigInteger.ONE, userToken.quantity());
     }
 
@@ -282,7 +282,7 @@ public class OfflineCip68EvalTest {
 
         var result = handler.buildRegistrationTransaction(
                 DummyRegisterRequest.builder()
-                        .substandardId("dummy")
+                        .moduleId("dummy")
                         .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
                         .recipientAddress(BootstrapFixture.ALICE.baseAddress())
                         .assetName(BASE_ASSET_NAME_HEX)
@@ -311,7 +311,7 @@ public class OfflineCip68EvalTest {
 
         var result = handler.buildRegistrationTransaction(
                 DummyRegisterRequest.builder()
-                        .substandardId("dummy")
+                        .moduleId("dummy")
                         .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
                         .recipientAddress(BootstrapFixture.ALICE.baseAddress())
                         .assetName("")
@@ -402,7 +402,7 @@ public class OfflineCip68EvalTest {
         int size = tx.serialize().length;
         Assertions.assertTrue(size < 16384, "tx exceeds 16384 bytes: " + size);
 
-        // The crux for this substandard: issuer_admin is parameterised by the asset NAME, so the
+        // The crux for this module: issuer_admin is parameterised by the asset NAME, so the
         // CIP-67 label participates in the script hash and therefore in the issuance policy id.
         var withoutCip68 = runFreezeAndSeizeRegistration(null, "1000000");
         log.info("[freeze-and-seize] policy WITH cip68    = {}", withCip68.issuancePolicyId());
@@ -653,7 +653,7 @@ public class OfflineCip68EvalTest {
         var targetStake = stakeCredHex(BootstrapFixture.ALICE.baseAddress());
 
         var add = handler.buildAddToBlacklistTransaction(
-                new org.cardanofoundation.cip113.service.substandard.capabilities
+                new org.cardanofoundation.cip113.service.module.capabilities
                         .BlacklistManageable.AddToBlacklistRequest(
                         policyId,
                         st.registrations().get(policyId).getSecurityAssetNameHex(),
@@ -677,7 +677,7 @@ public class OfflineCip68EvalTest {
         chain.submit(addTx);
 
         var remove = handler.buildRemoveFromBlacklistTransaction(
-                new org.cardanofoundation.cip113.service.substandard.capabilities
+                new org.cardanofoundation.cip113.service.module.capabilities
                         .BlacklistManageable.RemoveFromBlacklistRequest(
                         policyId,
                         st.registrations().get(policyId).getSecurityAssetNameHex(),
@@ -754,9 +754,9 @@ public class OfflineCip68EvalTest {
                         .getPaymentCredentialHash().orElseThrow());
 
         java.util.function.BiFunction<String, Object[], org.cardanofoundation.cip113.service
-                .substandard.RwaTokenSubstandardHandler.GsChangeSpec> spec =
-                (action, f) -> new org.cardanofoundation.cip113.service.substandard
-                        .RwaTokenSubstandardHandler.GsChangeSpec(
+                .module.RwaTokenModuleHandler.GsChangeSpec> spec =
+                (action, f) -> new org.cardanofoundation.cip113.service.module
+                        .RwaTokenModuleHandler.GsChangeSpec(
                         action,
                         (Boolean) f[0], (String) f[1], null, null, null, null, null,
                         (Boolean) f[2], (Boolean) f[3], null, null, null);
@@ -787,10 +787,10 @@ public class OfflineCip68EvalTest {
      * A seizure actually validates on chain.
      *
      * <p>The RWA token's regulatory force-transfer path is CIP-113's
-     * {@code ThirdPartyAct} branch, gated by this substandard's
+     * {@code ThirdPartyAct} branch, gated by this module's
      * {@code third_party_transfer_logic_script} and the {@code can_force_transfer}
      * power-user role. The platform advertised no seize capability at all for this
-     * substandard until now — {@code ComplianceOperationsService} answered every request
+     * module until now — {@code ComplianceOperationsService} answered every request
      * with "does not support seize operations" — so this is the first coverage the path
      * has, and it drives the real builder rather than asserting on shape.
      *
@@ -824,7 +824,7 @@ public class OfflineCip68EvalTest {
                 label, regTxHash, userToken.outputIndex(), userToken.assetNameHex(),
                 userToken.quantity());
 
-        var seizeRequest = new org.cardanofoundation.cip113.service.substandard.capabilities
+        var seizeRequest = new org.cardanofoundation.cip113.service.module.capabilities
                 .Seizeable.SeizeRequest(
                 BootstrapFixture.ADMIN.baseAddress(),
                 policyId + reg.getSecurityAssetNameHex(),
@@ -879,7 +879,7 @@ public class OfflineCip68EvalTest {
                 .filter(t -> !Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label()))
                 .findFirst().orElseThrow();
 
-        var seizeRequest = new org.cardanofoundation.cip113.service.substandard.capabilities
+        var seizeRequest = new org.cardanofoundation.cip113.service.module.capabilities
                 .Seizeable.SeizeRequest(
                 BootstrapFixture.ALICE.baseAddress(),          // not a power user
                 policyId + reg.getSecurityAssetNameHex(),
@@ -967,7 +967,7 @@ public class OfflineCip68EvalTest {
         // (The PLB payment credential is no longer demanded by this validator either. We
         // still use it, because the reference NFT is a token of this policy and CIP-113
         // confines those to the base — so the assertion below is now pinning OUR choice
-        // rather than the substandard's requirement.)
+        // rather than the module's requirement.)
         var plb = boot.params().programmableLogicBase().scriptHash();
         var adminCredentialHash = HexUtil.encodeHexString(
                 new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
@@ -1161,7 +1161,7 @@ public class OfflineCip68EvalTest {
                 "precondition: the holding under test must be exactly one unit");
 
         fes.handler().setContext(
-                org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext.builder()
+                org.cardanofoundation.cip113.service.module.context.FreezeAndSeizeContext.builder()
                         .blacklistNodePolicyId(BLACKLIST_NODE_POLICY_ID)
                         .assetName(userToken.assetNameHex())
                         .build());
@@ -1191,7 +1191,7 @@ public class OfflineCip68EvalTest {
                 .findFirst().orElseThrow();
 
         fes.handler().setContext(
-                org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext.builder()
+                org.cardanofoundation.cip113.service.module.context.FreezeAndSeizeContext.builder()
                         .blacklistNodePolicyId(BLACKLIST_NODE_POLICY_ID)
                         .build());
 
@@ -1232,13 +1232,13 @@ public class OfflineCip68EvalTest {
         var adminPkh = new Address(BootstrapFixture.ADMIN.baseAddress())
                 .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
         fes.handler().setContext(
-                org.cardanofoundation.cip113.service.substandard.context.FreezeAndSeizeContext.builder()
+                org.cardanofoundation.cip113.service.module.context.FreezeAndSeizeContext.builder()
                         .blacklistNodePolicyId(BLACKLIST_NODE_POLICY_ID)
                         .issuerAdminPkh(adminPkh)
                         .build());
 
         var result = fes.handler().buildSeizeTransaction(
-                new org.cardanofoundation.cip113.service.substandard.capabilities.Seizeable.SeizeRequest(
+                new org.cardanofoundation.cip113.service.module.capabilities.Seizeable.SeizeRequest(
                         BootstrapFixture.ADMIN.baseAddress(),
                         fes.issuancePolicyId() + refToken.assetNameHex(),
                         fes.transaction().getBody().getInputs().getFirst().getTransactionId(),
@@ -1301,7 +1301,7 @@ public class OfflineCip68EvalTest {
     }
 
     /**
-     * Drive the real {@link org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler}
+     * Drive the real {@link org.cardanofoundation.cip113.service.module.FreezeAndSeizeHandler}
      * through one registration on a fresh offline protocol.
      *
      * <p>Unlike dummy, this handler reaches the chain through {@code UtxoProvider} rather than a
@@ -1328,7 +1328,7 @@ public class OfflineCip68EvalTest {
     private record FesAttempt(
             OfflineChain chain,
             BootstrapFixture.Bootstrapped boot,
-            org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler handler,
+            org.cardanofoundation.cip113.service.module.FreezeAndSeizeHandler handler,
             org.cardanofoundation.cip113.model.TransactionContext<
                     org.cardanofoundation.cip113.model.TransactionContext.RegistrationResult> context) {
     }
@@ -1355,17 +1355,17 @@ public class OfflineCip68EvalTest {
         Mockito.when(utxoProvider.findUtxos(Mockito.anyString()))
                 .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
 
-        var substandardService = HandlerFixtures.substandardService();
+        var moduleService = HandlerFixtures.moduleService();
 
-        var handler = new org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler(
+        var handler = new org.cardanofoundation.cip113.service.module.FreezeAndSeizeHandler(
                 HandlerFixtures.OBJECT_MAPPER,
                 HandlerFixtures.NETWORK,
                 Mockito.mock(org.cardanofoundation.cip113.model.onchain.siezeandfreeze.blacklist.BlacklistNodeParser.class),
                 new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
                 new AccountService(utxoProvider),
-                substandardService,
+                moduleService,
                 HandlerFixtures.protocolScriptBuilderService(),
-                new org.cardanofoundation.cip113.service.FreezeAndSeizeScriptBuilderService(substandardService),
+                new org.cardanofoundation.cip113.service.FreezeAndSeizeScriptBuilderService(moduleService),
                 new org.cardanofoundation.cip113.service.LinkedListService(utxoProvider),
                 chain.quickTxBuilder(),
                 chain.protocolParamsSupplier(),
@@ -1394,7 +1394,7 @@ public class OfflineCip68EvalTest {
                 .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
 
         var request = org.cardanofoundation.cip113.model.FreezeAndSeizeRegisterRequest.builder()
-                .substandardId("freeze-and-seize")
+                .moduleId("freeze-and-seize")
                 .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
                 .recipientAddress(BootstrapFixture.ALICE.baseAddress())
                 .assetName(BASE_ASSET_NAME_HEX)
@@ -1412,7 +1412,7 @@ public class OfflineCip68EvalTest {
                              Transaction transaction,
                              String issuancePolicyId,
                              String plbScriptHash,
-                             org.cardanofoundation.cip113.service.substandard.FreezeAndSeizeHandler handler,
+                             org.cardanofoundation.cip113.service.module.FreezeAndSeizeHandler handler,
                              org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams bootParams) {
     }
 
@@ -1527,7 +1527,7 @@ public class OfflineCip68EvalTest {
         var reg = st.registrations().get(st.built().programmableTokenPolicyId());
 
         var scripts = new org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService(
-                HandlerFixtures.substandardService(),
+                HandlerFixtures.moduleService(),
                 HandlerFixtures.protocolScriptBuilderService())
                 .resolveScripts(
                         reg.getSecurityAssetNameHex(),
@@ -1628,10 +1628,10 @@ public class OfflineCip68EvalTest {
     private record RwaTokenChain(
             OfflineChain chain,
             BootstrapFixture.Bootstrapped boot,
-            org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler handler,
+            org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler handler,
             java.util.Map<String, org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity>
                     registrations,
-            org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler.ChainBuildResult
+            org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.ChainBuildResult
                     built,
             org.cardanofoundation.cip113.service.UtxoProvider utxoProvider,
             org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository
@@ -1761,9 +1761,9 @@ public class OfflineCip68EvalTest {
         var hybridUtxoSupplier =
                 new org.cardanofoundation.cip113.service.HybridUtxoSupplier(chain.utxoService());
 
-        var handler = new org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler(
+        var handler = new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler(
                 new org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService(
-                        HandlerFixtures.substandardService(),
+                        HandlerFixtures.moduleService(),
                         HandlerFixtures.protocolScriptBuilderService()),
                 HandlerFixtures.protocolScriptBuilderService(),
                 Mockito.mock(org.cardanofoundation.cip113.service.RwaTokenAllowlistService.class),
@@ -1817,7 +1817,7 @@ public class OfflineCip68EvalTest {
                 .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
 
         var registerRequest = org.cardanofoundation.cip113.model.RwaTokenRegisterRequest.builder()
-                .substandardId("rwa-token")
+                .moduleId("rwa-token")
                 .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
                 .recipientAddress(recipientAddress)
                 .assetName(BASE_ASSET_NAME_HEX)
@@ -1905,15 +1905,15 @@ public class OfflineCip68EvalTest {
     }
 
     /**
-     * Bootstrap a fresh offline protocol, then drive the real {@link DummySubstandardHandler}
+     * Bootstrap a fresh offline protocol, then drive the real {@link DummyModuleHandler}
      * through one registration on top of it.
      *
-     * <p>A fresh chain per call is deliberate: the dummy substandard's issuance policy does NOT
+     * <p>A fresh chain per call is deliberate: the dummy module's issuance policy does NOT
      * depend on the asset name, so two registrations on one chain would collide on the handler's
      * "already registered" guard.
      */
-    /** The real {@link DummySubstandardHandler}, spliced onto an offline chain. */
-    private static DummySubstandardHandler dummyHandler(OfflineChain chain,
+    /** The real {@link DummyModuleHandler}, spliced onto an offline chain. */
+    private static DummyModuleHandler dummyHandler(OfflineChain chain,
                                                         BootstrapFixture.Bootstrapped boot,
                                                         ProgrammableTokenRegistryRepository registry)
             throws Exception {
@@ -1922,14 +1922,14 @@ public class OfflineCip68EvalTest {
         var issuanceUtxoProvider = Mockito.mock(org.cardanofoundation.cip113.service.UtxoProvider.class);
         Mockito.when(issuanceUtxoProvider.findIssuanceCborHexUtxo(Mockito.any()))
                 .thenReturn(java.util.Optional.of(boot.issuanceCborHexUtxo()));
-        return new DummySubstandardHandler(
+        return new DummyModuleHandler(
                 HandlerFixtures.OBJECT_MAPPER,
                 HandlerFixtures.NETWORK,
                 HandlerFixtures.utxoRepository(chain, registryAddress, registrySpendHash),
                 issuanceUtxoProvider,
                 new RegistryNodeParser(HandlerFixtures.OBJECT_MAPPER),
                 Mockito.mock(AccountService.class),
-                HandlerFixtures.substandardService(),
+                HandlerFixtures.moduleService(),
                 HandlerFixtures.protocolScriptBuilderService(),
                 chain.quickTxBuilder(),
                 chain.protocolParamsSupplier(),
@@ -1955,13 +1955,13 @@ public class OfflineCip68EvalTest {
     private static final class DummyMintFixture {
         private final OfflineChain chain;
         private final BootstrapFixture.Bootstrapped boot;
-        private final DummySubstandardHandler handler;
+        private final DummyModuleHandler handler;
         private final String policyId;
         private final java.util.Map<String, ProgrammableTokenRegistryEntity> rows;
         private String registeredAssetName;
 
         DummyMintFixture(OfflineChain chain, BootstrapFixture.Bootstrapped boot,
-                         DummySubstandardHandler handler, String policyId, String registeredAssetName,
+                         DummyModuleHandler handler, String policyId, String registeredAssetName,
                          java.util.Map<String, ProgrammableTokenRegistryEntity> rows) {
             this.chain = chain;
             this.boot = boot;
@@ -1979,12 +1979,12 @@ public class OfflineCip68EvalTest {
         void addRegistryRow(String otherPolicyId, String assetName) {
             rows.put(otherPolicyId, ProgrammableTokenRegistryEntity.builder()
                     .policyId(otherPolicyId)
-                    .substandardId("dummy")
+                    .moduleId("dummy")
                     .assetName(assetName)
                     .build());
         }
 
-        DummySubstandardHandler handler() {
+        DummyModuleHandler handler() {
             return handler;
         }
 
@@ -2027,7 +2027,7 @@ public class OfflineCip68EvalTest {
 
         var context = handler.buildRegistrationTransaction(
                 DummyRegisterRequest.builder()
-                        .substandardId("dummy")
+                        .moduleId("dummy")
                         .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
                         .recipientAddress(BootstrapFixture.ALICE.baseAddress())
                         .assetName(BASE_ASSET_NAME_HEX)
@@ -2050,7 +2050,7 @@ public class OfflineCip68EvalTest {
         Mockito.when(registry.findByPolicyId(Mockito.eq(policyId)))
                 .thenAnswer(inv -> java.util.Optional.of(ProgrammableTokenRegistryEntity.builder()
                         .policyId(policyId)
-                        .substandardId("dummy")
+                        .moduleId("dummy")
                         .assetName(fixture.registeredAssetName())
                         .build()));
         return fixture;
@@ -2088,7 +2088,7 @@ public class OfflineCip68EvalTest {
         var handler = dummyHandler(chain, boot, Mockito.mock(ProgrammableTokenRegistryRepository.class));
 
         var request = DummyRegisterRequest.builder()
-                .substandardId("dummy")
+                .moduleId("dummy")
                 .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
                 .recipientAddress(BootstrapFixture.ALICE.baseAddress())
                 .assetName(BASE_ASSET_NAME_HEX)

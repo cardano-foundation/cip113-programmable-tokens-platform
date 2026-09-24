@@ -29,7 +29,8 @@ Thumbs.db
 *.log
 logs/
 
-# Aiken (for substandards)
-src/substandards/*/build/
-src/substandards/*/artifacts/
-src/substandards/*/docs/
+# Aiken (for modules)
+src/modules/*/artifacts/
+src/modules/*/docs/
+# Local Aiken builds, including pre-rename build directories.
+src/*/*/build/

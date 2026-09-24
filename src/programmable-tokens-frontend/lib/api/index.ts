@@ -1,5 +1,5 @@
 export * from './client';
-export * from './substandards';
+export * from './modules';
 export * from './registration';
 export * from './minting';
 export * from './transfer';

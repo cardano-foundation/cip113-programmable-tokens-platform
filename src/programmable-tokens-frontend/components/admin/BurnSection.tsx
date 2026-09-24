@@ -31,7 +31,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
   const { wallet } = useWallet();
   const { selectedVersion } = useProtocolVersion();
   const { toast: showToast } = useToast();
-  const { getProtocol, ensureSubstandard, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
+  const { getProtocol, ensureModule, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
   // Default to the backend builder even when the SDK is available. Parity means the SDK
   // CAN build a transaction, not that it becomes the default route (PLAN.md A-5) — the
   // SDK path is opt-in per operation via the toggle until T-018 has verified all seven
@@ -55,11 +55,11 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
   });
 
   // Per-page capability gate. Show:
-  //   - tokens where the wallet has ISSUER_ADMIN (legacy substandards)
+  //   - tokens where the wallet has ISSUER_ADMIN (legacy modules)
   //   - rwa-tokens where the wallet has BURNER or ADMIN capability
   //     in the on-chain power-users linked list (BaFin model)
   const issuerTokens = adminTokens.filter((t) => {
-    if (t.substandardId === "rwa-token") {
+    if (t.moduleId === "rwa-token") {
       return hasRwaTokenCapability(
         t,
         RwaTokenCapability.BURNER | RwaTokenCapability.ADMIN,
@@ -111,13 +111,13 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
     }
   };
 
-  const isFes = selectedToken?.substandardId === "freeze-and-seize";
+  const isFes = selectedToken?.moduleId === "freeze-and-seize";
 
   const handleBurnUtxo = async (utxo: UtxoInfo) => {
     if (!selectedToken) return;
 
     const utxoKey = `${utxo.txHash}#${utxo.outputIndex}`;
-    // FES always wipes the full UTxO amount; other substandards use user-entered amount
+    // FES always wipes the full UTxO amount; other modules use user-entered amount
     const burnAmount = isFes ? utxo.tokenAmount : burnAmounts[utxoKey];
 
     // Validate burn amount (skip for FES since it's always the full amount)
@@ -147,17 +147,17 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
     try {
       let unsignedTx: string;
 
-      // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize substandards.
+      // The cip113-sdk-ts SDK only ships dummy + freeze-and-seize modules.
       // For rwa-token (and kyc / kyc-extended) the SDK path errors with
-      // "Substandard 'rwa-token' not registered" — force the backend route
-      // regardless of the toggle for those substandards.
+      // "Module 'rwa-token' not registered" — force the backend route
+      // regardless of the toggle for those modules.
       const sdkSupportsSelected =
-        selectedToken.substandardId !== "rwa-token"
-        && selectedToken.substandardId !== "kyc"
-        && selectedToken.substandardId !== "kyc-extended";
+        selectedToken.moduleId !== "rwa-token"
+        && selectedToken.moduleId !== "kyc"
+        && selectedToken.moduleId !== "kyc-extended";
 
       if (txBuilder === "sdk" && sdkSupportsSelected) {
-        const substandardId = await ensureSubstandard(selectedToken.policyId, selectedToken.assetName);
+        const moduleId = await ensureModule(selectedToken.policyId, selectedToken.assetName);
         const protocol = await getProtocol();
         const result = await protocol.burn({
           feePayerAddress,
@@ -166,7 +166,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
           utxoTxHash: utxo.txHash,
           utxoOutputIndex: utxo.outputIndex,
           holderAddress: targetAddress,
-          substandardId,
+          substandardId: moduleId,
         });
         unsignedTx = result.cbor;
       } else {
@@ -203,7 +203,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
       // of the burn tx (Conway tag-7 + multi-script body), so we isolate
       // it into a structurally tiny tx that signs cleanly.
       const needsCertRegistration =
-        selectedToken?.substandardId === "rwa-token"
+        selectedToken?.moduleId === "rwa-token"
         && msg.includes("transferLogic stake credential not yet registered");
       if (needsCertRegistration && selectedToken) {
         try {
@@ -402,7 +402,7 @@ export function BurnSection({ adminTokens, feePayerAddress }: BurnSectionProps) 
                             Will wipe: <span className="font-bold ml-1">{utxo.tokenAmount}</span> tokens
                           </div>
                         ) : (
-                          /* Other substandards: partial amount input with Half/Max buttons */
+                          /* Other modules: partial amount input with Half/Max buttons */
                           <div className="flex-1 relative">
                             <input
                               type="number"

@@ -12,26 +12,26 @@ const CIP67_LABEL_222 = "000de140"; // NFT token
 const CIP67_PREFIX_LENGTH = 8;
 
 /**
- * Substandards whose registration actually mints the CIP-68 pair.
+ * Modules whose registration actually mints the CIP-68 pair.
  *
  * Single source of truth for the wizard: `token-details-step` hides the CIP-68 form for
  * anything not listed here, so the fields can never be collected and then dropped. The Java
- * backend enforces the same list — `KycSubstandardHandler` and `KycExtendedSubstandardHandler`
+ * backend enforces the same list — `KycModuleHandler` and `KycExtendedModuleHandler`
  * reject a non-null `cip68Metadata` outright rather than ignoring it — so a hand-rolled API
  * call gets a clear error instead of a token whose label promises metadata that was never
  * written.
  */
-export const CIP68_SUPPORTED_SUBSTANDARDS = [
+export const CIP68_SUPPORTED_MODULES = [
   "dummy",
   "freeze-and-seize",
   "rwa-token",
 ] as const;
 
-/** Whether the given substandard/flow id supports CIP-68 registration. */
-export function supportsCIP68(substandardId: string | null | undefined): boolean {
+/** Whether the given module/flow id supports CIP-68 registration. */
+export function supportsCIP68(moduleId: string | null | undefined): boolean {
   return (
-    !!substandardId &&
-    (CIP68_SUPPORTED_SUBSTANDARDS as readonly string[]).includes(substandardId)
+    !!moduleId &&
+    (CIP68_SUPPORTED_MODULES as readonly string[]).includes(moduleId)
   );
 }
 
@@ -155,7 +155,7 @@ export function labelAssetNameHex(label: 100 | 222 | 333, assetNameHex: string):
 }
 
 /**
- * The user-token label for a substandard, given a requested supply.
+ * The user-token label for a module, given a requested supply.
  *
  * MUST match `Cip68.userTokenLabel` in the Java backend — the backend picks the label that
  * actually goes on chain, and the frontend only re-derives it to record the right asset name
@@ -163,8 +163,8 @@ export function labelAssetNameHex(label: 100 | 222 | 333, assetNameHex: string):
  *
  * The rule is NOT "one unit means 222". `(222)` asserts non-fungibility — one unit, forever — and
  * only a validator that bounds LIFETIME issuance can keep that promise. None of the three
- * substandards does, so in practice every user token this platform mints is `(333)`; see
- * `userTokenLabelForSubstandard`.
+ * modules does, so in practice every user token this platform mints is `(333)`; see
+ * `userTokenLabelForModule`.
  *
  * @param quantity the supply — a lifetime ceiling only when `lifetimeSupplyCapped`
  * @param lifetimeSupplyCapped whether a validator bounds total lifetime issuance at `quantity`
@@ -182,7 +182,7 @@ export function userTokenLabelFor(
 }
 
 /**
- * The label a given substandard will apply — always `(333)`, for every substandard and every
+ * The label a given module will apply — always `(333)`, for every module and every
  * quantity. Keeps the capped/uncapped decision in one place rather than at each call site.
  *
  * `rwa-token` used to be treated as capped, on the grounds that its GlobalState
@@ -194,8 +194,8 @@ export function userTokenLabelFor(
  * the Java backend — the backend picks the label that actually goes on chain, and it participates
  * in the policy id, so a disagreement means the recorded asset name stops resolving.
  */
-export function userTokenLabelForSubstandard(
-  _substandardId: string | null | undefined,
+export function userTokenLabelForModule(
+  _moduleId: string | null | undefined,
   quantity: string | number | bigint
 ): 222 | 333 {
   return userTokenLabelFor(quantity, /* lifetimeSupplyCapped */ false);

@@ -3,21 +3,28 @@
 The platform targets CIP-113 `0.5.0-alpha.4` exclusively. Historical contract
 surfaces are not transaction-buildable compatibility modes.
 
-This repository ships **compiled blueprints only**. The Aiken source for the CIP-113 core and
-for the rwa-token substandard is not vendored here — it lives upstream, and this document is
-how you get back to it.
+The backend serves **compiled blueprints**. The Aiken source for the CIP-113 core and
+the rwa-token module lives upstream; the four first-party module source trees live in
+`src/modules/`. This document records how to trace each blueprint to its source.
 
 ## What is here
 
 | blueprint | shipped at | owned by |
 |---|---|---|
 | CIP-113 core | `src/programmable-tokens-offchain-java/src/main/resources/plutus.json` | upstream |
-| rwa-token | `.../src/main/resources/substandards/rwa-token/plutus.json` | upstream |
-| dummy, freeze-and-seize, kyc, kyc-extended | `src/substandards/<name>/` **plus** a resource copy | **this repository** |
+| rwa-token | `.../src/main/resources/modules/rwa-token/plutus.json` | upstream |
+| dummy, freeze-and-seize, kyc, kyc-extended | `src/modules/<name>/` **plus** a resource copy | **this repository** |
 
 The last row is different in kind: those four are **first-party** — written here, and
-`src/substandards/<name>/` is the only copy of their source. Do not treat them like the two
-above.
+`src/modules/<name>/` is the current location of their source. At the pinned historical
+commits, the source trees lived under their previous path; the pin notes record that
+path so the original artifacts remain reproducible.
+
+The freeze-and-seize, kyc, and kyc-extended blueprints were rebuilt with their
+pinned Aiken compiler after changing the manifest description to “module.” Only
+`preamble.description` changed: every validator entry and script hash matches the
+previous pinned artifact. `contracts-pin.json` retains each original artifact hash
+and the steps to reproduce the served bytes.
 
 The rwa-token tree also carried two pentest reports. Those are *records*, not artifacts —
 no rebuild reproduces them — so they were kept, at `docs/audits/rwa-token/`.
@@ -36,8 +43,8 @@ record, costly to reconstruct.
 
 ## What we gave up, deliberately
 
-The source trees used to be vendored (~1.2 MB to ship a 112 KB artifact), which bought two
-things now gone:
+The core and rwa-token source trees used to be vendored (~1.2 MB to ship a 112 KB artifact),
+which bought two things now gone for those two blueprints:
 
 - **Auditing the blueprint against readable source, offline.** `plutus.json` is compiled
   UPLC; nobody can review it. The source is what an auditor reads.
@@ -51,7 +58,8 @@ was judged higher than the convenience of in-repo reproduction.
 
 ## Reproducing a blueprint
 
-Requires `aiken` at the version in `contracts-pin.json` (`v1.1.23+8949565` for both today).
+Requires `aiken` at the version in `contracts-pin.json` (`v1.1.23+8949565` for the core
+and rwa-token; `v1.1.21+42babe5` for the four first-party modules).
 
 ### CIP-113 core — verbatim upstream
 
@@ -109,10 +117,10 @@ Two traps from the last upgrade, both of which a hash-only check would have miss
 
 - **`issuance_mint`'s fourth parameter changed type while staying in position four.** Arity
   was unchanged, so nothing complained; the applied script was simply a different one.
-- **The protocol-params datum grew from 5 fields to 7 — and fields 2–4 were *reordered*, not
-  appended.** Reading an old deployment's datum with the new parser yields plausible values
-  in the wrong slots rather than a parse error, which is why
-  `CoreProtocolParamsDatum.validateForDeployment()` exists.
+- **The protocol-params datum grew from 5 fields to 6 — the new issuance credential was
+  inserted at field 1, shifting existing fields rather than appending.**
+  `CoreProtocolParamsDatum.from()` rejects an old five-field datum by field count;
+  it cannot be positionally adapted to the new protocol.
 
 ## Why a blueprint is not just data
 

@@ -7,7 +7,7 @@ import lombok.NoArgsConstructor;
 import lombok.experimental.SuperBuilder;
 
 /**
- * Registration request for the "freeze-and-seize" substandard.
+ * Registration request for the "freeze-and-seize" module.
  * Includes additional fields for admin management and blacklist configuration.
  */
 @Data

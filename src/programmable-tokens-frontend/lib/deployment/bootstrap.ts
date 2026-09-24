@@ -127,7 +127,7 @@ const ISSUANCE_OUTPUT_LOVELACE = 15_000_000n;
 /**
  * Placeholder minting-logic hash, split out of the `issuance_mint` CBOR body.
  *
- * `issuance_mint` is parameterised per minting-logic hash — once per substandard — so a core
+ * `issuance_mint` is parameterised per minting-logic hash — once per module — so a core
  * deployment cannot know its final form. It stores the CBOR either side of this placeholder
  * instead, and a registration splices the real hash in.
  */
@@ -504,7 +504,7 @@ async function cborOf(built: BuiltTx, label: string): Promise<string> {
  * The `issuance_mint` body, cut either side of the placeholder minting-logic hash.
  *
  * A core deployment cannot know `issuance_mint`'s final form — it is parameterised per
- * minting-logic hash, once per substandard — so the genesis stores the CBOR either side of a
+ * minting-logic hash, once per module — so the genesis stores the CBOR either side of a
  * placeholder and a registration splices the real hash in.
  *
  * Exported because this is the one part of the bootstrap whose correctness is a measurable

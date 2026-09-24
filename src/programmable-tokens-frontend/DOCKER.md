@@ -1,398 +1,89 @@
-# Docker Deployment Guide
+# Frontend Docker deployment
 
-This guide explains how to build and deploy the CIP-113 Programmable Tokens Frontend using Docker.
+Run these commands from `src/programmable-tokens-frontend/`. The Dockerfile builds a
+Next.js server image on port 3000. Public configuration is compiled into the client
+bundle; changing a `NEXT_PUBLIC_*` value requires a new image. In particular,
+`NEXT_PUBLIC_BLOCKFROST_API_KEY` is visible to browser users and must be a key
+intended for public client use.
 
-## Overview
+## Build locally
 
-The application uses a **build-time parameter strategy** where each network (preview, preprod, mainnet) gets its own Docker image with environment variables baked in at build time. This results in:
-
-- ✅ Smaller, optimized images
-- ✅ Faster startup times
-- ✅ Better security (no runtime configuration exposure)
-- ✅ CDN-friendly static assets
-
-## Prerequisites
-
-- Docker installed (version 20.10+)
-- Docker Compose installed (version 2.0+)
-- Blockfrost API keys for your target network(s)
-
-## Quick Start
-
-### 1. Set Up Environment Variables
-
-Copy the example environment file:
+Docker 20.10+ and a Blockfrost key for the selected network are required. This
+example builds a Preview image without publishing it:
 
 ```bash
-cp .env.docker.example .env.docker
-```
-
-Edit `.env.docker` and add your Blockfrost API keys:
-
-```bash
-BLOCKFROST_PREVIEW_API_KEY=preview...
-BLOCKFROST_PREPROD_API_KEY=preprod...
-BLOCKFROST_MAINNET_API_KEY=mainnet...
-```
-
-### 2. Build for a Specific Network
-
-Using the build script (recommended):
-
-```bash
-# Build for preview (default)
-./build-docker.sh preview
-
-# Build for preprod
-./build-docker.sh preprod
-
-# Build for mainnet
-./build-docker.sh mainnet
-
-# Build ALL networks at once
-./build-docker.sh all
-
-# Build all and push to Docker Hub
-./build-docker.sh all --push
-```
-
-**Image Tags Created:**
-
-For each build, two tags are created:
-- `easy1staking/cip113-frontend:<git-tag>-<network>` (e.g., `v1.0.0-preview`)
-- `easy1staking/cip113-frontend:<network>` (e.g., `preview`)
-
-For mainnet, an additional tag is created:
-- `easy1staking/cip113-frontend:latest`
-
-Or manually with Docker:
-
-```bash
-# Get git version
-GIT_TAG=$(git describe --tags --always --dirty)
-
-# Build with version tag
 docker build \
   --build-arg NEXT_PUBLIC_NETWORK=preview \
-  --build-arg NEXT_PUBLIC_BLOCKFROST_API_KEY=your_key_here \
+  --build-arg NEXT_PUBLIC_BLOCKFROST_API_KEY=your_preview_key \
   --build-arg NEXT_PUBLIC_BLOCKFROST_URL=https://cardano-preview.blockfrost.io/api/v0 \
-  -t easy1staking/cip113-frontend:${GIT_TAG}-preview \
-  -t easy1staking/cip113-frontend:preview \
-  .
+  --build-arg NEXT_PUBLIC_API_BASE_URL=http://localhost:8080 \
+  --build-arg NEXT_PUBLIC_BASE_URL=http://localhost:3000 \
+  -t cip113-frontend:preview .
+docker run --rm -p 3000:3000 cip113-frontend:preview
 ```
 
-### 3. Run the Container
+Set `NEXT_PUBLIC_API_BASE_URL` to the backend origin reachable **from the user's
+browser**. The frontend adds `/api/v1` to requests; do not include that path in
+the value. If the frontend is served to remote users, `localhost` refers to
+their machines, so use a reachable HTTPS backend origin instead. Set
+`NEXT_PUBLIC_BASE_URL` to the frontend's public origin for metadata.
 
-**Single container:**
+The image has a health check on `/`. To inspect a running container, use
+`docker ps`, `docker logs <container-id>`, or
+`docker inspect --format='{{json .State.Health}}' <container-id>`.
+
+## Build script and published images
+
+Copy `.env.docker.example` to `.env.docker` and set the Blockfrost key and
+`NEXT_PUBLIC_API_BASE_URL_<NETWORK>` for each network you build. The example file
+also defines optional `NEXT_PUBLIC_BASE_URL_<NETWORK>` values. Run
+`./build-docker.sh preview`, `preprod`, `mainnet`, or `all` to build images tagged
+`easy1staking/cip113-frontend:<git-tag>-<network>` and `:<network>`.
+
+**Current script behavior:** `build-docker.sh` passes `--push` to `docker build`
+even without its optional `--push` argument. It therefore requires a configured
+builder and registry credentials and may publish the image. The `--push` option
+also runs separate `docker push` commands after the build. Use the manual
+`docker build` command above when you only want a local image.
+
+The repository's [GitHub Actions workflow](../../.github/workflows/docker-frontend.yml)
+publishes `cardanofoundation/cip113-frontend:<git-tag>-preview` and
+`:<git-tag>-preprod`, plus the moving `:preview` and `:preprod` tags. It uses
+per-network Blockfrost secrets and optional repository variables for backend
+and frontend URLs. Mainnet is not enabled in that workflow. The local build
+script's image repository differs from the workflow's published repository.
+
+To run a published Preview image:
 
 ```bash
-# Run preview network on port 3000
-docker run -p 3000:3000 easy1staking/cip113-frontend:preview
-
-# Run specific version
-docker run -p 3000:3000 easy1staking/cip113-frontend:v1.0.0-preview
-
-# Run preprod network on port 3001
-docker run -p 3001:3000 easy1staking/cip113-frontend:preprod
-
-# Run mainnet network on port 3002
-docker run -p 3002:3000 easy1staking/cip113-frontend:mainnet
+docker run --rm -p 3000:3000 cardanofoundation/cip113-frontend:preview
 ```
 
-**With Docker Compose:**
+The image's public configuration cannot be corrected with `docker run -e`; build
+a new image for a different backend, Blockfrost key, or network.
+
+The frontend's `docker-compose.yml` defines preview on host port 3000 and optional
+preprod and mainnet profiles on ports 3001 and 3002. It runs prebuilt
+`easy1staking/cip113-frontend` images; it does not build them or use the
+`cardanofoundation` images from CI. For an image you built locally with that
+tag, run:
 
 ```bash
-# Run preview (default)
-docker-compose up frontend-preview
-
-# Run preprod
-docker-compose --profile preprod up frontend-preprod
-
-# Run mainnet
-docker-compose --profile mainnet up frontend-mainnet
-
-# Run all networks at once
-docker-compose --profile preprod --profile mainnet up
+docker compose up -d frontend-preview
+docker compose --profile preprod up -d frontend-preprod
+docker compose --profile mainnet up -d frontend-mainnet
+docker compose down
 ```
 
-## Docker Compose Configuration
-
-The `docker-compose.yml` file defines three services:
-
-- `frontend-preview` - Port 3000 (default, always available)
-- `frontend-preprod` - Port 3001 (requires `--profile preprod`)
-- `frontend-mainnet` - Port 3002 (requires `--profile mainnet`)
-
-Each service builds its own image with network-specific configuration.
-
-## Image Details
-
-### Multi-Stage Build
-
-The Dockerfile uses a 3-stage build process:
-
-1. **deps** - Installs dependencies
-2. **builder** - Builds the Next.js application
-3. **runner** - Creates minimal runtime image
-
-### Image Size
-
-- **Final image**: ~200-250 MB (Node.js Alpine + Next.js)
-- **Build cache**: ~500 MB (development dependencies)
-
-### Security
-
-- Runs as non-root user (`nextjs`)
-- Only production dependencies included
-- No unnecessary files copied
-- Regular security scans with `docker scan cip113-frontend:preview`
-
-## Health Checks
-
-All containers include health checks:
-
-```bash
-# Check container health
-docker ps
-
-# View health check logs
-docker inspect --format='{{json .State.Health}}' cip113-frontend-preview
-```
-
-## Environment Variables
-
-### Build-Time (ARG)
-
-These are baked into the image at build time:
-
-- `NEXT_PUBLIC_NETWORK` - Network name (preview/preprod/mainnet)
-- `NEXT_PUBLIC_BLOCKFROST_API_KEY` - Blockfrost API key
-- `NEXT_PUBLIC_BLOCKFROST_URL` - Blockfrost API endpoint
-
-### Runtime (ENV)
-
-These can be overridden at runtime (though not recommended):
-
-- `NODE_ENV` - Always `production`
-- `PORT` - Server port (default: 3000)
-- `HOSTNAME` - Server hostname (default: 0.0.0.0)
-
-## Production Deployment
-
-### Using Docker Compose
-
-```bash
-# Build and start in detached mode
-docker-compose up -d frontend-preview
-
-# View logs
-docker-compose logs -f frontend-preview
-
-# Stop
-docker-compose down
-```
-
-### Using Docker Swarm
-
-```bash
-# Initialize swarm
-docker swarm init
-
-# Deploy stack
-docker stack deploy -c docker-compose.yml cip113
-
-# Check services
-docker service ls
-
-# Remove stack
-docker stack rm cip113
-```
-
-### Using Kubernetes
-
-Create deployment YAML:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: cip113-frontend-preview
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: cip113-frontend
-      network: preview
-  template:
-    metadata:
-      labels:
-        app: cip113-frontend
-        network: preview
-    spec:
-      containers:
-      - name: frontend
-        image: cip113-frontend:preview
-        ports:
-        - containerPort: 3000
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
-```
+For the CI-published image, use `docker run` above or change the Compose image
+reference to `cardanofoundation/cip113-frontend:<network>`.
 
 ## Troubleshooting
 
-### Build Fails
-
-**Problem**: Build fails with "API key not found"
-
-**Solution**: Check that `.env.docker` exists and contains valid API keys
-
-### Container Won't Start
-
-**Problem**: Container exits immediately
-
-**Solution**: Check logs:
-
-```bash
-docker logs cip113-frontend-preview
-```
-
-### Port Already in Use
-
-**Problem**: "port is already allocated"
-
-**Solution**: Change the port mapping:
-
-```bash
-docker run -p 4000:3000 cip113-frontend:preview
-```
-
-### WASM Warnings
-
-**Problem**: WASM-related warnings in logs
-
-**Solution**: These are expected and non-blocking. The Mesh SDK uses WASM for Cardano operations.
-
-## Advanced Configuration
-
-### Custom Networks
-
-To add a custom network:
-
-1. Update `docker-compose.yml` with new service
-2. Add API key to `.env.docker`
-3. Update `build-docker.sh` with network case
-
-### Nginx Reverse Proxy
-
-Example nginx config:
-
-```nginx
-server {
-    listen 80;
-    server_name cip113.example.com;
-
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
-```
-
-### Resource Limits
-
-Limit container resources:
-
-```bash
-docker run \
-  --memory="512m" \
-  --cpus="0.5" \
-  -p 3000:3000 \
-  cip113-frontend:preview
-```
-
-## CI/CD Integration
-
-### GitHub Actions
-
-```yaml
-name: Build Docker Images
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        network: [preview, preprod, mainnet]
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Build image
-        run: |
-          docker build \
-            --build-arg NEXT_PUBLIC_NETWORK=${{ matrix.network }} \
-            --build-arg NEXT_PUBLIC_BLOCKFROST_API_KEY=${{ secrets.BLOCKFROST_KEY }} \
-            -t cip113-frontend:${{ matrix.network }} \
-            .
-```
-
-## Monitoring
-
-### Logs
-
-```bash
-# Follow logs
-docker logs -f cip113-frontend-preview
-
-# Last 100 lines
-docker logs --tail 100 cip113-frontend-preview
-
-# Logs since timestamp
-docker logs --since 2024-01-01T00:00:00 cip113-frontend-preview
-```
-
-### Metrics
-
-```bash
-# Container stats
-docker stats cip113-frontend-preview
-
-# Detailed inspection
-docker inspect cip113-frontend-preview
-```
-
-## Cleanup
-
-```bash
-# Stop and remove containers
-docker-compose down
-
-# Remove images
-docker rmi cip113-frontend:preview
-docker rmi cip113-frontend:preprod
-docker rmi cip113-frontend:mainnet
-
-# Clean up build cache
-docker builder prune
-
-# Remove all unused resources
-docker system prune -a
-```
-
-## Support
-
-For issues or questions:
-- GitHub Issues: https://github.com/cardano-foundation/cip113-programmable-tokens/issues
-- Documentation: See README.md
+- If the browser cannot reach the backend, check the image's
+  `NEXT_PUBLIC_API_BASE_URL` build value and the backend's `/api/v1` routes.
+- If an image build lacks a Blockfrost key, provide the key for that network in
+  the manual build args or `.env.docker`.
+- If port 3000 is occupied, map another host port, for example `-p 4000:3000`.
+- For a failed health check, inspect container logs and
+  `docker inspect --format='{{json .State.Health}}' <container-id>`.

@@ -13,7 +13,7 @@ import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryReposito
 import org.cardanofoundation.cip113.repository.RegistryNodeRepository;
 import org.cardanofoundation.cip113.service.FesProvenanceReconstructor;
 import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
-import org.cardanofoundation.cip113.service.substandard.RwaTokenSubstandardHandler;
+import org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -32,20 +32,20 @@ public class TokenContextController {
     private final BlacklistInitRepository blacklistInitRepository;
     private final org.cardanofoundation.cip113.service.Cip68MetadataService cip68MetadataService;
 
-    /** Optional — only present when the rwa-token substandard is enabled. */
+    /** Optional — only present when the rwa-token module is enabled. */
     @Autowired(required = false)
     private RwaTokenRegistrationRepository rwaTokenRegistrationRepository;
 
     /** Prototype-scoped handler; resolved per request to read the live GS datum.
      *  {@code ObjectProvider} keeps this singleton controller decoupled from the
      *  handler's lifecycle. {@code @Autowired(required=false)} so the controller
-     *  still loads when the rwa-token substandard is disabled. */
+     *  still loads when the rwa-token module is disabled. */
     @Autowired(required = false)
-    private ObjectProvider<RwaTokenSubstandardHandler> rwaTokenHandlerProvider;
+    private ObjectProvider<RwaTokenModuleHandler> rwaTokenHandlerProvider;
 
     /**
-     * Get token context — returns substandardId + init params for a given policy ID.
-     * Used by the SDK to determine which substandard handles a token.
+     * Get token context — returns moduleId + init params for a given policy ID.
+     * Used by the SDK to determine which module handles a token.
      */
     @GetMapping("/{policyId}")
     public ResponseEntity<TokenContextResponse> getTokenContext(@PathVariable String policyId) {
@@ -56,7 +56,7 @@ public class TokenContextController {
         }
 
         var entry = registryEntry.get();
-        var substandardId = entry.getSubstandardId();
+        var moduleId = entry.getModuleId();
         var assetName = entry.getAssetName();
 
         // The registry node is keyed by the token's policy id. Null when we have not indexed it,
@@ -78,7 +78,7 @@ public class TokenContextController {
         org.cardanofoundation.cip113.model.Cip68Metadata cip68Metadata = null;
         String cip68Status = null;
 
-        if ("freeze-and-seize".equals(substandardId)) {
+        if ("freeze-and-seize".equals(moduleId)) {
             var tokenRegistration = freezeAndSeizeTokenRegistrationRepository
                     .findByProgrammableTokenPolicyId(policyId);
 
@@ -108,7 +108,7 @@ public class TokenContextController {
             }
         }
 
-        if ("rwa-token".equals(substandardId) && rwaTokenRegistrationRepository != null) {
+        if ("rwa-token".equals(moduleId) && rwaTokenRegistrationRepository != null) {
             var stReg = rwaTokenRegistrationRepository.findByProgrammableTokenPolicyId(policyId);
             if (stReg.isPresent()) {
                 issuerAdminPkh = stReg.get().getIssuerAdminPkh();
@@ -119,7 +119,7 @@ public class TokenContextController {
                 // requiresReceiverKyc only when the indexer hasn't seen the GS UTxO.
                 requiresReceiverKyc = stReg.get().isRequiresReceiverKyc();
                 if (rwaTokenHandlerProvider != null) {
-                    RwaTokenSubstandardHandler handler = rwaTokenHandlerProvider.getIfAvailable();
+                    RwaTokenModuleHandler handler = rwaTokenHandlerProvider.getIfAvailable();
                     if (handler != null) {
                         var live = handler.readGlobalState(policyId);
                         if (live.isPresent()) {
@@ -143,7 +143,7 @@ public class TokenContextController {
 
         return ResponseEntity.ok(new TokenContextResponse(
                 policyId,
-                substandardId,
+                moduleId,
                 assetName,
                 blacklistNodePolicyId,
                 issuerAdminPkh,
@@ -166,7 +166,7 @@ public class TokenContextController {
      */
     @PostMapping("/register")
     public ResponseEntity<?> registerToken(@RequestBody TokenRegistrationRequest request) {
-        log.info("Token registry callback: policyId={}, substandardId={}", request.policyId(), request.substandardId());
+        log.info("Token registry callback: policyId={}, moduleId={}", request.policyId(), request.moduleId());
 
         // Check if already registered
         if (programmableTokenRegistryRepository.existsByPolicyId(request.policyId())) {
@@ -177,12 +177,12 @@ public class TokenContextController {
         // 1. Save to unified programmable token registry
         programmableTokenRegistryRepository.save(ProgrammableTokenRegistryEntity.builder()
                 .policyId(request.policyId())
-                .substandardId(request.substandardId())
+                .moduleId(request.moduleId())
                 .assetName(request.assetName() != null ? request.assetName() : "")
                 .build());
 
         // 2. For FES: insert blacklist init (if not already present), then token registration
-        if ("freeze-and-seize".equals(request.substandardId()) && request.blacklistNodePolicyId() != null) {
+        if ("freeze-and-seize".equals(request.moduleId()) && request.blacklistNodePolicyId() != null) {
             // 2a. Insert blacklist init row if it doesn't exist yet (SDK-built registrations)
             var blacklistInitOpt = blacklistInitRepository
                     .findByBlacklistNodePolicyId(request.blacklistNodePolicyId());
@@ -217,7 +217,7 @@ public class TokenContextController {
             }
         }
 
-        log.info("Token {} registered successfully as {}", request.policyId(), request.substandardId());
+        log.info("Token {} registered successfully as {}", request.policyId(), request.moduleId());
         return ResponseEntity.ok().build();
     }
 }

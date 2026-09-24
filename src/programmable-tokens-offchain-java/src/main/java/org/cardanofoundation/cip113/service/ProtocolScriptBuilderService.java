@@ -17,7 +17,7 @@ import org.springframework.stereotype.Service;
  * in {@link CoreScriptFactory}, where the parameter lists sit together in one switch and
  * can be read against the blueprint as a table. What remains here is the vocabulary:
  * {@code getParameterizedRegistryScript} and friends are called from every
- * substandard handler, and renaming them is a separate change from moving the knowledge
+ * module handler, and renaming them is a separate change from moving the knowledge
  * out of them.
  *
  * <p>Kept deliberately thin. New code should depend on {@link CoreScriptFactory} directly;
@@ -43,12 +43,12 @@ public class ProtocolScriptBuilderService {
     }
 
     /**
-     * {@code issuance_mint} for one substandard — its policy id is the registered token's
-     * identity, because the substandard's minting-logic credential is baked into it.
+     * {@code issuance_mint} for one module — its policy id is the registered token's
+     * identity, because the module's minting-logic credential is baked into it.
      */
     public PlutusScript getParameterizedIssuanceMintScript(ProtocolBootstrapParams protocolParams,
-                                                           PlutusScript substandardIssueScript) {
-        return coreScripts.issuanceMint(protocolParams, substandardIssueScript);
+                                                           PlutusScript moduleIssueScript) {
+        return coreScripts.issuanceMint(protocolParams, moduleIssueScript);
     }
 
     /** {@code programmable_logic_base} — the payment credential of every programmable address. */

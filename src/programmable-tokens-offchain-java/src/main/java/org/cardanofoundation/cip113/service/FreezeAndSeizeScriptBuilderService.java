@@ -12,7 +12,7 @@ import com.bloxbean.cardano.client.util.HexUtil;
 import com.easy1staking.util.Pair;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.cardanofoundation.cip113.model.SubstandardValidator;
+import org.cardanofoundation.cip113.model.ModuleValidator;
 import org.cardanofoundation.cip113.util.PlutusSerializationHelper;
 import org.springframework.stereotype.Service;
 
@@ -37,9 +37,9 @@ import static org.cardanofoundation.cip113.util.PlutusSerializationHelper.serial
 @Slf4j
 public class FreezeAndSeizeScriptBuilderService {
 
-    private static final String SUBSTANDARD_ID = "freeze-and-seize";
+    private static final String MODULE_ID = "freeze-and-seize";
 
-    private final SubstandardService substandardService;
+    private final ModuleService moduleService;
 
     /**
      * Build Issuer Admin Contract (withdraw)
@@ -172,10 +172,10 @@ public class FreezeAndSeizeScriptBuilderService {
     // ========== Private Helpers ==========
 
     /**
-     * Get contract from substandard service
+     * Get contract from module service
      */
-    private SubstandardValidator getContract(String contractPath) {
-        return substandardService.getSubstandardValidator(SUBSTANDARD_ID, contractPath)
+    private ModuleValidator getContract(String contractPath) {
+        return moduleService.getModuleValidator(MODULE_ID, contractPath)
                 .orElseThrow(() -> new IllegalStateException(
                         "Freeze-and-seize contract not found: " + contractPath
                 ));
@@ -185,7 +185,7 @@ public class FreezeAndSeizeScriptBuilderService {
      * Apply parameters to contract and build PlutusScript v3
      */
     private PlutusScript applyParameters(
-            SubstandardValidator contract,
+            ModuleValidator contract,
             ListPlutusData params,
             String scriptName) {
 

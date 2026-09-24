@@ -25,7 +25,7 @@ import java.util.Set;
  * <p>The catch is that none of these positions is the order the builder added things in.
  * The ledger re-orders reference inputs and keys withdrawals by credential, so an index
  * is only meaningful once the <em>complete</em> set is known. That is the structural
- * reason this cannot live in a substandard handler: a handler knows its own withdrawals
+ * reason this cannot live in a module handler: a handler knows its own withdrawals
  * and reference inputs, not the framework's, and the framework knows its own and not the
  * handler's. Whoever computes an index must see both.
  *
@@ -51,7 +51,7 @@ import java.util.Set;
  * after it" means after it <em>in ledger order</em>, not after it in the builder. Because
  * every script credential sorts ahead of every key credential, a key-hash reward withdrawal
  * a wallet adds can never displace a script's index, however many it adds. What does
- * displace one is another SCRIPT withdrawal with a lower hash — a second substandard, say.
+ * displace one is another SCRIPT withdrawal with a lower hash — a second module, say.
  * {@code CoreLayoutTest#whatShiftsAnIndex} pins both halves, because knowing only the first
  * invites the conclusion that script indices are stable.
  */
@@ -126,7 +126,7 @@ public final class CoreLayout {
     /**
      * @param referenceInputs every reference input the transaction will carry, in any order
      * @param withdrawals     every withdrawal the transaction will carry, in any order —
-     *                        the framework's, the substandard's, and any the wallet adds
+     *                        the framework's, the module's, and any the wallet adds
      */
     public static CoreLayout of(Set<TransactionInput> referenceInputs, Set<WithdrawalKey> withdrawals) {
         // Normalise before de-duplicating or indexing. TransactionInput's equals() compares the

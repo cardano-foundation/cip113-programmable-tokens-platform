@@ -65,7 +65,7 @@ public class OfflineChain {
     public static final BigInteger PLACEHOLDER_STEPS = BigInteger.valueOf(10_000);
 
     /**
-     * The hand-picked cost {@code RwaTokenSubstandardHandler#buildRegisterTransferLogicTransaction}
+     * The hand-picked cost {@code RwaTokenModuleHandler#buildRegisterTransferLogicTransaction}
      * stamps on the Cert publish redeemer it injects. That injection happens in a
      * {@code postBalanceTx} hook — i.e. AFTER {@code ScriptCostEvaluators.evaluateScriptCost()}
      * has already run — so the redeemer does not exist when the evaluator sees the transaction
@@ -141,7 +141,7 @@ public class OfflineChain {
      * QuickTxBuilder through {@code ReferenceScriptResolver.resolveReferenceScript()}, which
      * dereferences the context's script supplier — with the three-argument constructor that
      * field is never set and the build dies with a bare NPE on {@code scriptSupplier}. The
-     * bootstrap transaction has no reference inputs and so does not notice; every substandard
+     * bootstrap transaction has no reference inputs and so does not notice; every module
      * registration does.
      */
     public com.bloxbean.cardano.client.quicktx.QuickTxBuilder quickTxBuilder() {

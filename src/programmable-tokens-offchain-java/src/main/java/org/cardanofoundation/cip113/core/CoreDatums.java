@@ -34,7 +34,7 @@ public final class CoreDatums {
      * from substituting one for the other.
      *
      * <p>Nothing in the core reads this datum; it exists because a PLB output needs
-     * <em>some</em> datum, and upstream's guidance to substandards is explicit that the
+     * <em>some</em> datum, and upstream's guidance to modules is explicit that the
      * default should be as small as possible — a seizure must reproduce a programmable
      * output's datum byte for byte, so every byte here is a byte of someone else's future
      * seizure transaction. The exception is CIP-68 reference tokens, whose metadata datum

@@ -2,12 +2,12 @@
 
 import { useState, useMemo } from 'react';
 import { Select, SelectOption } from '@/components/ui/select';
-import { Substandard } from '@/types/api';
+import { Module } from '@/types/api';
 
 interface ValidatorTripleSelectorProps {
-  substandards: Substandard[];
+  modules: Module[];
   onSelect: (
-    substandardId: string,
+    moduleId: string,
     issueContract: string,
     transferContract: string,
     thirdPartyContract?: string
@@ -16,25 +16,25 @@ interface ValidatorTripleSelectorProps {
 }
 
 export function ValidatorTripleSelector({
-  substandards,
+  modules,
   onSelect,
   disabled = false,
 }: ValidatorTripleSelectorProps) {
-  const [selectedSubstandard, setSelectedSubstandard] = useState<string>('');
+  const [selectedModule, setSelectedModule] = useState<string>('');
   const [selectedIssueContract, setSelectedIssueContract] = useState<string>('');
   const [selectedTransferContract, setSelectedTransferContract] = useState<string>('');
   const [selectedThirdPartyContract, setSelectedThirdPartyContract] = useState<string>('');
 
-  // Get validator options for selected substandard
+  // Get validator options for selected module
   const validatorOptions: SelectOption[] = useMemo(() => {
-    if (!selectedSubstandard) return [];
+    if (!selectedModule) return [];
 
-    const substandard = substandards.find(s => s.id === selectedSubstandard);
-    return substandard?.validators.map(v => ({
+    const selectedDefinition = modules.find(s => s.id === selectedModule);
+    return selectedDefinition?.validators.map(v => ({
       value: v.title,
       label: v.title,
     })) || [];
-  }, [selectedSubstandard, substandards]);
+  }, [selectedModule, modules]);
 
   const thirdPartyOptions: SelectOption[] = useMemo(() => {
     return [
@@ -43,10 +43,10 @@ export function ValidatorTripleSelector({
     ];
   }, [validatorOptions]);
 
-  const handleSubstandardChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const substandardId = e.target.value;
-    setSelectedSubstandard(substandardId);
-    // Reset all validator selections when substandard changes
+  const handleModuleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const moduleId = e.target.value;
+    setSelectedModule(moduleId);
+    // Reset all validator selections when module changes
     setSelectedIssueContract('');
     setSelectedTransferContract('');
     setSelectedThirdPartyContract('');
@@ -58,7 +58,7 @@ export function ValidatorTripleSelector({
     // Notify parent if both required contracts are selected
     if (contract && selectedTransferContract) {
       onSelect(
-        selectedSubstandard,
+        selectedModule,
         contract,
         selectedTransferContract,
         selectedThirdPartyContract || undefined
@@ -72,7 +72,7 @@ export function ValidatorTripleSelector({
     // Notify parent if both required contracts are selected
     if (selectedIssueContract && contract) {
       onSelect(
-        selectedSubstandard,
+        selectedModule,
         selectedIssueContract,
         contract,
         selectedThirdPartyContract || undefined
@@ -86,7 +86,7 @@ export function ValidatorTripleSelector({
     // Notify parent if both required contracts are already selected
     if (selectedIssueContract && selectedTransferContract) {
       onSelect(
-        selectedSubstandard,
+        selectedModule,
         selectedIssueContract,
         selectedTransferContract,
         contract || undefined
@@ -94,9 +94,9 @@ export function ValidatorTripleSelector({
     }
   };
 
-  const substandardOptions: SelectOption[] = [
-    { value: '', label: '-- Select a substandard --' },
-    ...substandards.map(s => ({
+  const moduleOptions: SelectOption[] = [
+    { value: '', label: '-- Select a module --' },
+    ...modules.map(s => ({
       value: s.id,
       label: s.id.charAt(0).toUpperCase() + s.id.slice(1),
     }))
@@ -114,18 +114,18 @@ export function ValidatorTripleSelector({
 
   return (
     <div className="space-y-4">
-      {/* Step 1: Substandard Selection */}
+      {/* Step 1: Module Selection */}
       <Select
-        label="Step 1: Validation Logic (Substandard)"
-        options={substandardOptions}
-        value={selectedSubstandard}
-        onChange={handleSubstandardChange}
-        disabled={disabled || substandards.length === 0}
+        label="Step 1: Validation Logic (Module)"
+        options={moduleOptions}
+        value={selectedModule}
+        onChange={handleModuleChange}
+        disabled={disabled || modules.length === 0}
         helperText="Choose the validation rules for your programmable token"
       />
 
       {/* Step 2: Issue Contract Selection */}
-      {selectedSubstandard && validatorOptions.length > 0 && (
+      {selectedModule && validatorOptions.length > 0 && (
         <Select
           label="Step 2: Issue Contract (Required)"
           options={issueContractOptions}
@@ -137,7 +137,7 @@ export function ValidatorTripleSelector({
       )}
 
       {/* Step 3: Transfer Contract Selection */}
-      {selectedSubstandard && selectedIssueContract && (
+      {selectedModule && selectedIssueContract && (
         <Select
           label="Step 3: Transfer Contract (Required)"
           options={transferContractOptions}
@@ -149,7 +149,7 @@ export function ValidatorTripleSelector({
       )}
 
       {/* Step 4: Third-Party Contract Selection (Optional) */}
-      {selectedSubstandard && selectedIssueContract && selectedTransferContract && (
+      {selectedModule && selectedIssueContract && selectedTransferContract && (
         <Select
           label="Step 4: Third-Party Contract (Optional)"
           options={thirdPartyOptions}

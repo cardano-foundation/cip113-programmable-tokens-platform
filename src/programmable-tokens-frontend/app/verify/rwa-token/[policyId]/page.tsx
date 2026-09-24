@@ -27,7 +27,7 @@ type DisplayToken = Pick<RwaTokenSummary, "policyId" | "assetName" | "displayNam
 
 type ViewState =
   | { kind: "loading" }
-  | { kind: "wrong-substandard"; substandardId: string }
+  | { kind: "wrong-module"; moduleId: string }
   | { kind: "ready"; token: DisplayToken };
 
 export default function VerifyRwaTokenPage() {
@@ -68,8 +68,8 @@ export default function VerifyRwaTokenPage() {
       try {
         const ctx = await getTokenContext(policyId);
         if (cancelled) return;
-        if (ctx.substandardId !== "rwa-token") {
-          setViewState({ kind: "wrong-substandard", substandardId: ctx.substandardId });
+        if (ctx.moduleId !== "rwa-token") {
+          setViewState({ kind: "wrong-module", moduleId: ctx.moduleId });
           return;
         }
         const tokens = await listRwaTokens();
@@ -80,8 +80,8 @@ export default function VerifyRwaTokenPage() {
       } catch (e) {
         if (cancelled) return;
         setViewState({
-          kind: "wrong-substandard",
-          substandardId: e instanceof Error ? e.message : "Unknown error",
+          kind: "wrong-module",
+          moduleId: e instanceof Error ? e.message : "Unknown error",
         });
       }
     })();
@@ -116,15 +116,15 @@ export default function VerifyRwaTokenPage() {
     );
   }
 
-  if (viewState.kind === "wrong-substandard") {
+  if (viewState.kind === "wrong-module") {
     return (
       <PageContainer>
         <div className="max-w-2xl mx-auto py-10">
           <Card className="p-6 space-y-2">
             <h1 className="text-lg font-semibold text-white">Verification not required</h1>
             <p className="text-sm text-dark-300">
-              This token is not a rwa-token (substandard:{" "}
-              <code>{viewState.substandardId}</code>). No verification is needed.
+              This token is not a rwa-token (module:{" "}
+              <code>{viewState.moduleId}</code>). No verification is needed.
             </p>
           </Card>
         </div>

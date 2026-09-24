@@ -1,5 +1,5 @@
 /**
- * KYC Substandard Flow
+ * KYC Module Flow
  * Token registration with KYC attestation requirements for transfers.
  * Requires a Global State to be created externally.
  */
@@ -25,7 +25,7 @@ function KycSuccessStep(props: StepComponentProps) {
   const enhancedResult = props.wizardState.finalResult || {
     policyId: buildResult?.tokenPolicyId || '',
     txHash: buildResult?.regTxHash || '',
-    substandardId: 'kyc',
+    moduleId: 'kyc',
     assetName: '',
     quantity: '',
     metadata: {
@@ -92,7 +92,7 @@ const kycFlow: RegistrationFlow = {
     } | undefined;
 
     return {
-      substandardId: 'kyc',
+      moduleId: 'kyc',
       feePayerAddress: '',
       assetName: tokenDetails?.assetName || '',
       quantity: tokenDetails?.quantity || '',

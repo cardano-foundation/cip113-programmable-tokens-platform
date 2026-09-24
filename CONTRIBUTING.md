@@ -2,7 +2,7 @@
 
 Thanks for considering contributing and helping us build this project!
 
-This repository hosts the **off-chain platform** for CIP-113 programmable tokens: a reference Next.js frontend, a Spring Boot backend, and Aiken substandard implementations. For the on-chain core framework (CIP-113 validators), see the [on-chain repository](https://github.com/cardano-foundation/cip113-programmable-tokens-2).
+This repository hosts the **off-chain platform** for CIP-113 programmable tokens: a reference Next.js frontend, a Spring Boot backend, and Aiken module implementations. For the on-chain core framework (CIP-113 validators), see the [on-chain repository](https://github.com/cardano-foundation/cip113-programmable-tokens).
 
 The best way to contribute right now is to try things out and provide feedback, but we also accept contributions to the documentation and obviously to the code itself.
 
@@ -11,7 +11,7 @@ The best way to contribute right now is to try things out and provide feedback, 
 Should you have any questions or need some help getting set up, you can use these communication channels to reach the team and get answers in a way others can benefit from as well:
 
 - [CIP-113 Pull Request](https://github.com/cardano-foundation/CIPs/pull/444) — For standard-related discussions and feedback
-- GitHub [Issues](../../issues) — For bug reports and implementation-specific issues
+- GitHub [Issues](https://github.com/cardano-foundation/cip113-programmable-tokens-platform/issues) — For bug reports and implementation-specific issues
 
 ## Your first contribution
 
@@ -27,14 +27,14 @@ Documentation is available in:
 - Component READMEs:
   - [Frontend](./src/programmable-tokens-frontend/README.md)
   - [Off-chain backend](./src/programmable-tokens-offchain-java/README.md)
-  - Substandards: [`dummy`](./src/substandards/dummy/README.md), [`freeze-and-seize`](./src/substandards/freeze-and-seize/README.md)
-- On-chain framework documentation in the [on-chain repository](https://github.com/cardano-foundation/cip113-programmable-tokens-2/tree/main/documentation)
+  - Modules: [`dummy`](./src/modules/dummy/README.md), [`freeze-and-seize`](./src/modules/freeze-and-seize/README.md), [`kyc`](./docs/modules/kyc/README.md), [`kyc-extended`](./docs/modules/kyc-extended/README.md)
+- On-chain framework documentation in the [on-chain repository](https://github.com/cardano-foundation/cip113-programmable-tokens/tree/main/documentation)
 
 ### Bug reports
 
-[Submit an issue](../../issues/new) for implementation-specific bugs. For bug reports, it's very important to explain:
+[Submit an issue](https://github.com/cardano-foundation/cip113-programmable-tokens-platform/issues/new) for implementation-specific bugs. For bug reports, it's very important to explain:
 
-* Which component (frontend, backend, substandard, etc.) and version/commit you used
+* Which component (frontend, backend, module, etc.) and version/commit you used
 * Steps to reproduce (or steps you took)
 * What behavior you saw (ideally supported by logs)
 * What behavior you expected
@@ -46,12 +46,12 @@ For issues related to the CIP-113 standard itself, please use the [CIP-113 Pull 
 Feature ideas and enhancement proposals are welcome. Feature discussions should consider:
 
 - **Standard-level features** — Discuss in the [CIP-113 Pull Request](https://github.com/cardano-foundation/CIPs/pull/444)
-- **Implementation-specific features** — [Submit an issue](../../issues/new) in this repository
+- **Implementation-specific features** — [Submit an issue](https://github.com/cardano-foundation/cip113-programmable-tokens-platform/issues/new) in this repository
 
 We expect a description of:
 
 * Why you (or the user) need/want something (e.g. problem, challenge, pain, benefit)
-* What this is roughly about (e.g. description of a new UI flow, API endpoint, or substandard behavior)
+* What this is roughly about (e.g. description of a new UI flow, API endpoint, or module behavior)
 
 We do NOT require a detailed technical description, but are much more interested in *why* a feature is needed.
 
@@ -67,7 +67,10 @@ When contributing code, it helps to have discussed the rationale and (ideally) h
 cd src/programmable-tokens-frontend
 npm install
 npm run lint
-npm test
+npm run test:parameterization
+npm run test:deployment
+npm run test:upgrade
+npm run test:multitx
 npm run build
 ```
 
@@ -79,10 +82,10 @@ cd src/programmable-tokens-offchain-java
 ./gradlew test
 ```
 
-**Substandards (`src/substandards/<name>/`):**
+**Modules (`src/modules/<name>/`):**
 
 ```bash
-cd src/substandards/<substandard>
+cd src/modules/<module>
 aiken fmt --check
 aiken check
 aiken build
@@ -100,10 +103,10 @@ More generally, keep the coding style consistent with what is already there. Rep
 
 ### Cross-repository changes
 
-Changes that span on-chain and off-chain (e.g. a new substandard requiring new on-chain primitives, or a protocol change affecting transaction building) may require coordinated pull requests in both:
+Changes that span on-chain and off-chain (e.g. a new module requiring new on-chain primitives, or a protocol change affecting transaction building) may require coordinated pull requests in both:
 
-- This repository — off-chain services and substandard implementations
-- The [on-chain repository](https://github.com/cardano-foundation/cip113-programmable-tokens-2) — validators and core framework
+- This repository — off-chain services and module implementations
+- The [on-chain repository](https://github.com/cardano-foundation/cip113-programmable-tokens) — validators and core framework
 
 Please reference related pull requests in both descriptions so reviewers have the full picture.
 

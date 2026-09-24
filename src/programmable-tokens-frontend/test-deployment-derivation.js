@@ -389,7 +389,7 @@ async function main() {
   );
 
   // The splice must be SEALED out of the provenance record. issuance_mint belongs to a
-  // substandard registration, not to this deployment, so publishing it here would attest a
+  // module registration, not to this deployment, so publishing it here would attest a
   // script the deployment does not run.
   if (coreSet.parameterizations.length !== derived.parameterizations.length) {
     throw new Error(

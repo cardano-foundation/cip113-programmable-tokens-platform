@@ -78,7 +78,7 @@ export function WizardStepContainer() {
             // refused in terms that blame the token. The flow now supplies the pkh the scripts
             // were actually built with; if it ever does not, that is a defect to see, not to
             // paper over.
-            if (!callbackData.issuerAdminPkh && callbackData.substandardId === 'freeze-and-seize') {
+            if (!callbackData.issuerAdminPkh && callbackData.moduleId === 'freeze-and-seize') {
               throw new Error(
                 'The registration flow did not report the admin key hash the scripts were built ' +
                   'with. Refusing to guess it from the wallet: the token policy id is derived ' +

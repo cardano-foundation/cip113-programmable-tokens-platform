@@ -83,8 +83,8 @@ export function AdminPanel({ tokens, adminAddress }: AdminPanelProps) {
   // This used to be `kyc` tokens ONLY, from when global state was a KYC-only
   // feature. It has not been true for a long time: GlobalStateSection has a
   // dedicated rwa-token branch (RwaTokenGlobalStatePanel) covering all
-  // twelve GlobalStateSpendActions, and the `kyc` substandard is disabled by
-  // default in the backend (`substandards.disabled: kyc,kyc-extended`). So on any
+  // twelve GlobalStateSpendActions, and the `kyc` module is disabled by
+  // default in the backend (`modules.disabled: kyc,kyc-extended`). So on any
   // deployment that issues RWA tokens the tab was filtered out and the whole
   // panel was unreachable, with no error and nothing to click.
   //
@@ -92,7 +92,7 @@ export function AdminPanel({ tokens, adminAddress }: AdminPanelProps) {
   // to build its own `manageableTokens`. If they drift apart, the tab appears with
   // an empty token selector (or worse, hides a token the panel could manage).
   const hasKycAdminTokens = tokens.some(
-    (t) => t.substandardId === "kyc" && t.roles.includes("ISSUER_ADMIN")
+    (t) => t.moduleId === "kyc" && t.roles.includes("ISSUER_ADMIN")
   );
   // One list, two consumers — the Global State tab's availability and the CMTAT
   // link strip below. Derived once so the two cannot drift into disagreeing about
