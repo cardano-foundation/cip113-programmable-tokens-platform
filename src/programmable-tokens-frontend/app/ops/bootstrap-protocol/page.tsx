@@ -666,12 +666,19 @@ export default function BootstrapProtocolPage() {
           Payment key hashes or bech32 addresses, one per line. An address is reduced to its
           payment credential; a script credential is refused, because a script cannot sign.
         </p>
+        <p className="text-xs text-accent-300">
+          Ask participants for an ADDRESS, not a key hash. A bech32 address carries a checksum,
+          so a character mistyped or mangled on the way here is rejected the moment you paste
+          it. A key hash has none — every wrong one is 56 valid-looking characters, and the
+          mistake survives to the signing round, where the member list is already on chain and
+          the fix costs the whole ceremony.
+        </p>
         <textarea
           id="multisig-members"
           rows={6}
           spellCheck={false}
           className={`w-full ${FIELD}`}
-          placeholder={"addr_test1...\n32e7e00eae28502a2aa271cf4202b1b01b94ca8efe642e380c93d5e2"}
+          placeholder={"addr_test1... (preferred — checksummed)\naddr_test1..."}
           value={membersText}
           onChange={(e) => setMembersText(e.target.value)}
         />
