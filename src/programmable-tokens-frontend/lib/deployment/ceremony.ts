@@ -53,10 +53,36 @@ import {
   type ReferenceScriptsTxParams,
 } from "@easy1staking/cip113-sdk-ts";
 
-/** A UTxO as this module needs to talk about one, independent of the SDK's shape. */
+/**
+ * A wallet UTxO, as the seed-selection code needs to read one.
+ *
+ * `scriptRef` and `assets` are here because a seed must be PLAIN: a UTxO carrying a reference
+ * script or a native asset cannot be spent as a one-shot seed without dragging its payload
+ * into the transaction that consumes it.
+ */
 export interface ChainUtxo {
   txHash: string;
   outputIndex: number;
+  scriptRef?: unknown;
+  assets?: unknown;
+}
+
+/**
+ * Three plain UTxOs to seed a deployment, newest last.
+ *
+ * ⛔ THEY MUST BE DISTINCT. `protocolParams` and `upgradeMultisig` are the same type and are
+ * not interchangeable: one UTxO in both slots deploys perfectly well and makes the
+ * upgrade-multisig check vacuous, because the verifier then passes whichever of the two fields
+ * it happens to read.
+ */
+export function selectSeedUtxos(
+  utxos: readonly ChainUtxo[],
+  _changeAddress: string,
+): { paramsSeed: ChainUtxo; issuanceSeed: ChainUtxo; multisigSeed: ChainUtxo } | null {
+  const plain = utxos.filter((u) => !u.scriptRef);
+  if (plain.length < 3) return null;
+  const [a, b, c] = plain;
+  return { paramsSeed: a, issuanceSeed: b, multisigSeed: c };
 }
 
 export { BOOTSTRAP_SEED_COUNT };
