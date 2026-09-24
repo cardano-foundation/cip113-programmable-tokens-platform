@@ -10,13 +10,13 @@
       "name": "cip113-core",
       "resource": "plutus.json",
       "repository": "https://github.com/cardano-foundation/cip113-programmable-tokens",
-      "commit": "b83a041eaa053625c502f8ee64b607a787cf5f79",
-      "commit_date": "2026-09-23T00:00:00+01:00",
-      "upstream_version": "0.5.0-alpha.5",
+      "commit": "6b75ba3286b4692ca23059ff51285db357fb09c6",
+      "commit_date": "2026-09-24T00:00:00+01:00",
+      "upstream_version": "0.0.1",
       "aiken_compiler": "v1.1.23+8949565",
-      "sha256": "ca53475332b5932f021fa134f823b932b05433ccd335bbf6251f18167826da66",
+      "sha256": "b6c8cb096a15e02f1b9c719fb8c617b624c1aa7719f2258d45faa3e8f144e7b9",
       "verbatim_from_upstream": true,
-      "note": "Upstream's committed plutus.json, byte for byte, taken from the SDK's vendored copy at blueprints/standard/v0.5.0-alpha.5 and sha-verified against that directory's UPSTREAM_PIN.json. alpha.5 adds one check to protocol_params — the genesis mint must carry a withdraw-0 from the upgrade credential — which moves EIGHT of the twelve derived script hashes; always_fail, issuance_cbor_hex_mint, registry and upgrade_multisig survive because they hang off seeds and nonces. Pinned to the COMMIT, not the version string: upstream publishes no git tags, so 0.5.0-alpha.5 is a field inside a file on a moving branch."
+      "note": "Upstream's committed plutus.json, byte for byte, taken from the SDK's vendored copy at blueprints/standard/v0.0.1 and sha-verified against that directory's UPSTREAM_PIN.json. v0.0.1 is the first non-dev version and the intended mainnet release candidate. MEASURED, not assumed: all 34 compiledCode entries are byte-identical to 0.5.0-alpha.5 and the ONLY difference in the whole artifact is preamble.version, so EVERY derived script hash is unchanged and an alpha.5 instance would be reachable by a v0.0.1 build. Note the artifact SHA256 still changes, because preamble.version is inside the hashed file — 'byte-identical' is true of the compiled code and false of the file, and conflating the two leads either to skipping this pin update or to doubting the zero-hash claim. Pinned to the COMMIT, not the version string: upstream publishes no git tags."
     },
     {
       "name": "rwa-token",

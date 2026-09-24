@@ -41,7 +41,8 @@ async function main() {
       ),
     );
   const blueprintAlpha4 = bp("v0.5.0-alpha.4");
-  const blueprint = bp("v0.5.0-alpha.5");
+  const blueprintAlpha5 = bp("v0.5.0-alpha.5");
+  const blueprint = bp("v0.0.1");
 
   // The alpha.4 preview instance, now a fixture. Its seeds are the FIXED INPUTS both
   // derivations run at, so any difference below is the blueprint's and nothing else.
@@ -60,6 +61,7 @@ async function main() {
   };
 
   const derivedAlpha4 = derive({ blueprint: blueprintAlpha4, ...fixedInputs });
+  const derivedAlpha5 = derive({ blueprint: blueprintAlpha5, ...fixedInputs });
   const derived = derive({ blueprint, ...fixedInputs });
 
   // ---- ANCHOR: alpha.4 still reproduces the real recorded instance --------
@@ -122,7 +124,37 @@ async function main() {
   for (const name of Object.keys(recorded)) {
     assert.ok(classified.has(name), `${name} is in neither MOVES nor SURVIVES — classify it`);
   }
-  console.log(`  OK   alpha.4 -> alpha.5: ${MOVES.length} hashes move, ${SURVIVES.length} hold, both asserted`);
+  console.log(`  OK   alpha.4 -> v0.0.1: ${MOVES.length} hashes move, ${SURVIVES.length} hold, both asserted`);
+
+  // ---- alpha.5 -> v0.0.1 MOVES NOTHING ------------------------------------
+  // The claim the v0.0.1 release rests on. Upstream cut a version, not a change:
+  // all 34 compiledCode entries are byte-identical to alpha.5 and the only
+  // difference in the artifact is `preamble.version`. So every derived hash must
+  // be equal — an alpha.5 instance is reachable by a v0.0.1 build.
+  //
+  // ⚠ A ZERO-DIFFERENCE ASSERTION IS THE EASIEST KIND TO PASS FOR THE WRONG
+  // REASON. If `bp()` silently returned the same file twice, or both derivations
+  // were handed the same blueprint object, every hash would be equal and this
+  // would go green while testing nothing. Two things stop that: the premise check
+  // below, which requires the two artifacts to genuinely DIFFER in their
+  // preamble; and the alpha.4 comparison above, which runs through the same
+  // `derive` and must still produce seven movers — impossible if the loader were
+  // handing back one blueprint.
+  assert.notStrictEqual(
+    blueprintAlpha5.preamble.version,
+    blueprint.preamble.version,
+    "the alpha.5 and v0.0.1 fixtures are the same artifact — this comparison proves nothing",
+  );
+  assert.strictEqual(blueprintAlpha5.preamble.version, "0.5.0-alpha.5");
+  assert.strictEqual(blueprint.preamble.version, "0.0.1");
+
+  const moved = Object.keys(recorded).filter((n) => derived[n] !== derivedAlpha5[n]);
+  assert.deepStrictEqual(
+    moved,
+    [],
+    `v0.0.1 must move NO script hash from alpha.5; these moved: ${moved.join(", ")}`,
+  );
+  console.log(`  OK   alpha.5 -> v0.0.1: ${Object.keys(recorded).length} hashes, ZERO moved`);
 
   console.log(`\n  parameterizations recorded: ${derived.parameterizations.length} (CIP-171 payload)`);
 
