@@ -19,13 +19,14 @@ public record UplcLinkRequest(CompilerType compilerType,
                               String sourcePath,
                               // Optional<>
                               String compilerVersion,
+                              String environment,
                               Map<String, List<String>> parameters) {
 
     public PlutusData toPlutusData() {
 
         var scriptHashToParametersMap = new MapPlutusData();
 
-        parameters.forEach((k, v) -> {
+        new java.util.TreeMap<>(parameters).forEach((k, v) -> {
             var key = BytesPlutusData.of(HexUtil.decodeHexString(k));
             var valuesList = v.stream().map(HexUtil::decodeHexString).map(BytesPlutusData::of).toList().toArray(new PlutusData[0]);
             var values = ListPlutusData.of(valuesList);
@@ -37,6 +38,7 @@ public record UplcLinkRequest(CompilerType compilerType,
                 BytesPlutusData.of(HexUtil.decodeHexString(commitHash)),
                 BytesPlutusData.of(sourcePath != null ? sourcePath : ""),
                 BytesPlutusData.of(compilerVersion != null ? compilerVersion : ""),
+                BytesPlutusData.of(environment != null ? environment : ""),
                 scriptHashToParametersMap
         );
     }
@@ -46,18 +48,13 @@ public record UplcLinkRequest(CompilerType compilerType,
     }
 
     public List<String> toCborChunks(int size) {
-        var chunks = new ArrayList<String>();
-        var hex = toPlutusData().serializeToHex();
-
-        while (hex.length() > size) {
-            chunks.add(hex.substring(0, size));
-            hex = hex.substring(size);
-        }
-        chunks.add(hex);
-        return chunks;
+        return toCborBytesChunks(size).stream().map(HexUtil::encodeHexString).toList();
     }
 
     public List<byte[]> toCborBytesChunks(int size) {
+        if (size < 1 || size > 64) {
+            throw new IllegalArgumentException("CIP-171 metadata chunks must contain 1 to 64 bytes");
+        }
         var chunks = new ArrayList<byte[]>();
         var i = 0;
         var hex = toPlutusData().serializeToBytes();

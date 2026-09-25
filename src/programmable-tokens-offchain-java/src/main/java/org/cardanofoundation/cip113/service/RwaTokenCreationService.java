@@ -47,6 +47,8 @@ public class RwaTokenCreationService {
         List<String> txs = new ArrayList<>();
         txs.add(meta.genesisCborHex());
         txs.add(meta.addPowerUserCborHex());
+        txs.add(meta.cmtaProvenanceCborHex());
+        txs.add(meta.issuanceProvenanceCborHex());
         if (meta.publishScriptsCborHex() != null) txs.add(meta.publishScriptsCborHex());
         txs.add(meta.registrationCborHex());
         if (meta.registerTransferLogicCborHex() != null) txs.add(meta.registerTransferLogicCborHex());
@@ -60,15 +62,8 @@ public class RwaTokenCreationService {
 
     @Transactional
     public InitResult init(RwaTokenRegisterRequest request, ProtocolBootstrapParams params) {
-        var handler = (RwaTokenModuleHandler) handlerFactory.getHandler("rwa-token", RwaTokenContext.emptyContext());
-        var result = handler.buildGlobalStateInitTransaction(request, params);
-        if (!result.isSuccessful() || result.metadata() == null)
-            throw new BuildFailed(result.error() == null ? "init failed" : result.error());
-        String gsPolicy = registrations.findByProgrammableTokenPolicyId(result.metadata().policyId())
-                .orElseThrow(() -> new BuildFailed("genesis registration row missing"))
-                .getGlobalStatePolicyId();
-        reserveExternalWalletInputs(List.of(result.unsignedCborTx()), request.getFeePayerAddress(), gsPolicy);
-        return new InitResult(result.unsignedCborTx(), result.metadata());
+        throw new BuildFailed("Standalone CMTA init is disabled because CIP-171 provenance "
+                + "is required. Use /rwa-token/build-chain to create and publish both records.");
     }
 
     private void reserveExternalWalletInputs(List<String> cborHexes, String payerAddress, String gsPolicy) {

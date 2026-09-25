@@ -51,6 +51,8 @@ function RwaTokenSuccessStep(props: StepComponentProps) {
       powerUsersPolicyId: chainResult?.powerUsersPolicyId,
       genesisTxHash: byName?.genesis,
       addPowerUserTxHash: byName?.addPowerUser,
+      cmtaProvenanceTxHash: byName?.cmtaProvenance,
+      issuanceProvenanceTxHash: byName?.issuanceProvenance,
       publishScriptsTxHash: byName?.publishScripts,
       registrationTxHash: byName?.registration,
       registerTransferLogicTxHash: byName?.registerTransferLogic,

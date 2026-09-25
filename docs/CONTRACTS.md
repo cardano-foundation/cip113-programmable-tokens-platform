@@ -71,8 +71,8 @@ cd /tmp/cip113 && git checkout 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4
 shasum -a 256 plutus.json
 # -> 5ff5d6d2990d815973e4edcf6d46e7c3d0ff4bf3cb7c17a3e672e091b7ea0b46
 
-# and they reproduce from source: all 34 validator entries come back identical
-aiken build && shasum -a 256 plutus.json
+# The core's aiken-lang/fuzz dependency is declared as moving `main`; run the
+# repository verifier below to restore its original archive before building.
 ```
 
 ### rwa-token — a rebuild, not upstream's file
@@ -94,6 +94,16 @@ shasum -a 256 plutus.json     # upstream's STALE file: 301b2d9f…
 aiken build
 shasum -a 256 plutus.json     # the rebuild we ship:   2f1f1799…
 ```
+
+For a release check, run `python3 scripts/verify-cip171-sources.py` from this
+repository. It checks out both exact commits, restores the core's original
+`aiken-lang/fuzz` archive (`06874926ec70747f3fc4e2b9364ee9e1393441cc`),
+uses Aiken `v1.1.23+8949565`, and compares both rebuilt blueprint hashes with
+the shipped resources and the checked-in CIP-171 rebuild receipt. The original
+dependency archive has SHA-256
+`b8158eb84ec81114cfc5fa179927a82aafae64de41001e9767fdb02ceb8892d9`.
+The core's floating dependency means a plain future `aiken build` may resolve
+a different version; an external verifier also needs this pinned archive.
 
 `contracts-pin.json` records `upstream_committed_sha256` alongside ours, so it stays possible
 to tell whether upstream has since regenerated. If `301b2d9f…` ever changes, check whether

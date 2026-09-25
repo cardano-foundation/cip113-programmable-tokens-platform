@@ -162,6 +162,7 @@ export default function VerifyPolicyPage() {
               try {
                 // Per-wallet session id — must match the one KycVerificationFlow used.
                 const sessionId = getKeriSessionIdForWallet(walletAddress!);
+                await bindSessionToToken(policyId, sessionId);
                 await requestMpfInclusion(policyId, {
                   boundAddress: walletAddress!,
                   kycSessionId: sessionId,

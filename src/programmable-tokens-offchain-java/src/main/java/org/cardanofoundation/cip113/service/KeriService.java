@@ -16,6 +16,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.config.SchemaConfig;
 import org.cardanofoundation.cip113.entity.KycSessionEntity;
+import org.cardanofoundation.cip113.entity.KycIssuanceEntity;
 import org.cardanofoundation.cip113.model.AttestAnchorRequest;
 import org.cardanofoundation.cip113.model.Cip170AttestationData;
 import org.cardanofoundation.cip113.model.CredentialChainPublishRequest;
@@ -31,24 +32,29 @@ import org.cardanofoundation.cip113.service.keri.TokenMembershipHook;
 import org.cardanofoundation.cip113.util.CESRStreamUtil;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.cardanofoundation.cip113.util.IpexNotificationHelper;
-import org.cardanofoundation.signify.app.Exchanging;
-import org.cardanofoundation.signify.app.clienting.SignifyClient;
-import org.cardanofoundation.signify.app.credentialing.credentials.CredentialData;
-import org.cardanofoundation.signify.app.credentialing.credentials.IssueCredentialResult;
-import org.cardanofoundation.signify.app.credentialing.ipex.IpexAdmitArgs;
-import org.cardanofoundation.signify.app.credentialing.ipex.IpexAgreeArgs;
-import org.cardanofoundation.signify.app.credentialing.ipex.IpexGrantArgs;
-import org.cardanofoundation.signify.app.credentialing.registries.CreateRegistryArgs;
-import org.cardanofoundation.signify.app.credentialing.registries.RegistryResult;
-import org.cardanofoundation.signify.cesr.Saider;
-import org.cardanofoundation.signify.cesr.util.Utils;
-import org.cardanofoundation.signify.generated.keria.model.CompletedOperation;
-import org.cardanofoundation.signify.generated.keria.model.Credential;
-import org.cardanofoundation.signify.generated.keria.model.ExchangeResource;
-import org.cardanofoundation.signify.generated.keria.model.HabState;
-import org.cardanofoundation.signify.generated.keria.model.KeyStateRecord;
-import org.cardanofoundation.signify.generated.keria.model.OOBI;
-import org.cardanofoundation.signify.generated.keria.model.Registry;
+import id.veridian.signify.app.Exchanging;
+import id.veridian.signify.app.clienting.SignifyClient;
+import id.veridian.signify.app.credentialing.credentials.CredentialData;
+import id.veridian.signify.app.credentialing.credentials.IssueCredentialResult;
+import id.veridian.signify.app.credentialing.ipex.IpexAdmitArgs;
+import id.veridian.signify.app.credentialing.ipex.IpexAgreeArgs;
+import id.veridian.signify.app.credentialing.ipex.IpexGrantArgs;
+import id.veridian.signify.app.credentialing.registries.CreateRegistryArgs;
+import id.veridian.signify.app.credentialing.registries.RegistryResult;
+import id.veridian.signify.cesr.Saider;
+import id.veridian.signify.cesr.Serder;
+import id.veridian.signify.cesr.util.Utils;
+import id.veridian.signify.generated.keria.model.CompletedOperation;
+import id.veridian.signify.generated.keria.model.CompletedCredentialOperation;
+import id.veridian.signify.generated.keria.model.CompletedExchangeOperation;
+import id.veridian.signify.generated.keria.model.Credential;
+import id.veridian.signify.generated.keria.model.ExchangeResource;
+import id.veridian.signify.generated.keria.model.FailedOperation;
+import id.veridian.signify.generated.keria.model.HabState;
+import id.veridian.signify.generated.keria.model.KeyStateRecord;
+import id.veridian.signify.generated.keria.model.OOBI;
+import id.veridian.signify.generated.keria.model.Operation;
+import id.veridian.signify.generated.keria.model.Registry;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -99,6 +105,7 @@ public class KeriService {
     private final KycSessionRepository kycSessionRepository;
     private final KycProofService kycProofService;
     private final SchemaConfig schemaConfig;
+    private final SchemaOobiVerifier schemaOobiVerifier;
     private final ObjectMapper objectMapper;
     private final QuickTxBuilder quickTxBuilder;
 
@@ -112,6 +119,8 @@ public class KeriService {
     @Autowired(required = false)
     private ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
+    private final KycIssuanceStore issuanceStore;
+
     /** Per-module membership hooks keyed by {@link TokenMembershipHook#moduleId()}.
      *  Populated by Spring with every {@link TokenMembershipHook} bean on the classpath, so
      *  adding or removing a module's hook is a self-contained, no-edit change here. */
@@ -123,6 +132,7 @@ public class KeriService {
             KycSessionRepository kycSessionRepository,
             KycProofService kycProofService,
             SchemaConfig schemaConfig,
+            KycIssuanceStore issuanceStore,
             ObjectMapper objectMapper,
             QuickTxBuilder quickTxBuilder,
             List<TokenMembershipHook> hooks,
@@ -135,6 +145,8 @@ public class KeriService {
         this.kycSessionRepository = kycSessionRepository;
         this.kycProofService = kycProofService;
         this.schemaConfig = schemaConfig;
+        this.issuanceStore = issuanceStore;
+        this.schemaOobiVerifier = new SchemaOobiVerifier(objectMapper);
         this.objectMapper = objectMapper;
         this.quickTxBuilder = quickTxBuilder;
         this.membershipHooks = hooks.stream()
@@ -183,11 +195,7 @@ public class KeriService {
         String aid = matcher.group(1);
         client.contacts().get(aid);
 
-        kycSessionRepository.save(KycSessionEntity.builder()
-                .sessionId(sessionId)
-                .oobi(oobi)
-                .aid(aid)
-                .build());
+        issuanceStore.applyResolvedOobi(sessionId, oobi, aid);
         return true;
     }
 
@@ -244,6 +252,7 @@ public class KeriService {
         }
 
         String aid = kyc.getAid();
+        String presentationOwner = issuanceStore.reservePresentation(sessionId, aid, schemaEntry.getSaid());
         activePresentations.put(sessionId, Thread.currentThread());
         try {
             // Build /ipex/apply directly via createExchangeMessage so oobiUrl lands at
@@ -289,6 +298,12 @@ public class KeriService {
             ExchangeResource grantResource = client.exchanges().get(grantNote.a.d)
                     .orElseThrow(() -> new IllegalStateException("Grant exchange not found: " + grantNote.a.d));
 
+            @SuppressWarnings("unchecked")
+            Map<String, Object> acdc = (Map<String, Object>) grantResource.getExn().getE().get("acdc");
+            if (acdc == null || !schemaEntry.getSaid().equals(acdc.get("s"))) {
+                throw new IllegalStateException("Presented credential schema does not match the requested role");
+            }
+
             IpexAdmitArgs admitArgs = IpexAdmitArgs.builder()
                     .senderName(identifierName)
                     .recipient(aid)
@@ -303,25 +318,17 @@ public class KeriService {
             IpexNotificationHelper.markAndDelete(client, grantNote);
 
             @SuppressWarnings("unchecked")
-            Map<String, Object> acdc = (Map<String, Object>) grantResource.getExn().getE().get("acdc");
-            @SuppressWarnings("unchecked")
             Map<String, Object> rawAttributes = (Map<String, Object>) acdc.get("a");
             Map<String, Object> userAttributes = new LinkedHashMap<>(rawAttributes);
             userAttributes.remove("i");
 
-            kyc.setCredentialAid(acdc.get("d").toString());
-            kyc.setCredentialSaid(schemaEntry.getSaid());
-            try {
-                kyc.setCredentialAttributes(objectMapper.writeValueAsString(userAttributes));
-            } catch (JsonProcessingException e) {
-                log.warn("Failed to serialize credential attributes", e);
-            }
-            kyc.setCredentialRole(role.getValue());
-            kycSessionRepository.save(kyc);
+            issuanceStore.acceptPresented(sessionId, presentationOwner, aid, acdc.get("d").toString(),
+                    schemaEntry.getSaid(), objectMapper.writeValueAsString(userAttributes), role.getValue());
 
             return new CredentialResponse(role.name(), role.getValue(),
                     schemaEntry.getLabel(), userAttributes);
         } finally {
+            issuanceStore.releasePresentation(sessionId, presentationOwner);
             activePresentations.remove(sessionId);
         }
     }
@@ -349,6 +356,33 @@ public class KeriService {
         }
 
         String walletAid = kyc.getAid();
+        if (walletAid == null || walletAid.isBlank()) {
+            throw new IllegalStateException("Resolve the Veridian profile OOBI before issuing a credential");
+        }
+        log.info("Checking IPEX issuance prerequisites walletAid={} schemaSaid={}",
+                walletAid, schemaEntry.getSaid());
+        var contact = client.contacts().get(walletAid);
+        if (contact.isEmpty() || !walletAid.equals(contact.get().getId())) {
+            log.warn("IPEX issuance preflight failed: backend contact missing walletAid={}", walletAid);
+            throw new IllegalStateException("Veridian profile connection is missing on the backend. Reconnect its OOBI before issuing.");
+        }
+        // This is the exact URL embedded in the grant. Check it before creating
+        // an irreversible credential so a stale schema host cannot cause a silent wait.
+        try {
+            schemaOobiVerifier.verify(schemaConfig.getBaseUrl(), schemaEntry.getSaid());
+        } catch (IllegalStateException e) {
+            log.warn("IPEX issuance preflight failed: schema OOBI unavailable schemaSaid={} reason={}",
+                    schemaEntry.getSaid(), e.getMessage());
+            throw e;
+        }
+        String issuerAid = client.identifiers().get(identifierName)
+                .orElseThrow(() -> new IllegalStateException("KERI issuer identifier is unavailable"))
+                .getPrefix();
+        if (issuerAid == null || issuerAid.isBlank()) {
+            throw new IllegalStateException("KERI issuer identifier has no AID");
+        }
+        log.info("Starting IPEX issuance issuerAid={} walletAid={} schemaSaid={}",
+                issuerAid, walletAid, schemaEntry.getSaid());
         String registrySaid = getOrCreateRegistrySaid();
 
         Map<String, Object> additionalProps = new LinkedHashMap<>();
@@ -366,56 +400,185 @@ public class KeriService {
                         .build())
                 .build();
 
-        IssueCredentialResult issueResult = client.credentials().issue(identifierName, credentialData);
-        client.operations().wait(issueResult.getOp());
+        issuanceStore.claim(sessionId, walletAid, issuerAid, schemaEntry.getSaid(), schemaConfig.getBaseUrl(),
+                objectMapper.writeValueAsString(additionalProps));
+        IssueCredentialResult issueResult;
+        try {
+            issueResult = client.credentials().issue(identifierName, credentialData);
+            // Signify has already POSTed to KERIA when issue returns. Persist everything
+            // needed to recover before waiting on the asynchronous KERIA operation.
+            issuanceStore.saveIssued(sessionId,
+                    issueResult.getAcdc().getKed().get("d").toString(),
+                    issueResult.getOp().getName(),
+                    issueResult.getAcdc().getRaw(), issueResult.getIss().getRaw(),
+                    issueResult.getAnc().getRaw());
+        } catch (Exception e) {
+            issuanceStore.markUnknown(sessionId);
+            throw new IllegalStateException("Credential issuance outcome is uncertain. Do not issue again; ask the operator to reconcile this session.", e);
+        }
+        return prepareAndDeliverGrant(sessionId, issueResult);
+    }
 
-        String credentialSaid = issueResult.getAcdc().getKed().get("d").toString();
+    /** Reuses the server-side credential and the original signed grant. */
+    public CredentialResponse retryGrantDelivery(String sessionId) throws Exception {
+        KycIssuanceEntity issue = issuanceStore.find(sessionId)
+                .orElseThrow(() -> new NoSuchElementException("No issued credential is available for this session"));
+        if ("ACCEPTED".equals(issue.getStatus())) {
+            return responseFromIssue(issue);
+        }
+        if ("ISSUING".equals(issue.getStatus()) || "ISSUANCE_UNKNOWN".equals(issue.getStatus())) {
+            throw new IllegalStateException("Credential issuance outcome is uncertain. An operator must reconcile it before retrying.");
+        }
+        if (issue.getGrantRaw() == null) {
+            if (!"ISSUED".equals(issue.getStatus())
+                    && !"BUILDING".equals(issue.getStatus())) {
+                throw new IllegalStateException("Credential grant is not ready for delivery");
+            }
+            return prepareAndDeliverGrant(sessionId, null);
+        }
+        return deliverGrant(sessionId);
+    }
+
+    private CredentialResponse prepareAndDeliverGrant(String sessionId, IssueCredentialResult issuedResult) throws Exception {
+        String buildOwner = issuanceStore.claimGrantBuild(sessionId);
+        try {
+        KycIssuanceEntity issue = issuanceStore.find(sessionId).orElseThrow();
+        requireCurrentIssuer(issue);
+        if (issuedResult == null) {
+            issuedResult = IssueCredentialResult.builder()
+                    .acdc(serder(issue.getAcdcJson()))
+                    .iss(serder(issue.getIssJson()))
+                    .anc(serder(issue.getAncJson()))
+                    .build();
+        }
+        var operation = issuedResult.getOp() != null ? issuedResult.getOp()
+                : client.operations().get(issue.getIssueOperationName())
+                    .orElseThrow(() -> new IllegalStateException("KERIA credential issuance operation is unavailable"));
+        requireCompletedOperation(client.operations().wait(operation),
+                CompletedCredentialOperation.class, "credential issuance");
+        String credentialSaid = issue.getCredentialSaid();
         log.info("Issued credential SAID={} for session={}", credentialSaid, sessionId);
 
-        // Re-fetch the credential to obtain the anc attachment, which IssueCredentialResult does
-        // not expose. includeCESR=true asks KERIA to return the CESR-encoded ancatc list.
-        Credential issuedCredential = client.credentials().get(credentialSaid, true)
-                .orElseThrow(() -> new IllegalStateException("Issued credential not found: " + credentialSaid));
-        List<String> ancatc = issuedCredential.getAncatc();
-        String ancAttachment = (ancatc != null && !ancatc.isEmpty()) ? ancatc.getFirst() : null;
+        // The JSON representation includes ancatc. KERIA's CESR representation is a raw
+        // stream, which Signify's typed credentials().get method cannot deserialize.
+        Credential issuedCredential = client.credentials().get(credentialSaid, false)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Issued credential anchor attachment retrieval failed: credential not found " + credentialSaid));
+        String ancAttachment = requireAnchorAttachment(issuedCredential, credentialSaid);
 
         IpexGrantArgs grantArgs = IpexGrantArgs.builder()
                 .senderName(identifierName)
-                .recipient(walletAid)
+                .recipient(issue.getWalletAid())
                 .datetime(nowKeriTimestamp())
-                .acdc(issueResult.getAcdc())
-                .iss(issueResult.getIss())
-                .anc(issueResult.getAnc())
+                .acdc(issuedResult.getAcdc())
+                .iss(issuedResult.getIss())
+                .anc(issuedResult.getAnc())
                 .ancAttachment(ancAttachment)
                 .build();
+        var signingEstablishment = currentEstablishment();
         Exchanging.ExchangeMessageResult grantResult = buildGrantExchange(grantArgs,
-                schemaConfig.getBaseUrl(), schemaEntry.getSaid());
-        var grantOp = client.ipex().submitGrant(identifierName, grantResult.exn(),
-                grantResult.sigs(), grantResult.atc(), Collections.singletonList(walletAid));
-        client.operations().wait(grantOp);
-
-        log.info("IPEX grant submitted for credential SAID={}, waiting for wallet admit...", credentialSaid);
-
-        // submitGrant only confirms KERIA queued the message; the wallet still has to
-        // surface the credential and send back /ipex/admit once the user accepts.
-        IpexNotificationHelper.Notification admitNote = IpexNotificationHelper.waitForNotification(
-                client, "/exn/ipex/admit");
-        IpexNotificationHelper.markAndDelete(client, admitNote);
-
-        log.info("Wallet admitted credential SAID={}", credentialSaid);
-
-        kyc.setCredentialAid(credentialSaid);
-        kyc.setCredentialSaid(schemaEntry.getSaid());
-        try {
-            kyc.setCredentialAttributes(objectMapper.writeValueAsString(additionalProps));
-        } catch (JsonProcessingException e) {
-            log.warn("Failed to serialize credential attributes", e);
+                issue.getSchemaOobiUrl(), issue.getSchemaSaid());
+        Object grantSaidValue = grantResult.exn().getKed().get("d");
+        if (!(grantSaidValue instanceof String grantSaid) || grantSaid.isBlank()) {
+            throw new IllegalStateException("Submitted IPEX grant has no exchange SAID");
         }
-        kyc.setCredentialRole(role.getValue());
-        kycSessionRepository.save(kyc);
 
-        return new CredentialResponse(role.name(), role.getValue(),
-                schemaEntry.getLabel(), additionalProps);
+        var establishment = currentEstablishment();
+        if (!signingEstablishment.getS().equals(establishment.getS())
+                || !signingEstablishment.getD().equals(establishment.getD())) {
+            throw new IllegalStateException("Issuer key state rotated while signing the grant; operator recovery is required");
+        }
+        issuanceStore.saveGrant(sessionId, buildOwner, grantSaid, grantResult.exn().getRaw(),
+                objectMapper.writeValueAsString(grantResult.sigs()), grantResult.atc(),
+                establishment.getS(), establishment.getD());
+        return deliverGrant(sessionId);
+        } finally {
+            issuanceStore.releaseGrantBuild(sessionId, buildOwner);
+        }
+    }
+
+    private CredentialResponse deliverGrant(String sessionId) throws Exception {
+        String owner = issuanceStore.claimDelivery(sessionId);
+        KycIssuanceEntity issue = issuanceStore.find(sessionId).orElseThrow();
+        String grantSaid = issue.getGrantSaid();
+        try {
+            requireCurrentIssuer(issue);
+            var establishment = currentEstablishment();
+            if (!issue.getSigningEstablishmentSeq().equals(establishment.getS())
+                    || !issue.getSigningEstablishmentDigest().equals(establishment.getD())) {
+                throw new IllegalStateException("Issuer key state changed since this grant was signed. Operator recovery is required.");
+            }
+            Serder grant = serder(issue.getGrantRaw());
+            if (!issue.getGrantRaw().equals(grant.getRaw())
+                    || !grantSaid.equals(grant.getKed().get("d"))) {
+                throw new IllegalStateException("Stored signed grant is invalid; operator recovery is required");
+            }
+            @SuppressWarnings("unchecked")
+            List<String> sigs = objectMapper.readValue(issue.getGrantSigs(), List.class);
+            var grantOp = client.ipex().submitGrant(identifierName, grant,
+                    sigs, issue.getGrantAtc(), Collections.singletonList(issue.getWalletAid()));
+            requireCompletedOperation(client.operations().wait(grantOp),
+                    CompletedExchangeOperation.class, "credential grant");
+            log.info("IPEX grant submitted credentialSaid={} grantSaid={} issuerAid={} walletAid={}; waiting for admit",
+                    issue.getCredentialSaid(), grantSaid, issue.getIssuerAid(), issue.getWalletAid());
+            IpexNotificationHelper.Notification admitNote = IpexNotificationHelper.waitForAdmit(
+                    client, grantSaid, issue.getWalletAid(), issue.getIssuerAid());
+            issuanceStore.accept(sessionId, owner, grantSaid);
+            try {
+                IpexNotificationHelper.markAndDelete(client, admitNote);
+            } catch (Exception e) {
+                log.warn("Could not clear matching admit notification grantSaid={}", grantSaid, e);
+            }
+            return responseFromIssue(issue);
+        } finally {
+            issuanceStore.releaseDelivery(sessionId, owner);
+        }
+    }
+
+    private id.veridian.signify.generated.keria.model.StateEERecord currentEstablishment() throws Exception {
+        HabState hab = client.identifiers().get(identifierName)
+                .orElseThrow(() -> new IllegalStateException("KERI issuer identifier is unavailable"));
+        if (hab.getState() == null || hab.getState().getEe() == null) {
+            throw new IllegalStateException("Issuer establishment key state is unavailable");
+        }
+        return hab.getState().getEe();
+    }
+
+    private void requireCurrentIssuer(KycIssuanceEntity issue) throws Exception {
+        HabState hab = client.identifiers().get(identifierName)
+                .orElseThrow(() -> new IllegalStateException("KERI issuer identifier is unavailable"));
+        if (!issue.getIssuerAid().equals(hab.getPrefix())) {
+            throw new IllegalStateException("Issuer AID changed since credential issuance. Operator recovery is required.");
+        }
+    }
+
+    private Serder serder(String raw) throws Exception {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> ked = objectMapper.readValue(raw, LinkedHashMap.class);
+        return new Serder(ked);
+    }
+
+    private CredentialResponse responseFromIssue(KycIssuanceEntity issue) throws Exception {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> attributes = objectMapper.readValue(issue.getAttributesJson(), LinkedHashMap.class);
+        SchemaConfig.SchemaEntry schema = schemaConfig.getSchemaForRole(Role.USER);
+        return new CredentialResponse("USER", Role.USER.getValue(),
+                schema == null ? "User" : schema.getLabel(), attributes);
+    }
+
+    static void requireCompletedOperation(Operation result, Class<? extends Operation> expected,
+                                          String stage) {
+        if (result instanceof FailedOperation failed) {
+            var error = failed.getError();
+            String detail = error == null ? "no error details" :
+                    "code " + error.getCode() + ": " + error.getMessage();
+            throw new RuntimeException("KERIA " + stage + " operation " + result.getName()
+                    + " failed (" + detail + "). Check issuer KERIA processing and recipient routing.");
+        }
+        if (result == null || !expected.isInstance(result)) {
+            throw new RuntimeException("KERIA " + stage + " did not return a completed "
+                    + expected.getSimpleName() + " operation");
+        }
     }
 
     // ── Session state ─────────────────────────────────────────────────────────
@@ -436,6 +599,14 @@ public class KeriService {
                 .exists(true)
                 .hasCredential(hasCredential)
                 .hasCardanoAddress(hasCardanoAddress);
+
+        issuanceStore.find(sessionId).ifPresent(issue -> builder
+                .issuanceStatus(issue.getStatus())
+                .canRetryGrant("READY".equals(issue.getStatus())
+                        || "ISSUED".equals(issue.getStatus())
+                        || (("WAITING".equals(issue.getStatus()) || "BUILDING".equals(issue.getStatus()))
+                                && issue.getDeliveryLeaseUntil() != null
+                                && issue.getDeliveryLeaseUntil().isBefore(java.time.Instant.now()))));
 
         if (hasCredential) {
             builder.attributes(resolveAttributes(kyc));
@@ -718,6 +889,16 @@ public class KeriService {
             return null;
         }
         return response.body();
+    }
+
+    static String requireAnchorAttachment(Credential credential, String credentialSaid) {
+        List<String> attachments = credential == null ? null : credential.getAncatc();
+        if (attachments == null || attachments.isEmpty()
+                || attachments.getFirst() == null || attachments.getFirst().isBlank()) {
+            throw new IllegalStateException("Issued credential anchor attachment retrieval failed for "
+                    + credentialSaid + "; grant was not submitted");
+        }
+        return attachments.getFirst();
     }
 
     private Exchanging.ExchangeMessageResult buildGrantExchange(IpexGrantArgs args,

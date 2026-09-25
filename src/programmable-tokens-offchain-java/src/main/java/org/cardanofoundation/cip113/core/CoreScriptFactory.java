@@ -15,6 +15,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.model.bootstrap.TxInput;
+import org.cardanofoundation.cip113.service.RwaCip171ProvenanceService;
 import org.springframework.stereotype.Service;
 
 import java.util.Map;
@@ -103,7 +104,9 @@ public class CoreScriptFactory {
         var params = ListPlutusData.of(
                 scriptCredential(mintingLogicHash),
                 policyId(bootstrap.protocolParams().policyId()));
-        return apply(CoreValidator.ISSUANCE_MINT, params);
+        var script = apply(CoreValidator.ISSUANCE_MINT, params);
+        RwaCip171ProvenanceService.recordIssuance(blueprint.compiledCode(CoreValidator.ISSUANCE_MINT), params, script);
+        return script;
     }
 
     /** {@code always_fail} under a caller-chosen nonce, which is its only parameter. */

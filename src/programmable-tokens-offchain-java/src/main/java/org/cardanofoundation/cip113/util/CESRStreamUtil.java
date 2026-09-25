@@ -11,7 +11,7 @@ import java.util.Map;
 /**
  * Utility for parsing and reconstructing CESR (Composable Event Streaming Representation) streams.
  *
- * Replaces {@code org.cardanofoundation.signify.cesr.util.CESRStreamUtil} which was removed when
+ * Replaces {@code id.veridian.signify.cesr.util.CESRStreamUtil} which was removed when
  * the signify-java library moved to a typed credential model. CIP-170 still requires the raw
  * vcp+iss+acdc CESR chain, so we keep this parser locally.
  */

@@ -1,18 +1,22 @@
 package org.cardanofoundation.cip113.util;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import lombok.extern.slf4j.Slf4j;
-import org.cardanofoundation.signify.app.Notifying;
-import org.cardanofoundation.signify.app.clienting.SignifyClient;
-import org.cardanofoundation.signify.cesr.util.Utils;
+import id.veridian.signify.app.Notifying;
+import id.veridian.signify.app.clienting.SignifyClient;
+import id.veridian.signify.generated.keria.model.Exn;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 
 @Slf4j
 public class IpexNotificationHelper {
 
     private static final int MAX_RETRIES = 20;
+    private static final int ADMIT_MAX_RETRIES = 60;
     private static final long POLL_INTERVAL_MS = 2000;
+    private static final int PAGE_SIZE = 25;
 
     public static Notification waitForNotification(SignifyClient client, String route) throws Exception {
         return waitForNotification(client, route, route.startsWith("/exn/") ? route.substring(4) : "/exn" + route);
@@ -27,7 +31,7 @@ public class IpexNotificationHelper {
         var accepted = List.of(acceptedRoutes);
         for (int i = 0; i < MAX_RETRIES; i++) {
             Notifying.Notifications.NotificationListResponse response = client.notifications().list();
-            List<Notification> notes = Utils.fromJson(response.notes(), new TypeReference<>() {});
+            List<Notification> notes = toNotifications(response.notes());
 
             var matching = notes.stream()
                     .filter(n -> n.a != null && accepted.contains(n.a.r) && !Boolean.TRUE.equals(n.r))
@@ -42,6 +46,99 @@ public class IpexNotificationHelper {
             Thread.sleep(POLL_INTERVAL_MS);
         }
         throw new RuntimeException("Timed out waiting for notification: " + accepted);
+    }
+
+    /**
+     * Wait for the wallet's admit of one specific grant. KERIA notifications only
+     * contain a route and exchange SAID, so the referenced exchange must be checked
+     * before it can acknowledge this issuance. Unrelated notifications are retained.
+     */
+    public static Notification waitForAdmit(SignifyClient client, String grantSaid,
+                                            String walletAid, String issuerAid) throws Exception {
+        return waitForAdmit(client, grantSaid, walletAid, issuerAid, ADMIT_MAX_RETRIES, POLL_INTERVAL_MS);
+    }
+
+    static Notification waitForAdmit(SignifyClient client, String grantSaid,
+                                     String walletAid, String issuerAid,
+                                     int maxRetries, long pollIntervalMs) throws Exception {
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            int start = 0;
+            int snapshotTotal = Integer.MAX_VALUE;
+            Set<String> seen = new HashSet<>();
+            while (start < snapshotTotal) {
+                int end = start + PAGE_SIZE - 1;
+                Notifying.Notifications.NotificationListResponse response =
+                        client.notifications().list(start, end);
+                snapshotTotal = Math.min(snapshotTotal, response.total());
+                List<Notification> notes = toNotifications(response.notes());
+                if (notes == null || notes.isEmpty()) {
+                    break;
+                }
+                for (Notification note : notes) {
+                    if (note == null || note.i == null || !seen.add(note.i)
+                            || Boolean.TRUE.equals(note.r) || note.a == null
+                            || note.a.d == null || !isAdmitRoute(note.a.r)) {
+                        continue;
+                    }
+                    try {
+                        var exchange = client.exchanges().get(note.a.d);
+                        if (exchange.isPresent() && matchesAdmit(exchange.get().getExn(), note.a.d,
+                                grantSaid, walletAid, issuerAid)) {
+                            log.info("Received matching IPEX admit grantSaid={} walletAid={}", grantSaid, walletAid);
+                            return note;
+                        }
+                    } catch (RuntimeException e) {
+                        // A malformed exchange may be repaired or become available
+                        // on a later poll; never consume its notification here.
+                        log.warn("Could not inspect IPEX admit exchangeSaid={}", note.a.d, e);
+                    }
+                }
+                // Use explicit absolute ranges; list(start) always ends at entry 24.
+                if (response.end() < start || response.end() + 1 <= start) {
+                    break;
+                }
+                start = response.end() + 1;
+            }
+            log.info("Waiting for matching IPEX admit grantSaid={} walletAid={} (attempt {}/{})",
+                    grantSaid, walletAid, attempt + 1, maxRetries);
+            if (attempt + 1 < maxRetries) {
+                Thread.sleep(pollIntervalMs);
+            }
+        }
+        throw new RuntimeException("Timed out waiting for admit of grant " + grantSaid
+                + " from wallet " + walletAid);
+    }
+
+    static boolean matchesAdmit(Exn exn, String notificationSaid, String grantSaid,
+                                String walletAid, String issuerAid) {
+        return exn != null
+                && Objects.equals("/ipex/admit", exn.getR())
+                && Objects.equals(notificationSaid, exn.getD())
+                && Objects.equals(grantSaid, exn.getP())
+                && Objects.equals(walletAid, exn.getI())
+                && Objects.equals(issuerAid, exn.getRp());
+    }
+
+    private static boolean isAdmitRoute(String route) {
+        return "/exn/ipex/admit".equals(route) || "/ipex/admit".equals(route);
+    }
+
+    private static List<Notification> toNotifications(
+            List<id.veridian.signify.generated.keria.model.Notification> notes) {
+        if (notes == null) {
+            return List.of();
+        }
+        return notes.stream().filter(Objects::nonNull).map(note -> {
+            Notification result = new Notification();
+            result.i = note.getI();
+            result.r = note.getR();
+            if (note.getA() != null) {
+                result.a = new Notification.NotificationBody();
+                result.a.r = note.getA().getR();
+                result.a.d = note.getA().getD();
+            }
+            return result;
+        }).toList();
     }
 
     public static void markAndDelete(SignifyClient client, Notification note) throws Exception {

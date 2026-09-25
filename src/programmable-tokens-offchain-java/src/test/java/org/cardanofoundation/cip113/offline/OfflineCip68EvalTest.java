@@ -935,6 +935,14 @@ public class OfflineCip68EvalTest {
      * supply cap and from the denylist and KYC gates.
      */
     @Test
+    public void rwaTokenStructuralChainPublishesBothProvenanceRecords() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L);
+        Assertions.assertNotNull(st.built().cmtaProvenanceCborHex());
+        Assertions.assertNotNull(st.built().issuanceProvenanceCborHex());
+        Assertions.assertNull(st.built().publishScriptsCborHex());
+    }
+
+    @Test
     public void rwaTokenChainAndCip68Mint() throws Exception {
         var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress());
         var chain = st.chain();
@@ -2018,6 +2026,14 @@ public class OfflineCip68EvalTest {
         var stages = new java.util.LinkedHashMap<String, String>();
         stages.put("genesis", built.genesisCborHex());
         stages.put("addPowerUser", built.addPowerUserCborHex());
+        stages.put("cmtaProvenance", built.cmtaProvenanceCborHex());
+        stages.put("issuanceProvenance", built.issuanceProvenanceCborHex());
+        var cmtaTx = Transaction.deserialize(HexUtil.decodeHexString(built.cmtaProvenanceCborHex()));
+        var issuanceTx = Transaction.deserialize(HexUtil.decodeHexString(built.issuanceProvenanceCborHex()));
+        Assertions.assertEquals(built.addPowerUserTxHash(),
+                cmtaTx.getBody().getInputs().getFirst().getTransactionId());
+        Assertions.assertEquals(built.cmtaProvenanceTxHash(),
+                issuanceTx.getBody().getInputs().getFirst().getTransactionId());
         // Present only on the mint path, and it must be submitted BEFORE the registration —
         // the registration reads its outputs as reference inputs.
         if (built.publishScriptsCborHex() != null) {
@@ -2035,6 +2051,10 @@ public class OfflineCip68EvalTest {
         for (var stage : stages.entrySet()) {
             Assertions.assertNotNull(stage.getValue(), stage.getKey() + " cbor missing from chain result");
             var stageTx = Transaction.deserialize(HexUtil.decodeHexString(stage.getValue()));
+            if (stage.getKey().endsWith("Provenance")) {
+                Assertions.assertNotNull(stageTx.getBody().getAuxiliaryDataHash(),
+                        stage.getKey() + " must commit to label-1984 metadata");
+            }
             int evaluated = chain.reportAndCheckRedeemers(label + "/" + stage.getKey(), stageTx);
             log.info("[{}/{}] {} redeemer(s) genuinely evaluated, size={} bytes",
                     label, stage.getKey(), evaluated, stageTx.serialize().length);
@@ -2044,7 +2064,8 @@ public class OfflineCip68EvalTest {
             // measure. Every other stage must have really run its scripts.
             if (!"registerTransferLogic".equals(stage.getKey())
                     && !"registerThirdPartyTransferLogic".equals(stage.getKey())
-                    && !"publishScripts".equals(stage.getKey())) {
+                    && !"publishScripts".equals(stage.getKey())
+                    && !stage.getKey().endsWith("Provenance")) {
                 Assertions.assertTrue(evaluated > 0,
                         stage.getKey() + " produced no genuinely evaluated redeemer");
             }

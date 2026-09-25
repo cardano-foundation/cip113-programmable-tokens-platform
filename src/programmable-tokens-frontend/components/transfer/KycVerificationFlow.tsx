@@ -26,12 +26,13 @@ import {
   getSession,
   getAvailableRoles,
   issueCredential,
+  retryGrantDelivery,
   type KycProofResponse,
   type CredentialResponse,
   type AvailableRole,
 } from "@/lib/api/keri";
 import { setKycProof, type KycProofCookie } from "@/lib/utils/kyc-cookie";
-import { getKeriSessionIdForWallet } from "@/lib/utils/keri-session";
+import { getKeriSessionIdForWallet, storeKeriSessionIdForWallet } from "@/lib/utils/keri-session";
 import { bindSessionToToken } from "@/lib/api/kyc-extended";
 
 type KycStep = 1 | 2 | 3 | 4;
@@ -64,7 +65,16 @@ export function KycVerificationFlow({
   // Per-wallet session id: switching wallets in the same tab yields a fresh
   // session, so the backend's cached credential / KYC proof from a previous
   // wallet cannot be inherited by the new one.
-  const sessionIdRef = useRef(getKeriSessionIdForWallet(senderAddress));
+  const [initialSessionId] = useState(() =>
+    forceFresh
+      ? crypto.randomUUID()
+      : getKeriSessionIdForWallet(senderAddress)
+  );
+  const sessionIdRef = useRef(initialSessionId);
+
+  useEffect(() => {
+    if (forceFresh) storeKeriSessionIdForWallet(senderAddress, initialSessionId);
+  }, [forceFresh, senderAddress, initialSessionId]);
 
   // Step 1: OOBI
   const [oobiUrl, setOobiUrl] = useState<string | null>(null);
@@ -93,6 +103,20 @@ export function KycVerificationFlow({
   });
   const [isIssuing, setIsIssuing] = useState(false);
   const [issueError, setIssueError] = useState<string | null>(null);
+  const [issuanceStatus, setIssuanceStatus] = useState<string | null>(null);
+  const [canRetryGrant, setCanRetryGrant] = useState(false);
+
+  const refreshIssuance = useCallback(async () => {
+    const sessionId = sessionIdRef.current;
+    const data = await getSession(sessionId);
+    if (sessionIdRef.current !== sessionId) return;
+    setIssuanceStatus(data.issuanceStatus ?? null);
+    setCanRetryGrant(data.canRetryGrant ?? false);
+  }, []);
+
+  useEffect(() => {
+    refreshIssuance().catch(() => {});
+  }, [refreshIssuance]);
 
   // Restore session on mount (skipped when caller asked for a fresh flow).
   useEffect(() => {
@@ -100,6 +124,9 @@ export function KycVerificationFlow({
     const sessionId = sessionIdRef.current;
     getSession(sessionId)
       .then((data) => {
+        if (sessionIdRef.current !== sessionId) return;
+        setIssuanceStatus(data.issuanceStatus ?? null);
+        setCanRetryGrant(data.canRetryGrant ?? false);
         if (data.exists && data.hasCredential && data.attributes) {
           setCredential({
             role: data.credentialRoleName ?? "USER",
@@ -254,20 +281,23 @@ export function KycVerificationFlow({
   // Load available roles when entering step 3
   useEffect(() => {
     if (step === 3 && availableRoles === null && !credential) {
-      getAvailableRoles(sessionIdRef.current)
+      const sessionId = sessionIdRef.current;
+      getAvailableRoles(sessionId)
         .then((data) => {
+          if (sessionIdRef.current !== sessionId) return;
           setAvailableRoles(data.availableRoles ?? []);
           if (data.availableRoles?.length === 1) {
             setSelectedRole(data.availableRoles[0].role);
           }
         })
-        .catch((e) =>
+        .catch((e) => {
+          if (sessionIdRef.current !== sessionId) return;
           setError(
             e instanceof Error
               ? e.message
               : "Failed to load available roles"
-          )
-        );
+          );
+        });
     }
   }, [step, availableRoles, credential]);
 
@@ -313,21 +343,61 @@ export function KycVerificationFlow({
     setIsIssuing(true);
     setIssueError(null);
     try {
-      await issueCredential(sessionIdRef.current, {
+      const issued = await issueCredential(sessionIdRef.current, {
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         email: email.trim(),
       });
       setIssueError(null);
       setShowIssueForm(false);
+      setCredential(issued);
+      setStep(4);
     } catch (err) {
       setIssueError(
         err instanceof Error ? err.message : "Failed to issue credential"
       );
     } finally {
+      await refreshIssuance().catch(() => {});
       setIsIssuing(false);
     }
-  }, [issueForm]);
+  }, [issueForm, refreshIssuance]);
+
+  const handleRetryGrant = useCallback(async () => {
+    setIsIssuing(true);
+    setIssueError(null);
+    try {
+      const issued = await retryGrantDelivery(sessionIdRef.current);
+      setShowIssueForm(false);
+      setCredential(issued);
+      setStep(4);
+    } catch (err) {
+      setIssueError(err instanceof Error ? err.message : 'Grant delivery failed');
+    } finally {
+      await refreshIssuance().catch(() => {});
+      setIsIssuing(false);
+    }
+  }, [refreshIssuance]);
+
+  const startNewSession = useCallback((openIssueForm = false) => {
+    const id = crypto.randomUUID();
+    storeKeriSessionIdForWallet(senderAddress, id);
+    sessionIdRef.current = id;
+    stopCamera();
+    setIssuanceStatus(null);
+    setCanRetryGrant(false);
+    setCredential(null);
+    setAvailableRoles(null);
+    setSelectedRole(null);
+    setShowIssueForm(openIssueForm);
+    setIssueForm({ firstName: '', lastName: '', email: '' });
+    setIssueError(null);
+    setOobiUrl(null);
+    setOobiQrDataUrl(null);
+    setOobiCopied(false);
+    setPartnerOobi('');
+    setStep(1);
+    setError(null);
+  }, [senderAddress, stopCamera]);
 
   // ── Step 4: Generate proof ────────────────────────────────────────────────
 
@@ -700,6 +770,42 @@ export function KycVerificationFlow({
 
               {showIssueForm && (
                 <div className="bg-dark-900 rounded-lg p-4 space-y-3">
+                  {issuanceStatus && issuanceStatus !== 'ACCEPTED' ? (
+                    <>
+                      <p className="text-xs text-amber-300">
+                        {issuanceStatus === 'ISSUANCE_UNKNOWN'
+                          ? 'Issuance outcome is uncertain. Contact the operator.'
+                          : issuanceStatus === 'PRESENTING'
+                          ? 'The previous credential presentation was interrupted. Start a separate KYC session to continue; the old exchange remains unchanged.'
+                          : 'A credential is already pending for this session. Repair the Veridian connection and retry the same grant.'}
+                      </p>
+                      {canRetryGrant && (
+                        <Button variant="primary" onClick={handleRetryGrant}
+                          isLoading={isIssuing} disabled={isIssuing} className="w-full">
+                          Retry grant delivery
+                        </Button>
+                      )}
+                      {(issuanceStatus === 'READY'
+                        || (issuanceStatus === 'WAITING' && canRetryGrant)) && (
+                        <>
+                          <p className="text-xs text-dark-400">
+                            Issuing again creates another credential. The existing one remains issued.
+                          </p>
+                          <Button variant="ghost" onClick={() => startNewSession(true)}
+                            disabled={isIssuing || isLoading} className="w-full">
+                            Issue a new credential
+                          </Button>
+                        </>
+                      )}
+                      {issuanceStatus === 'PRESENTING' && (
+                        <Button variant="ghost" onClick={() => startNewSession()} disabled={isIssuing || isLoading} className="w-full">
+                          Start new KYC session
+                        </Button>
+                      )}
+                      {issueError && <p className="text-xs text-red-400">{issueError}</p>}
+                    </>
+                  ) : (
+                  <>
                   <p className="text-xs text-dark-400">
                     Provide your details below and a basic User credential will
                     be issued to your wallet.
@@ -752,6 +858,8 @@ export function KycVerificationFlow({
                       ? "Issuing..."
                       : "Issue User Credential"}
                   </Button>
+                  </>
+                  )}
                 </div>
               )}
             </div>

@@ -18,6 +18,8 @@ import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.MapPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.PlutusData;
 import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
+import com.bloxbean.cardano.client.metadata.MetadataBuilder;
+import com.bloxbean.cardano.client.metadata.MetadataList;
 import com.bloxbean.cardano.client.plutus.spec.Redeemer;
 import com.bloxbean.cardano.client.plutus.spec.RedeemerTag;
 import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
@@ -68,6 +70,7 @@ import org.cardanofoundation.cip113.service.LinkedListService;
 import org.cardanofoundation.cip113.service.ProtocolScriptBuilderService;
 import org.cardanofoundation.cip113.service.RwaTokenAllowlistService;
 import org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService;
+import org.cardanofoundation.cip113.service.RwaCip171ProvenanceService;
 import org.cardanofoundation.cip113.service.UtxoProvider;
 import com.easy1staking.cardano.model.AssetType;
 import com.bloxbean.cardano.client.address.Address;
@@ -360,7 +363,9 @@ public class RwaTokenModuleHandler
     public TransactionContext<RegistrationResult> buildRegistrationTransaction(
             RwaTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
-        return buildRegistrationTransaction(request, protocolParams, RegistrationChainInputs.NONE);
+        return TransactionContext.typedError(
+                "Standalone CMTA registration is disabled because CIP-171 provenance is required. "
+                + "Use /rwa-token/build-chain to publish both records before registration.");
     }
 
     /** The UTxOs a chained registration cannot discover by querying the chain,
@@ -4039,6 +4044,8 @@ public class RwaTokenModuleHandler
     public record ChainBuildResult(
             String genesisCborHex,
             String addPowerUserCborHex,
+            String cmtaProvenanceCborHex,
+            String issuanceProvenanceCborHex,
             /** Publishes {@code minting_logic} + {@code global_state} spend as reference
              *  scripts. Without it the registration tx cannot fit under max-tx-size when
              *  it carries a first mint — see {@link #buildPublishScriptsTransaction}. */
@@ -4062,6 +4069,8 @@ public class RwaTokenModuleHandler
             String powerUsersPolicyId,
             String genesisTxHash,
             String addPowerUserTxHash,
+            String cmtaProvenanceTxHash,
+            String issuanceProvenanceTxHash,
             String publishScriptsTxHash,
             String registrationTxHash,
             String registerTransferLogicTxHash,
@@ -4093,7 +4102,7 @@ public class RwaTokenModuleHandler
     public TransactionContext<ChainBuildResult> buildFullRegistrationChain(
             RwaTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
-        try {
+        try (var provenance = RwaCip171ProvenanceService.beginCapture()) {
             String adminAddress = request.getFeePayerAddress();
             if (adminAddress == null || adminAddress.isBlank()) {
                 return TransactionContext.typedError("feePayerAddress is required");
@@ -4316,6 +4325,9 @@ public class RwaTokenModuleHandler
             // ordering can shift across SDK versions and preBalanceTx hooks).
             RwaTokenScriptBuilderService.RwaTokenScripts chainScripts =
                     resolveScripts(reg, protocolParams);
+            // Both records must reproduce the exact scripts used by this chain. A
+            // mismatch fails the transactional build before any CBOR is returned.
+            var provenanceRecords = provenance.records(reg, chainScripts);
             String gsSpendAddr = AddressProvider.getEntAddress(
                     chainScripts.globalStateSpend(), network.getCardanoNetwork()).getAddress();
             String puSpendAddr = AddressProvider.getEntAddress(
@@ -4361,6 +4373,39 @@ public class RwaTokenModuleHandler
             }
             hybridUtxoSupplier.add(addPuChange);
 
+            // ── PHASE 2.25 ─ Publish both mandatory CIP-171 records ──────
+            // Each label-1984 value describes one source pin. The CMTA validators
+            // and the core issuance policy have different source commits, so they
+            // occupy separate transactions. Spending each predecessor's admin
+            // change makes registration causally depend on both publications.
+            Transaction cmtaProvenanceTx = buildProvenanceTransaction(
+                    adminAddress, addPuChange, provenanceRecords.cmta());
+            String cmtaProvenanceCbor = cmtaProvenanceTx.serializeToHex();
+            String cmtaProvenanceTxHash = TransactionUtil.getTxHash(cmtaProvenanceTx.serialize());
+            checkedTxSize("cmtaProvenance", cmtaProvenanceTx);
+            Utxo cmtaProvenanceChange = findOutputAtAddress(
+                    cmtaProvenanceTx, cmtaProvenanceTxHash, adminAddress,
+                    BigInteger.valueOf(10_000_000L));
+            if (cmtaProvenanceChange == null) {
+                return TransactionContext.typedError(
+                        "chain[cmtaProvenance]: no admin change above 10 ADA to fund the next phase");
+            }
+            hybridUtxoSupplier.add(cmtaProvenanceChange);
+
+            Transaction issuanceProvenanceTx = buildProvenanceTransaction(
+                    adminAddress, cmtaProvenanceChange, provenanceRecords.issuance());
+            String issuanceProvenanceCbor = issuanceProvenanceTx.serializeToHex();
+            String issuanceProvenanceTxHash = TransactionUtil.getTxHash(issuanceProvenanceTx.serialize());
+            checkedTxSize("issuanceProvenance", issuanceProvenanceTx);
+            Utxo issuanceProvenanceChange = findOutputAtAddress(
+                    issuanceProvenanceTx, issuanceProvenanceTxHash, adminAddress,
+                    BigInteger.valueOf(10_000_000L));
+            if (issuanceProvenanceChange == null) {
+                return TransactionContext.typedError(
+                        "chain[issuanceProvenance]: no admin change above 10 ADA to fund registration");
+            }
+            hybridUtxoSupplier.add(issuanceProvenanceChange);
+
             // ── PHASE 2.5 ─ Publish the two big per-token scripts ──────────
             // The registration tx attaches five validators inline; minting_logic (7211 B)
             // and the global_state spend (4183 B) alone are 11 394 of the 16 384-byte
@@ -4390,7 +4435,7 @@ public class RwaTokenModuleHandler
             if (chainWillMint) {
                 TransactionContext<PublishedRefScripts> publishResult = buildPublishScriptsTransaction(
                         adminAddress, chainScripts.mintingAuthority(), chainScripts.globalStateSpend(),
-                        addPuChange);
+                        issuanceProvenanceChange);
                 if (!publishResult.isSuccessful()) {
                     return TransactionContext.typedError("chain[publishScripts]: " + publishResult.error());
                 }
@@ -4453,7 +4498,8 @@ public class RwaTokenModuleHandler
             // it also created sit at the admin's ENTERPRISE address precisely so this scan
             // (which matches on the fee-payer address) cannot pick one of them as a funding
             // input and destroy the reference script.
-            request.setChainingTransactionCborHex(chainWillMint ? publishCbor : addPuCbor);
+            request.setChainingTransactionCborHex(
+                    chainWillMint ? publishCbor : issuanceProvenanceCbor);
             request.setQuantity(firstMintQuantity);
             // Align the asset name with what genesis actually persisted. For a CIP-68
             // registration these two DIVERGE: the request carries the base name the user
@@ -4587,10 +4633,12 @@ public class RwaTokenModuleHandler
             }
 
             return TransactionContext.ok(null, new ChainBuildResult(
-                    genesisCbor, addPuCbor, publishCbor, regCbor, certCbor, thirdPartyCertCbor,
+                    genesisCbor, addPuCbor, cmtaProvenanceCbor, issuanceProvenanceCbor,
+                    publishCbor, regCbor, certCbor, thirdPartyCertCbor,
                     reg.getGlobalStatePolicyId(), progTokenPolicyId,
                     reg.getDenylistPolicyId(), reg.getPowerUsersPolicyId(),
-                    genesisTxHash, addPuTxHash, publishTxHash, regTxHash, certTxHash,
+                    genesisTxHash, addPuTxHash, cmtaProvenanceTxHash,
+                    issuanceProvenanceTxHash, publishTxHash, regTxHash, certTxHash,
                     thirdPartyCertTxHash));
         } catch (Exception e) {
             log.error("rwa-token chain build failed", e);
@@ -4611,6 +4659,33 @@ public class RwaTokenModuleHandler
      *
      *  <p>Used by the chain orchestrator to extract funding + script-locked
      *  outputs from each preceding tx for the next one to consume. */
+    private Transaction buildProvenanceTransaction(String adminAddress, Utxo funding,
+                                                   MetadataList record) throws Exception {
+        var metadata = MetadataBuilder.createMetadata();
+        metadata.put(1984L, record);
+        Tx tx = new Tx()
+                .from(adminAddress)
+                .collectFrom(List.of(funding))
+                .payToAddress(adminAddress, List.of(Amount.lovelace(BigInteger.valueOf(2_000_000L))))
+                .attachMetadata(metadata)
+                .withChangeAddress(adminAddress);
+        Transaction transaction = quickTxBuilder.compose(tx)
+                .feePayer(adminAddress)
+                .mergeOutputs(false)
+                .build();
+        TransactionBody body = transaction.getBody();
+        if (body.getInputs() == null || body.getInputs().size() != 1
+                || !funding.getTxHash().equals(body.getInputs().getFirst().getTransactionId())
+                || funding.getOutputIndex() != body.getInputs().getFirst().getIndex()) {
+            throw new IllegalStateException(
+                    "CIP-171 transaction did not exclusively spend its chained funding output");
+        }
+        if (body.getAuxiliaryDataHash() == null) {
+            throw new IllegalStateException("CIP-171 transaction has no auxiliary-data hash");
+        }
+        return transaction;
+    }
+
     private static Utxo findOutputAtAddress(Transaction tx, String txHash,
                                             String targetAddr, BigInteger minLovelace) {
         java.util.List<com.bloxbean.cardano.client.transaction.spec.TransactionOutput> outputs =

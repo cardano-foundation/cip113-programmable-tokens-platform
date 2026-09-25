@@ -14,6 +14,8 @@ public class SessionResponse {
     private final boolean exists;
     private final Boolean hasCredential;
     private final Boolean hasCardanoAddress;
+    private final String issuanceStatus;
+    private final Boolean canRetryGrant;
     private final Map<String, Object> attributes;
     private final Integer credentialRole;
     private final String credentialRoleName;

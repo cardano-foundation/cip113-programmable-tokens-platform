@@ -152,6 +152,7 @@ export interface RwaTokenInitResponse {
 /** Build the genesis tx that mints the GS NFT + denylist root + power-users root.
  *  Frontend signs + submits the returned CBOR. The bootstrap admin is auto-seeded
  *  into the off-chain power-user table at the same time. */
+/** @deprecated CMTA genesis cannot be initialized alone; use buildRwaTokenChain. */
 export const initRwaTokenGlobalState = async (body: RwaTokenInitRequest, rawApi: unknown) => {
   const path = '/rwa-token/init' as const;
   const serializedBody = JSON.stringify({ moduleId: 'rwa-token', quantity: '0', ...body });
@@ -165,6 +166,8 @@ export const initRwaTokenGlobalState = async (body: RwaTokenInitRequest, rawApi:
 export interface RwaTokenChainBuildResponse {
   genesisCborHex: string;
   addPowerUserCborHex: string;
+  cmtaProvenanceCborHex: string;
+  issuanceProvenanceCborHex: string;
   /** Publishes minting_logic (~7.3 KB) and the global_state spend validator (~4.3 KB)
    *  as REFERENCE SCRIPTS. Present iff the registration carries a first mint, which is
    *  the only case whose validator set does not fit inline: attached inline the five
@@ -188,6 +191,8 @@ export interface RwaTokenChainBuildResponse {
   powerUsersPolicyId: string;
   genesisTxHash: string;
   addPowerUserTxHash: string;
+  cmtaProvenanceTxHash: string;
+  issuanceProvenanceTxHash: string;
   publishScriptsTxHash?: string;
   registrationTxHash: string;
   registerTransferLogicTxHash?: string;
@@ -197,13 +202,15 @@ export interface RwaTokenChainBuildResponse {
  *
  *    1. genesis            mints GS + denylist root + PU root
  *    2. addPowerUser       inserts the admin into the power-user linked list
- *    3. publishScripts     mint path only — publishes minting_logic + global_state
+ *    3. cmtaProvenance     publishes CIP-171 source and parameters for ten CMTA scripts
+ *    4. issuanceProvenance publishes the core issuance-policy source and parameters
+ *    5. publishScripts     mint path only — publishes minting_logic + global_state
  *                          spend as reference scripts, without which the registration
  *                          tx exceeds max-tx-size
- *    4. registration       CIP-113 directory insert + stake-cred registration, plus —
+ *    6. registration       CIP-113 directory insert + stake-cred registration, plus —
  *                          when {@link RwaTokenInitRequest.initialMintQuantity}
  *                          is set — the token's first mint in that same transaction
- *    5. registerTransferLogic  optional Conway RegCert for the transfer-logic cred
+ *    7. registerTransferLogic  optional Conway RegCert for the transfer-logic cred
  *
  *  The frontend signs them all in a single CIP-30 signTxs popup and posts the signed
  *  CBORs, IN THIS ORDER, to {@link submitTokenChain}. Steps 3 and 5 are optional; the

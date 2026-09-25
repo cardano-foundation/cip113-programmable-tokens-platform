@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { useWallet } from "@/hooks/use-wallet";
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,11 +15,14 @@ import {
   getAvailableRoles,
   publishCredentialChain,
   issueCredential,
+  retryGrantDelivery,
+  getSession,
   type CredentialResponse,
   type AvailableRole,
 } from '@/lib/api/keri';
 import type { StepComponentProps } from '@/types/registration';
 import { QrCode, Shield, Copy, CheckCircle } from 'lucide-react';
+import { keriIssueErrorMessage } from '@/lib/utils/keri-issue-error';
 
 interface Cip170StepData {
   authBeginTxHash: string;
@@ -55,15 +58,38 @@ export function KycCip170Step({
   const [oobiUrl, setOobiUrl] = useState<string | null>(null);
   const [oobiCopied, setOobiCopied] = useState(false);
   const [partnerOobi, setPartnerOobi] = useState('');
+  const [resolvedOobi, setResolvedOobi] = useState<string | null>(null);
 
   // Credential state
   const [availableRoles, setAvailableRoles] = useState<AvailableRole[] | null>(null);
   const [selectedRole, setSelectedRole] = useState<string | null>(null);
   const [credential, setCredential] = useState<CredentialResponse | null>(null);
   const [credentialMode, setCredentialMode] = useState<'present' | 'issue'>('present');
+  const [issuanceStatus, setIssuanceStatus] = useState<string | null>(null);
+  const [canRetryGrant, setCanRetryGrant] = useState(false);
   const [issueFirstName, setIssueFirstName] = useState('');
   const [issueLastName, setIssueLastName] = useState('');
   const [issueEmail, setIssueEmail] = useState('');
+
+  const refreshIssuance = useCallback(async () => {
+    const sessionId = sessionIdRef.current;
+    const session = await getSession(sessionId);
+    if (sessionIdRef.current !== sessionId) return;
+    setIssuanceStatus(session.issuanceStatus ?? null);
+    setCanRetryGrant(session.canRetryGrant ?? false);
+    if (session.hasCredential && session.attributes) {
+      setCredential({
+        role: session.credentialRoleName ?? 'USER',
+        roleValue: session.credentialRole ?? 0,
+        label: session.credentialRoleName ?? 'User',
+        attributes: session.attributes,
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshIssuance().catch(() => {});
+  }, [refreshIssuance]);
 
   // Publish state
   const [authBeginTxHash, setAuthBeginTxHash] = useState<string | null>(null);
@@ -95,22 +121,68 @@ export function KycCip170Step({
 
   const handleResolveOobi = async () => {
     if (!partnerOobi.trim()) return;
+    const oobi = partnerOobi.trim();
+    let step = 'resolve OOBI';
     try {
       setIsLoading(true);
       setError(null);
-      await resolveOobi(sessionIdRef.current, partnerOobi.trim());
+      if (resolvedOobi !== oobi) {
+        await resolveOobi(sessionIdRef.current, oobi);
+        setResolvedOobi(oobi);
+      }
+      step = 'read Cardano wallet addresses';
       const addresses = await wallet.getUsedAddresses();
       if (addresses?.[0]) {
+        step = 'store the Cardano address';
         await storeCardanoAddress(sessionIdRef.current, addresses[0]);
       }
+      step = 'load credential roles';
       const rolesData = await getAvailableRoles(sessionIdRef.current);
       setAvailableRoles(rolesData.availableRoles);
+      await refreshIssuance();
       setSubStep('credential');
-    } catch {
-      setError('Failed to resolve OOBI. Make sure the URL is correct.');
+    } catch (err) {
+      const detail = err instanceof Error ? ` ${err.message}` : '';
+      setError(`Failed to ${step}.${detail}`);
     } finally {
+      await refreshIssuance().catch(() => {});
       setIsLoading(false);
     }
+  };
+
+  const handleRetryGrant = async () => {
+    try {
+      setIsLoading(true);
+      setError(null);
+      setCredential(await retryGrantDelivery(sessionIdRef.current));
+    } catch (err) {
+      setError(keriIssueErrorMessage(err));
+    } finally {
+      await refreshIssuance().catch(() => {});
+      setIsLoading(false);
+    }
+  };
+
+  const startNewSession = (issueNewCredential = false) => {
+    const id = crypto.randomUUID();
+    sessionStorage.setItem('register-cip170-session-id', id);
+    sessionIdRef.current = id;
+    setOobiUrl(null);
+    setOobiCopied(false);
+    setIssuanceStatus(null);
+    setCanRetryGrant(false);
+    setCredential(null);
+    setAvailableRoles(null);
+    setSelectedRole(null);
+    setCredentialMode(issueNewCredential ? 'issue' : 'present');
+    setIssueFirstName('');
+    setIssueLastName('');
+    setIssueEmail('');
+    setAuthBeginTxHash(null);
+    setResolvedOobi(null);
+    setPartnerOobi('');
+    setSubStep('intro');
+    setError(null);
   };
 
   // ── Credential presentation ─────────────────────────────────────────────
@@ -147,8 +219,9 @@ export function KycCip170Step({
       });
       setCredential(cred);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to issue credential');
+      setError(keriIssueErrorMessage(err));
     } finally {
+      await refreshIssuance().catch(() => {});
       setIsLoading(false);
     }
   };
@@ -274,7 +347,8 @@ export function KycCip170Step({
             <h4 className="text-white font-medium">Share Agent OOBI</h4>
           </div>
           <p className="text-sm text-dark-400">
-            Share this OOBI URL with your Veridian wallet to establish a connection.
+            Add this OOBI as a connection in the Veridian profile that should receive the credential.
+            Then paste that same profile&apos;s OOBI in the next step. The connection is needed to accept the credential.
           </p>
           {oobiUrl && (
             <div className="space-y-3">
@@ -411,6 +485,41 @@ export function KycCip170Step({
                     Accept the offer in the wallet when prompted.
                   </p>
 
+                  {issuanceStatus && issuanceStatus !== 'ACCEPTED' ? (
+                    <div className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+                      <p className="text-sm text-amber-300">
+                        {issuanceStatus === 'ISSUANCE_UNKNOWN'
+                          ? 'The credential issuance outcome is uncertain. Contact the operator before trying again.'
+                          : issuanceStatus === 'PRESENTING'
+                          ? 'The previous credential presentation was interrupted. Start a separate KYC session to continue; the old exchange remains unchanged.'
+                          : 'A credential has already been issued for this session. Check the Veridian connection, then retry delivery of the same grant.'}
+                      </p>
+                      {canRetryGrant && (
+                        <Button variant="primary" className="w-full" onClick={handleRetryGrant}
+                          isLoading={isLoading} disabled={isLoading}>
+                          {isLoading ? 'Waiting for Veridian...' : 'Retry grant delivery'}
+                        </Button>
+                      )}
+                      {(issuanceStatus === 'READY'
+                        || (issuanceStatus === 'WAITING' && canRetryGrant)) && (
+                        <>
+                          <p className="text-xs text-dark-400">
+                            Issuing again creates another credential. The existing one remains issued.
+                          </p>
+                          <Button variant="ghost" className="w-full"
+                            onClick={() => startNewSession(true)} disabled={isLoading}>
+                            Issue a new credential
+                          </Button>
+                        </>
+                      )}
+                      {issuanceStatus === 'PRESENTING' && (
+                        <Button variant="ghost" className="w-full" onClick={() => startNewSession()} disabled={isLoading}>
+                          Start new KYC session
+                        </Button>
+                      )}
+                    </div>
+                  ) : (
+                  <>
                   <div className="space-y-3">
                     <Input
                       label="First name"
@@ -450,6 +559,8 @@ export function KycCip170Step({
                   >
                     {isLoading ? 'Issuing credential...' : 'Issue Credential'}
                   </Button>
+                  </>
+                  )}
                 </>
               )}
             </>

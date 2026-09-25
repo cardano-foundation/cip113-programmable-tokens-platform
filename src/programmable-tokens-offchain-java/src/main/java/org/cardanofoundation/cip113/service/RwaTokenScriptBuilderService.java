@@ -434,8 +434,10 @@ public class RwaTokenScriptBuilderService {
                                          String scriptName) {
         try {
             String parameterizedCode = AikenScriptUtil.applyParamToScript(params, contract.scriptBytes());
-            return PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
+            var script = PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(
                     parameterizedCode, PlutusVersion.v3);
+            RwaCip171ProvenanceService.recordCmta(scriptName, contract.title(), contract.scriptBytes(), params, script);
+            return script;
         } catch (Exception e) {
             throw new RuntimeException("Failed to build rwa-token " + scriptName + " script", e);
         }

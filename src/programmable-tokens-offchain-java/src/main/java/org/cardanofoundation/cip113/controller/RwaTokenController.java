@@ -440,23 +440,24 @@ public class RwaTokenController {
     }
 
     /** Build the full rwa-token registration chain (genesis → AddPowerUser →
-     *  publishScripts → registration → transfer-logic cert) as up to five unsigned
+     *  CMTA provenance → issuance provenance → optional publishScripts →
+     *  registration → optional transfer-logic certificates) as up to eight unsigned
      *  CBORs. The frontend signs them all in one CIP-30 {@code signTxs} call, then
      *  POSTs the signed CBORs (in order) to {@code /issue-token/submit-chain} which
      *  submits them sequentially via the backend's submission service — bypassing the
      *  wallet's submission backend so mempool-chained txs aren't rejected.
      *
      *  <p>{@code publishScriptsCborHex} publishes {@code minting_logic} and the
-     *  {@code global_state} spend validator as reference scripts. It is not optional:
-     *  attached inline those two are 11 394 of the ledger's 16 384-byte budget and the
-     *  registration tx's full validator set is 16 584, so the registration cannot exist
-     *  without them being referenced.
+     *  {@code global_state} spend validator as reference scripts when the registration
+     *  includes a first mint. The structural registration fits without this phase.
      *
-     *  <p>Returns {@code { genesisCborHex, addPowerUserCborHex, publishScriptsCborHex,
+     *  <p>Returns {@code { genesisCborHex, addPowerUserCborHex,
+     *  cmtaProvenanceCborHex, issuanceProvenanceCborHex, publishScriptsCborHex?,
      *  registrationCborHex, registerTransferLogicCborHex?,
      *  registerThirdPartyTransferLogicCborHex?, globalStatePolicyId,
      *  programmableTokenPolicyId, denylistPolicyId, powerUsersPolicyId, genesisTxHash,
-     *  addPowerUserTxHash, publishScriptsTxHash, registrationTxHash,
+     *  addPowerUserTxHash, cmtaProvenanceTxHash, issuanceProvenanceTxHash,
+     *  publishScriptsTxHash?, registrationTxHash,
      *  registerTransferLogicTxHash?, registerThirdPartyTransferLogicTxHash? } }. */
     @PostMapping("/build-chain")
     public ResponseEntity<?> buildChain(@RequestBody byte[] rawBody,
@@ -476,6 +477,8 @@ public class RwaTokenController {
             Map<String, Object> resp = new java.util.HashMap<>();
             resp.put("genesisCborHex", meta.genesisCborHex());
             resp.put("addPowerUserCborHex", meta.addPowerUserCborHex());
+            resp.put("cmtaProvenanceCborHex", meta.cmtaProvenanceCborHex());
+            resp.put("issuanceProvenanceCborHex", meta.issuanceProvenanceCborHex());
             // Present only when the registration carries a first mint — that is the only
             // case whose validator set does not fit inline. Omitted (not null) otherwise,
             // matching the optional 4th tx and keeping the wire shape forward-compatible.
@@ -500,6 +503,8 @@ public class RwaTokenController {
             resp.put("powerUsersPolicyId", meta.powerUsersPolicyId());
             resp.put("genesisTxHash", meta.genesisTxHash());
             resp.put("addPowerUserTxHash", meta.addPowerUserTxHash());
+            resp.put("cmtaProvenanceTxHash", meta.cmtaProvenanceTxHash());
+            resp.put("issuanceProvenanceTxHash", meta.issuanceProvenanceTxHash());
             resp.put("registrationTxHash", meta.registrationTxHash());
             return ResponseEntity.ok(resp);
         } catch (ResponseStatusException e) {
@@ -515,32 +520,9 @@ public class RwaTokenController {
     @PostMapping("/init")
     public ResponseEntity<?> initGlobalState(@RequestBody byte[] rawBody,
                                              @org.springframework.web.bind.annotation.RequestHeader HttpHeaders headers) {
-        try {
-            RwaTokenRegisterRequest request = objectMapper.readValue(rawBody, RwaTokenRegisterRequest.class);
-            creationRequestVerifier.verifyCreationAndConsume(
-                    "/rwa-token/init", rawBody, request.getFeePayerAddress(), headers);
-            ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
-            if (protocolParams == null) {
-                return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
-            }
-            var result = creationService.init(request, protocolParams);
-            // The wizard expects {globalStatePolicyId} for kyc-extended parity, but
-            // the value we return here is actually the prog-token (issuance) policy id —
-            // that's what the registration tx is keyed on downstream. We also return
-            // {programmableTokenPolicyId} explicitly so clients have an unambiguous name.
-            String progTokenPolicyId = result.metadata().policyId();
-            return ResponseEntity.ok(Map.of(
-                    "unsignedCborTx", result.unsignedCborTx(),
-                    "globalStatePolicyId", progTokenPolicyId,
-                    "programmableTokenPolicyId", progTokenPolicyId));
-        } catch (ResponseStatusException e) {
-            throw e;
-        } catch (RwaTokenCreationService.BuildFailed e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            log.error("rwa-token init failed", e);
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
-        }
+        return ResponseEntity.badRequest().body(Map.of("error",
+                "Standalone CMTA init is disabled because CIP-171 provenance is required. "
+                + "Use /rwa-token/build-chain to create and publish both records."));
     }
 
     @GetMapping("/tokens")

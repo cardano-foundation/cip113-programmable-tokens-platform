@@ -26,3 +26,10 @@ export function getKeriSessionIdForWallet(walletAddress: string): string {
   }
   return id;
 }
+
+/** Persist the exact ID chosen by a fresh verification component. */
+export function storeKeriSessionIdForWallet(walletAddress: string, id: string): void {
+  if (typeof sessionStorage !== "undefined") {
+    sessionStorage.setItem(`${KEY_PREFIX}:${walletKeyForAddress(walletAddress)}`, id);
+  }
+}

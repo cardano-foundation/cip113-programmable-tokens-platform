@@ -367,7 +367,7 @@ export function KycConfigStep({
         }, rawApi);
 
         // ── Phase 2: single wallet popup signs all txs in the chain ──
-        // 4-tx shape when the backend included the transferLogic RegCert
+        // The backend includes two required CIP-171 provenance transactions.
         // (it's optional but on by default). All txs go through the same
         // CIP-103 batch so Eternl signs them as a single popup — including
         // the script-cred RegCert that Eternl refuses via single-tx signTx.
@@ -380,6 +380,8 @@ export function KycConfigStep({
         const chainTxs: { name: string; cbor: string }[] = [
           { name: 'genesis', cbor: chain.genesisCborHex },
           { name: 'addPowerUser', cbor: chain.addPowerUserCborHex },
+          { name: 'cmtaProvenance', cbor: chain.cmtaProvenanceCborHex },
+          { name: 'issuanceProvenance', cbor: chain.issuanceProvenanceCborHex },
           ...(chain.publishScriptsCborHex
             ? [{ name: 'publishScripts', cbor: chain.publishScriptsCborHex }]
             : []),

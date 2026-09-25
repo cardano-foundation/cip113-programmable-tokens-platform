@@ -79,6 +79,14 @@ class RwaTokenCreationTransactionTest {
     @MockBean UtxoProvider utxoProvider;
 
     @Test
+    void legacyInitCannotCreateUnprovenancedGenesis() {
+        var failure = assertThrows(RwaTokenCreationService.BuildFailed.class,
+                () -> creation.init(RwaTokenRegisterRequest.builder().build(), null));
+        assertTrue(failure.getMessage().contains("/rwa-token/build-chain"));
+        verifyNoInteractions(handlerFactory);
+    }
+
+    @Test
     void failedLateBuildRollsBackEveryRowButKeepsConsumedNonce() {
         var tx = new TransactionTemplate(transactions);
         String nonce = "01".repeat(32);

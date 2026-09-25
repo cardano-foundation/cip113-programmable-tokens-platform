@@ -1,14 +1,15 @@
 package org.cardanofoundation.cip113.repository;
 
-import org.cardanofoundation.cip113.entity.KycSessionEntity;
+import org.cardanofoundation.cip113.entity.KycIssuanceEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
-import jakarta.persistence.LockModeType;
-import java.util.Optional;
 import org.springframework.stereotype.Repository;
 
+import jakarta.persistence.LockModeType;
+import java.util.Optional;
+
 @Repository
-public interface KycSessionRepository extends JpaRepository<KycSessionEntity, String> {
+public interface KycIssuanceRepository extends JpaRepository<KycIssuanceEntity, String> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    Optional<KycSessionEntity> findLockedBySessionId(String sessionId);
+    Optional<KycIssuanceEntity> findLockedBySessionId(String sessionId);
 }

@@ -421,6 +421,8 @@ public class DevnetRwaTokenPathsTest {
         var stages = new LinkedHashMap<String, String>();
         stages.put("genesis", built.genesisCborHex());
         stages.put("addPowerUser", built.addPowerUserCborHex());
+        stages.put("cmtaProvenance", built.cmtaProvenanceCborHex());
+        stages.put("issuanceProvenance", built.issuanceProvenanceCborHex());
         if (built.publishScriptsCborHex() != null) stages.put("publishScripts", built.publishScriptsCborHex());
         stages.put("registration", built.registrationCborHex());
         if (built.registerTransferLogicCborHex() != null) {

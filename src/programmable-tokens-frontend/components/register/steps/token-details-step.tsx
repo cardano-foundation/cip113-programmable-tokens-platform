@@ -179,7 +179,9 @@ export function TokenDetailsStep({
     // Never carry `enabled: true` forward when provenance is unavailable. The checkbox cannot be
     // ticked in that state, but step data can be restored from an earlier session, and a stale
     // `true` would silently request a record nothing can build.
-    const cip171Provenance = { enabled: cip171Enabled && cip171Available };
+    const cip171Provenance = {
+      enabled: wizardState?.flowId === 'rwa-token' || (cip171Enabled && cip171Available),
+    };
     const data: TokenDetailsData = {
       assetName: assetName.trim(),
       quantity: quantity.trim(),
@@ -268,7 +270,15 @@ export function TokenDetailsStep({
           way the tx-builder toggle handles an unavailable SDK: an option that vanishes is
           indistinguishable from one that was never built, and the reason is what someone
           debugging this in three months actually needs. */}
-      <div className="border-t border-dark-700 pt-4">
+      {wizardState?.flowId === 'rwa-token' ? (
+        <div className="border-t border-dark-700 pt-4" role="status">
+          <p className="text-sm font-medium text-white">CIP-171 provenance required</p>
+          <p className="text-xs text-dark-400 mt-1">
+            Registration publishes the CMTA validator source and the CIP-113 issuance policy
+            source in two transactions before the token is registered.
+          </p>
+        </div>
+      ) : <div className="border-t border-dark-700 pt-4">
         <label
           className={cip171Available ? "flex items-center gap-3 cursor-pointer" : "flex items-center gap-3 cursor-help"}
           title={cip171Available ? undefined : CIP171_RECORDER_UNAVAILABLE}
@@ -299,7 +309,7 @@ export function TokenDetailsStep({
             )}
           </div>
         </label>
-      </div>
+      </div>}
 
       {cip68Supported && cip68Enabled && (
         <div className="space-y-4 p-4 bg-dark-800/50 rounded-lg border border-dark-700">

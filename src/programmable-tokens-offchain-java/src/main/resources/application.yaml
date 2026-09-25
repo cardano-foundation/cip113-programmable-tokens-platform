@@ -61,12 +61,12 @@ keri:
   url: ${KERI_URL:http://localhost:3901}
   booturl: ${KERI_BOOT_URL:http://localhost:3903}
   identifier:
-    bran: ${KERI_BRAN:0ADF2TpptgqcDE5IQUF1H}
-    name: ${KERI_IDENTIFIER_NAME:identity}
+    bran: ${KERI_BRAN:0BDF2TpptgqcDE5IQUF1H}
+    name: ${KERI_IDENTIFIER_NAME:identity2}
     role: agent
-    registry-name: kyc-registry
+    registry-name: kyc-registry2
   schema:
-    base-url: https://cred-issuance.demo.idw-sandboxes.cf-deployments.org/oobi/
+    base-url: https://cred-issuance.dev.ecosyseng.cf-deployments.org/oobi/
     schemas:
       USER:
         said: EL9oOWU_7zQn_rD--Xsgi3giCWnFDaNvFMUGTOZx1ARO

@@ -16,6 +16,7 @@
     "test:multitx": "tsc lib/tx/*.ts --outDir .upgrade-build/tx --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-multi-tx.js",
     "test:member-root": "tsc lib/rwa/member-root.ts lib/rwa/review-root-tx.ts --outDir .root-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-member-root.js && node test-review-root-tx.js",
     "test:stake-address": "tsc lib/rwa/stake-address.ts --outDir .stake-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-stake-address.js",
+    "test:keri-issue-error": "node test-keri-issue-error.js",
     "test:cmta-attestation": "tsc lib/rwa/attestation.ts --outDir .attestation-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-cmta-attestation.js"
   },
   "dependencies": {

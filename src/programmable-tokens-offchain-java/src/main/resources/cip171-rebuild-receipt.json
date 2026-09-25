@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "blueprints": [
+    {
+      "name": "cip113-core",
+      "repository": "https://github.com/cardano-foundation/cip113-programmable-tokens",
+      "commit": "7e8a63198c5b240135f1aa2f043ce5d7c046b2c4",
+      "resource": "plutus.json",
+      "source_path": "",
+      "environment": "",
+      "aiken_compiler": "v1.1.23+8949565",
+      "rebuilt_sha256": "5ff5d6d2990d815973e4edcf6d46e7c3d0ff4bf3cb7c17a3e672e091b7ea0b46",
+      "build_dependencies": [
+        {
+          "repository": "https://github.com/aiken-lang/fuzz",
+          "commit": "06874926ec70747f3fc4e2b9364ee9e1393441cc",
+          "archive_sha256": "b8158eb84ec81114cfc5fa179927a82aafae64de41001e9767fdb02ceb8892d9",
+          "lock_etag": "9843473958e51725a9274b487d2d4aac0395ec1a2e30f090724fa737226bc127"
+        }
+      ]
+    },
+    {
+      "name": "rwa-token",
+      "repository": "https://github.com/cardano-foundation/cpt-rwa-ch-de-cmta-reference",
+      "commit": "9761a05e5d7d298a940c990989438cc894a0dad5",
+      "resource": "modules/rwa-token/plutus.json",
+      "source_path": "",
+      "environment": "",
+      "aiken_compiler": "v1.1.23+8949565",
+      "rebuilt_sha256": "2f1f1799f499339dd9ecc9e0ae683bf9bdc77e5b9d5654e624f6e807f4185f48"
+    }
+  ]
+}
