@@ -8,7 +8,7 @@ echo "Building version: ${VERSION}"
 
 ./gradlew bootJar
 
-DOCKER_IMAGE_NAME=easy1staking/programmable-tokens-indexer
+DOCKER_IMAGE_NAME=cardanofoundation/programmable-tokens-indexer
 DOCKER_IMAGE="${DOCKER_IMAGE_NAME}:${VERSION}"
 DOCKER_IMAGE_LATEST="${DOCKER_IMAGE_NAME}:latest"
 
