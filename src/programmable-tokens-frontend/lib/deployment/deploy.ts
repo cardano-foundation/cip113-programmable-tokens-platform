@@ -30,13 +30,21 @@ import {
 import type { PlutusBlueprint } from "@easy1staking/cip113-sdk-ts";
 
 import {
-  buildBootstrapPlan,
-  selectSeedUtxos,
+  buildPlan,
+  buildPhaseOne,
+  buildProtocolGenesis,
+  buildReferenceScripts,
+  awaitMultisigConfigUtxo,
+  selectBootstrapSeeds,
+  assembleDeploymentParams,
   type BootstrapPlan,
+  type CeremonyStep,
+  type CeremonyContext,
+  selectSeedUtxos,
   type ChainUtxo,
-} from "./bootstrap";
-import type { DeploymentSeeds } from "./derive";
-import { verifyDeployment, type VerificationResult } from "./verify";
+} from "./ceremony";
+import { deriveCoreDeployment, type DeploymentSeeds } from "./derive";
+import { verifyDeployment, verifyPlanScripts, type VerificationResult } from "./verify";
 import { EvoAddress, EvoAssets, EvoTransaction, outputAssets } from "@easy1staking/cip113-sdk-ts";
 
 /** Lovelace parked in each prepared seed. Enough to be a useful input, small enough to be cheap. */
@@ -141,7 +149,7 @@ export async function findWalletSeeds(
   const { client } = signingClient(network, rawWalletApi);
   const utxos = (await client.getUtxos(
     EvoAddress.fromBech32(changeAddress) as never,
-  )) as ChainUtxo[];
+  )) as unknown as ChainUtxo[];
   const seeds = selectSeedUtxos(utxos, changeAddress);
   const usableCount = utxos.filter(
     (u) => !u.scriptRef && !EvoAssets.getUnits(u.assets as never).some((x: string) => x !== "lovelace"),
@@ -166,7 +174,7 @@ export async function prepareSeedUtxos(
 ): Promise<string> {
   const { client } = signingClient(network, rawWalletApi);
   const addressObj = EvoAddress.fromBech32(changeAddress);
-  const utxos = (await client.getUtxos(addressObj as never)) as ChainUtxo[];
+  const utxos = (await client.getUtxos(addressObj as never)) as unknown as ChainUtxo[];
 
   let tx = client.newTx();
   for (let i = 0; i < 3; i++) {
@@ -192,8 +200,10 @@ export interface PlanDeploymentInput {
   multisig: ResolvedMultisig;
   maxInlineDatumBytes: number;
   alwaysFailNonce: string;
-  /** Three existing wallet UTxOs. Omit and the plan opens by creating them. */
+  /** Three existing wallet UTxOs, as chain references. */
   seeds?: DeploymentSeeds;
+  /** The same three as resolved UTxO objects — the builders need the whole output, not a ref. */
+  seedUtxos?: { protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown };
   /**
    * Whether the dispatcher permits unfracking. Default: yes.
    *
@@ -234,88 +244,97 @@ export interface DeploymentPlan {
   verification: VerificationResult;
 }
 
-/**
- * Fold a mined body back into a plan.
+/*
+ * `applyMinedStep` lived here and has been REMOVED with the mining feature (T-058).
  *
- * ⛔ MINING MOVES THE TRANSACTION ID, AND SEVEN RECORDED FIELDS POINT AT IT. Every
- * `*RefInput` in the deployment names the reference-script transaction by hash, so a plan whose
- * step was mined but whose record still carries the pre-mining hash would deploy correctly and
- * then hand out reference inputs that resolve to nothing. The record and the bytes have to move
- * together, which is what this does — and why the panel hands the mined body here rather than
- * replacing the step in place.
+ * It repointed every `*RefInput` to the mined transaction's hash, which was correct only
+ * because the mined step was always the LAST one — the reference-script transaction, published
+ * last precisely so its hash could move without invalidating anything chained onto it. Mining
+ * the genesis instead, as was briefly proposed, would have repointed all seven reference
+ * inputs at the genesis while the scripts themselves sat in a later transaction, and
+ * verification would still have passed: it re-derives script hashes from parameters and knows
+ * nothing about where outputs live. The mining code itself is untouched under `lib/mining/`
+ * and `/ops/mine-check`, ready to be re-wired once upstream says which transaction should
+ * carry a low hash and why.
  */
-export function applyMinedStep(
-  plan: BootstrapPlan,
-  mined: { signedBodyTxHash: string; unsignedCbor: string },
-): BootstrapPlan {
-  if (!plan.mining) throw new Error("this plan has no mineable step");
-  const steps = plan.steps.map((s, i) =>
-    i === plan.mining!.stepIndex ? { ...s, unsignedCbor: mined.unsignedCbor } : s,
-  );
-  const d = plan.deployment as unknown as Record<string, { txHash: string; outputIndex: number }>;
-  const repointed: Record<string, { txHash: string; outputIndex: number }> = {};
-  for (const key of Object.keys(d)) {
-    if (key.endsWith("RefInput")) {
-      repointed[key] = { ...d[key], txHash: mined.signedBodyTxHash };
-    }
-  }
-  return {
-    ...plan,
-    steps,
-    deployment: { ...plan.deployment, ...repointed } as typeof plan.deployment,
-  };
+
+export interface CeremonyPlan {
+  plan: BootstrapPlan;
+  /** Two independent derivations agreeing. `ok === false` means nothing may be submitted. */
+  verification: VerificationResult;
+  /** Seed, multisig genesis, stake registrations — the deployer alone. */
+  phaseOne: CeremonyStep[];
+  /** Carried into phase two so the same client and UTxO set build both halves. */
+  ctx: CeremonyContext;
 }
 
-export async function planDeployment(input: PlanDeploymentInput): Promise<DeploymentPlan> {
-  // ⛔ REFUSED UNDER alpha.5 UNTIL THE PORT IS MIGRATED.
-  //
-  // `buildBootstrapPlan` is the alpha.4 harness port. alpha.5 added one requirement
-  // to `protocol_params.mint` — the genesis must carry a withdraw-0 from the upgrade
-  // credential, needing the multisig config UTxO as a reference input and the
-  // participants in `extra_signatories` — and it moved the stake registrations ahead
-  // of the genesis. The port does none of that.
-  //
-  // Without this guard the failure is the expensive kind: the plan BUILDS, every hash
-  // VERIFIES — verification re-derives from the blueprint and knows nothing about
-  // transaction shape — and the genesis is rejected at SUBMISSION, after the earlier
-  // transactions have landed and spent their one-shot seeds, which cannot be reused.
-  //
-  // Measured rather than predicted: the backend's own offline fixture builds this
-  // same genesis shape against the alpha.5 blueprint and Aiken refuses it with
-  // `RedeemerError { tag: "Mint", index: 1, EvaluationFailure }`.
-  throw new Error(
-    "This deployment builder targets CIP-113 alpha.4, and the platform now pins the " +
-      "alpha.5 blueprint. alpha.5's genesis requires a withdraw-0 from the upgrade " +
-      "credential, the multisig config UTxO as a reference input, and the authority " +
-      "signers — none of which this builder supplies. It would be rejected on chain " +
-      "after the earlier transactions had already spent their one-shot seeds. " +
-      "Migration to the SDK's exported bootstrap is in progress.",
-  );
-
+export async function planDeployment(input: PlanDeploymentInput): Promise<CeremonyPlan> {
   const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
+  void projectId;
   const { chain, client } = signingClient(input.network, input.rawWalletApi);
 
-  const plan = await buildBootstrapPlan({
+  const availableUtxos = (await (
+    client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
+  ).getUtxos(EvoAddress.fromBech32(input.changeAddress))) as readonly never[];
+
+  const ctx: CeremonyContext = {
     client: client as never,
-    networkId: chain.id,
+    changeAddress: EvoAddress.fromBech32(input.changeAddress) as never,
+    availableUtxos,
+  };
+
+  if (!input.seeds) {
+    throw new Error(
+      "Three distinct seed UTxOs are required before planning. Use the seed-preparation step " +
+        "first: the alternative is a fragmentation transaction whose outputs do not exist on " +
+        "chain while everything after it is built and evaluated against them.",
+    );
+  }
+
+  const plan = buildPlan({
     blueprint: input.blueprint,
-    pin: input.pin,
-    changeAddress: input.changeAddress,
-    multisig: input.multisig,
-    maxInlineDatumBytes: input.maxInlineDatumBytes,
+    networkId: chain.id,
+    seeds: {
+      protocolParams: input.seeds.paramsSeed as never,
+      issuance: input.seeds.issuanceSeed as never,
+      upgradeMultisig: input.seeds.multisigSeed as never,
+    },
     alwaysFailNonce: input.alwaysFailNonce,
+    maxInlineDatumBytes: BigInt(input.maxInlineDatumBytes),
+    unfracking: input.unfrackingEnabled === false ? "disabled" : "enabled",
+  } as never);
+
+  // ⛔ THE GATE THAT REPLACES "nothing is signed until the plan verifies". Our derivation
+  // against the SDK's, before a single seed is spent. See verifyPlanScripts for why agreement
+  // between two independent implementations is worth more than either alone.
+  const ours = deriveCoreDeployment({
+    blueprint: input.blueprint,
     seeds: input.seeds,
+    alwaysFailNonce: input.alwaysFailNonce,
+    maxInlineDatumBytes: input.maxInlineDatumBytes,
     unfrackingEnabled: input.unfrackingEnabled,
-    mineable: input.mineable,
-    isStakeRegistered: (rewardAddress) =>
-      isStakeRegisteredViaBlockfrost(input.network, projectId, rewardAddress),
   });
+  const verification = verifyPlanScripts(ours, plan as never);
 
-  // The deployment the plan WILL produce, checked the way a finished one is checked.
-  const verification = verifyDeployment(input.blueprint, plan.deployment);
+  const phaseOne = verification.ok
+    ? await buildPhaseOne({
+        ctx,
+        plan,
+        needsSeedTx: false,
+        seedUtxo: input.seedUtxos?.upgradeMultisig as never,
+        upgradeMultisigTree: input.multisig.tree as never,
+        ownerAddress: ctx.changeAddress,
+        seedLovelace: DEFAULT_SEED_LOVELACE,
+      })
+    : [];
 
-  return { plan, verification };
+  return { plan, verification, phaseOne, ctx };
 }
+
+/** Lovelace per seed output. Each seed funds part of the transaction that consumes it. */
+export const DEFAULT_SEED_LOVELACE = 10_000_000n;
+
+export { awaitMultisigConfigUtxo, buildProtocolGenesis, buildReferenceScripts, selectBootstrapSeeds, assembleDeploymentParams };
 
 /**
  * The block an indexer should intersect at: the one IMMEDIATELY BEFORE the genesis

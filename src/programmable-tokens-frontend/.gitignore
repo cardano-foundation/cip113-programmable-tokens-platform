@@ -59,3 +59,4 @@ frontend.log
 .witness-build/
 .hash-build/
 .sdkrec-build/
+.colour-build/
