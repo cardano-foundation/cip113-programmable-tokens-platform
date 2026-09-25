@@ -2,6 +2,7 @@
 
 import { ReactNode } from "react";
 import { WalletProvider } from "@/contexts/wallet-context";
+import { CookieBanner } from "@/components/layout/cookie-banner";
 import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 import { Toaster } from "@/components/ui/toast";
@@ -21,6 +22,7 @@ export function AppProviders({ children }: AppProvidersProps) {
             <Header />
             <main className="flex-1">{children}</main>
             <Footer />
+            <CookieBanner />
             <Toaster />
           </div>
         </CIP113Provider>
