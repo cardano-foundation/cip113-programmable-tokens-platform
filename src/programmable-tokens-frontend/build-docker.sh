@@ -11,7 +11,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Docker image repository
-DOCKER_REPO="easy1staking/cip113-frontend"
+DOCKER_REPO="cardanofoundation/cip113-frontend"
 
 # Get git version tag
 GIT_TAG=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -205,8 +205,8 @@ case $COMMAND in
         echo "  ./build-docker.sh mainnet --push   # Build mainnet and push"
         echo ""
         echo "Tags created:"
-        echo "  <repo>:<git-tag>-<network>  (e.g., easy1staking/cip113-frontend:v1.0.0-preview)"
-        echo "  <repo>:<network>            (e.g., easy1staking/cip113-frontend:preview)"
+        echo "  <repo>:<git-tag>-<network>  (e.g., cardanofoundation/cip113-frontend:v1.0.0-preview)"
+        echo "  <repo>:<network>            (e.g., cardanofoundation/cip113-frontend:preview)"
         echo "  <repo>:latest               (only for mainnet)"
         exit 0
         ;;

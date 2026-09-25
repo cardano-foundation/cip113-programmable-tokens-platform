@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # Preview network deployment
   frontend-preview:
-    image: easy1staking/cip113-frontend:preview
+    image: cardanofoundation/cip113-frontend:preview
     container_name: cip113-frontend-preview
     ports:
       - "3000:3000"
@@ -24,7 +24,7 @@ services:
 
   # Preprod network deployment
   frontend-preprod:
-    image: easy1staking/cip113-frontend:preprod
+    image: cardanofoundation/cip113-frontend:preprod
     container_name: cip113-frontend-preprod
     ports:
       - "3001:3000"
@@ -47,7 +47,7 @@ services:
 
   # Mainnet network deployment
   frontend-mainnet:
-    image: easy1staking/cip113-frontend:mainnet
+    image: cardanofoundation/cip113-frontend:mainnet
     container_name: cip113-frontend-mainnet
     ports:
       - "3002:3000"
