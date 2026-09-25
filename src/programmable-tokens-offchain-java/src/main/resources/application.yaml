@@ -98,6 +98,16 @@ rwaToken:
   memberValidityDays: ${SECURITY_TOKEN_MEMBER_VALIDITY_DAYS:30}
   postInsertSyncDelayMs: ${SECURITY_TOKEN_POST_INSERT_SYNC_DELAY_MS:5000}
 
+# Start with no CIP-113 deployment recorded, to check the database, the migrations and the
+# node peer BEFORE a ceremony spends one-shot seeds that cannot be recovered. The service
+# still REFUSES every protocol operation individually; this only keeps the process up.
+#
+# ⚑ Declared here so the env var has a NAME THIS FILE STATES. Relaxed binding does reach the
+# @Value without this block, but only via a spelling nothing in the repo writes down, and the
+# chart that has to set it should not have to infer it. See ProtocolBootstrapService.
+cip113:
+  allow-no-deployment: ${CIP113_ALLOW_NO_DEPLOYMENT:false}
+
 management:
   endpoints:
     web:
