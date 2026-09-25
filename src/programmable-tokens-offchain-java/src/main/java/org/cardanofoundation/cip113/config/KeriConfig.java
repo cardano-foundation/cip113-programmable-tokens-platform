@@ -37,6 +37,20 @@ public class KeriConfig {
                                        @Value("${keri.identifier.bran}") String bran,
                                        @Value("${keri.booturl}") String bootUrl,
                                        SchemaConfig schemaConfig) throws Exception {
+        // ⛔ REFUSE BY NAME rather than booting an agent with an empty passcode. The default
+        // committed in application.yaml until 2026-09-25 is PUBLIC, so it was removed; this
+        // block is what makes its absence loud instead of turning into a null-bran client.
+        if (bran == null || bran.isBlank()) {
+            throw new IllegalStateException(
+                    "keri.enabled=true but no KERI passcode is configured.\n"
+                    + "\n"
+                    + "  Set KERI_BRAN (from a Secret, never a values file), or set KERI_ENABLED=false\n"
+                    + "  if this deployment does not run a KERI agent — which is what the preview\n"
+                    + "  profile does.\n"
+                    + "\n"
+                    + "  NOTE: the value committed here before 2026-09-25 is PUBLIC and must be treated\n"
+                    + "  as compromised. Supply a ROTATED passcode, not that one.");
+        }
         SignifyClient client = new SignifyClient(url, bran, Tier.LOW, bootUrl, null);
         try {
             client.connect();

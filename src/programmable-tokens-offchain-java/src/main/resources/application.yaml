@@ -61,7 +61,10 @@ keri:
   url: ${KERI_URL:http://localhost:3901}
   booturl: ${KERI_BOOT_URL:http://localhost:3903}
   identifier:
-    bran: ${KERI_BRAN:0ADF2TpptgqcDE5IQUF1H}
+    # ⛔ NO DEFAULT. The value committed here until 2026-09-25 is PUBLIC — this repo is
+    # public and git history keeps it — so it must be treated as compromised, not merely replaced.
+    # KeriConfig refuses to start rather than boot a SignifyClient with an empty bran.
+    bran: ${KERI_BRAN:}
     name: ${KERI_IDENTIFIER_NAME:identity}
     role: agent
     registry-name: kyc-registry
@@ -77,7 +80,12 @@ keri:
       VLEI:
         said: ${KERI_SCHEMA_VLEI_SAID:ENPXp1vQzRF6JwIuS-mp2U8Uf1MoADoP_GqQ62VsDZWY}
         label: "vLEI Credential"
-  signing-mnemonic: ${KERI_SIGNING_MNEMONIC:nest wild farm beyond decide arm chuckle home raven card parrot nothing crazy casino hub broken scan height marine movie gloom village common off}
+  # ⛔ NO DEFAULT, AND THIS IS A CARDANO SIGNING KEY, not only a KERI passcode:
+  # AdminSigningKeyProvider derives a payment account from it and SIGNS AND SUBMITS the
+  # kyc-extended / rwa-token root-hash updates with it. The 24 words committed here until
+  # 2026-09-25 are PUBLIC and the account they derive held testnet funds on preview and
+  # preprod, so that key is compromised and rotation — not removal — is the fix.
+  signing-mnemonic: ${KERI_SIGNING_MNEMONIC:}
   kyc-proof-validity-days: ${KERI_PROOF_VALIDITY_DAYS:30}
 
 # kyc-extended autonomous root-sync job. Signing reuses keri.signing-mnemonic
