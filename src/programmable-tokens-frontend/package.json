@@ -19,6 +19,8 @@
     "test:witness": "tsc lib/tx/witness-set.ts --outDir .witness-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .witness-build && node test-witness-preservation.js",
     "test:txhash": "tsc lib/tx/hash.ts lib/tx/witness-set.ts lib/utils/tx-hash.ts --outDir .hash-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .hash-build && node test-tx-hash.js",
     "test:sdkrecord": "tsc lib/deployment/sdk-record.ts --outDir .sdkrec-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .sdkrec-build && node test-sdk-record.js",
+    "test:signoffline": "node test-sign-offline.js",
+    "test:colour": "tsc lib/deployment/participant-colour.ts --outDir .colour-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .colour-build && node test-participant-colour.js",
     "test:noanalytics": "node test-no-analytics.js"
   },
   "dependencies": {

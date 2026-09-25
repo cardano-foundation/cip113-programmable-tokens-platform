@@ -30,6 +30,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { transactionHash, verifyWitnessSet } from "@/lib/tx/hash";
+import { participantColour, confusablePairs } from "@/lib/deployment/participant-colour";
 
 export interface CosignatureState {
   witnesses: string[];
@@ -97,6 +98,11 @@ export function CosignaturePanel({
       complete: members.length > 0 && members.every((h) => signed.has(h)),
     };
   }, [witnesses, memberKeyHashes, unsignedCbor]);
+
+  const confusable = useMemo(
+    () => confusablePairs(memberKeyHashes.map((h) => h.toLowerCase())),
+    [memberKeyHashes],
+  );
 
   useEffect(() => {
     onChange({ witnesses, complete: status.complete });
@@ -190,6 +196,7 @@ export function CosignaturePanel({
           const bad = status.forged.has(h);
           return (
             <li key={h} className="flex flex-wrap items-center gap-2 text-xs">
+              <ParticipantChip keyHash={h} />
               <Badge variant={ok ? "success" : bad ? "error" : "default"} size="sm">
                 {ok ? "Verified" : bad ? "Does not verify" : "Waiting"}
               </Badge>
@@ -198,6 +205,14 @@ export function CosignaturePanel({
           );
         })}
       </ul>
+
+      {confusable.length > 0 && (
+        <p className="text-[11px] text-dark-400">
+          {confusable.length === 1 ? "Two participants have" : `${confusable.length} pairs have`}{" "}
+          similar colours. Read the hashes for those rather than the chips — the colour is a
+          shortcut, not the identity, and nothing is nudged to hide the clash.
+        </p>
+      )}
 
       {status.forged.size > 0 && (
         <p className="text-xs text-red-300">
@@ -221,5 +236,26 @@ export function CosignaturePanel({
         </p>
       )}
     </section>
+  );
+}
+
+/**
+ * One participant's colour, with the short hash beside it.
+ *
+ * The chip and the text ship together everywhere, deliberately: the colour makes the common
+ * case ("who is missing?") instant, and the hash makes every case correct — for a colour-blind
+ * reader, a greyscale screenshot, or two hues that happen to land near each other.
+ */
+function ParticipantChip({ keyHash }: { keyHash: string }) {
+  const colour = participantColour(keyHash);
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span
+        aria-hidden
+        className="h-2.5 w-2.5 shrink-0 rounded-full border"
+        style={colour.swatch}
+      />
+      <span className="font-mono text-[10px] text-dark-400">{colour.shortHash}</span>
+    </span>
   );
 }
