@@ -7,6 +7,7 @@ import React, {
   useEffect,
   useCallback,
   useMemo,
+  useState,
   ReactNode,
 } from 'react';
 import type {
@@ -21,12 +22,15 @@ import type {
 } from '@/types/registration';
 import { createInitialWizardState } from '@/types/registration';
 import { getFlow } from '@/lib/registration/flow-registry';
+import { clearRegistrationCip170Storage } from '@/lib/rwa/mint-recovery-storage';
+import { resetRegistrationRun } from '@/lib/rwa/registration-run';
 
 // ============================================================================
 // Constants
 // ============================================================================
 
 const STORAGE_KEY = 'registration-wizard-state';
+const VOLATILE_CIP170_FLOWS = new Set(['rwa-token', 'kyc', 'kyc-extended']);
 
 // ============================================================================
 // Reducer
@@ -278,6 +282,9 @@ interface WizardProviderProps {
 
 export function RegistrationWizardProvider({ children }: WizardProviderProps) {
   const [state, dispatch] = useReducer(wizardReducer, createInitialWizardState());
+  const [registrationNavigationLocked, setRegistrationNavigationLocked] = useState(false);
+
+  useEffect(() => { clearRegistrationCip170Storage(); }, []);
 
   // Persist state to localStorage
   useEffect(() => {
@@ -285,6 +292,11 @@ export function RegistrationWizardProvider({ children }: WizardProviderProps) {
 
     // Clear saved state when wizard is complete
     if (state.isComplete) {
+      localStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+
+    if (state.flowId && VOLATILE_CIP170_FLOWS.has(state.flowId)) {
       localStorage.removeItem(STORAGE_KEY);
       return;
     }
@@ -361,6 +373,9 @@ export function RegistrationWizardProvider({ children }: WizardProviderProps) {
 
   // Reset wizard
   const reset = useCallback(() => {
+    resetRegistrationRun();
+    setRegistrationNavigationLocked(false);
+    clearRegistrationCip170Storage();
     dispatch({ type: 'RESET_WIZARD' });
     if (typeof window !== 'undefined') {
       localStorage.removeItem(STORAGE_KEY);
@@ -374,6 +389,10 @@ export function RegistrationWizardProvider({ children }: WizardProviderProps) {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (!saved) return false;
       const parsed = JSON.parse(saved) as WizardState;
+      if (parsed.flowId && VOLATILE_CIP170_FLOWS.has(parsed.flowId)) {
+        localStorage.removeItem(STORAGE_KEY);
+        return false;
+      }
       // Valid if has flowId and not complete
       return !!parsed.flowId && !parsed.isComplete;
     } catch {
@@ -398,6 +417,8 @@ export function RegistrationWizardProvider({ children }: WizardProviderProps) {
     isStepCompleted,
     canGoBack,
     canGoNext,
+    registrationNavigationLocked,
+    setRegistrationNavigationLocked,
     reset,
     hasResumableSession,
     clearSavedSession,
@@ -436,6 +457,10 @@ export function useWizardResume(): {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (!saved) return false;
       const parsed = JSON.parse(saved) as WizardState;
+      if (parsed.flowId && VOLATILE_CIP170_FLOWS.has(parsed.flowId)) {
+        localStorage.removeItem(STORAGE_KEY);
+        return false;
+      }
       return !!parsed.flowId && !parsed.isComplete;
     } catch {
       return false;
@@ -447,7 +472,12 @@ export function useWizardResume(): {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (!saved) return null;
-      return JSON.parse(saved) as WizardState;
+      const parsed = JSON.parse(saved) as WizardState;
+      if (parsed.flowId && VOLATILE_CIP170_FLOWS.has(parsed.flowId)) {
+        localStorage.removeItem(STORAGE_KEY);
+        return null;
+      }
+      return parsed;
     } catch {
       return null;
     }

@@ -12,7 +12,7 @@ const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
 /** Decode the exact address bytes; comparing only payment key hashes would permit
  * a different stake credential or address type to authorize a payer address. */
-function payerAddressHex(address: string): string {
+export function payerAddressHex(address: string): string {
   const normalized = address.toLowerCase();
   if (normalized !== address && address.toUpperCase() !== address)
     throw new Error("Invalid mixed-case payer address");

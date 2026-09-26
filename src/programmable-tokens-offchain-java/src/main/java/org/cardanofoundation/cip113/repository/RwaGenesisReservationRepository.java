@@ -16,11 +16,14 @@ public interface RwaGenesisReservationRepository extends JpaRepository<RwaGenesi
     @Transactional
     @Query(value = """
         INSERT INTO rwa_genesis_reservation
-            (global_state_policy_id, bootstrap_tx_hash, bootstrap_output_index)
-        VALUES (:gsPolicy, :txHash, :outputIndex)
+            (global_state_policy_id, bootstrap_tx_hash, bootstrap_output_index, created_at)
+        VALUES (:gsPolicy, :txHash, :outputIndex, CURRENT_TIMESTAMP)
         ON CONFLICT DO NOTHING
         """, nativeQuery = true)
     int claim(@Param("gsPolicy") String gsPolicy,
               @Param("txHash") String txHash,
               @Param("outputIndex") int outputIndex);
+    @Modifying
+    @Query("delete from RwaGenesisReservationEntity r where r.globalStatePolicyId = :gsPolicy and r.bootstrapTxHash = :txHash and r.bootstrapOutputIndex = :outputIndex")
+    int releaseOwned(@Param("gsPolicy") String gsPolicy, @Param("txHash") String txHash, @Param("outputIndex") int outputIndex);
 }

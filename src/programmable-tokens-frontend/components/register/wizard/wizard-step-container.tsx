@@ -6,6 +6,7 @@ import { useCIP113 } from '@/contexts/cip113-context';
 import { useWallet } from '@/hooks/use-wallet';
 import { getPaymentKeyHash } from '@/lib/utils/address';
 import type { StepResult, StepComponentProps } from '@/types/registration';
+import { currentRegistrationRun } from '@/lib/rwa/registration-run';
 
 export function WizardStepContainer() {
   const {
@@ -15,6 +16,7 @@ export function WizardStepContainer() {
     currentStep,
     getStepData,
     canGoBack,
+    registrationNavigationLocked,
   } = useRegistrationWizard();
 
   const { registerTokenCallback } = useCIP113();
@@ -44,6 +46,7 @@ export function WizardStepContainer() {
   const handleComplete = useCallback(
     async (result: StepResult) => {
       if (!currentStep || !currentFlow) return;
+      const run = currentRegistrationRun();
 
       // Mark step as complete
       dispatch({
@@ -86,9 +89,11 @@ export function WizardStepContainer() {
               );
             }
             await registerTokenCallback(callbackData);
+            if (currentRegistrationRun() !== run) return;
             console.log('[Registration] Token registered in backend DB');
           }
         } catch (e) {
+          if (currentRegistrationRun() !== run) return;
           // ⚠ SURFACED, not swallowed. The token is already on chain by this point — this
           // callback is what makes it USABLE from this backend. A console.warn left the
           // operator with a minted token, a missing or wrong row, and a success screen.
@@ -109,7 +114,7 @@ export function WizardStepContainer() {
       // chain either way, but "registered" and "usable from this backend" are different claims,
       // and showing success for the first while the second failed is how a broken token reaches
       // an operator looking finished.
-      if (registrationRecorded && currentIndex < currentFlow.steps.length - 1) {
+      if (currentRegistrationRun() === run && registrationRecorded && currentIndex < currentFlow.steps.length - 1) {
         dispatch({ type: 'NEXT_STEP' });
       }
     },
@@ -131,10 +136,10 @@ export function WizardStepContainer() {
 
   // Handle back navigation
   const handleBack = useCallback(() => {
-    if (canGoBack) {
+    if (canGoBack && !registrationNavigationLocked) {
       dispatch({ type: 'PREV_STEP' });
     }
-  }, [canGoBack, dispatch]);
+  }, [canGoBack, registrationNavigationLocked, dispatch]);
 
   // Set processing state
   const handleSetProcessing = useCallback((processing: boolean) => {

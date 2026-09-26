@@ -138,7 +138,7 @@ public class KeriService {
             List<TokenMembershipHook> hooks,
             @Value("${keri.identifier.name}") String identifierName,
             @Value("${keri.identifier.registry-name:kyc-registry}") String registryName,
-            @Value("${keri.signing-mnemonic}") String signingMnemonic,
+            @Value("${keri.signing-mnemonic:}") String signingMnemonic,
             @Value("${network:preview}") String network) {
         this.identifierConfig = identifierConfig;
         this.client = client;
@@ -161,6 +161,9 @@ public class KeriService {
     // ── Signing entity key ─────────────────────────────────────────────────────
 
     public String getSigningEntityVkey() {
+        if (signingMnemonic == null || signingMnemonic.isBlank()) {
+            throw new BackendCardanoSigningUnavailableException();
+        }
         Account entityAccount = Account.createFromMnemonic(networkInfo(), signingMnemonic);
         return HexUtil.encodeHexString(entityAccount.publicKeyBytes());
     }
@@ -795,15 +798,15 @@ public class KeriService {
         HabState hab = client.identifiers().get(identifierName)
                 .orElseThrow(() -> new IllegalStateException("Identifier not found: " + identifierName));
 
-        client.exchanges().send(identifierName, "remotesign",
+        var requestExchange = client.exchanges().send(identifierName, "remotesign",
                 hab, "/remotesign/ixn/req", ked, Map.of(), List.of(userAid));
 
         log.info("Remotesign ixn request sent to wallet AID={}, digest={}", userAid, digest);
 
         // KERIA prefixes inbound exn routes with "/exn/" when surfacing them as
         // notifications, so we accept both forms.
-        IpexNotificationHelper.Notification refNote = IpexNotificationHelper.waitForNotification(client,
-                "/remotesign/ixn/ref", "/exn/remotesign/ixn/ref");
+        IpexNotificationHelper.Notification refNote = IpexNotificationHelper.waitForRemoteSignRef(client,
+                requestExchange.getD(), userAid, hab.getPrefix());
         IpexNotificationHelper.markAndDelete(client, refNote);
 
         // signify-java's keyStates().query signature is (pre, sn) — the second arg is an

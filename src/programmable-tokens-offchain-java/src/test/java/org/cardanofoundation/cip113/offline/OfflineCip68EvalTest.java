@@ -1,6 +1,8 @@
 package org.cardanofoundation.cip113.offline;
 
 import com.bloxbean.cardano.client.address.Address;
+import com.bloxbean.cardano.client.address.AddressProvider;
+import com.bloxbean.cardano.client.address.Credential;
 import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.transaction.spec.Transaction;
 import com.bloxbean.cardano.client.util.HexUtil;
@@ -56,6 +58,16 @@ public class OfflineCip68EvalTest {
             6,
             "https://example.invalid/offline-token",
             "ipfs://bafkreialsoinvalidbutwellformedlookinglogohash");
+
+    @Test
+    public void initialMintAttestationPreservesPlainRegistrationChainAndEvaluates() throws Exception {
+        rwaTokenChain(null, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress(), false, false, false, true);
+    }
+
+    @Test
+    public void initialMintAttestationPreservesCip68PairAndEvaluates() throws Exception {
+        rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress(), false, false, false, true);
+    }
 
     @Test
     public void bootstrapIsVirtuallySubmittableAndSpendable() throws Exception {
@@ -227,6 +239,34 @@ public class OfflineCip68EvalTest {
                 mintRequest(fixture.policyId(), registeredName), fixture.bootParams());
         Assertions.assertTrue(ok.isSuccessful(),
                 "the REGISTERED name must still mint: " + ok.error());
+    }
+
+    @Test
+    public void dummyMintIncludesOptionalCip170LabelOnlyWhenApproved() throws Exception {
+        var fixture = dummyMintFixture(METADATA, "1000000");
+        var ordinary = fixture.handler().buildMintTransaction(
+                mintRequest(fixture.policyId(), fixture.registeredAssetName()), fixture.bootParams());
+        Assertions.assertTrue(ordinary.isSuccessful(), ordinary.error());
+        var ordinaryTx = Transaction.deserialize(HexUtil.decodeHexString(ordinary.unsignedCborTx()));
+        Assertions.assertTrue(ordinaryTx.getAuxiliaryData() == null
+                        || ordinaryTx.getAuxiliaryData().getMetadata() == null
+                        || ordinaryTx.getAuxiliaryData().getMetadata().get(BigInteger.valueOf(170)) == null,
+                "ordinary mint must have no ATTEST label");
+
+        var attestation = new org.cardanofoundation.cip113.model.Cip170AttestationData(
+                "E" + "a".repeat(43), "E" + "b".repeat(43), "1", "1.0");
+        var approved = new org.cardanofoundation.cip113.model.MintTokenRequest(
+                BootstrapFixture.ADMIN.baseAddress(), fixture.policyId(), fixture.registeredAssetName(),
+                "500", BootstrapFixture.ALICE.baseAddress(), attestation);
+        var result = fixture.handler().buildMintTransaction(approved, fixture.bootParams());
+        Assertions.assertTrue(result.isSuccessful(), result.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(result.unsignedCborTx()));
+        var label = tx.getAuxiliaryData().getMetadata().get(BigInteger.valueOf(170));
+        Assertions.assertInstanceOf(com.bloxbean.cardano.client.metadata.MetadataMap.class, label);
+        var attest = (com.bloxbean.cardano.client.metadata.MetadataMap) label;
+        Assertions.assertEquals("ATTEST", attest.get("t"));
+        Assertions.assertEquals(attestation.digest(), attest.get("d"));
+        Assertions.assertEquals(attestation.signerAid(), attest.get("i"));
     }
 
     /** A (100) name must be refused by the ordinary mint endpoint whatever else is true. */
@@ -1807,6 +1847,13 @@ public class OfflineCip68EvalTest {
                                                   boolean seedReceiverKyc,
                                                   boolean submitEarlierAttempt)
             throws Exception {
+        return rwaTokenChain(metadata, initialMintableAmount, initialMintQuantity, recipientAddress,
+                rewardAccountsRegistered, seedReceiverKyc, submitEarlierAttempt, false);
+    }
+
+    private RwaTokenChain rwaTokenChain(Cip68Metadata metadata, long initialMintableAmount,
+            String initialMintQuantity, String recipientAddress, boolean rewardAccountsRegistered,
+            boolean seedReceiverKyc, boolean submitEarlierAttempt, boolean attestInitialMint) throws Exception {
         var chain = new OfflineChain();
         var boot = BootstrapFixture.bootstrap(chain);
         var label = "rwa-token";
@@ -1948,6 +1995,43 @@ public class OfflineCip68EvalTest {
                 .seedRecipientInAllowlistAtGenesis(seedReceiverKyc)
                 .build();
 
+        var frozenRequest = HandlerFixtures.OBJECT_MAPPER.readValue(
+                HandlerFixtures.OBJECT_MAPPER.writeValueAsString(registerRequest),
+                org.cardanofoundation.cip113.model.RwaTokenRegisterRequest.class);
+        org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GenesisPlan approvedPlan = null;
+        var approval = new org.cardanofoundation.cip113.model.Cip170AttestationData(
+                "E" + "a".repeat(43), "E" + "b".repeat(43), "a", "1.0");
+        if (attestInitialMint) {
+            approvedPlan = handler.planGenesis(registerRequest, boot.params());
+            Assertions.assertTrue(registrations.isEmpty(), "planning must not create registration state");
+            Assertions.assertTrue(reservations.isEmpty(), "planning has no reservation side effects");
+            var bootstrap = approvedPlan.funding().getFirst();
+            reservationRepository.claim(approvedPlan.globalStatePolicyId(), bootstrap.getTxHash(), bootstrap.getOutputIndex());
+            var savedReservation = new org.cardanofoundation.cip113.entity.RwaGenesisReservationEntity();
+            savedReservation.setGlobalStatePolicyId(approvedPlan.globalStatePolicyId());
+            savedReservation.setBootstrapTxHash(bootstrap.getTxHash()); savedReservation.setBootstrapOutputIndex(bootstrap.getOutputIndex());
+            Mockito.when(reservationRepository.findById(approvedPlan.globalStatePolicyId()))
+                    .thenReturn(java.util.Optional.of(savedReservation));
+            for (var funding : approvedPlan.funding()) fundingReservationRepository.claim(
+                    funding.getTxHash() + "#" + funding.getOutputIndex(), approvedPlan.globalStatePolicyId());
+            if (metadata == null) {
+                // An attested attempt must never choose another bootstrap when its pinned state differs.
+                var wrongPolicy = new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GenesisPlan(
+                        approvedPlan.globalStatePolicyId(), "ff".repeat(28), approvedPlan.funding());
+                handler.usePreparedGenesis(wrongPolicy, null, java.time.Instant.now().plusSeconds(1800));
+                var rejectedPolicy = handler.buildFullRegistrationChain(registerRequest, boot.params());
+                Assertions.assertFalse(rejectedPolicy.isSuccessful());
+                Assertions.assertTrue(registrations.isEmpty(), "policy mismatch must not create registration state");
+                String fundingRef = bootstrap.getTxHash() + "#" + bootstrap.getOutputIndex();
+                fundingReservations.put(fundingRef, "ee".repeat(28));
+                handler.usePreparedGenesis(approvedPlan, null, java.time.Instant.now().plusSeconds(1800));
+                var rejectedOwner = handler.buildFullRegistrationChain(registerRequest, boot.params());
+                Assertions.assertFalse(rejectedOwner.isSuccessful());
+                Assertions.assertTrue(registrations.isEmpty(), "foreign reservation must not create registration state");
+                fundingReservations.put(fundingRef, approvedPlan.globalStatePolicyId());
+            }
+            handler.usePreparedGenesis(approvedPlan, null, java.time.Instant.now().plusSeconds(1800));
+        }
         var chainResult = handler.buildFullRegistrationChain(registerRequest, boot.params());
         Assertions.assertTrue(chainResult.isSuccessful(),
                 "rwa-token registration chain build failed: " + chainResult.error());
@@ -1998,6 +2082,27 @@ public class OfflineCip68EvalTest {
         }
 
         var built = chainResult.metadata();
+        if (attestInitialMint) {
+            approval = new org.cardanofoundation.cip113.model.Cip170AttestationData(
+                    "E" + "a".repeat(43),
+                    org.cardanofoundation.cip113.service.MintTxHashPayload.digest(built.registrationTxHash()),
+                    "a", "1.0");
+            var childBuilder = new org.cardanofoundation.cip113.service.module.Cip170MintChildBuilder(
+                    chain.quickTxBuilderOver(hybridUtxoSupplier));
+            built = handler.completeInitialMintChain(built, BootstrapFixture.ADMIN.baseAddress(),
+                    boot.params(), approval, childBuilder);
+            chainResult = org.cardanofoundation.cip113.model.TransactionContext.ok(built.genesisCborHex(), built);
+            String approvedAsset = metadata == null ? BASE_ASSET_NAME_HEX
+                    : Cip68.labeledAssetName(Cip68.uncappedUserTokenLabel(), BASE_ASSET_NAME_HEX);
+            String destination = AddressProvider.getBaseAddress(
+                    Credential.fromScript(boot.params().programmableLogicBase().scriptHash()),
+                    new Address(recipientAddress).getDelegationCredential().orElseThrow(), HandlerFixtures.NETWORK.getCardanoNetwork()).getAddress();
+            var fields = new org.cardanofoundation.cip113.model.MintAttestationRequest("session", "dev", boot.params().txHash(),
+                    approvedPlan.programmableTokenPolicyId(), approvedAsset, initialMintQuantity,
+                    BootstrapFixture.ADMIN.baseAddress(), recipientAddress, destination);
+            org.cardanofoundation.cip113.service.InitialMintTransactionValidator.validate(
+                    built, fields, frozenRequest, approvedPlan, boot.params(), approval);
+        }
         // Exercise the same final-chain funding audit the controller runs after the
         // builder. It must recognize chained outputs and protocol inputs while
         // reserving every external wallet input used by later phases.
@@ -2018,8 +2123,9 @@ public class OfflineCip68EvalTest {
         if (seedReceiverKyc) {
             byte[] recipientStake = new Address(recipientAddress).getDelegationCredentialHash().orElseThrow();
             var seededAllowlist = allowlist;
+            String builtPolicy = built.programmableTokenPolicyId();
             Assertions.assertThrows(IllegalStateException.class,
-                    () -> seededAllowlist.inclusionProof(built.programmableTokenPolicyId(), recipientStake,
+                    () -> seededAllowlist.inclusionProof(builtPolicy, recipientStake,
                             (short) 0, System.currentTimeMillis()),
                     "public proof lookup must not trust an unsubmitted genesis snapshot");
         }
@@ -2040,6 +2146,12 @@ public class OfflineCip68EvalTest {
             stages.put("publishScripts", built.publishScriptsCborHex());
         }
         stages.put("registration", built.registrationCborHex());
+        if (built.attestationCborHex() != null) {
+            stages.put("attestation", built.attestationCborHex());
+            Assertions.assertEquals(built.registrationTxHash(),
+                    Transaction.deserialize(HexUtil.decodeHexString(built.attestationCborHex()))
+                            .getBody().getInputs().getFirst().getTransactionId());
+        }
         if (built.registerTransferLogicCborHex() != null) {
             stages.put("registerTransferLogic", built.registerTransferLogicCborHex());
         }
@@ -2065,6 +2177,7 @@ public class OfflineCip68EvalTest {
             if (!"registerTransferLogic".equals(stage.getKey())
                     && !"registerThirdPartyTransferLogic".equals(stage.getKey())
                     && !"publishScripts".equals(stage.getKey())
+                    && !"attestation".equals(stage.getKey())
                     && !stage.getKey().endsWith("Provenance")) {
                 Assertions.assertTrue(evaluated > 0,
                         stage.getKey() + " produced no genuinely evaluated redeemer");

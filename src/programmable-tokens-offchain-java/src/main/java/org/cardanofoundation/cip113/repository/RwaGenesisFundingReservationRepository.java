@@ -14,9 +14,12 @@ public interface RwaGenesisFundingReservationRepository
     @Modifying
     @Transactional
     @Query(value = """
-        INSERT INTO rwa_genesis_funding_reservation (input_ref, global_state_policy_id)
-        VALUES (:inputRef, :gsPolicy)
+        INSERT INTO rwa_genesis_funding_reservation (input_ref, global_state_policy_id, created_at)
+        VALUES (:inputRef, :gsPolicy, CURRENT_TIMESTAMP)
         ON CONFLICT DO NOTHING
         """, nativeQuery = true)
     int claim(@Param("inputRef") String inputRef, @Param("gsPolicy") String gsPolicy);
+    @Modifying
+    @Query("delete from RwaGenesisFundingReservationEntity r where r.inputRef = :inputRef and r.globalStatePolicyId = :gsPolicy")
+    int releaseOwned(@Param("inputRef") String inputRef, @Param("gsPolicy") String gsPolicy);
 }

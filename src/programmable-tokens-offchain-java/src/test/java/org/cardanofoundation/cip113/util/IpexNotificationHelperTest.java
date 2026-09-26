@@ -14,6 +14,8 @@ import java.util.Optional;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.*;
@@ -23,6 +25,15 @@ class IpexNotificationHelperTest {
     private static final String GRANT = "grant-said";
     private static final String WALLET = "wallet-aid";
     private static final String ISSUER = "issuer-aid";
+
+    @Test
+    void remoteSignRefMustBelongToItsOwnRequest() {
+        var ref = new Exn().d("note").r("/remotesign/ixn/ref")
+                .p("mint-request").i(WALLET).rp(ISSUER);
+        assertTrue(IpexNotificationHelper.matchesRemoteSignRef(ref, "note", "mint-request", WALLET, ISSUER));
+        assertFalse(IpexNotificationHelper.matchesRemoteSignRef(ref, "note", "registration-request", WALLET, ISSUER));
+        assertFalse(IpexNotificationHelper.matchesRemoteSignRef(ref, "note", "mint-request", "other", ISSUER));
+    }
 
     @Test
     void acceptsOnlyTheAdmitForThisGrantAndLeavesOtherNotificationsUntouched() throws Exception {

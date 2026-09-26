@@ -17,7 +17,8 @@
     "test:member-root": "tsc lib/rwa/member-root.ts lib/rwa/review-root-tx.ts --outDir .root-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-member-root.js && node test-review-root-tx.js",
     "test:stake-address": "tsc lib/rwa/stake-address.ts --outDir .stake-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-stake-address.js",
     "test:keri-issue-error": "node test-keri-issue-error.js",
-    "test:cmta-attestation": "tsc lib/rwa/attestation.ts --outDir .attestation-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-cmta-attestation.js"
+    "test:cmta-attestation": "tsc lib/rwa/attestation.ts --outDir .attestation-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-cmta-attestation.js",
+    "test:mint-recovery": "tsc lib/rwa/mint-recovery-storage.ts lib/rwa/initial-mint-draft.ts lib/rwa/initial-mint-cap.ts lib/rwa/registration-run.ts lib/rwa/registration-chain-status.ts --outDir .mint-recovery-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-mint-recovery-storage.js && node test-initial-mint-draft.js && node test-initial-mint-cap.js && node test-initial-mint-scan.js && node test-registration-run.js && node test-registration-chain-status.js"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.9.0",

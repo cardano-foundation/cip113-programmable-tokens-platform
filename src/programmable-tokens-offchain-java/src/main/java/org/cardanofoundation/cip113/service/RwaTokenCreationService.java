@@ -39,7 +39,23 @@ public class RwaTokenCreationService {
     @Transactional
     public RwaTokenModuleHandler.ChainBuildResult buildChain(RwaTokenRegisterRequest request,
                                                                ProtocolBootstrapParams params) {
+        if (request.getAttestation() != null)
+            throw new BuildFailed("Raw initial-mint attestation is not accepted; use prepared creation");
+        return build(request, params, null, null, null);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public RwaTokenModuleHandler.ChainBuildResult buildPrepared(RwaTokenRegisterRequest request,
+            ProtocolBootstrapParams params, RwaTokenModuleHandler.GenesisPlan plan,
+            org.cardanofoundation.cip113.model.Cip170AttestationData attestation, java.time.Instant expiresAt) {
+        return build(request, params, plan, attestation, expiresAt);
+    }
+
+    private RwaTokenModuleHandler.ChainBuildResult build(RwaTokenRegisterRequest request,
+            ProtocolBootstrapParams params, RwaTokenModuleHandler.GenesisPlan plan,
+            org.cardanofoundation.cip113.model.Cip170AttestationData attestation, java.time.Instant expiresAt) {
         var handler = (RwaTokenModuleHandler) handlerFactory.getHandler("rwa-token", RwaTokenContext.emptyContext());
+        if (plan != null) handler.usePreparedGenesis(plan, attestation, expiresAt);
         var result = handler.buildFullRegistrationChain(request, params);
         if (!result.isSuccessful() || result.metadata() == null)
             throw new BuildFailed(result.error() == null ? "chain build failed" : result.error());
@@ -51,10 +67,13 @@ public class RwaTokenCreationService {
         txs.add(meta.issuanceProvenanceCborHex());
         if (meta.publishScriptsCborHex() != null) txs.add(meta.publishScriptsCborHex());
         txs.add(meta.registrationCborHex());
+        if (meta.attestationCborHex() != null) txs.add(meta.attestationCborHex());
         if (meta.registerTransferLogicCborHex() != null) txs.add(meta.registerTransferLogicCborHex());
         if (meta.registerThirdPartyTransferLogicCborHex() != null)
             txs.add(meta.registerThirdPartyTransferLogicCborHex());
-        reserveExternalWalletInputs(txs, request.getFeePayerAddress(), meta.globalStatePolicyId());
+        Set<String> pinned = plan == null ? null : plan.funding().stream()
+                .map(u -> ref(u.getTxHash(), u.getOutputIndex())).collect(java.util.stream.Collectors.toSet());
+        reserveExternalWalletInputs(txs, request.getFeePayerAddress(), meta.globalStatePolicyId(), pinned);
         return meta;
     }
 
@@ -66,7 +85,7 @@ public class RwaTokenCreationService {
                 + "is required. Use /rwa-token/build-chain to create and publish both records.");
     }
 
-    private void reserveExternalWalletInputs(List<String> cborHexes, String payerAddress, String gsPolicy) {
+    private void reserveExternalWalletInputs(List<String> cborHexes, String payerAddress, String gsPolicy, Set<String> pinned) {
         try {
         Set<String> currentPayerRefs = new HashSet<>();
         for (var utxo : utxoProvider.findAllCurrentUtxosFromBlockfrost(payerAddress)) {
@@ -85,6 +104,9 @@ public class RwaTokenCreationService {
                 String inputRef = ref(input.getTransactionId(), input.getIndex());
                 if (previousOutputRefs.contains(inputRef)) continue;
                 if (currentPayerRefs.contains(inputRef)) {
+                    if (pinned != null && !pinned.contains(inputRef))
+                        throw new BuildFailed("Prepared creation selected unapproved wallet funding: " + inputRef
+                                + ". Cancel this unbuilt attempt and prepare with sufficient funding.");
                     walletRefs.add(inputRef);
                     continue;
                 }

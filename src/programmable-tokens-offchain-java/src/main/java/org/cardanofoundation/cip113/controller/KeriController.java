@@ -11,6 +11,7 @@ import org.cardanofoundation.cip113.model.keri.OobiResponse;
 import org.cardanofoundation.cip113.model.keri.SchemaListResponse;
 import org.cardanofoundation.cip113.model.keri.SessionResponse;
 import org.cardanofoundation.cip113.service.KeriService;
+import org.cardanofoundation.cip113.service.BackendCardanoSigningUnavailableException;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.dao.OptimisticLockingFailureException;
@@ -46,6 +47,8 @@ public class KeriController {
     public ResponseEntity<?> getSigningEntityVkey() {
         try {
             return ResponseEntity.ok(Map.of("vkeyHex", keriService.getSigningEntityVkey()));
+        } catch (BackendCardanoSigningUnavailableException e) {
+            return ResponseEntity.status(503).body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
             log.error("Failed to derive signing entity vkey", e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
@@ -263,6 +266,8 @@ public class KeriController {
         try {
             KycProofResponse proof = keriService.generateKycProof(sessionId);
             return ResponseEntity.ok(proof);
+        } catch (BackendCardanoSigningUnavailableException e) {
+            return ResponseEntity.status(503).body(Map.of("error", e.getMessage()));
         } catch (NoSuchElementException e) {
             return ResponseEntity.status(401).body(Map.of("error", "Unknown session"));
         } catch (IllegalStateException | IllegalArgumentException e) {

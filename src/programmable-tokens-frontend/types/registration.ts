@@ -368,6 +368,9 @@ export interface WizardContextValue {
   canGoBack: boolean;
   /** Check if wizard can go to next step */
   canGoNext: boolean;
+  /** Prevent leaving the registration step while signed transactions may be in flight. */
+  registrationNavigationLocked: boolean;
+  setRegistrationNavigationLocked: (locked: boolean) => void;
   /** Reset wizard to initial state */
   reset: () => void;
   /** Check if there's a resumable session */

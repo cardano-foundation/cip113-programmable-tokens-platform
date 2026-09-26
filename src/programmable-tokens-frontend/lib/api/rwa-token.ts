@@ -108,13 +108,8 @@ export interface RwaTokenInitRequest {
    *  AddTrustedEntity update tx beforehand. */
   initialTrustedEntityVkeys?: string[];
   /** When set, genesis bakes the CIP-67 (222)/(333) label into the security asset name — and
-   *  therefore into minting_logic_script, transfer_logic_script and the token policy id.
-   *  The label is chosen from `initialMintableAmount`, not `quantity`, because a
-   *  rwa-token registration is structurally mint-free.
-   *
-   *  The (100) reference token is NOT minted here: the registration path rejects a second
-   *  asset name under the policy (minting_logic_script.ak:198-204). Pass the same metadata to
-   *  the FIRST mint (`/issue-token/mint`) to complete the pair. */
+   *  therefore into the scripts and token policy. A nonzero initial mint also creates the
+   *  CIP-68 (100) reference asset and datum in the registration transaction. */
   cip68Metadata?: Cip68MetadataRequest;
   /** OPT-IN. Seed the compliance allowlist at genesis with the recipient's stake
    *  credential and write the resulting MPF root into the GlobalState datum's
@@ -176,6 +171,7 @@ export interface RwaTokenChainBuildResponse {
    *  registration tx, which reads both scripts from it. */
   publishScriptsCborHex?: string;
   registrationCborHex: string;
+  attestationCborHex?: string;
   /** Conway RegCert for the BaFin transfer_logic_script stake credential.
    *  Included in the same CIP-103 signing batch so Eternl signs it cleanly
    *  alongside the genesis cert. Present iff the chain orchestrator could
@@ -195,7 +191,9 @@ export interface RwaTokenChainBuildResponse {
   issuanceProvenanceTxHash: string;
   publishScriptsTxHash?: string;
   registrationTxHash: string;
+  attestationTxHash?: string;
   registerTransferLogicTxHash?: string;
+  registerThirdPartyTransferLogicTxHash?: string;
 }
 
 /** Build the whole rwa-token registration chain at once, in submission order:
@@ -225,6 +223,7 @@ export const buildRwaTokenChain = async (body: RwaTokenInitRequest, rawApi: unkn
 
 export interface SubmitChainResponse {
   txHashes: string[];
+  confirmed: boolean;
   failedIndex?: number;
   failedTxHash?: string;
   error?: string;
@@ -238,6 +237,19 @@ export const submitTokenChain = (signedCborHexes: string[]) =>
     `/issue-token/submit-chain`,
     { signedCborHexes },
   );
+
+export interface ChainObservation {
+  hash: string;
+  status: 'CONFIRMED' | 'INVALID' | 'NOT_INDEXED' | 'UNKNOWN';
+  reason: string;
+}
+
+export interface ChainStatusResponse { transactions: ChainObservation[] }
+
+/** Read only: this never submits a signed transaction. */
+export const getTokenChainStatus = (txHashes: string[]) =>
+  apiPost<{ txHashes: string[] }, ChainStatusResponse>(
+    `/issue-token/chain-status`, { txHashes });
 
 /** A partial-failure result from {@link submitTokenChain}.
  *

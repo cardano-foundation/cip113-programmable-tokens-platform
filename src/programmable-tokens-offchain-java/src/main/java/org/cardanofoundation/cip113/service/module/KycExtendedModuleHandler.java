@@ -546,22 +546,7 @@ public class KycExtendedModuleHandler implements ModuleHandler, BasicOperations<
                             CoreWithdrawal::credential)
                     .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
 
-            if (request.attestation() != null) {
-                var att = request.attestation();
-                MetadataMap versionMap = MetadataBuilder.createMap();
-                versionMap.put("v", att.cipVersion() != null ? att.cipVersion() : "1.0");
-
-                MetadataMap cip170Map = MetadataBuilder.createMap();
-                cip170Map.put("t", "ATTEST");
-                cip170Map.put("i", att.signerAid());
-                cip170Map.put("d", att.digest());
-                cip170Map.put("s", att.seqNumber());
-                cip170Map.put("v", versionMap);
-
-                var metadata = MetadataBuilder.createMetadata();
-                metadata.put(170L, cip170Map);
-                tx.attachMetadata(metadata);
-            }
+            MintAttestationMetadata.attach(tx, request.attestation());
 
             var transaction = quickTxBuilder.compose(tx)
                     .withRequiredSigners(adminPkh.getBytes())

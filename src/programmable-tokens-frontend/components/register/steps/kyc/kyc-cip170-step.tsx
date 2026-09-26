@@ -23,6 +23,7 @@ import {
 import type { StepComponentProps } from '@/types/registration';
 import { QrCode, Shield, Copy, CheckCircle } from 'lucide-react';
 import { keriIssueErrorMessage } from '@/lib/utils/keri-issue-error';
+import { currentRegistrationRun, assertRegistrationRun } from '@/lib/rwa/registration-run';
 
 interface Cip170StepData {
   authBeginTxHash: string;
@@ -31,16 +32,6 @@ interface Cip170StepData {
 
 type Cip170SubStep = 'intro' | 'oobi-share' | 'oobi-scan' | 'credential' | 'publish' | 'done';
 
-function getSessionId(): string {
-  if (typeof sessionStorage === 'undefined') return crypto.randomUUID();
-  let id = sessionStorage.getItem('register-cip170-session-id');
-  if (!id) {
-    id = crypto.randomUUID();
-    sessionStorage.setItem('register-cip170-session-id', id);
-  }
-  return id;
-}
-
 export function KycCip170Step({
   onDataChange,
   onComplete,
@@ -48,7 +39,8 @@ export function KycCip170Step({
 }: StepComponentProps<Cip170StepData>) {
   const { wallet } = useWallet();
   const { toast: showToast } = useToast();
-  const sessionIdRef = useRef(getSessionId());
+  const sessionIdRef = useRef(crypto.randomUUID());
+  const run = useRef(currentRegistrationRun());
 
   const [subStep, setSubStep] = useState<Cip170SubStep>('intro');
   const [isLoading, setIsLoading] = useState(false);
@@ -165,7 +157,6 @@ export function KycCip170Step({
 
   const startNewSession = (issueNewCredential = false) => {
     const id = crypto.randomUUID();
-    sessionStorage.setItem('register-cip170-session-id', id);
     sessionIdRef.current = id;
     setOobiUrl(null);
     setOobiCopied(false);
@@ -240,9 +231,12 @@ export function KycCip170Step({
         sessionIdRef.current,
         feePayerAddress,
       );
+      assertRegistrationRun(run.current);
 
       const signedTx = await wallet.signTx(unsignedCbor);
+      assertRegistrationRun(run.current);
       const txHash = await wallet.submitTx(signedTx);
+      assertRegistrationRun(run.current);
 
       setAuthBeginTxHash(txHash);
       setSubStep('done');

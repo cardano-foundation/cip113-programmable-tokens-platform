@@ -22,13 +22,12 @@ import {
 } from "@/lib/api/admin";
 import { decodeAssetNameDisplay } from "@/lib/utils/cip68";
 import { mintToken } from "@/lib/api";
-import { MintTokenRequest, Cip170AttestationData } from "@/types/api";
+import { MintTokenRequest } from "@/types/api";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useCIP113 } from "@/contexts/cip113-context";
 import { useToast } from "@/components/ui/use-toast";
 import { getExplorerTxUrl } from "@/lib/utils";
 import {
-  requestAttestation,
   getAgentOobi,
   resolveOobi,
   storeCardanoAddress,
@@ -39,6 +38,20 @@ import {
   type AvailableRole,
   type CredentialResponse,
 } from "@/lib/api/keri";
+import {
+  getMintAttestationConfig,
+  getMintAttestation,
+  prepareMintAttestation,
+  anchorMintAttestation,
+  buildMintAttestationChain,
+  type MintAttestationRequest,
+  type MintAttestationView,
+  type MintAttestationConfig,
+  type MintAttestationChain,
+} from "@/lib/api/mint-attestation";
+import { bytesHex, hexBytes } from "@/lib/rwa/member-root";
+import { payerAddressHex } from "@/lib/rwa/creation-auth";
+import { mintRecoveryStorage } from "@/lib/rwa/mint-recovery-storage";
 import {
   getRwaTokenGlobalState,
   buildGlobalStateUpdateChain,
@@ -55,7 +68,7 @@ interface MintSectionProps {
 type MintStep = "form" | "attestation" | "signing" | "success";
 
 function getSessionId(): string {
-  if (typeof sessionStorage === "undefined") return crypto.randomUUID();
+  if (typeof window === "undefined") return crypto.randomUUID();
   let id = sessionStorage.getItem("mint-keri-session-id");
   if (!id) {
     id = crypto.randomUUID();
@@ -64,8 +77,25 @@ function getSessionId(): string {
   return id;
 }
 
+function savedRecoveryForPayer(payer: string): string | null {
+  if (!payer || typeof window === 'undefined') return null;
+  const payerKey = payerAddressHex(payer);
+  const pointerKey = `mint-keri-recovery-id-${payerKey}`;
+  const id = mintRecoveryStorage.getItem(pointerKey)
+    ?? mintRecoveryStorage.getItem('mint-keri-recovery-id');
+  if (!id) return null;
+  const raw = mintRecoveryStorage.getItem(`mint-keri-recovery-${id}`);
+  if (!raw) return null;
+  try {
+    const saved = JSON.parse(raw) as { payer?: string };
+    if (!saved.payer || payerAddressHex(saved.payer) !== payerKey) return null;
+    mintRecoveryStorage.setItem(pointerKey, id);
+    return id;
+  } catch { return null; }
+}
+
 export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
-  const { wallet } = useWallet();
+  const { wallet, rawApi } = useWallet();
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
   const { getProtocol, ensureModule, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
@@ -137,9 +167,19 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const [attestError, setAttestError] = useState<string | null>(null);
 
   // CIP-170 state
-  const [attestationData, setAttestationData] =
-    useState<Cip170AttestationData | null>(null);
+  const [mintIntent, setMintIntent] = useState<MintAttestationView | null>(null);
+  const [mintIntentConfig, setMintIntentConfig] = useState<MintAttestationConfig | null>(null);
+  const [mintIntentRequest, setMintIntentRequest] = useState<MintAttestationRequest | null>(null);
+  const [pendingIntentId, setPendingIntentId] = useState<string | null>(null);
+  const [recoveryId, setRecoveryId] = useState<string | null>(null);
+  const [recoveryLoaded, setRecoveryLoaded] = useState(false);
   const sessionIdRef = useRef(getSessionId());
+
+  useEffect(() => {
+    setPendingIntentId(sessionStorage.getItem('mint-keri-intent-id'));
+    setRecoveryId(savedRecoveryForPayer(feePayerAddress));
+    setRecoveryLoaded(true);
+  }, [feePayerAddress]);
 
   // OOBI + credential state for the inline KERI handshake. The backend's
   // /keri/attest/request requires the session to already have an admitted
@@ -158,21 +198,96 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const [isPresenting, setIsPresenting] = useState(false);
   const [presentError, setPresentError] = useState<string | null>(null);
 
+  const lastPayerRef = useRef(feePayerAddress);
+  useEffect(() => {
+    if (lastPayerRef.current === feePayerAddress) return;
+    const previousPayer = lastPayerRef.current;
+    lastPayerRef.current = feePayerAddress;
+    if (!previousPayer) return; // Initial wallet connection may restore a saved intent.
+    sessionStorage.removeItem("mint-keri-session-id");
+    sessionStorage.removeItem("mint-keri-intent-id");
+    sessionIdRef.current = getSessionId();
+    setPendingIntentId(null);
+    setRecoveryId(savedRecoveryForPayer(feePayerAddress));
+    setMintIntent(null);
+    setMintIntentRequest(null);
+    setMintIntentConfig(null);
+    setAttestError(null);
+    setOobiUrl(null);
+    setPartnerOobi("");
+    setIsOobiConnected(false);
+    setHasCredential(false);
+    setAvailableRoles(null);
+    setSelectedRole(null);
+    setCredential(null);
+    setConnectError(null);
+    setPresentError(null);
+    setEnableAttestation(false);
+    setSelectedToken(null);
+    setStep("form");
+  }, [feePayerAddress]);
+
   // Probe the session on mount so a refresh / reused tab can skip OOBI when
   // the backend already knows about us.
   useEffect(() => {
     let cancelled = false;
     getSession(sessionIdRef.current)
-      .then((s) => {
+      .then(async (s) => {
         if (cancelled) return;
         if (s.exists) {
+          const expected = payerAddressHex(feePayerAddress);
+          const stored = s.cardanoAddress ? bytesHex(hexBytes(s.cardanoAddress)) : null;
+          if (stored !== expected) {
+            sessionStorage.removeItem("mint-keri-session-id");
+            sessionStorage.removeItem("mint-keri-intent-id");
+            sessionIdRef.current = getSessionId();
+            setPendingIntentId(null);
+            setMintIntent(null);
+            setMintIntentRequest(null);
+            setIsOobiConnected(false);
+            setHasCredential(false);
+            return;
+          }
           setIsOobiConnected(true);
-          if (s.hasCredential) setHasCredential(true);
+          setHasCredential(Boolean(s.hasCredential));
         }
       })
       .catch(() => {/* best effort */});
     return () => { cancelled = true; };
-  }, []);
+  }, [feePayerAddress]);
+
+  useEffect(() => {
+    if (!pendingIntentId || mintIntent || !feePayerAddress || tokens.length === 0) return;
+    let cancelled = false;
+    Promise.all([
+      getSession(sessionIdRef.current),
+      getMintAttestation(pendingIntentId, sessionIdRef.current),
+      getMintAttestationConfig(),
+    ]).then(([session, saved, config]) => {
+      if (cancelled) return;
+      if (!session.hasCredential || !session.cardanoAddress
+          || bytesHex(hexBytes(session.cardanoAddress)) !== payerAddressHex(feePayerAddress)
+          || payerAddressHex(saved.fields.feePayerAddress) !== payerAddressHex(feePayerAddress))
+        throw new Error("Saved mint intent belongs to another wallet session");
+      const token = tokens.find((item) => item.policyId === saved.fields.tokenPolicyId
+        && item.assetName.toLowerCase() === saved.fields.assetName.toLowerCase());
+      if (!token) throw new Error("Saved mint intent token is unavailable");
+      setSelectedToken(token);
+      setQuantity(saved.fields.quantity);
+      setRecipientAddress(saved.fields.recipientAddress);
+      setEnableAttestation(true);
+      setMintIntent(saved);
+      setMintIntentRequest(saved.fields);
+      setMintIntentConfig(config);
+      setIsOobiConnected(true);
+      setHasCredential(true);
+      setStep("attestation");
+    }).catch((err) => {
+      if (cancelled) return;
+      setAttestError(err instanceof Error ? err.message : "Saved mint intent could not be restored");
+    });
+    return () => { cancelled = true; };
+  }, [pendingIntentId, mintIntent, feePayerAddress, tokens]);
 
   const [errors, setErrors] = useState({
     token: "",
@@ -402,7 +517,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     e.preventDefault();
     if (!validateForm() || !selectedToken) return;
 
-    if (enableAttestation && isKycToken) {
+    if (enableAttestation) {
       // Go to attestation step — request digest anchoring then mint
       setStep("attestation");
     } else {
@@ -413,8 +528,55 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
   // ── Direct mint flow ─────────────────────────────────────────────────────
 
+  const submitSavedMint = async (intentId: string): Promise<string> => {
+    const raw = mintRecoveryStorage.getItem(`mint-keri-recovery-${intentId}`);
+    if (!raw) throw new Error("Saved signed mint chain is unavailable");
+    const saved = JSON.parse(raw) as { payer: string; chain: MintAttestationChain; signed: string[] };
+    if (payerAddressHex(saved.payer) !== payerAddressHex(feePayerAddress))
+      throw new Error("Reconnect the wallet that signed this mint to resume submission");
+    if (!Array.isArray(saved.signed) || saved.signed.length !== 2 ||
+        !saved.chain?.mintTxHash || !saved.chain?.attestationTxHash)
+      throw new Error("Saved mint chain is invalid");
+    try {
+      const response = await submitTokenChain(saved.signed);
+      if (response.error || response.txHashes.length !== 2 ||
+          response.txHashes[0]?.toLowerCase() !== saved.chain.mintTxHash.toLowerCase() ||
+          response.txHashes[1]?.toLowerCase() !== saved.chain.attestationTxHash.toLowerCase())
+        throw new Error("Submission returned mismatched transaction hashes; inspect the saved mint before retrying");
+      if (response.confirmed !== true)
+        throw new Error("The mint and its CIP-170 transaction were accepted but are not both confirmed yet. The signed chain is saved; check again after confirmation");
+      mintRecoveryStorage.removeItem(`mint-keri-recovery-${intentId}`);
+      mintRecoveryStorage.removeItem(`mint-keri-recovery-id-${payerAddressHex(feePayerAddress)}`);
+      if (mintRecoveryStorage.getItem('mint-keri-recovery-id') === intentId)
+        mintRecoveryStorage.removeItem('mint-keri-recovery-id');
+      setRecoveryId(null);
+      return saved.chain.mintTxHash;
+    } catch (error) {
+      const failure = parseSubmitChainFailure(error);
+      if (failure.txHashes.length &&
+          failure.txHashes.some((hash, index) => hash.toLowerCase() !==
+            [saved.chain.mintTxHash, saved.chain.attestationTxHash][index]?.toLowerCase()))
+        throw new Error("Submission returned unexpected transaction hashes; reconcile the saved chain before retrying");
+      throw new Error(`${failure.error}. The exact signed mint and attestation are saved. Resume after the chain confirms any pending transaction.`);
+    }
+  };
+
+  const resumeSavedMint = async () => {
+    if (!recoveryId) return;
+    setIsBuilding(true); setMintFailure(null);
+    try {
+      const hash = await submitSavedMint(recoveryId);
+      setTxHash(hash); setStep("success");
+      sessionStorage.removeItem("mint-keri-intent-id");
+      setPendingIntentId(null);
+      if (isRwaToken) void refreshRwaTokenGs();
+    } catch (error) {
+      setMintFailure(error instanceof Error ? error.message : "Could not resume signed mint chain");
+    } finally { setIsBuilding(false); }
+  };
+
   const buildAndSignMint = async (
-    attestation: Cip170AttestationData | null
+    intent: MintAttestationView | null
   ) => {
     if (!selectedToken) return;
 
@@ -429,10 +591,10 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       setMintConfirmed(false);
       setPreMintMintable(mintableBefore);
 
-      let unsignedCborTx: string;
+      let submittedTxHash: string;
 
       // KYC has no SDK implementation in cip113-sdk-ts; force the backend path.
-      const useSdk = txBuilder === "sdk" && sdkAvailableForSelected(selectedToken);
+      const useSdk = !intent && txBuilder === "sdk" && sdkAvailableForSelected(selectedToken);
 
       if (useSdk) {
         const moduleId = await ensureModule(selectedToken.policyId, selectedToken.assetName);
@@ -445,7 +607,25 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           recipientAddress: recipientAddress.trim(),
           substandardId: moduleId,
         });
-        unsignedCborTx = result.cbor;
+        setIsBuilding(false);
+        setIsSigning(true);
+        const signedTx = await wallet.signTx(result.cbor);
+        submittedTxHash = await wallet.submitTx(signedTx);
+      } else if (intent) {
+        const saved = mintRecoveryStorage.getItem(`mint-keri-recovery-${intent.intentId}`);
+        if (!saved) {
+          const config = mintIntentConfig ?? await getMintAttestationConfig();
+          const chain = await buildMintAttestationChain(rawApi, intent.intentId, intent.fields, config);
+          setIsBuilding(false);
+          setIsSigning(true);
+          const signedCbors = await wallet.signTxs([chain.mintCborHex, chain.attestationCborHex], true);
+          if (signedCbors.length !== 2) throw new Error("Wallet did not sign both mint transactions");
+          mintRecoveryStorage.setItem(`mint-keri-recovery-${intent.intentId}`,
+            JSON.stringify({ payer: feePayerAddress, chain, signed: signedCbors }));
+          mintRecoveryStorage.setItem(`mint-keri-recovery-id-${payerAddressHex(feePayerAddress)}`, intent.intentId);
+          setRecoveryId(intent.intentId);
+        }
+        submittedTxHash = await submitSavedMint(intent.intentId);
       } else {
         const request: MintTokenRequest = {
           feePayerAddress,
@@ -453,16 +633,17 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           assetName: selectedToken.assetName,
           quantity,
           recipientAddress: recipientAddress.trim(),
-          ...(attestation ? { attestation } : {}),
         };
-        unsignedCborTx = await mintToken(request, selectedVersion?.txHash);
+        const unsignedCborTx = await mintToken(request, selectedVersion?.txHash);
+        setIsBuilding(false);
+        setIsSigning(true);
+        const signedTx = await wallet.signTx(unsignedCborTx);
+        submittedTxHash = await wallet.submitTx(signedTx);
       }
 
-      setIsBuilding(false);
-      setIsSigning(true);
-
-      const signedTx = await wallet.signTx(unsignedCborTx);
-      const submittedTxHash = await wallet.submitTx(signedTx);
+      sessionStorage.removeItem("mint-keri-intent-id");
+      sessionStorage.removeItem("mint-keri-request-id");
+      setPendingIntentId(null);
 
       setTxHash(submittedTxHash);
       setStep("success");
@@ -495,7 +676,8 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       }
 
       showToast({
-        title: "Mint Failed",
+        title: intent && recoveryId
+          ? "Mint submitted; attestation pending" : "Mint Failed",
         description: errorMessage,
         variant: "error",
       });
@@ -504,7 +686,8 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       // that the form looks identical either way. Keep the message, and re-read the
       // chain so the displayed cap is known-current rather than assumed-unchanged.
       setMintFailure(errorMessage);
-      setStep("form");
+      if (intent) setAttestError(errorMessage);
+      setStep(intent ? "attestation" : "form");
       if (isRwaToken) void refreshRwaTokenGs();
     } finally {
       setIsBuilding(false);
@@ -533,10 +716,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       setIsConnecting(true);
       setConnectError(null);
       await resolveOobi(sessionIdRef.current, partnerOobi.trim());
-      const addresses = await wallet.getUsedAddresses();
-      if (addresses?.[0]) {
-        await storeCardanoAddress(sessionIdRef.current, addresses[0]);
-      }
+      await storeCardanoAddress(sessionIdRef.current, payerAddressHex(feePayerAddress));
       const rolesData = await getAvailableRoles(sessionIdRef.current);
       setAvailableRoles(rolesData.availableRoles);
       setIsOobiConnected(true);
@@ -550,7 +730,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     } finally {
       setIsConnecting(false);
     }
-  }, [partnerOobi, wallet, showToast]);
+  }, [partnerOobi, feePayerAddress, showToast]);
 
   const loadAvailableRoles = useCallback(async () => {
     try {
@@ -598,36 +778,44 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       setIsBuilding(true);
       setAttestError(null);
 
-      const unit = selectedToken.policyId + selectedToken.assetName;
-
-      const attestData = await requestAttestation(
-        sessionIdRef.current,
-        unit,
-        quantity
-      );
-
-      setAttestationData(attestData);
+      const config = mintIntentConfig ?? await getMintAttestationConfig();
+      setMintIntentConfig(config);
+      const input: MintAttestationRequest = mintIntentRequest ?? {
+        requestId: sessionStorage.getItem("mint-keri-request-id") ?? crypto.randomUUID(),
+        sessionId: sessionIdRef.current,
+        network: config.network,
+        protocolTxHash: selectedVersion?.txHash ?? null,
+        tokenPolicyId: selectedToken.policyId,
+        assetName: selectedToken.assetName,
+        quantity,
+        feePayerAddress,
+        recipientAddress: recipientAddress.trim(),
+        programmableRecipientAddress: null,
+      };
+      if (input.requestId) sessionStorage.setItem("mint-keri-request-id", input.requestId);
+      const prepared = mintIntent ?? await prepareMintAttestation(rawApi, input, config);
+      setMintIntent(prepared);
+      setMintIntentRequest(prepared.fields);
+      sessionStorage.setItem("mint-keri-intent-id", prepared.intentId);
+      setPendingIntentId(prepared.intentId);
+      const anchored = prepared.status === "ANCHORED" || prepared.status === "BUILT"
+        ? prepared
+        : await anchorMintAttestation(rawApi, prepared.intentId, prepared.fields, config);
+      setMintIntent(anchored);
 
       showToast({
-        title: "Attestation Anchored",
-        description: "Digest anchored in KEL. Building mint transaction...",
+        title: "KERI Approval Recorded",
+        description: "Veridian approved the frozen mint transaction hash. Building its CIP-170 child...",
         variant: "success",
       });
 
       // Proceed to build and sign mint tx with attestation
-      await buildAndSignMint(attestData);
+      await buildAndSignMint(anchored);
     } catch (error) {
       console.error("Attestation error:", error);
       let errorMessage = "Failed to anchor attestation";
       if (error instanceof Error) {
-        if (error.message.includes("408")) {
-          errorMessage =
-            "Wallet did not respond to anchor request in time.";
-        } else if (error.message.includes("409")) {
-          errorMessage = "Attestation request was cancelled.";
-        } else {
-          errorMessage = error.message;
-        }
+        errorMessage = error.message;
       }
       setAttestError(errorMessage);
     } finally {
@@ -638,6 +826,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   // ── Reset ────────────────────────────────────────────────────────────────
 
   const handleReset = () => {
+    sessionStorage.removeItem("mint-keri-request-id");
     setStep("form");
     setQuantity("");
     setRecipientAddress(feePayerAddress);
@@ -650,7 +839,11 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     setPreMintMintable(null);
     if (isRwaToken) void refreshRwaTokenGs();
     setEnableAttestation(false);
-    setAttestationData(null);
+    setMintIntent(null);
+    setMintIntentRequest(null);
+    setMintIntentConfig(null);
+    sessionStorage.removeItem("mint-keri-intent-id");
+    setPendingIntentId(null);
     setAttestError(null);
     setErrors({ token: "", quantity: "", recipientAddress: "" });
     sessionStorage.removeItem("mint-keri-session-id");
@@ -668,6 +861,25 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   };
 
   // ── Renders ──────────────────────────────────────────────────────────────
+
+  if (!recoveryLoaded) return <Card className="p-5 text-sm text-dark-300">Checking saved mint attempts…</Card>;
+
+  if (recoveryId) {
+    return (
+      <Card className="p-5 space-y-3">
+        <h3 className="text-lg font-semibold text-white">Resume signed mint attestation</h3>
+        <p className="text-sm text-dark-300">
+          Your exact signed mint and CIP-170 transaction are saved in this browser. Resume checks their
+          hashes on chain before resubmitting the same transactions. A pending transaction may need to
+          confirm before the next attempt succeeds.
+        </p>
+        <p className="text-xs font-mono break-all text-dark-400">Intent: {recoveryId}</p>
+        {mintFailure && <p role="alert" className="text-sm text-red-300">{mintFailure}</p>}
+        <Button variant="primary" onClick={resumeSavedMint} isLoading={isBuilding}
+          disabled={isBuilding}>Resume saved signed chain</Button>
+      </Card>
+    );
+  }
 
   if (mintableTokens.length === 0) {
     return (
@@ -752,19 +964,25 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           </div>
         )}
 
-        {attestationData && (
+        {mintIntent && (
           <div className="w-full px-4 py-3 bg-dark-900 rounded-lg mb-4">
             <div className="flex items-center gap-2 mb-2">
               <Shield className="h-4 w-4 text-green-400" />
               <p className="text-xs text-green-400 font-medium">
-                CIP-170 Attested
+                KERI approval recorded
               </p>
             </div>
             <p className="text-xs text-dark-400">
-              Signer: {attestationData.signerAid}
+              Signer: {mintIntent.signerAid}
             </p>
             <p className="text-xs text-dark-400">
-              Digest: {attestationData.digest}
+              Digest: {mintIntent.digest}
+            </p>
+            <p className="text-xs text-dark-400 break-all">
+              Mint transaction hash: {mintIntent.targetTxHash ?? txHash ?? "Pending"}
+            </p>
+            <p className="text-xs text-dark-400 mt-2">
+              KERI approval is recorded. Credential authority and revocation must be checked separately.
             </p>
           </div>
         )}
@@ -815,7 +1033,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     const phaseDone = {
       connect: isOobiConnected,
       present: hasCredential,
-      anchor: !!attestationData,
+      anchor: mintIntent?.status === "ANCHORED" || mintIntent?.status === "BUILT",
       mint: false, // happens after this step exits to "signing"
     };
     const stepRow = (n: number, label: string, done: boolean, active: boolean) => (
@@ -834,21 +1052,22 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     return (
       <div className="space-y-6">
         <h3 className="text-lg font-semibold text-white">
-          CIP-170 Attestation
+          Optional KERI mint approval
         </h3>
 
         <Card className="p-4 space-y-2">
           {stepRow(1, "Connect Veridian wallet (mutual OOBI)", phaseDone.connect, !phaseDone.connect)}
           {stepRow(2, "Present a verifiable credential",        phaseDone.present, phaseDone.connect && !phaseDone.present)}
-          {stepRow(3, "Anchor mint digest in your KEL",         phaseDone.anchor,  phaseDone.present && !phaseDone.anchor)}
+          {stepRow(3, "Authorize request, then approve in Veridian", phaseDone.anchor, phaseDone.present && !phaseDone.anchor)}
           {stepRow(4, "Submit the mint transaction",            phaseDone.mint,    phaseDone.anchor)}
         </Card>
 
         <p className="text-sm text-dark-400">
-          The mint digest (token unit + quantity) will be sent as a remote-sign request to
-          your Veridian wallet. After you approve, the wallet anchors the digest as an
-          interact event in its KEL, and we attach a CIP-170 ATTEST metadata block (label
-          170) to the on-chain mint transaction so verifiers can correlate the two.
+          Review the mint details below. Your Cardano wallet authorizes preparation of the
+          frozen mint transaction, then Veridian approves its transaction hash. A chained
+          transaction records the CIP-170 reference. Anyone can reconstruct the signed
+          digest from the mint transaction hash without a separate document. Credential authority and
+          revocation require separate verification.
         </p>
 
         {attestError && (
@@ -863,7 +1082,20 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
             {selectedToken?.assetNameDisplay}
           </p>
           <p className="text-xs text-dark-400 mt-2">Quantity</p>
-          <p className="text-sm text-white">{quantity}</p>
+          <p className="text-sm text-white">{mintIntent?.fields.quantity ?? quantity}</p>
+          <p className="text-xs text-dark-400 mt-2">Recipient</p>
+          <p className="text-xs text-white font-mono break-all">
+            {mintIntent?.fields.recipientAddress ?? recipientAddress}
+          </p>
+          <p className="text-xs text-dark-400 mt-2">Network / deployment</p>
+          <p className="text-xs text-white font-mono break-all">
+            {mintIntentConfig?.network ?? "Loading"} · {mintIntent?.fields.protocolTxHash ?? selectedVersion?.txHash ?? "Default"}
+          </p>
+          {mintIntent?.targetTxHash && <>
+            <p className="text-xs text-dark-400 mt-2">Frozen mint transaction hash</p>
+            <p className="text-xs text-white font-mono break-all">{mintIntent.targetTxHash}</p>
+            <p className="text-xs text-dark-400">Veridian signs the digest of {`{"d":"","txHash":"${mintIntent.targetTxHash}"}`}</p>
+          </>}
         </div>
 
         {(connectError || presentError) && (
@@ -1001,11 +1233,12 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           <Button
             variant="outline"
             onClick={() => {
-              setStep("form");
+              if (mintIntent) handleReset();
+              else setStep("form");
               setAttestError(null);
             }}
           >
-            Back
+            {mintIntent ? "Discard intent & edit mint" : "Back"}
           </Button>
           <Button
             variant="primary"
@@ -1020,7 +1253,11 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
                 ? "Connect wallet first"
                 : !hasCredential
                   ? "Present a credential first"
-                  : "Anchor Digest & Mint with Attestation"}
+                  : phaseDone.anchor
+                    ? "Continue mint with approved intent"
+                    : mintIntent
+                      ? "Resume Veridian approval check"
+                      : "Approve mint intent & continue"}
           </Button>
         </div>
 
@@ -1040,10 +1277,15 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     <form onSubmit={handleSubmit} className="space-y-6">
       <TxBuilderToggle
         sdkUnavailableReason={sdkUnavailableReason}
-        value={sdkAvailableForSelected(selectedToken) ? txBuilder : "backend"}
+        value={sdkAvailableForSelected(selectedToken) && !enableAttestation ? txBuilder : "backend"}
         onChange={setTxBuilder}
-        sdkAvailable={sdkAvailableForSelected(selectedToken)}
+        sdkAvailable={sdkAvailableForSelected(selectedToken) && !enableAttestation}
       />
+      {enableAttestation && (
+        <p className="text-xs text-dark-400 -mt-3">
+          Attested mints use the backend builder to include the KERI reference.
+        </p>
+      )}
       {selectedToken?.moduleId === "kyc" && (
         <p className="text-xs text-dark-400 -mt-3">
           KYC tokens are minted via the backend (no SDK module available).
@@ -1067,7 +1309,6 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
             setErrors((prev) => ({ ...prev, token: "" }));
           }}
           disabled={isBuilding}
-          filterByRole="ISSUER_ADMIN"
         />
         {errors.token && (
           <p className="mt-2 text-sm text-red-400">{errors.token}</p>
@@ -1260,8 +1501,8 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         helperText="Address to receive the minted tokens"
       />
 
-      {/* CIP-170 Attestation Toggle (only for KYC tokens) */}
-      {isKycToken && (
+      {/* Optional KERI mint approval for every backend mint module. */}
+      {selectedToken && (
         <div className="px-4 py-3 bg-dark-900 rounded-lg">
           <label className="flex items-center gap-3 cursor-pointer">
             <input
@@ -1273,11 +1514,11 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
             />
             <div>
               <p className="text-sm text-white font-medium">
-                Enable CIP-170 Attestation
+                Attest this mint with Veridian (optional)
               </p>
               <p className="text-xs text-dark-400">
-                Attest this mint with your Veridian wallet (anchors digest in
-                KEL and attaches ATTEST metadata to the mint transaction)
+                Approve the frozen mint transaction hash in Veridian. Your wallet then signs
+                the mint and a chained CIP-170 metadata transaction.
               </p>
             </div>
           </label>

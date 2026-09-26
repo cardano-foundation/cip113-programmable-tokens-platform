@@ -1,6 +1,10 @@
 package org.cardanofoundation.cip113.service;
 
 import com.bloxbean.cardano.client.transaction.spec.TransactionInput;
+import com.bloxbean.cardano.client.transaction.spec.Transaction;
+import com.bloxbean.cardano.client.util.HexUtil;
+import com.bloxbean.cardano.yaci.store.utxo.storage.impl.model.UtxoId;
+import com.bloxbean.cardano.yaci.store.utxo.storage.impl.repository.TxInputRepository;
 import com.easy1staking.cardano.model.AssetType;
 import com.easy1staking.util.Pair;
 import lombok.RequiredArgsConstructor;
@@ -28,6 +32,7 @@ import org.cardanofoundation.cip113.service.module.context.KycContext;
 import org.cardanofoundation.cip113.service.module.context.KycExtendedContext;
 import org.cardanofoundation.cip113.service.module.context.RwaTokenContext;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.util.List;
 
@@ -62,6 +67,10 @@ public class TokenOperationsService {
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
 
     private final RwaTokenRegistrationRepository rwaTokenRegistrationRepository;
+
+    private final ObjectProvider<MintAttestationService> mintAttestations;
+
+    private final ObjectProvider<TxInputRepository> spentInputs;
 
     /**
      * Pre-register a programmable token by registering required stake addresses.
@@ -240,8 +249,65 @@ public class TokenOperationsService {
     public TransactionContext<Void> mintToken(MintTokenRequest request, String protocolTxHash) {
         log.info("Minting token: {}, protocol: {}", request, protocolTxHash);
 
+        if (request.attestation() != null) {
+            return TransactionContext.typedError("Raw CIP-170 attestation fields are not accepted on mints. "
+                    + "Prepare and anchor a mint intent, then send mintAttestationId.");
+        }
+
         // Get protocol bootstrap params
         var protocolParams = resolveProtocolParams(protocolTxHash);
+
+        String intentId = request.mintAttestationId();
+        MintAttestationService attestationService = null;
+        MintAttestationStore.BuildClaim buildClaim = null;
+        MintAttestationRequest approvedFields = null;
+        MintTokenRequest buildRequest = request;
+        if (intentId != null && !intentId.isBlank()) {
+            attestationService = mintAttestations.getIfAvailable();
+            if (attestationService == null)
+                return TransactionContext.typedError("KERI mint attestation is not enabled on this backend");
+            try {
+                var intent = attestationService.requireAnchored(intentId, request, protocolParams);
+                approvedFields = attestationService.fields(intent);
+                buildClaim = attestationService.claimBuild(intentId);
+                if (buildClaim.cbor() != null) {
+                    rejectIndexedSpentInputs(buildClaim.cbor());
+                    return TransactionContext.ok(buildClaim.cbor());
+                }
+                buildRequest = new MintTokenRequest(request.feePayerAddress(), request.tokenPolicyId(),
+                        request.assetName(), request.quantity(), request.recipientAddress(),
+                        attestationService.attestation(intent), request.cip68Metadata(), intentId);
+            } catch (Exception e) {
+                return TransactionContext.typedError("Mint attestation rejected: " + e.getMessage());
+            }
+        }
+
+        try {
+            return buildMintTransaction(buildRequest, protocolParams, intentId,
+                    attestationService, buildClaim, approvedFields);
+        } finally {
+            if (attestationService != null && buildClaim != null && buildClaim.owner() != null)
+                attestationService.releaseBuild(intentId, buildClaim.owner());
+        }
+    }
+
+    /** Build the exact, unsigned target of a transaction-hash attestation. */
+    public String buildMintDraft(MintAttestationRequest fields) {
+        var request = new MintTokenRequest(fields.feePayerAddress(), fields.tokenPolicyId(),
+                fields.assetName(), fields.quantity(), fields.recipientAddress(), null, null, null);
+        var result = buildMintTransaction(request, resolveProtocolParams(fields.protocolTxHash()),
+                null, null, null, null);
+        if (!result.isSuccessful() || result.unsignedCborTx() == null)
+            throw new IllegalArgumentException(result.error() == null ? "Mint draft could not be built" : result.error());
+        return result.unsignedCborTx();
+    }
+
+    private TransactionContext<Void> buildMintTransaction(MintTokenRequest request,
+                                                           ProtocolBootstrapParams protocolParams,
+                                                           String intentId,
+                                                           MintAttestationService attestationService,
+                                                           MintAttestationStore.BuildClaim buildClaim,
+                                                           MintAttestationRequest approvedFields) {
 
         // Resolve module from policyId via unified registry
         String moduleId = resolveModuleId(request.tokenPolicyId());
@@ -328,7 +394,30 @@ public class TokenOperationsService {
 
         log.info("Mint transaction built successfully for module: {}", moduleId);
 
+        if (intentId != null && txContext.isSuccessful() && txContext.unsignedCborTx() != null) {
+            try {
+                var attestation = request.attestation();
+                MintAttestedTransactionValidator.validate(txContext.unsignedCborTx(), approvedFields, attestation);
+                String stored = attestationService.publishBuild(intentId, buildClaim.owner(), txContext.unsignedCborTx());
+                return TransactionContext.ok(stored);
+            } catch (Exception e) {
+                return TransactionContext.typedError("Attested mint transaction rejected: " + e.getMessage());
+            }
+        }
         return txContext;
+    }
+
+    private void rejectIndexedSpentInputs(String cbor) throws Exception {
+        var repository = spentInputs.getIfAvailable();
+        if (repository == null) return; // External chain backend has no local spent-input index.
+        Transaction tx = Transaction.deserialize(HexUtil.decodeHexString(cbor));
+        for (TransactionInput input : tx.getBody().getInputs()) {
+            if (repository.existsById(UtxoId.builder()
+                    .txHash(input.getTransactionId()).outputIndex(input.getIndex()).build())) {
+                throw new IllegalArgumentException(
+                        "Saved mint transaction has an input already spent on chain; approve a new mint intent");
+            }
+        }
     }
 
     /**

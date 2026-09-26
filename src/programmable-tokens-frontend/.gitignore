@@ -57,3 +57,4 @@ frontend.log
 .root-build/
 .stake-build/
 .attestation-build/
+.mint-recovery-build/

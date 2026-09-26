@@ -77,7 +77,9 @@ keri:
       VLEI:
         said: ${KERI_SCHEMA_VLEI_SAID:ENPXp1vQzRF6JwIuS-mp2U8Uf1MoADoP_GqQ62VsDZWY}
         label: "vLEI Credential"
-  signing-mnemonic: ${KERI_SIGNING_MNEMONIC:nest wild farm beyond decide arm chuckle home raven card parrot nothing crazy casino hub broken scan height marine movie gloom village common off}
+  # Optional backend Cardano signing key. Leave unset when the issuer signs and
+  # manages the allowlist manually; never use a shared public default key.
+  signing-mnemonic: ${KERI_SIGNING_MNEMONIC:}
   kyc-proof-validity-days: ${KERI_PROOF_VALIDITY_DAYS:30}
 
 # kyc-extended autonomous root-sync job. Signing reuses keri.signing-mnemonic

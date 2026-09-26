@@ -58,6 +58,48 @@ public class IpexNotificationHelper {
         return waitForAdmit(client, grantSaid, walletAid, issuerAid, ADMIT_MAX_RETRIES, POLL_INTERVAL_MS);
     }
 
+    /** Preserve unrelated remote-sign replies when registration and mint approvals overlap. */
+    public static Notification waitForRemoteSignRef(SignifyClient client, String requestSaid,
+                                                    String walletAid, String issuerAid) throws Exception {
+        for (int attempt = 0; attempt < ADMIT_MAX_RETRIES; attempt++) {
+            int start = 0;
+            int total = Integer.MAX_VALUE;
+            while (start < total) {
+                var response = client.notifications().list(start, start + PAGE_SIZE - 1);
+                total = Math.min(total, response.total());
+                List<Notification> notes = toNotifications(response.notes());
+                if (notes.isEmpty()) break;
+                for (Notification note : notes) {
+                    if (note.i == null || Boolean.TRUE.equals(note.r) || note.a == null
+                            || note.a.d == null || !isRemoteSignRoute(note.a.r)) continue;
+                    try {
+                        var exchange = client.exchanges().get(note.a.d);
+                        if (exchange.isPresent() && matchesRemoteSignRef(exchange.get().getExn(), note.a.d,
+                                requestSaid, walletAid, issuerAid)) return note;
+                    } catch (RuntimeException badNotification) {
+                        log.warn("Could not inspect remote-sign exchange said={}; retaining notification",
+                                note.a.d, badNotification);
+                    }
+                }
+                if (response.end() < start) break;
+                start = response.end() + 1;
+            }
+            if (attempt + 1 < ADMIT_MAX_RETRIES) Thread.sleep(POLL_INTERVAL_MS);
+        }
+        throw new RuntimeException("Timed out waiting for remote-sign reply to request " + requestSaid);
+    }
+
+    static boolean matchesRemoteSignRef(Exn exn, String noteSaid, String requestSaid,
+                                        String walletAid, String issuerAid) {
+        return exn != null && "/remotesign/ixn/ref".equals(exn.getR())
+                && Objects.equals(noteSaid, exn.getD()) && Objects.equals(requestSaid, exn.getP())
+                && Objects.equals(walletAid, exn.getI()) && Objects.equals(issuerAid, exn.getRp());
+    }
+
+    private static boolean isRemoteSignRoute(String route) {
+        return "/remotesign/ixn/ref".equals(route) || "/exn/remotesign/ixn/ref".equals(route);
+    }
+
     static Notification waitForAdmit(SignifyClient client, String grantSaid,
                                      String walletAid, String issuerAid,
                                      int maxRetries, long pollIntervalMs) throws Exception {
