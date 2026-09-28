@@ -45,6 +45,7 @@ import {
   assertCeremonyContext,
   resolveSeedUtxos,
   providerEvaluatorWithAdditionalUtxos,
+  withoutRefs,
   type ChainUtxo,
 } from "./ceremony";
 import { deriveCoreDeployment, type DeploymentSeeds } from "./derive";
@@ -300,6 +301,14 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
     client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
   ).getUtxos(EvoAddress.fromBech32(input.changeAddress))) as readonly never[];
 
+  if (!input.seeds) {
+    throw new Error(
+      "Three distinct seed UTxOs are required before planning. Use the seed-preparation step " +
+        "first: the alternative is a fragmentation transaction whose outputs do not exist on " +
+        "chain while everything after it is built and evaluated against them.",
+    );
+  }
+
   const ctx: CeremonyContext = {
     client: client as never,
     // Reuses the provider's own evaluator and only changes one decision: it FORWARDS the
@@ -311,21 +320,38 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
     // object that used to be here satisfied `as never` and then failed the SDK's own guard at
     // whichever step ran first — see assertCeremonyContext.
     changeAddress: input.changeAddress,
-    availableUtxos,
+    // ⛔ THE FUNDING SET, WITH THE SEEDS REMOVED. Not the raw wallet read — see the block below.
+    availableUtxos: withoutRefs(availableUtxos, [
+      input.seeds.paramsSeed,
+      input.seeds.issuanceSeed,
+      input.seeds.multisigSeed,
+    ]) as never,
   };
   // Fail here, before the plan and before any seed is spent, rather than inside step 2.
   assertCeremonyContext(ctx, "plan deployment");
 
-  if (!input.seeds) {
-    throw new Error(
-      "Three distinct seed UTxOs are required before planning. Use the seed-preparation step " +
-        "first: the alternative is a fragmentation transaction whose outputs do not exist on " +
-        "chain while everything after it is built and evaluated against them.",
-    );
-  }
-
-  // The builders SPEND these; the plan below is only parameterised by their outrefs.
+  // The builders SPEND these; the plan below is only parameterised by their outrefs. Resolved from
+  // the RAW read, because the funding set above deliberately no longer contains them.
   const seedUtxos = resolveSeedUtxos(availableUtxos, input.seeds);
+
+  /**
+   * ⛔ WHY THE SEEDS ARE OUT OF THE FUNDING SET ABOVE.
+   *
+   * Phase one builds BOTH its transactions from one available set before either is submitted, so
+   * whatever coin selection picks for stake-registrations is chosen in ignorance of what
+   * multisig-genesis already claims. Measured on preview 2026-09-28: multisig-genesis consumed the
+   * 50 ADA multisig seed and landed; stake-registrations, funded from the same set, was rejected at
+   * submission — one transaction on chain, its partner unspendable, and the plan dead, because the
+   * one-shot policy is a function of a seed that is now spent.
+   *
+   * ⚑ AND MAKING THE SEEDS THE LARGEST UTxOs MADE THIS LIKELIER, which is my own doing: seeds are
+   * now the biggest outputs in the wallet and coin selection prefers big inputs. Both changes are
+   * individually right and they collide.
+   *
+   * This adds NO requirement on the wallet. The seeds are handed to the builders that consume them
+   * explicitly, so taking them out of the FUNDING pool only stops them being spent twice — it is
+   * not the "reserve more UTxOs up front" constraint that was ruled out.
+   */
 
   const plan = buildPlan({
     blueprint: input.blueprint,
@@ -370,7 +396,7 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
 /** Lovelace per seed output. Each seed funds part of the transaction that consumes it. */
 export const DEFAULT_SEED_LOVELACE = 10_000_000n;
 
-export { buildWithFreshUtxos, withoutOutputsOf, providerEvaluatorWithAdditionalUtxos } from "./ceremony";
+export { buildWithFreshUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos } from "./ceremony";
 export { awaitMultisigConfigUtxo, buildProtocolGenesis, buildReferenceScripts, selectBootstrapSeeds, assembleDeploymentParams };
 export type { MultisigConfigLocation } from "./ceremony";
 

@@ -376,6 +376,28 @@ export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
 }
 
 /**
+ * Drop specific UTxOs by outref — the seeds, so coin selection cannot spend them as funding.
+ *
+ * Sibling of {@link withoutOutputsOf}, which excludes by TRANSACTION. This excludes exact outputs,
+ * because a seed is one output of a transaction whose other outputs are ordinary wallet money.
+ */
+export function withoutRefs(
+  utxos: readonly unknown[],
+  refs: readonly ChainUtxo[],
+): readonly unknown[] {
+  const exclude = new Set(refs.map((r) => `${r.txHash.toLowerCase()}#${r.outputIndex}`));
+  if (exclude.size === 0) return utxos;
+  return utxos.filter((u) => {
+    try {
+      const r = toChainUtxo(u);
+      return !exclude.has(`${r.txHash}#${r.outputIndex}`);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
  * Drop wallet UTxOs produced by the transactions named, so coin selection cannot fund from them.
  *
  * ⛔ THIS IS THE REAL FIX FOR "Unknown transaction input (missing from UTxO set)", and waiting is

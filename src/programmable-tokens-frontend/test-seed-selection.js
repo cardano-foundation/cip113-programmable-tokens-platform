@@ -29,7 +29,7 @@ const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
 const {
   selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
   resolveSeedUtxos, lovelaceOfUtxo, cborOf,
-  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf, providerEvaluatorWithAdditionalUtxos,
+  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos,
 } = await import("./.seeds-build/ceremony.js");
 
 const HASHES = [
@@ -359,6 +359,30 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
   let refused = "";
   try { providerEvaluatorWithAdditionalUtxos({ effect: {} }); } catch (e) { refused = e.message; }
   ok(/effect.evaluateTx/.test(refused), "a client without effect.evaluateTx is refused by name");
+}
+
+// ── withoutRefs: the seeds are not funding ───────────────────────────────────
+// ⛔ MEASURED: multisig-genesis spent the 50 ADA multisig seed and landed; stake-registrations,
+// funded from the SAME set, picked it too and was rejected at submission. One tx on chain, its
+// partner dead, and the plan unrecoverable because the one-shot policy depends on that outref.
+{
+  const seedA = providerUtxo(HASHES[0], 0);
+  const seedB = providerUtxo(HASHES[1], 0);
+  const sameTxOtherOutput = providerUtxo(HASHES[0], 1); // ordinary money, must SURVIVE
+  const ordinary = providerUtxo(HASHES[2], 0);
+  const all = [seedA, seedB, sameTxOtherOutput, ordinary];
+
+  const funding = withoutRefs(all, [toChainUtxo(seedA), toChainUtxo(seedB)]);
+  const refs = funding.map((u) => `${toChainUtxo(u).txHash}#${toChainUtxo(u).outputIndex}`);
+  ok(funding.length === 2, "both named seeds are removed from the funding pool");
+  ok(refs.includes(`${HASHES[0]}#1`),
+    "a DIFFERENT output of the same transaction survives — excluding by outref, not by tx");
+  ok(refs.includes(`${HASHES[2]}#0`), "ordinary money survives");
+  ok(!refs.includes(`${HASHES[0]}#0`), "the seed itself is gone, so selection cannot double-spend it");
+
+  ok(withoutRefs(all, []).length === 4, "no refs to exclude changes nothing");
+  ok(withoutRefs(all, [{ txHash: HASHES[0].toUpperCase(), outputIndex: 0 }]).length === 3,
+    "outref comparison is case-insensitive on the hash");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
