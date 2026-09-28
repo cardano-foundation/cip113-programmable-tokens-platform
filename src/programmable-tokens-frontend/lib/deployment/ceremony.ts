@@ -310,6 +310,14 @@ export function buildPlan(config: BootstrapConfig): BootstrapPlan {
 export { selectBootstrapSeeds, assertMultisigConfigUtxo, assembleDeploymentParams };
 
 /**
+ * Where the upgrade-multisig config UTxO is, in the two shapes the ceremony needs.
+ *
+ * Taken from the SDK's own return type rather than restated, so a change there is a compile
+ * error here instead of a runtime refusal five steps into a ceremony.
+ */
+export type MultisigConfigLocation = ReturnType<typeof assertMultisigConfigUtxo>;
+
+/**
  * Phase one: the three transactions the deployer submits alone.
  *
  * Built together and submitted in order. They chain — the seed transaction's outputs
@@ -436,6 +444,14 @@ export async function buildReferenceScripts(params: {
  * There is no cross-deployment collision to worry about: `upgrade_multisig` is parameterised
  * by the one-shot seed, so every deployment has a different script address AND a different
  * config NFT policy.
+ *
+ * ⛔ RETURNS BOTH HALVES, AND THE TYPE SAYS SO. `assertMultisigConfigUtxo` does not return a
+ * UTxO — it returns `{ utxo, ref }` — and this function used to declare `Promise<unknown>` and
+ * hand the wrapper straight back. Two callers each want a DIFFERENT half and both got the
+ * wrapper: the protocol-genesis builder needs `utxo` (a `UTxO`, and it refused with
+ * "upgradeMultisigConfigUtxo is required" because the wrapper carries no `transactionId`), while
+ * the deployment record needs `ref` (a `TxInput`, `{txHash, outputIndex}`). `unknown` plus an
+ * `as never` at each call site meant neither mismatch reached the compiler.
  */
 export async function awaitMultisigConfigUtxo(params: {
   plan: BootstrapPlan;
@@ -447,7 +463,7 @@ export async function awaitMultisigConfigUtxo(params: {
   /** Gives up rather than polling forever — the operator is watching. */
   timeoutMs?: number;
   onAttempt?: (attempt: number) => void;
-}): Promise<unknown> {
+}): Promise<MultisigConfigLocation> {
   const interval = params.intervalMs ?? 5_000;
   const timeout = params.timeoutMs ?? 10 * 60_000;
   const address = (params.plan as { addresses: { upgradeMultisig: string } }).addresses

@@ -32,6 +32,7 @@ import {
   findWalletSeeds,
   prepareSeedUtxos,
   awaitMultisigConfigUtxo,
+  type MultisigConfigLocation,
   buildProtocolGenesis,
   buildReferenceScripts,
   type CeremonyPlan,
@@ -456,8 +457,14 @@ export default function BootstrapProtocolPage() {
   // Phase one is the deployer alone and SPENDS THE ONE-SHOT SEEDS. Phase two needs every
   // declared participant and happens with people waiting.
 
-  /** Set once phase one lands. Read back off the chain and vetted, never reconstructed. */
-  const [configUtxo, setConfigUtxo] = useState<unknown | null>(null);
+  /**
+   * Set once phase one lands. Read back off the chain and vetted, never reconstructed.
+   *
+   * ⚑ TYPED, not `unknown`. It holds BOTH halves the SDK returns — `.utxo` for the
+   * protocol-genesis builder and `.ref` for the deployment record — and `unknown` is precisely
+   * what let the wrapper reach both call sites unconverted.
+   */
+  const [configUtxo, setConfigUtxo] = useState<MultisigConfigLocation | null>(null);
   /** The genesis, frozen. Built only after the config UTxO exists; this is what gets signed. */
   const [genesisStep, setGenesisStep] = useState<{ label: string; unsignedCbor: string } | null>(
     null,
@@ -498,7 +505,10 @@ export default function BootstrapProtocolPage() {
         plan: planned.plan,
         protocolParamsSeedUtxo: planned.seedUtxos.protocolParams as never,
         issuanceSeedUtxo: planned.seedUtxos.issuance as never,
-        upgradeMultisigConfigUtxo: utxo as never,
+        // `.utxo`, not the wrapper: awaitMultisigConfigUtxo returns { utxo, ref } and this
+        // parameter is a UTxO. The wrapper carries no `transactionId`, which is what the SDK
+        // checks, so passing it refused with "upgradeMultisigConfigUtxo is required".
+        upgradeMultisigConfigUtxo: utxo.utxo as never,
         upgradeAuthoritySigners: (multisig?.members ?? []).map((m) => m.keyHash) as never,
       });
       setGenesisStep(genesis);
@@ -550,7 +560,10 @@ export default function BootstrapProtocolPage() {
           assembleDeploymentParams(planned.plan, {
             protocolGenesisTxHash: genesisHash,
             referenceScriptsTxHash: refHash,
-            multisigConfigUtxo: configUtxo,
+            // `.ref`, not the wrapper and not `.utxo`: BootstrapObservations wants a TxInput
+            // ({txHash, outputIndex}). The template download below already uses that shape;
+            // this live path was the one that did not.
+            multisigConfigUtxo: configUtxo.ref,
           } as never) as unknown as Record<string, unknown>,
         );
       }

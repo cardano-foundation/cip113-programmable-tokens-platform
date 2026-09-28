@@ -365,6 +365,7 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
 export const DEFAULT_SEED_LOVELACE = 10_000_000n;
 
 export { awaitMultisigConfigUtxo, buildProtocolGenesis, buildReferenceScripts, selectBootstrapSeeds, assembleDeploymentParams };
+export type { MultisigConfigLocation } from "./ceremony";
 
 /**
  * The block an indexer should intersect at: the one IMMEDIATELY BEFORE the genesis
