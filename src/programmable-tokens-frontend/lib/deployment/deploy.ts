@@ -227,10 +227,47 @@ export async function prepareSeedUtxos(
   for (const lovelace of SEED_PREP_LOVELACE) {
     tx = tx.payToAddress({ address: addressObj, assets: outputAssets(lovelace) });
   }
+  /**
+   * ⛔ A FILTER CAN EMPTY THE POOL OF A RICH WALLET, and Evolution's advice for that is wrong.
+   * A seed candidate must be PLAIN — no reference script, no native assets — because whatever it
+   * carries is dragged into the transaction that consumes it. A wallet whose every output holds a
+   * token is therefore rich and unusable, and "add more funds" is exactly the wrong remedy. Only a
+   * message that counts the pool can tell that apart from genuinely being broke.
+   *
+   * ⚠ NOT to be confused with "Cannot create valid change … Available: 0 lovelace", which is a
+   * DIFFERENT failure: there the payment and fees are covered and the LEFTOVER is too small to
+   * become a change output. See onInsufficientChange below.
+   */
+  const candidates = utxos.filter(isPlainSeedCandidate);
+  if (candidates.length === 0) {
+    const total = utxos.length;
+    throw new Error(
+      `None of this wallet's ${total} UTxO(s) can seed a deployment. A seed must be PLAIN — no ` +
+        `native assets and no reference script — because whatever it carries would be dragged ` +
+        `into the transaction that consumes it.\n` +
+        `\n` +
+        `  This is not a funding problem: adding ADA to outputs that already carry tokens will ` +
+        `not help. Send yourself a few ada-only outputs, or consolidate, and try again.`,
+    );
+  }
+
   const built = await tx.build({
     changeAddress: addressObj,
-    availableUtxos: utxos.filter(isPlainSeedCandidate) as never,
+    availableUtxos: candidates as never,
     passAdditionalUtxos: true,
+    /**
+     * ⛔ "Cannot create valid change … Available: 0 lovelace. Required: At least 969750 lovelace
+     * for change output" — reported after seeding, and it is NOT a funding problem. The payment and
+     * fees are covered; what fails is the LEFTOVER, which lands below the min-UTxO a change output
+     * needs. Coin selection cannot always avoid it: the seeds are exact amounts, so whether the
+     * remainder clears ~0.97 ADA is luck.
+     *
+     * ⚑ 'burn' IS BOUNDED, WHICH IS WHY IT IS SAFE HERE. It only applies when the leftover is
+     * already below min-UTxO, so at most ~1 ADA becomes extra fee — and the alternative is a seed
+     * preparation that fails outright on a wallet holding thousands. Deliberately NOT applied to
+     * the ceremony transactions: this is repeatable housekeeping, and they are one-shot.
+     */
+    onInsufficientChange: "burn",
   });
   const cbor = EvoTransaction.toCBORHex((await built.toTransaction()) as never);
   return wallet.submitTx(await wallet.signTx(cbor, true));
