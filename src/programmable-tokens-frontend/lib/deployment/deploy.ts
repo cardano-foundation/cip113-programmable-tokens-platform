@@ -376,6 +376,43 @@ export type { MultisigConfigLocation } from "./ceremony";
  * indexed, no deployment resolves, and every operation fails with a message that points at
  * configuration rather than at the sync window.
  */
+/**
+ * How many blocks deep a transaction is — 1 means "in the tip block".
+ *
+ * ⛔ DEPTH, NOT ELAPSED SECONDS, and the unit is the point. Blockfrost's evaluation endpoint can
+ * work from an older ledger snapshot than its query endpoints, so a UTxO created a block or two
+ * ago is invisible to `/utils/txs/evaluate/utxos` while `/addresses/.../utxos` already lists it.
+ * That gap is measured in BLOCKS. A wall-clock countdown guesses at someone else's infrastructure
+ * and silently under-waits whenever the chain is slow; preview alone varies enough for that to
+ * matter. Counting blocks self-adjusts.
+ *
+ * Returns `null` while Blockfrost does not know the transaction at all, which is a different
+ * state from "known but shallow" and the caller should say so rather than showing a depth of 0.
+ */
+export async function confirmationDepth(
+  network: CardanoNetwork,
+  txHash: string,
+): Promise<{ depth: number; txBlockHeight: number; tipHeight: number } | null> {
+  const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
+  const headers = { project_id: projectId };
+  const base = blockfrostBaseUrl(network);
+
+  const txRes = await fetch(`${base}/txs/${txHash}`, { headers });
+  if (txRes.status === 404) return null; // not indexed yet — not an error
+  if (!txRes.ok) {
+    throw new Error(`Could not read transaction ${txHash} from Blockfrost (${txRes.status}).`);
+  }
+  const { block_height: txBlockHeight } = (await txRes.json()) as { block_height: number };
+
+  const tipRes = await fetch(`${base}/blocks/latest`, { headers });
+  if (!tipRes.ok) {
+    throw new Error(`Could not read the chain tip from Blockfrost (${tipRes.status}).`);
+  }
+  const { height: tipHeight } = (await tipRes.json()) as { height: number };
+
+  return { depth: Math.max(0, tipHeight - txBlockHeight + 1), txBlockHeight, tipHeight };
+}
+
 export async function previousBlockOf(
   network: CardanoNetwork,
   txHash: string,

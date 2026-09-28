@@ -34,6 +34,7 @@ import {
   prepareSeedUtxos,
   awaitMultisigConfigUtxo,
   buildWithFreshUtxos,
+  confirmationDepth,
   type MultisigConfigLocation,
   buildProtocolGenesis,
   buildReferenceScripts,
@@ -467,6 +468,14 @@ export default function BootstrapProtocolPage() {
    * what let the wrapper reach both call sites unconverted.
    */
   const [configUtxo, setConfigUtxo] = useState<MultisigConfigLocation | null>(null);
+
+  /** Phase one's LAST transaction, whose depth gates building the genesis. */
+  const [anchorTxHash, setAnchorTxHash] = useState<string | null>(null);
+  /** Blocks deep, or null while Blockfrost does not know the transaction yet. */
+  const [anchorDepth, setAnchorDepth] = useState<number | null>(null);
+  const [preparingGenesis, setPreparingGenesis] = useState(false);
+  /** What the retry learned, kept visible so the cause is recorded rather than guessed at. */
+  const [gateNote, setGateNote] = useState<string | null>(null);
   /** The genesis, frozen. Built only after the config UTxO exists; this is what gets signed. */
   const [genesisStep, setGenesisStep] = useState<{ label: string; unsignedCbor: string } | null>(
     null,
@@ -484,6 +493,9 @@ export default function BootstrapProtocolPage() {
       });
       setSubmitted(result.submitted);
       setPhaseOneDone(result.submitted.length === planned.phaseOne.length);
+      // The LAST phase-one transaction is the one the genesis chains from, so its depth is what
+      // the gate measures.
+      setAnchorTxHash(result.submitted[result.submitted.length - 1]?.txHash ?? null);
 
       // ⚑ POLLS FOR THE UTXO, NOT THE TRANSACTION. We must wait either way; querying the
       // multisig address and filtering by the config NFT's policy answers both "has it
@@ -501,12 +513,73 @@ export default function BootstrapProtocolPage() {
       });
       setConfigUtxo(utxo);
 
-      // ⛔ RE-READ THE WALLET FIRST. planned.ctx.availableUtxos was captured when the plan was
-      // made, and phase one has spent some of those outputs since — coin selection funding this
-      // transaction from one of them produces "Unknown transaction input (missing from UTxO
-      // set)" at evaluation. The same wrapper also retries that one failure, because Blockfrost's
-      // evaluation endpoint can lag its query endpoints by a block or two and then the input is
-      // real and merely early. See buildWithFreshUtxos.
+      // ⛔ STOPS HERE. The genesis is NOT built as part of this click. Building it needs the
+      // config UTxO to be visible to Blockfrost's EVALUATION endpoint, which lags its query
+      // endpoints, and the operator has to be able to see that gap rather than have a machine
+      // retry through it — each failed attempt strands 6 x 2 ADA in stake deposits. The
+      // "Proceed to phase two" button below unlocks at GENESIS_GATE_DEPTH blocks.
+      setProgress(null);
+    } catch (e) {
+      setProgress(null);
+      setPlanError(
+        e instanceof MultiTxError
+          ? e.message
+          : // Not "Phase one failed": by the time we get here phase one's transactions may be
+            // submitted and confirmed, and what remains is reading the config UTxO back. Saying
+            // "phase one" sends the operator to look at transactions that already landed.
+            `Phase one submitted; reading the config UTxO back failed: ${describeError(e)}`,
+      );
+    }
+  }, [planned, wallet, phaseOneDone, multisig]);
+
+  /**
+   * How deep phase one's last transaction must be before the genesis may be built.
+   *
+   * ⛔ BLOCKS, NOT SECONDS. Blockfrost's evaluation endpoint works from an older ledger snapshot
+   * than its query endpoints, so the config UTxO can be listed by `/addresses/.../utxos` and
+   * still be invisible to `/utils/txs/evaluate/utxos` — which fails as "Unknown transaction input
+   * (missing from UTxO set)" naming an input that demonstrably exists. A wall-clock countdown
+   * guesses at that lag and under-waits whenever the chain is slow; depth self-adjusts.
+   * Ruled by Giovanni, 2026-09-28: three blocks.
+   */
+  const GENESIS_GATE_DEPTH = 3;
+
+  /** Poll the depth of phase one's last transaction while the gate is closed. */
+  useEffect(() => {
+    if (!phaseOneDone || genesisStep || !anchorTxHash) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const d = await confirmationDepth(network, anchorTxHash);
+        if (!cancelled) setAnchorDepth(d?.depth ?? null);
+      } catch {
+        /* transient; the next tick tries again rather than failing the ceremony */
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [phaseOneDone, genesisStep, anchorTxHash, network]);
+
+  const gateOpen = (anchorDepth ?? 0) >= GENESIS_GATE_DEPTH;
+
+  /**
+   * Build the protocol genesis — the operator's explicit second act.
+   *
+   * Separate from submitting phase one so the wait is VISIBLE and the operator decides when to
+   * spend it, rather than a retry loop burning attempts inside one click.
+   */
+  const preparePhaseTwo = useCallback(async () => {
+    if (!planned || !configUtxo || genesisStep) return;
+    setPlanError(null);
+    setPreparingGenesis(true);
+    try {
+      // The re-read is still mandatory: the gate covers the evaluator lagging, NOT the context's
+      // UTxO set having gone stale while phase one spent some of it. Different causes, and only
+      // one of them is about waiting.
       setProgress("Re-reading the wallet, then building the protocol genesis…");
       const genesis = await buildWithFreshUtxos(
         planned.ctx,
@@ -520,19 +593,26 @@ export default function BootstrapProtocolPage() {
             plan: planned.plan,
             protocolParamsSeedUtxo: planned.seedUtxos.protocolParams as never,
             issuanceSeedUtxo: planned.seedUtxos.issuance as never,
-            // `.utxo`, not the wrapper: awaitMultisigConfigUtxo returns { utxo, ref } and this
-            // parameter is a UTxO. The wrapper carries no `transactionId`, which is what the SDK
-            // checks, so passing it refused with "upgradeMultisigConfigUtxo is required".
-            upgradeMultisigConfigUtxo: utxo.utxo as never,
+            // `.utxo`, not the wrapper: awaitMultisigConfigUtxo returns { utxo, ref }.
+            upgradeMultisigConfigUtxo: configUtxo.utxo as never,
             upgradeAuthoritySigners: (multisig?.members ?? []).map((m) => m.keyHash) as never,
           }),
         {
-          attempts: 4,
+          // A safety net behind the gate, not the primary mechanism. It should rarely fire now.
+          attempts: 3,
           delayMs: 10_000,
           onAttempt: (n, why) =>
-            setProgress(
-              `Evaluation could not resolve ${why} — re-reading the wallet and retrying ` +
-                `(attempt ${n} of 4, 10s apart)…`,
+            setProgress(`Evaluation could not resolve ${why} — retrying (${n} of 3, 10s apart)…`),
+          // Recorded so a success SAYS WHY it succeeded: a changed UTxO set means the previous
+          // attempt was funded from an output that no longer existed; an unchanged one means
+          // nothing but time was needed, which is the evaluator lagging.
+          onRetryInfo: (info) =>
+            setGateNote(
+              info.utxoSetChanged
+                ? `Retry ${info.attempt}: the wallet's UTxO set CHANGED (${info.utxoCount} now) — ` +
+                  `the earlier attempt was funded from an output that no longer existed.`
+                : `Retry ${info.attempt}: the UTxO set was UNCHANGED (${info.utxoCount}) — ` +
+                  `the inputs were real and the evaluator was behind.`,
             ),
         },
       );
@@ -540,17 +620,11 @@ export default function BootstrapProtocolPage() {
       setProgress(null);
     } catch (e) {
       setProgress(null);
-      setPlanError(
-        e instanceof MultiTxError
-          ? e.message
-          : // Not "Phase one failed": by the time we get here phase one's transactions are
-            // submitted and confirmed, and what remains is reading the config UTxO back and
-            // BUILDING the genesis for the co-signature round. Saying "phase one" sends the
-            // operator to look at transactions that already landed.
-            `Phase one submitted; preparing the protocol genesis failed: ${describeError(e)}`,
-      );
+      setPlanError(`Preparing phase two failed: ${describeError(e)}`);
+    } finally {
+      setPreparingGenesis(false);
     }
-  }, [planned, wallet, phaseOneDone, multisig]);
+  }, [planned, configUtxo, genesisStep, multisig]);
 
   const submitPhaseTwo = useCallback(async () => {
     if (!planned || !genesisStep || !cosign.complete) return;
@@ -1155,13 +1229,44 @@ export default function BootstrapProtocolPage() {
               </p>
             )}
 
-            {/* ---- BETWEEN: waiting for the config UTxO, then the frozen genesis ---- */}
+            {/* ---- BETWEEN: the gate, then the operator's explicit second act ---- */}
             {phaseOneDone && !genesisStep && (
-              <p className="text-xs text-amber-200">
-                Phase one is on chain. Building the genesis once the upgrade-multisig config
-                UTxO is visible — it is a reference input, so it must exist before the genesis
-                can be built or submitted.
-              </p>
+              <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3 text-xs">
+                <p className="text-amber-200">
+                  Phase one is on chain. The genesis takes the upgrade-multisig config UTxO as a
+                  reference input, and Blockfrost&apos;s script evaluator runs a little behind its
+                  own query endpoints — so the UTxO can be listed and still not be usable yet.
+                  This waits {GENESIS_GATE_DEPTH} blocks rather than a fixed number of seconds,
+                  because that lag is measured in blocks and a timer under-waits whenever the
+                  chain is slow.
+                </p>
+
+                <p className={gateOpen ? "text-green-300" : "text-dark-300"}>
+                  {!configUtxo
+                    ? "Waiting for the upgrade-multisig config UTxO to appear…"
+                    : anchorDepth === null
+                      ? "Waiting for Blockfrost to index phase one's last transaction…"
+                      : gateOpen
+                        ? `Ready — phase one is ${anchorDepth} blocks deep.`
+                        : `Phase one is ${anchorDepth} of ${GENESIS_GATE_DEPTH} blocks deep…`}
+                </p>
+
+                <button
+                  type="button"
+                  onClick={preparePhaseTwo}
+                  disabled={!configUtxo || !gateOpen || preparingGenesis}
+                  className={`rounded px-3 py-1.5 ${
+                    gateOpen && configUtxo && !preparingGenesis
+                      ? "border border-green-600 text-green-100 hover:bg-green-950"
+                      : "border border-dark-700 text-dark-500"
+                  }`}
+                >
+                  {preparingGenesis ? "Building the genesis…" : "Proceed to phase two"}
+                </button>
+
+                {/* Kept visible: it says which cause was real, rather than leaving it a guess. */}
+                {gateNote && <p className="text-dark-300">{gateNote}</p>}
+              </div>
             )}
 
             {/* ---- PHASE TWO: the ceremony ---- */}

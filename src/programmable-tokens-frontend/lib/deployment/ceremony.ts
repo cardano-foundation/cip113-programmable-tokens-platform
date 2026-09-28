@@ -270,15 +270,34 @@ export async function buildWithFreshUtxos<T>(
   ctx: CeremonyContext,
   readUtxos: (address: string) => Promise<readonly unknown[]>,
   build: (ctx: CeremonyContext) => Promise<T>,
-  opts: { attempts?: number; delayMs?: number; onAttempt?: (n: number, why: string) => void } = {},
+  opts: {
+    attempts?: number;
+    delayMs?: number;
+    onAttempt?: (n: number, why: string) => void;
+    /** Reports what changed between attempts, so a success says WHY it succeeded. */
+    onRetryInfo?: (info: { attempt: number; utxoSetChanged: boolean; utxoCount: number }) => void;
+  } = {},
 ): Promise<T> {
   const attempts = opts.attempts ?? 4;
   const delay = opts.delayMs ?? 10_000;
   let last: unknown;
+  let previousSet: string | null = null;
 
   for (let n = 1; n <= attempts; n += 1) {
     // Re-read EVERY time: between two attempts the wallet may have changed again.
     const fresh = await readUtxos(ctx.changeAddress);
+
+    // ⚑ INSTRUMENTED ON PURPOSE. This retries for two different reasons and, having succeeded,
+    // could not previously say which one applied — the re-read and the pause happen together, so
+    // a success on attempt 2 was equally consistent with a stale UTxO set and with Blockfrost's
+    // evaluator lagging. Recording whether the set actually CHANGED separates them: changed means
+    // the earlier attempt was funded from an output that no longer existed; unchanged means the
+    // same inputs became acceptable with nothing but time, which is the lag.
+    const signature = fingerprintUtxos(fresh);
+    const changed = previousSet !== null && signature !== previousSet;
+    if (n > 1) opts.onRetryInfo?.({ attempt: n, utxoSetChanged: changed, utxoCount: fresh.length });
+    previousSet = signature;
+
     const attemptCtx: CeremonyContext = { ...ctx, availableUtxos: fresh as CeremonyContext["availableUtxos"] };
     assertCeremonyContext(attemptCtx, "build step");
     try {
@@ -291,6 +310,26 @@ export async function buildWithFreshUtxos<T>(
     }
   }
   throw last;
+}
+
+/**
+ * A stable signature of a UTxO set, for telling "the wallet changed" from "time passed".
+ *
+ * Sorted, so provider ordering does not read as a change. Entries it cannot convert are counted
+ * rather than dropped — a set that became unreadable is not the same as one that stayed put.
+ */
+export function fingerprintUtxos(utxos: readonly unknown[]): string {
+  const refs: string[] = [];
+  let unreadable = 0;
+  for (const u of utxos) {
+    try {
+      const r = toChainUtxo(u);
+      refs.push(`${r.txHash}#${r.outputIndex}`);
+    } catch {
+      unreadable += 1;
+    }
+  }
+  return `${refs.sort().join(",")}|${unreadable}`;
 }
 
 /** Only this failure is worth retrying; anything else is rethrown at once. */

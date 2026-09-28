@@ -29,7 +29,7 @@ const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
 const {
   selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
   resolveSeedUtxos, lovelaceOfUtxo, cborOf,
-  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf,
+  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos,
 } = await import("./.seeds-build/ceremony.js");
 
 const HASHES = [
@@ -296,6 +296,21 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
     await buildWithFreshUtxos(ctx, read, async () => { throw missing(); }, { attempts: 2, delayMs: 1 });
   } catch (e) { last = e.message; }
   ok(last.includes(REF), "after the last attempt the ORIGINAL error is rethrown, naming the input");
+}
+
+// ── fingerprintUtxos: telling "the wallet changed" from "time passed" ────────
+// ⛔ THE POINT: the retry re-reads AND waits together, so a success could not say which one
+// mattered. The fingerprint separates a stale UTxO set from an evaluator that was merely behind.
+{
+  const a = providerUtxo(HASHES[0], 0);
+  const b = providerUtxo(HASHES[1], 0);
+  ok(fingerprintUtxos([a, b]) === fingerprintUtxos([b, a]),
+    "order does not count as a change — provider ordering is not wallet state");
+  ok(fingerprintUtxos([a, b]) !== fingerprintUtxos([a]),
+    "a spent output IS a change");
+  ok(fingerprintUtxos([]) === fingerprintUtxos([]), "empty is stable");
+  ok(fingerprintUtxos([a, { junk: true }]) !== fingerprintUtxos([a]),
+    "an unreadable entry is counted, not dropped — a set that became unreadable is not unchanged");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
