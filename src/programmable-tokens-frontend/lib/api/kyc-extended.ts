@@ -50,5 +50,6 @@ export const getKycExtendedAdminPkh = () =>
 
 /** Bind the current KERI session to a kyc-extended token policy — the next proof
  *  generation auto-upserts the user's PKH into the per-policy MPF tree. */
-export const bindSessionToToken = (policyId: string) =>
-  apiPost<{ policyId: string }, void>(`/keri/session/bound-token`, { policyId });
+export const bindSessionToToken = (policyId: string, sessionId: string) =>
+  apiPost<{ policyId: string }, void>(`/keri/session/bound-token`, { policyId },
+    { headers: { 'X-Session-Id': sessionId } });

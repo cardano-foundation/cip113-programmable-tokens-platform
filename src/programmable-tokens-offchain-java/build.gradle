@@ -18,7 +18,7 @@ repositories {
 		name = "Central Portal Snapshots"
 		url = uri("https://central.sonatype.com/repository/maven-snapshots/")
 		content {
-			includeModule("org.cardanofoundation", "signify")
+			includeModule("id.veridian", "signify")
 		}
 	}
 }
@@ -55,7 +55,7 @@ dependencies {
 
     implementation('com.easy1staking:cardano-client-lib-extensions:0.0.4')
 
-	implementation 'org.cardanofoundation:signify:0.1.2-d92f263-SNAPSHOT'
+	implementation 'id.veridian:signify:0.1.2-378fa88-SNAPSHOT'
 
 	// Version comes from the Spring Boot BOM (io.spring.dependency-management), NOT from
 	// a dynamic `latest.release`.

@@ -17,6 +17,8 @@ import org.springframework.web.bind.annotation.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Locale;
 
 @RestController
 @RequestMapping("${apiPrefix}/issue-token")
@@ -26,6 +28,51 @@ public class IssueTokenController {
 
     private final TokenOperationsService tokenOperationsService;
     private final BackendService bfBackendService;
+
+    /** Read-only chain observation. Submission acceptance is never treated as confirmation. */
+    @PostMapping("/chain-status")
+    public ResponseEntity<?> chainStatus(@RequestBody Map<String, List<String>> body) {
+        var requested = body == null ? null : body.get("txHashes");
+        if (requested == null || requested.isEmpty() || requested.size() > 16)
+            return ResponseEntity.badRequest().body(Map.of("error", "txHashes must contain 1 to 16 hashes"));
+        var canonical = new ArrayList<String>(requested.size());
+        var distinct = new HashSet<String>();
+        for (String value : requested) {
+            if (value == null || !value.matches("[0-9a-fA-F]{64}"))
+                return ResponseEntity.badRequest().body(Map.of("error", "Each transaction hash must be 64 hex characters"));
+            String hash = value.toLowerCase(Locale.ROOT);
+            if (!distinct.add(hash))
+                return ResponseEntity.badRequest().body(Map.of("error", "Duplicate transaction hashes are not allowed"));
+            canonical.add(hash);
+        }
+        var observations = canonical.stream().map(this::observe).toList();
+        return ResponseEntity.ok(Map.of("transactions", observations));
+    }
+
+    private Map<String, String> observe(String hash) {
+        try {
+            var result = bfBackendService.getTransactionService().getTransaction(hash);
+            if (result == null) return observation(hash, "UNKNOWN", "NO_RESPONSE");
+            if (!result.isSuccessful())
+                return observation(hash, result.code() == 404 ? "NOT_INDEXED" : "UNKNOWN",
+                        result.code() == 404 ? "NOT_FOUND" : "LOOKUP_FAILED");
+            var tx = result.getValue();
+            if (tx == null) return observation(hash, "UNKNOWN", "EMPTY_RESULT");
+            if (!hash.equalsIgnoreCase(tx.getHash())) return observation(hash, "UNKNOWN", "HASH_MISMATCH");
+            if (tx.getBlock() == null || tx.getBlock().isBlank())
+                return observation(hash, "UNKNOWN", "MISSING_BLOCK");
+            if (Boolean.TRUE.equals(tx.getValidContract())) return observation(hash, "CONFIRMED", "VALID_BLOCK");
+            if (Boolean.FALSE.equals(tx.getValidContract())) return observation(hash, "INVALID", "INVALID_CONTRACT");
+            return observation(hash, "UNKNOWN", "MISSING_VALIDITY");
+        } catch (Exception e) {
+            log.warn("chain-status: lookup failed for tx {}", hash, e);
+            return observation(hash, "UNKNOWN", "LOOKUP_EXCEPTION");
+        }
+    }
+
+    private static Map<String, String> observation(String hash, String status, String reason) {
+        return Map.of("hash", hash, "status", status, "reason", reason);
+    }
 
     @PostMapping("/pre-register")
     public ResponseEntity<?> preRegisterToken(
@@ -109,16 +156,25 @@ public class IssueTokenController {
                         "error", "could not derive tx hash at index " + i + ": " + e.getMessage()));
             }
 
+            if (confirmed(expectedHash)) {
+                txHashes.add(expectedHash);
+                continue;
+            }
+
             try {
                 var submitResult = bfBackendService.getTransactionService().submitTransaction(signedBytes);
                 if (submitResult == null || !submitResult.isSuccessful()) {
                     var reason = submitResult != null ? submitResult.getResponse() : "null result";
+                    if (confirmed(expectedHash)) {
+                        txHashes.add(expectedHash);
+                        continue;
+                    }
                     log.warn("submit-chain: tx {} (index {}) rejected: {}", expectedHash, i, reason);
                     return ResponseEntity.badRequest().body(Map.of(
                             "txHashes", txHashes,
                             "failedIndex", i,
                             "failedTxHash", expectedHash,
-                            "error", "submit failed at index " + i + ": " + reason));
+                            "error", "submission status UNKNOWN at index " + i + ": " + reason));
                 }
                 // Blockfrost returns the tx hash on success; treat it as authoritative
                 // but cross-check against ours just in case of an SDK quirk.
@@ -126,6 +182,10 @@ public class IssueTokenController {
                 if (returned != null && !returned.equalsIgnoreCase(expectedHash)) {
                     log.warn("submit-chain: backend returned hash {} but we derived {} for index {}",
                             returned, expectedHash, i);
+                    if (!confirmed(expectedHash))
+                        return ResponseEntity.badRequest().body(Map.of(
+                                "txHashes", txHashes, "failedIndex", i, "failedTxHash", expectedHash,
+                                "error", "submission status UNKNOWN: backend returned a different transaction hash"));
                 }
                 txHashes.add(expectedHash);
                 log.info("submit-chain: submitted tx {}/{} hash={}", i + 1, signedCborHexes.size(), expectedHash);
@@ -135,16 +195,39 @@ public class IssueTokenController {
                 // flatten it into a 500 and put it in front of alerting.
                 throw e;
             } catch (Exception e) {
+                if (confirmed(expectedHash)) {
+                    txHashes.add(expectedHash);
+                    continue;
+                }
                 log.error("submit-chain: exception submitting tx {} (index {})", expectedHash, i, e);
                 return ResponseEntity.badRequest().body(Map.of(
                         "txHashes", txHashes,
                         "failedIndex", i,
                         "failedTxHash", expectedHash,
-                        "error", "submit exception at index " + i + ": " + e.getMessage()));
+                        "error", "submission status UNKNOWN at index " + i + ": " + e.getMessage()));
             }
         }
 
-        return ResponseEntity.ok(Map.of("txHashes", txHashes));
+        // Acceptance by a submit endpoint is not block confirmation. The caller
+        // must retain the complete signed chain until every exact hash is valid
+        // in a block, including the final CIP-170 child transaction.
+        boolean allConfirmed = txHashes.stream().allMatch(this::confirmed);
+        return ResponseEntity.ok(Map.of("txHashes", txHashes, "confirmed", allConfirmed));
+    }
+
+    /** Only a successfully applied transaction in a block permits skipping saved signed bytes. */
+    private boolean confirmed(String expectedHash) {
+        try {
+            var result = bfBackendService.getTransactionService().getTransaction(expectedHash);
+            if (result == null || !result.isSuccessful() || result.getValue() == null) return false;
+            var tx = result.getValue();
+            return expectedHash.equalsIgnoreCase(tx.getHash())
+                    && tx.getBlock() != null && !tx.getBlock().isBlank()
+                    && Boolean.TRUE.equals(tx.getValidContract());
+        } catch (Exception unavailable) {
+            log.debug("submit-chain: transaction {} is not confirmed by the configured backend", expectedHash, unavailable);
+            return false;
+        }
     }
 
     @PostMapping("/register")

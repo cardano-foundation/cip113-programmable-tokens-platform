@@ -27,13 +27,14 @@ public class RwaTokenMembershipHook implements TokenMembershipHook {
 
     @Override
     public void onProofGenerated(KycSessionEntity session, KycProofResponse proof) {
-        if (session.getCardanoAddress() == null) return;
+        if (session.getCardanoAddress() == null)
+            throw new IllegalStateException("No bound Cardano address for CMTA membership staging");
 
         byte[] pkh = AddressUtil.extractStakeCredHashFromAddress(session.getCardanoAddress());
         if (pkh == null) {
             log.warn("Cannot derive stake-cred PKH from address {} for rwa-token auto-upsert (base address required)",
                     session.getCardanoAddress());
-            return;
+            throw new IllegalStateException("A base address with a stake credential is required for CMTA membership");
         }
         Short credentialType = AddressUtil.extractStakeCredentialTypeFromAddress(session.getCardanoAddress());
         if (credentialType == null) {
@@ -41,7 +42,7 @@ public class RwaTokenMembershipHook implements TokenMembershipHook {
                      + "rwa-token auto-upsert. It is the first byte of the MPF leaf key, so "
                      + "enrolling with a guess would create a leaf the holder cannot prove against.",
                     session.getCardanoAddress());
-            return;
+            throw new IllegalStateException("Could not determine the stake credential type for CMTA membership");
         }
         try {
             allowlistService.putMember(session.getBoundTokenPolicyId(), pkh, credentialType,
@@ -49,8 +50,7 @@ public class RwaTokenMembershipHook implements TokenMembershipHook {
             log.info("Auto-upserted member into rwa-token MPF tree: policy={}, sessionId={}",
                     session.getBoundTokenPolicyId(), session.getSessionId());
         } catch (Exception e) {
-            log.warn("Failed to auto-upsert rwa-token MPF member for policy {} session {}: {}",
-                    session.getBoundTokenPolicyId(), session.getSessionId(), e.getMessage());
+            throw new IllegalStateException("Verified KYC could not be staged for CMTA membership", e);
         }
     }
 }

@@ -11,8 +11,11 @@ import org.cardanofoundation.cip113.model.keri.OobiResponse;
 import org.cardanofoundation.cip113.model.keri.SchemaListResponse;
 import org.cardanofoundation.cip113.model.keri.SessionResponse;
 import org.cardanofoundation.cip113.service.KeriService;
+import org.cardanofoundation.cip113.service.BackendCardanoSigningUnavailableException;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -44,6 +47,8 @@ public class KeriController {
     public ResponseEntity<?> getSigningEntityVkey() {
         try {
             return ResponseEntity.ok(Map.of("vkeyHex", keriService.getSigningEntityVkey()));
+        } catch (BackendCardanoSigningUnavailableException e) {
+            return ResponseEntity.status(503).body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
             log.error("Failed to derive signing entity vkey", e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
@@ -61,13 +66,19 @@ public class KeriController {
     }
 
     @GetMapping("/oobi/resolve")
-    public ResponseEntity<Boolean> resolveOobi(
+    public ResponseEntity<?> resolveOobi(
             @RequestHeader(value = "X-Session-Id", required = false) String sessionId,
             @RequestParam String oobi) throws Exception {
-        boolean resolved = keriService.resolveOobi(sessionId, oobi);
-        return resolved
-                ? ResponseEntity.ok(true)
-                : ResponseEntity.internalServerError().body(false);
+        if (sessionId == null || sessionId.isBlank()) {
+            return ResponseEntity.status(401).body(Map.of("error", "X-Session-Id header required"));
+        }
+        try {
+            boolean resolved = keriService.resolveOobi(sessionId, oobi);
+            return resolved ? ResponseEntity.ok(true) : ResponseEntity.internalServerError().body(false);
+        } catch (IllegalStateException | OptimisticLockingFailureException | PessimisticLockingFailureException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage() == null
+                    ? "KYC session changed. Reload its status before continuing." : e.getMessage()));
+        }
     }
 
     // ── Schema discovery ──────────────────────────────────────────────────────
@@ -98,6 +109,8 @@ public class KeriController {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return ResponseEntity.status(409).body(Map.of("error", "Presentation cancelled."));
+        } catch (OptimisticLockingFailureException | PessimisticLockingFailureException e) {
+            return ResponseEntity.status(409).body(Map.of("error", "KYC session changed. Reload its status before continuing."));
         } catch (RuntimeException e) {
             if (e.getMessage() != null && e.getMessage().startsWith("Timed out")) {
                 return ResponseEntity.status(408)
@@ -141,15 +154,47 @@ public class KeriController {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return ResponseEntity.status(409).body(Map.of("error", "Issuance cancelled."));
+        } catch (OptimisticLockingFailureException | PessimisticLockingFailureException e) {
+            return ResponseEntity.status(409).body(Map.of("error", "KYC session changed. Reload its status before continuing."));
         } catch (RuntimeException e) {
             if (e.getMessage() != null && e.getMessage().startsWith("Timed out")) {
                 return ResponseEntity.status(408).body(
-                        Map.of("error", "Wallet did not admit the credential in time."));
+                        Map.of("error", "Credential was issued, but Veridian did not admit the grant in time. "
+                                + "Repair the Veridian connection, then use Retry grant delivery. Do not issue another credential."));
             }
             log.error("credential/issue failed", e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         } catch (Exception e) {
             log.error("credential/issue failed", e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/credential/grant/retry")
+    public ResponseEntity<?> retryGrantDelivery(
+            @RequestHeader(value = "X-Session-Id", required = false) String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return ResponseEntity.status(401).body(Map.of("error", "X-Session-Id header required"));
+        }
+        try {
+            return ResponseEntity.ok(keriService.retryGrantDelivery(sessionId));
+        } catch (NoSuchElementException e) {
+            return ResponseEntity.status(404).body(Map.of("error", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(409).body(Map.of("error", e.getMessage()));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return ResponseEntity.status(409).body(Map.of("error", "Grant delivery cancelled"));
+        } catch (OptimisticLockingFailureException | PessimisticLockingFailureException e) {
+            return ResponseEntity.status(409).body(Map.of("error", "KYC session changed. Reload its status before continuing."));
+        } catch (RuntimeException e) {
+            if (e.getMessage() != null && e.getMessage().startsWith("Timed out")) {
+                return ResponseEntity.status(408).body(Map.of("error", "Veridian did not admit the grant in time. Retry grant delivery after checking the profile connection."));
+            }
+            log.error("credential/grant/retry failed", e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            log.error("credential/grant/retry failed", e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
     }
@@ -186,7 +231,8 @@ public class KeriController {
      * KERI proof generation will auto-upsert the user's PKH into the per-policy MPF tree.
      *
      * Body: {@code { "policyId": "<56-hex-chars>" }}.
-     * 204 on success; 400 if the policy isn't a kyc-extended token; 401 if no session.
+     * Supports kyc-extended and rwa-token membership hooks.
+     * 204 on success; 400 if the module has no hook; 401 if no session.
      */
     @PostMapping("/session/bound-token")
     public ResponseEntity<?> bindSessionToToken(
@@ -220,6 +266,8 @@ public class KeriController {
         try {
             KycProofResponse proof = keriService.generateKycProof(sessionId);
             return ResponseEntity.ok(proof);
+        } catch (BackendCardanoSigningUnavailableException e) {
+            return ResponseEntity.status(503).body(Map.of("error", e.getMessage()));
         } catch (NoSuchElementException e) {
             return ResponseEntity.status(401).body(Map.of("error", "Unknown session"));
         } catch (IllegalStateException | IllegalArgumentException e) {

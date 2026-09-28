@@ -29,7 +29,7 @@ const { readFileSync } = require("node:fs");
 
 async function main() {
   const { transactionHash, transactionBodyBytes, verifyWitnessSet } =
-    await import("./.hash-build/hash.js");
+    await import("./.hash-build/tx/hash.js");
   const { blake2b } = await import("@noble/hashes/blake2");
   const { ed25519 } = await import("@noble/curves/ed25519.js");
 

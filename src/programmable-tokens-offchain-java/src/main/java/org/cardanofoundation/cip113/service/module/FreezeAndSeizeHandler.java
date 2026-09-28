@@ -794,6 +794,8 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
                     .attachRewardValidator(moduleIssueContract)
                     .withChangeAddress(request.feePayerAddress());
 
+            MintAttestationMetadata.attach(tx, request.attestation());
+
             mintLayout.inWithdrawalOrder(List.of(
                             new CoreWithdrawal(moduleIssueCredential, moduleIssueAddress.getAddress(), ConstrPlutusData.of(0)),
                             new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(), issuanceLogicRedeemer)),

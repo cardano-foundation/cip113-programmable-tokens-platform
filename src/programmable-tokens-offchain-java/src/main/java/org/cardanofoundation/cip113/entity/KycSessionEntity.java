@@ -4,6 +4,7 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -22,6 +23,10 @@ public class KycSessionEntity {
     @Id
     @Column(name = "session_id", nullable = false, length = 128)
     private String sessionId;
+
+    @Version
+    @Column(name = "row_version", nullable = false)
+    private Long rowVersion;
 
     @Column(name = "aid", length = 128)
     private String aid;

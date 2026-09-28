@@ -6,12 +6,13 @@ import type { StepStatus } from '@/types/registration';
 import { Button } from '@/components/ui/button';
 
 export function WizardProgress() {
-  const { currentFlow, state, dispatch, reset } = useRegistrationWizard();
+  const { currentFlow, state, dispatch, reset, registrationNavigationLocked } = useRegistrationWizard();
   const [showResetDialog, setShowResetDialog] = useState(false);
 
   if (!currentFlow) return null;
 
   const handleStepClick = (stepIndex: number) => {
+    if (registrationNavigationLocked) return;
     const step = currentFlow.steps[stepIndex];
     if (!step) return;
 
@@ -70,7 +71,7 @@ export function WizardProgress() {
           <div className="bg-dark-800 border border-dark-700 rounded-lg p-6 max-w-md mx-4">
             <h3 className="text-lg font-semibold text-white mb-2">Start from Scratch?</h3>
             <p className="text-dark-300 mb-6">
-              This will reset all progress and return you to the beginning. This action cannot be undone.
+              This clears this browser’s registration and CIP-170 progress. Any transaction already sent to the chain cannot be undone, and a prepared backend attempt may keep its funding inputs reserved until it expires.
             </p>
             <div className="flex gap-3 justify-end">
               <Button
@@ -112,7 +113,7 @@ export function WizardProgress() {
           {currentFlow.steps.map((step, index) => {
           const status = getStepStatus(step.id);
           const isActive = index === state.currentStepIndex;
-          const isClickable = status === 'completed' || isActive;
+          const isClickable = !registrationNavigationLocked && (status === 'completed' || isActive);
           const classes = getStatusClasses(status, isActive);
 
           return (

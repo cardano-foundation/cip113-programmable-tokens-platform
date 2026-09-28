@@ -797,6 +797,8 @@ public class DummyModuleHandler implements ModuleHandler, BasicOperations<DummyR
                     .attachRewardValidator(moduleIssueContract)
                     .withChangeAddress(mintTokenRequest.feePayerAddress());
 
+            MintAttestationMetadata.attach(tx, mintTokenRequest.attestation());
+
             layout.inWithdrawalOrder(List.of(
                             new CoreWithdrawal(moduleIssueCredential, moduleIssueAddress.getAddress(), BigIntPlutusData.of(100)),
                             new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(), issuanceLogicRedeemer)),

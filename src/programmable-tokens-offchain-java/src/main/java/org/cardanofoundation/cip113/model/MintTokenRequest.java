@@ -30,7 +30,19 @@ public record MintTokenRequest(
         String quantity,
         String recipientAddress,
         Cip170AttestationData attestation,
-        Cip68Metadata cip68Metadata) {
+        Cip68Metadata cip68Metadata,
+        String mintAttestationId) {
+
+    public MintTokenRequest(String feePayerAddress,
+                            String tokenPolicyId,
+                            String assetName,
+                            String quantity,
+                            String recipientAddress,
+                            Cip170AttestationData attestation,
+                            Cip68Metadata cip68Metadata) {
+        this(feePayerAddress, tokenPolicyId, assetName, quantity, recipientAddress,
+                attestation, cip68Metadata, null);
+    }
 
     /** Convenience overload for the common mint/burn with no CIP-68 reference token to create. */
     public MintTokenRequest(String feePayerAddress,

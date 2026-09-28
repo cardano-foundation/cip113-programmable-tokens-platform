@@ -1,7 +1,8 @@
 /** API client for the rwa-token module. */
 
-import { apiGet, apiPost, apiDelete } from './client';
+import { apiGet, apiPost, apiPostRaw, apiDelete } from './client';
 import type { Cip68MetadataRequest } from '@/types/api';
+import { signRwaCreationRequest } from '@/lib/rwa/creation-auth';
 
 export interface RwaTokenInclusionProof {
   memberPkh: string;
@@ -11,49 +12,8 @@ export interface RwaTokenInclusionProof {
   rootHashLocal: string;
 }
 
-export const getRwaTokenInclusionProof = (policyId: string, memberPkh: string) =>
-  apiGet<RwaTokenInclusionProof>(`/rwa-token/${policyId}/proofs/${memberPkh}`);
-
-export interface RwaTokenInclusionResponse {
-  memberPkh: string;
-  currentRootLocal: string;
-}
-
-/** One row of the allowlist, as the admin list endpoint returns it.
- *
- * `published` and `expired` are computed server-side and are the two fields an
- * admin actually acts on — see the javadoc on `RwaTokenController#listMembers`.
- * A member who is present but not `published` is in the local trie only, and
- * transfers to them still fail until the root is published.
- *
- * `credentialType` is part of the member's IDENTITY (it is the first byte of the
- * MPF leaf key), so the same `memberPkh` can legitimately appear twice — once as
- * VerificationKey (0), once as Script (1). Key React lists on both, never on the
- * hash alone, or one row silently replaces the other.
- */
-export interface RwaTokenMember {
-  memberPkh: string;
-  credentialType: number;
-  boundAddress: string | null;
-  kycSessionId: string | null;
-  validUntilMs: number;
-  addedAt: string | null;
-  publishedAt: string | null;
-  published: boolean;
-  expired: boolean;
-}
-
-export const listRwaTokenMembers = (policyId: string) =>
-  apiGet<RwaTokenMember[]>(`/rwa-token/${policyId}/members`);
-
-export const requestRwaTokenInclusion = (
-  policyId: string,
-  body: { boundAddress: string; kycSessionId?: string; validUntilMs: number },
-) =>
-  apiPost<typeof body, RwaTokenInclusionResponse>(
-    `/rwa-token/${policyId}/members`,
-    body,
-  );
+export const getRwaTokenInclusionProof = (policyId: string, memberPkh: string, credentialType: 0 | 1) =>
+  apiGet<RwaTokenInclusionProof>(`/rwa-token/${policyId}/proofs/${memberPkh}?credentialType=${credentialType}`);
 
 export interface RwaTokenSummary {
   policyId: string;
@@ -72,9 +32,11 @@ export const listRwaTokens = () =>
  *  admin mint more. */
 export interface RwaTokenGlobalState {
   policyId: string;
+  globalStatePolicyId: string;
   transfersPaused: boolean;
   mintableAmount: number;
   trustedEntityVkeys: string[];
+  networkId: number;
   securityInfoHex: string;
   /** Root hash currently committed to the on-chain GS datum. */
   memberRootHash: string;
@@ -82,6 +44,7 @@ export interface RwaTokenGlobalState {
    *  differs from {@link memberRootHash}, an admin needs to publish a new
    *  UpdateMemberRootHash tx to bring the chain in sync. */
   memberRootHashLocal: string;
+  pendingMemberCount: number;
   requiresReceiverKyc: boolean;
   /** Written by SetRequiresSenderKyc and ENFORCED on chain: transfer_logic_script.ak:123
    *  gates the per-sender KYC loop on this flag, independently of {@link requiresReceiverKyc}
@@ -145,13 +108,8 @@ export interface RwaTokenInitRequest {
    *  AddTrustedEntity update tx beforehand. */
   initialTrustedEntityVkeys?: string[];
   /** When set, genesis bakes the CIP-67 (222)/(333) label into the security asset name — and
-   *  therefore into minting_logic_script, transfer_logic_script and the token policy id.
-   *  The label is chosen from `initialMintableAmount`, not `quantity`, because a
-   *  rwa-token registration is structurally mint-free.
-   *
-   *  The (100) reference token is NOT minted here: the registration path rejects a second
-   *  asset name under the policy (minting_logic_script.ak:198-204). Pass the same metadata to
-   *  the FIRST mint (`/issue-token/mint`) to complete the pair. */
+   *  therefore into the scripts and token policy. A nonzero initial mint also creates the
+   *  CIP-68 (100) reference asset and datum in the registration transaction. */
   cip68Metadata?: Cip68MetadataRequest;
   /** OPT-IN. Seed the compliance allowlist at genesis with the recipient's stake
    *  credential and write the resulting MPF root into the GlobalState datum's
@@ -189,17 +147,22 @@ export interface RwaTokenInitResponse {
 /** Build the genesis tx that mints the GS NFT + denylist root + power-users root.
  *  Frontend signs + submits the returned CBOR. The bootstrap admin is auto-seeded
  *  into the off-chain power-user table at the same time. */
-export const initRwaTokenGlobalState = (body: RwaTokenInitRequest) =>
-  apiPost<RwaTokenInitRequest, RwaTokenInitResponse>(
-    `/rwa-token/init`,
-    { moduleId: 'rwa-token', quantity: '0', ...body },
-  );
+/** @deprecated CMTA genesis cannot be initialized alone; use buildRwaTokenChain. */
+export const initRwaTokenGlobalState = async (body: RwaTokenInitRequest, rawApi: unknown) => {
+  const path = '/rwa-token/init' as const;
+  const serializedBody = JSON.stringify({ moduleId: 'rwa-token', quantity: '0', ...body });
+  const headers = await signRwaCreationRequest({ rawApi, feePayerAddress: body.feePayerAddress,
+    path, serializedBody });
+  return apiPostRaw<RwaTokenInitResponse>(path, serializedBody, { headers });
+};
 
 // ── Chained registration (genesis + AddPowerUser + registration in one round-trip) ──
 
 export interface RwaTokenChainBuildResponse {
   genesisCborHex: string;
   addPowerUserCborHex: string;
+  cmtaProvenanceCborHex: string;
+  issuanceProvenanceCborHex: string;
   /** Publishes minting_logic (~7.3 KB) and the global_state spend validator (~4.3 KB)
    *  as REFERENCE SCRIPTS. Present iff the registration carries a first mint, which is
    *  the only case whose validator set does not fit inline: attached inline the five
@@ -208,6 +171,7 @@ export interface RwaTokenChainBuildResponse {
    *  registration tx, which reads both scripts from it. */
   publishScriptsCborHex?: string;
   registrationCborHex: string;
+  attestationCborHex?: string;
   /** Conway RegCert for the BaFin transfer_logic_script stake credential.
    *  Included in the same CIP-103 signing batch so Eternl signs it cleanly
    *  alongside the genesis cert. Present iff the chain orchestrator could
@@ -223,34 +187,43 @@ export interface RwaTokenChainBuildResponse {
   powerUsersPolicyId: string;
   genesisTxHash: string;
   addPowerUserTxHash: string;
+  cmtaProvenanceTxHash: string;
+  issuanceProvenanceTxHash: string;
   publishScriptsTxHash?: string;
   registrationTxHash: string;
+  attestationTxHash?: string;
   registerTransferLogicTxHash?: string;
+  registerThirdPartyTransferLogicTxHash?: string;
 }
 
 /** Build the whole rwa-token registration chain at once, in submission order:
  *
  *    1. genesis            mints GS + denylist root + PU root
  *    2. addPowerUser       inserts the admin into the power-user linked list
- *    3. publishScripts     mint path only — publishes minting_logic + global_state
+ *    3. cmtaProvenance     publishes CIP-171 source and parameters for ten CMTA scripts
+ *    4. issuanceProvenance publishes the core issuance-policy source and parameters
+ *    5. publishScripts     mint path only — publishes minting_logic + global_state
  *                          spend as reference scripts, without which the registration
  *                          tx exceeds max-tx-size
- *    4. registration       CIP-113 directory insert + stake-cred registration, plus —
+ *    6. registration       CIP-113 directory insert + stake-cred registration, plus —
  *                          when {@link RwaTokenInitRequest.initialMintQuantity}
  *                          is set — the token's first mint in that same transaction
- *    5. registerTransferLogic  optional Conway RegCert for the transfer-logic cred
+ *    7. registerTransferLogic  optional Conway RegCert for the transfer-logic cred
  *
  *  The frontend signs them all in a single CIP-30 signTxs popup and posts the signed
  *  CBORs, IN THIS ORDER, to {@link submitTokenChain}. Steps 3 and 5 are optional; the
  *  order of the rest is load-bearing, because each spends the previous one's change. */
-export const buildRwaTokenChain = (body: RwaTokenInitRequest) =>
-  apiPost<RwaTokenInitRequest, RwaTokenChainBuildResponse>(
-    `/rwa-token/build-chain`,
-    { moduleId: 'rwa-token', quantity: '0', ...body },
-  );
+export const buildRwaTokenChain = async (body: RwaTokenInitRequest, rawApi: unknown) => {
+  const path = '/rwa-token/build-chain' as const;
+  const serializedBody = JSON.stringify({ moduleId: 'rwa-token', quantity: '0', ...body });
+  const headers = await signRwaCreationRequest({ rawApi, feePayerAddress: body.feePayerAddress,
+    path, serializedBody });
+  return apiPostRaw<RwaTokenChainBuildResponse>(path, serializedBody, { headers });
+};
 
 export interface SubmitChainResponse {
   txHashes: string[];
+  confirmed: boolean;
   failedIndex?: number;
   failedTxHash?: string;
   error?: string;
@@ -264,6 +237,19 @@ export const submitTokenChain = (signedCborHexes: string[]) =>
     `/issue-token/submit-chain`,
     { signedCborHexes },
   );
+
+export interface ChainObservation {
+  hash: string;
+  status: 'CONFIRMED' | 'INVALID' | 'NOT_INDEXED' | 'UNKNOWN';
+  reason: string;
+}
+
+export interface ChainStatusResponse { transactions: ChainObservation[] }
+
+/** Read only: this never submits a signed transaction. */
+export const getTokenChainStatus = (txHashes: string[]) =>
+  apiPost<{ txHashes: string[] }, ChainStatusResponse>(
+    `/issue-token/chain-status`, { txHashes });
 
 /** A partial-failure result from {@link submitTokenChain}.
  *
@@ -381,37 +367,45 @@ export const buildGlobalStateUpdateChain = (
  *  current leaves as published. Previously the autonomous sync job did this
  *  after submit+confirm — with user-driven publishing, the frontend has to
  *  call back. Idempotent. */
-export const acknowledgeRootPublish = (
-  policyId: string,
-  body: { txHash: string; newRootHashHex: string },
-) =>
-  apiPost<typeof body, {
-    policyId: string;
-    memberRootHashOnchain: string;
-    lastRootUpdateTxHash: string;
-    lastRootUpdateAt: string;
-    leavesMarkedPublished: number;
-    /** True when the allowlist changed while the root was in flight, so the local
-     *  leaf set no longer hashes to the published root and NO member was marked.
-     *  A 200 with `rootDrifted` is not a success — the transaction landed, but the
-     *  members it was published for still read as pending and will still be refused
-     *  at transfer. Publishing again resolves it. Treat it as a visible outcome,
-     *  never as noise: an unreported zero here is the exact shape of the bug this
-     *  field exists to prevent. */
-    rootDrifted?: boolean;
-    currentLocalRoot?: string;
-    message?: string;
-  }>(`/rwa-token/${policyId}/global-state/root-published`, body);
+export interface RwaMemberLeaf {
+  credentialHash: string;
+  credentialType: number;
+  validUntilMs: number;
+}
+
+export interface RwaMemberList {
+  baselineRootHash: string;
+  baseline: RwaMemberLeaf[];
+  pending: RwaMemberLeaf[];
+}
+
+export const listRwaMembers = (policyId: string, authHeaders: Record<string, string>) =>
+  apiGet<RwaMemberList>(`/rwa-token/${policyId}/members`, { headers: authHeaders, cache: "no-store" });
+
+export interface RwaMemberCandidate {
+  unsignedCborTx: string;
+  txHash: string;
+  baselineRootHash: string;
+  newRootHashHex: string;
+  baseline: RwaMemberLeaf[];
+  added: RwaMemberLeaf[];
+  leaves: RwaMemberLeaf[];
+}
 
 /** User-signed UpdateMemberRootHash. Backend computes the current local MPF
  *  root from its allowlist DB, builds the GS-spend tx with that root as the
  *  new value, returns unsigned CBOR. Frontend signs with the user's wallet
  *  (which must be the on-chain admin per the GS datum). Returns the unsigned
  *  CBOR + the root hash being published, so the UI can show what's being set. */
-export const buildUpdateMemberRootHashTx = (policyId: string, feePayerAddress: string) =>
-  apiPost<{ feePayerAddress: string }, { unsignedCborTx: string; newRootHashHex: string }>(
+export const buildUpdateMemberRootHashTx = (
+  policyId: string,
+  body: { feePayerAddress: string; manualMember?: RwaMemberLeaf; selectedPendingMembers: RwaMemberLeaf[] },
+  authHeaders: Record<string, string>,
+) =>
+  apiPost<typeof body, RwaMemberCandidate>(
     `/rwa-token/${policyId}/update-member-root-hash`,
-    { feePayerAddress },
+    body,
+    { headers: authHeaders, cache: "no-store" },
   );
 
 /** One-shot admin tx: register the transfer-logic stake credential on chain.

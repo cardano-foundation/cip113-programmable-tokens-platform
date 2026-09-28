@@ -94,6 +94,7 @@ export function KycBuildSignSubmitStep({
   const [oobiUrl, setOobiUrl] = useState<string | null>(null);
   const [oobiCopied, setOobiCopied] = useState(false);
   const [partnerOobi, setPartnerOobi] = useState('');
+  const [resolvedOobi, setResolvedOobi] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [isOobiConnected, setIsOobiConnected] = useState(!!cip170SessionId);
   const [connectError, setConnectError] = useState<string | null>(null);
@@ -237,6 +238,7 @@ export function KycBuildSignSubmitStep({
       setConnectError(null);
       const newSessionId = crypto.randomUUID();
       setAttestSessionId(newSessionId);
+      setResolvedOobi(null);
       const data = await getAgentOobi(newSessionId);
       setOobiUrl(data.oobi);
     } catch {
@@ -248,14 +250,22 @@ export function KycBuildSignSubmitStep({
 
   const handleResolveOobi = useCallback(async () => {
     if (!partnerOobi.trim() || !attestSessionId) return;
+    const oobi = partnerOobi.trim();
+    let step = 'resolve OOBI';
     try {
       setIsConnecting(true);
       setConnectError(null);
-      await resolveOobi(attestSessionId, partnerOobi.trim());
+      if (resolvedOobi !== oobi) {
+        await resolveOobi(attestSessionId, oobi);
+        setResolvedOobi(oobi);
+      }
+      step = 'read Cardano wallet addresses';
       const addresses = await wallet.getUsedAddresses();
       if (addresses?.[0]) {
+        step = 'store the Cardano address';
         await storeCardanoAddress(attestSessionId, addresses[0]);
       }
+      step = 'load credential roles';
       const rolesData = await getAvailableRoles(attestSessionId);
       setAvailableRoles(rolesData.availableRoles);
       setIsOobiConnected(true);
@@ -264,12 +274,13 @@ export function KycBuildSignSubmitStep({
         description: 'OOBI resolved. Present a credential to continue.',
         variant: 'success',
       });
-    } catch {
-      setConnectError('Failed to resolve OOBI. Make sure the URL is correct.');
+    } catch (err) {
+      const detail = err instanceof Error ? ` ${err.message}` : '';
+      setConnectError(`Failed to ${step}.${detail}`);
     } finally {
       setIsConnecting(false);
     }
-  }, [partnerOobi, attestSessionId, wallet]);
+  }, [partnerOobi, resolvedOobi, attestSessionId, wallet]);
 
   // ---- CREDENTIAL PRESENTATION (only needed when step 1 was skipped) ----
   const loadAvailableRoles = useCallback(async () => {

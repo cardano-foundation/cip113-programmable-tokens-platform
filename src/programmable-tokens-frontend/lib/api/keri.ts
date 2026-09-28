@@ -29,6 +29,8 @@ export interface SessionResponse {
   exists: boolean;
   hasCredential?: boolean;
   hasCardanoAddress?: boolean;
+  issuanceStatus?: string;
+  canRetryGrant?: boolean;
   attributes?: Record<string, unknown>;
   credentialRole?: number;
   credentialRoleName?: string;
@@ -134,7 +136,15 @@ export async function issueCredential(
   return apiPost<IssueCredentialRequest, CredentialResponse>(
     '/keri/credential/issue',
     data,
-    sessionHeaders(sessionId)
+    { ...sessionHeaders(sessionId), timeout: 180000 }
+  );
+}
+
+export async function retryGrantDelivery(sessionId: string): Promise<CredentialResponse> {
+  return apiPost<Record<string, never>, CredentialResponse>(
+    '/keri/credential/grant/retry',
+    {},
+    { ...sessionHeaders(sessionId), timeout: 180000 }
   );
 }
 

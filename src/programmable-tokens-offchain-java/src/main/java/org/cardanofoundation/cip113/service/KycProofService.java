@@ -22,7 +22,7 @@ public class KycProofService {
     private final String network;
 
     public KycProofService(
-            @Value("${keri.signing-mnemonic}") String signingMnemonic,
+            @Value("${keri.signing-mnemonic:}") String signingMnemonic,
             @Value("${keri.kyc-proof-validity-days:30}") int validityDays,
             @Value("${network:preview}") String network) {
         this.signingMnemonic = signingMnemonic;
@@ -35,6 +35,9 @@ public class KycProofService {
      * Payload is 37 bytes: user_pkh(28) || role(1) || valid_until(8 big-endian POSIX ms).
      */
     public KycProofResponse generateProof(String userAddress, int roleValue) {
+        if (signingMnemonic == null || signingMnemonic.isBlank()) {
+            throw new BackendCardanoSigningUnavailableException();
+        }
         var networkInfo = switch (network) {
             case "mainnet" -> Networks.mainnet();
             case "preprod" -> Networks.preprod();

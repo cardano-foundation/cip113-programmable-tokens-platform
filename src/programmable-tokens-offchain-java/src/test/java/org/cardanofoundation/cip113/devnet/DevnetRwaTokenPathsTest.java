@@ -348,6 +348,14 @@ public class DevnetRwaTokenPathsTest {
         var utxoProvider = zeroBasedPagingUtxoProvider(backend);
         var registrations = new java.util.HashMap<String,
                 org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity>();
+        var genesisReservations = org.mockito.Mockito.mock(
+                org.cardanofoundation.cip113.repository.RwaGenesisReservationRepository.class);
+        org.mockito.Mockito.when(genesisReservations.claim(org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.anyString(), org.mockito.Mockito.anyInt())).thenReturn(1);
+        var fundingReservations = org.mockito.Mockito.mock(
+                org.cardanofoundation.cip113.repository.RwaGenesisFundingReservationRepository.class);
+        org.mockito.Mockito.when(fundingReservations.claim(org.mockito.Mockito.anyString(),
+                org.mockito.Mockito.anyString())).thenReturn(1);
 
         var handler = new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler(
                 new org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService(
@@ -356,6 +364,8 @@ public class DevnetRwaTokenPathsTest {
                 HandlerFixtures.protocolScriptBuilderService(),
                 org.mockito.Mockito.mock(org.cardanofoundation.cip113.service.RwaTokenAllowlistService.class),
                 registrationRepository(registrations),
+                genesisReservations,
+                fundingReservations,
                 org.mockito.Mockito.mock(org.cardanofoundation.cip113.repository.RwaTokenDenylistEntryRepository.class),
                 org.mockito.Mockito.mock(org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository.class),
                 org.mockito.Mockito.mock(org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository.class),
@@ -411,6 +421,8 @@ public class DevnetRwaTokenPathsTest {
         var stages = new LinkedHashMap<String, String>();
         stages.put("genesis", built.genesisCborHex());
         stages.put("addPowerUser", built.addPowerUserCborHex());
+        stages.put("cmtaProvenance", built.cmtaProvenanceCborHex());
+        stages.put("issuanceProvenance", built.issuanceProvenanceCborHex());
         if (built.publishScriptsCborHex() != null) stages.put("publishScripts", built.publishScriptsCborHex());
         stages.put("registration", built.registrationCborHex());
         if (built.registerTransferLogicCborHex() != null) {

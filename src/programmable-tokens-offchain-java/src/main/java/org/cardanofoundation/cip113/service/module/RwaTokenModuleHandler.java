@@ -18,6 +18,8 @@ import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.MapPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.PlutusData;
 import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
+import com.bloxbean.cardano.client.metadata.MetadataBuilder;
+import com.bloxbean.cardano.client.metadata.MetadataList;
 import com.bloxbean.cardano.client.plutus.spec.Redeemer;
 import com.bloxbean.cardano.client.plutus.spec.RedeemerTag;
 import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
@@ -43,6 +45,7 @@ import org.cardanofoundation.cip113.entity.RwaTokenPowerUserCapability;
 import org.cardanofoundation.cip113.entity.RwaTokenPowerUserEntity;
 import org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity;
 import org.cardanofoundation.cip113.model.BurnTokenRequest;
+import org.cardanofoundation.cip113.model.CmtaAttestation;
 import org.cardanofoundation.cip113.model.MintTokenRequest;
 import org.cardanofoundation.cip113.model.RwaTokenRegisterRequest;
 import org.cardanofoundation.cip113.model.TransactionContext;
@@ -58,6 +61,8 @@ import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryReposito
 import org.cardanofoundation.cip113.repository.RwaTokenDenylistEntryRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
+import org.cardanofoundation.cip113.repository.RwaGenesisReservationRepository;
+import org.cardanofoundation.cip113.repository.RwaGenesisFundingReservationRepository;
 import org.cardanofoundation.cip113.service.AccountService;
 import org.cardanofoundation.cip113.service.HybridScriptSupplier;
 import org.cardanofoundation.cip113.service.HybridUtxoSupplier;
@@ -65,6 +70,7 @@ import org.cardanofoundation.cip113.service.LinkedListService;
 import org.cardanofoundation.cip113.service.ProtocolScriptBuilderService;
 import org.cardanofoundation.cip113.service.RwaTokenAllowlistService;
 import org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService;
+import org.cardanofoundation.cip113.service.RwaCip171ProvenanceService;
 import org.cardanofoundation.cip113.service.UtxoProvider;
 import com.easy1staking.cardano.model.AssetType;
 import com.bloxbean.cardano.client.address.Address;
@@ -282,6 +288,8 @@ public class RwaTokenModuleHandler
     private final ProtocolScriptBuilderService protocolScriptBuilderService;
     private final RwaTokenAllowlistService allowlistService;
     private final RwaTokenRegistrationRepository registrationRepository;
+    private final RwaGenesisReservationRepository genesisReservationRepository;
+    private final RwaGenesisFundingReservationRepository genesisFundingReservationRepository;
     private final RwaTokenDenylistEntryRepository denylistRepository;
     private final RwaTokenPowerUserRepository powerUserRepository;
     private final ProgrammableTokenRegistryRepository programmableTokenRegistryRepository;
@@ -355,7 +363,9 @@ public class RwaTokenModuleHandler
     public TransactionContext<RegistrationResult> buildRegistrationTransaction(
             RwaTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
-        return buildRegistrationTransaction(request, protocolParams, RegistrationChainInputs.NONE);
+        return TransactionContext.typedError(
+                "Standalone CMTA registration is disabled because CIP-171 provenance is required. "
+                + "Use /rwa-token/build-chain to publish both records before registration.");
     }
 
     /** The UTxOs a chained registration cannot discover by querying the chain,
@@ -848,7 +858,8 @@ public class RwaTokenModuleHandler
                     ResolvedMembership m = resolveMembershipProof(
                             progTokenPolicyId, mintRecipientStakeHash,
                             stakeCredentialTypeOf(recipientAddress, "recipient"), gsFields,
-                            "recipient", "registering with a first mint");
+                            "recipient", "registering with a first mint",
+                            chained != null && chained.globalState() != null);
                     mintMpfProofCborHex = m.proofCborHex();
                     mintMpfValidUntilMs = m.validUntilMs();
                 }
@@ -1171,6 +1182,14 @@ public class RwaTokenModuleHandler
                 requiredSigners.add(mintPuNodeKey);
             }
 
+            if (preparedGenesis != null) {
+                if (!willMint) throw new IllegalStateException("Prepared initial mint requires a first mint");
+                // This output is reserved for the subsequent CIP-170 transaction and
+                // the two optional stake-certificate transactions. It has no assets,
+                // datum, or reference script, so the child can spend it exclusively.
+                tx = tx.payToAddress(request.getFeePayerAddress(),
+                        List.of(Amount.lovelace(BigInteger.valueOf(60_000_000L))));
+            }
             Utxo firstUtxo = feePayerUtxos.getFirst();
             var txContext = quickTxBuilder.compose(tx)
                     .withRequiredSigners(requiredSigners.toArray(new byte[0][]))
@@ -1219,6 +1238,13 @@ public class RwaTokenModuleHandler
                 txContext = txContext.validTo(kycClampedTtlSlot(
                         mintNeedsRecipientProof ? mintMpfValidUntilMs : null,
                         mintRecipientStakeHash, "recipient", "registration mint"));
+            }
+            if (initialMintExpiresAt != null) {
+                long approvedUntil = initialMintExpiresAt.minusSeconds(1).toEpochMilli();
+                if (mintNeedsRecipientProof && mintMpfValidUntilMs != null)
+                    approvedUntil = Math.min(approvedUntil, mintMpfValidUntilMs);
+                txContext = txContext.validTo(kycClampedTtlSlot(approvedUntil,
+                        mintRecipientStakeHash, "recipient", "approved registration mint"));
             }
             Transaction transaction = txContext.build();
 
@@ -1638,6 +1664,8 @@ public class RwaTokenModuleHandler
                     .payToContract(s.gsSpendAddress().getAddress(), ValueUtil.toAmountList(gsValue),
                             newGsDatum);                                                             // output 1
 
+            MintAttestationMetadata.attach(tx, request.attestation());
+
             // ── Reference scripts ──────────────────────────────────────────
             // The four validators this mint needs are 15 441 bytes inline:
             //   8117 minting_authority + 4474 global_state spend
@@ -1714,12 +1742,12 @@ public class RwaTokenModuleHandler
     /** Transfer tx. Assembles {@code transfer_logic_script.withdraw} redeemer of shape
      *  {@code Constr 0 [global_state_ref_input_index, source_actions[], destination_actions[]]}.
      *  Each source action carries a {@code KycProof} (Attestation OR Membership, see
-     *  {@code lib/types/kyc_proof.ak}: 66-byte payload, 64-byte signature, 32-byte vkey)
+     *  {@code lib/types/kyc_proof.ak}: 67-byte payload, 64-byte signature, 32-byte vkey)
      *  plus the index of a denylist-covering linked-list ref-input proving the sender
      *  is not denylisted. Destination actions are identical. The KYC proof itself is
-     *  only verified — on the sender side as well as the destination side — when the
-     *  live GS datum's {@code requires_receiver_kyc} flag is true; the denylist-absence
-     *  check is unconditional on both sides. */
+     *  verified for sources when {@code requires_sender_kyc} is true and for
+     *  destinations when {@code requires_receiver_kyc} is true; denylist absence
+     *  is unconditional on both sides. */
     @Override
     public TransactionContext<Void> buildTransferTransaction(
             TransferTokenRequest request,
@@ -1754,7 +1782,10 @@ public class RwaTokenModuleHandler
                 return TransactionContext.typedError(
                         "recipient must be a base address (need delegation credential)");
             }
-            boolean isSelfSend = Arrays.equals(senderStakeHash, recipientStakeHash);
+            short senderCredentialType = stakeCredentialTypeOf(senderAddress, "sender");
+            short recipientCredentialType = stakeCredentialTypeOf(recipientAddress, "recipient");
+            boolean sameStakeCredential = senderCredentialType == recipientCredentialType
+                    && Arrays.equals(senderStakeHash, recipientStakeHash);
 
             // BOTH the sender and the receiver proof requirements are decided by
             // the LIVE GS datum's requires_receiver_kyc field, not by
@@ -1857,13 +1888,14 @@ public class RwaTokenModuleHandler
             }
             boolean liveRequiresReceiverKyc;
             boolean liveRequiresSenderKyc;
+            List<PlutusData> gsFields;
             try {
                 PlutusData gsDatum = PlutusData.deserialize(
                         HexUtil.decodeHexString(gsUtxo.getInlineDatum()));
                 if (!(gsDatum instanceof ConstrPlutusData gsConstr)) {
                     return TransactionContext.typedError("GS datum is not a Constr");
                 }
-                List<PlutusData> gsFields = gsConstr.getData().getPlutusDataList();
+                gsFields = gsConstr.getData().getPlutusDataList();
                 if (gsFields.size() != GS_DATUM_FIELD_COUNT) {
                     return TransactionContext.typedError("GS datum has " + gsFields.size()
                             + " fields, expected " + GS_DATUM_FIELD_COUNT
@@ -1879,33 +1911,39 @@ public class RwaTokenModuleHandler
                 return TransactionContext.typedError(
                         "could not parse GS datum to read requires_receiver_kyc: " + e.getMessage());
             }
-            boolean needRecipientProof = liveRequiresReceiverKyc && !isSelfSend;
-            if (needRecipientProof
-                    && (request.mpfProofCborHex() == null || request.mpfProofCborHex().isBlank()
-                        || request.mpfValidUntilMs() == null)) {
-                return TransactionContext.typedError(
-                        "recipient Membership proof required: mpfProofCborHex + mpfValidUntilMs "
-                        + "(token currently has requires_receiver_kyc=true on chain)");
+            // The source gate and destination gate are independent. Token change
+            // returns to the sender as a destination, so receiver KYC may require
+            // a sender proof even when sender KYC itself is disabled.
+            boolean needRecipientProof = liveRequiresReceiverKyc;
+            boolean needSenderProof = requiresTransferSenderProof(liveRequiresSenderKyc,
+                    liveRequiresReceiverKyc, changeAmount, sameStakeCredential);
+            List<String> trustedVkeys = trustedEntitiesFrom(gsFields.get(GS_IDX_TRUSTED_ENTITY_VKEYS));
+            long gsNetworkId = intFrom(gsFields.get(GS_IDX_NETWORK_ID));
+            boolean senderSupplied = hasTransferProof(request.senderMpfProofCborHex(),
+                    request.senderMpfValidUntilMs(), request.senderAttestation());
+            boolean recipientSupplied = hasTransferProof(request.mpfProofCborHex(),
+                    request.mpfValidUntilMs(), request.recipientAttestation());
+            // A shared full stake credential needs one proof, regardless of the
+            // payment addresses. Never collapse key and script credentials by hash.
+            var senderAttestation = request.senderAttestation();
+            String senderMpf = request.senderMpfProofCborHex();
+            Long senderMpfExpiry = request.senderMpfValidUntilMs();
+            if (sameStakeCredential && !senderSupplied && recipientSupplied) {
+                senderAttestation = request.recipientAttestation();
+                senderMpf = request.mpfProofCborHex();
+                senderMpfExpiry = request.mpfValidUntilMs();
             }
-
-            // Sender proof requirement. The two gates are INDEPENDENT in the pinned
-            // contract: transfer_logic_script.ak:123 reads requires_sender_kyc for the
-            // per-sender loop, and :157 reads requires_receiver_kyc for the per-destination
-            // loop. Gating the sender on the receiver flag (as this did) is the F-20 bug the
-            // re-pin to @e69c66a fixed on chain — off-chain it made a token with
-            // sender-KYC off but receiver-KYC on demand a sender proof the chain never asks
-            // for, which no sender can produce when the member root is empty.
-            //
-            // Only the Membership shape is supported in v1; Attestation-style sender
-            // proofs would need the KERI service to produce BaFin 66-byte payloads,
-            // which is a separate workstream.
-            boolean needSenderProof = liveRequiresSenderKyc;
-            if (needSenderProof
-                    && (request.senderMpfProofCborHex() == null || request.senderMpfProofCborHex().isBlank()
-                        || request.senderMpfValidUntilMs() == null)) {
-                return TransactionContext.typedError(
-                        "rwa-token sender Membership proof required: senderMpfProofCborHex "
-                        + "+ senderMpfValidUntilMs (token currently has requires_sender_kyc=true on chain)");
+            TransferKycProof senderProof = resolveTransferProof("sender", senderStakeHash,
+                    senderCredentialType, needSenderProof, senderMpf, senderMpfExpiry,
+                    senderAttestation, policyId, gsNetworkId, trustedVkeys);
+            TransferKycProof recipientProof;
+            if (sameStakeCredential && !recipientSupplied && senderProof.validUntilMs() != null) {
+                recipientProof = senderProof;
+            } else {
+                recipientProof = resolveTransferProof("receiver", recipientStakeHash,
+                        recipientCredentialType, needRecipientProof, request.mpfProofCborHex(),
+                        request.mpfValidUntilMs(), request.recipientAttestation(),
+                        policyId, gsNetworkId, trustedVkeys);
             }
 
             // Denylist root node (ref input) — for an empty denylist (v1 happy
@@ -1987,17 +2025,10 @@ public class RwaTokenModuleHandler
             int denylistRefIdx = layout.referenceInputIndex(tiDenylistRoot);
 
             // ── 6. Build redeemers ─────────────────────────────────────────
-            // Sender proof: Constr 1 = Membership { pkh, valid_until_ms, mpf_proof }.
-            // When requires_receiver_kyc is false the validator never inspects it,
-            // so emit the same placeholder shape the destination side uses.
-            PlutusData senderMembershipProof = buildMembershipProof(
-                    senderStakeHash, needSenderProof,
-                    request.senderMpfProofCborHex(), request.senderMpfValidUntilMs());
-
             // One source action per UNIQUE sender stake credential among token
             // inputs. v1: all token inputs are from the same wallet => 1 action.
             PlutusData sourceAction = ConstrPlutusData.of(0,
-                    senderMembershipProof,
+                    senderProof.data(),
                     BigIntPlutusData.of(BigInteger.valueOf(denylistRefIdx)));
             ListPlutusData sourceActions = ListPlutusData.of(sourceAction);
 
@@ -2014,36 +2045,20 @@ public class RwaTokenModuleHandler
             // (de-duped via list.unique, keeping first occurrence).
             //
             // Our outputs in TX order:
-            //   [0] recipient prog-token (always present, unless self-send)
+            //   [0] recipient prog-token (always present)
             //   [1] sender change prog-token (only if changeAmount > 0)
             //
             // So the validator iterates destinations as:
-            //   self-send:                     []
+            //   same-credential send:          [recipient]
             //   no change (full transfer):     [recipient]
             //   with change (partial transfer):[recipient, sender]
             //
             // We must emit a matching action per destination — emitting fewer
             // causes safe_list_at to read past the end of actions[] and
             // head_list on the empty tail throws EmptyList.
-            ListPlutusData destinationActions = ListPlutusData.of();
-            if (!isSelfSend) {
-                destinationActions.add(buildDestinationAction(
-                        recipientStakeHash, needRecipientProof,
-                        request.mpfProofCborHex(), request.mpfValidUntilMs(),
-                        denylistRefIdx));
-                // Sender appears as a destination too when there's change back.
-                if (changeAmount.signum() > 0) {
-                    // For the sender-as-destination, reuse the sender's
-                    // Membership proof — same stake cred, same enrollment.
-                    // requires_receiver_kyc=false sends a placeholder anyway,
-                    // but having a real proof here is harmless.
-                    destinationActions.add(buildDestinationAction(
-                            senderStakeHash, needRecipientProof,
-                            request.senderMpfProofCborHex(),
-                            request.senderMpfValidUntilMs(),
-                            denylistRefIdx));
-                }
-            }
+            ListPlutusData destinationActions = buildTransferDestinationActions(
+                    recipientProof.data(), senderProof.data(), changeAmount,
+                    sameStakeCredential, denylistRefIdx);
 
             // TransferLogicScriptWithdrawRedeemer { registry_node_ref_input_index,
             //   global_state_location, actions_for_each_input, destination_actions }.
@@ -2143,23 +2158,14 @@ public class RwaTokenModuleHandler
                 tx = tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer());
             }
 
-            // TTL bounded by whichever membership-proof validity windows actually
-            // apply. When requires_receiver_kyc is false neither proof is verified
-            // and neither may even exist (empty member_root_hash, no enrolled
-            // members), so the plain 15-minute window stands — reading
-            // senderMpfValidUntilMs unconditionally here would NPE on exactly the
-            // transfers the relaxed precondition above now allows through.
-            long now = System.currentTimeMillis();
-            long ttlMs = now + 15 * 60 * 1000L;
-            if (needSenderProof && request.senderMpfValidUntilMs() != null) {
-                ttlMs = Math.min(ttlMs, request.senderMpfValidUntilMs());
+            Long earliestExpiry = null;
+            if (needSenderProof)
+                earliestExpiry = senderProof.validUntilMs();
+            if (liveRequiresReceiverKyc) {
+                long recipientExpiry = recipientProof.validUntilMs();
+                earliestExpiry = earliestExpiry == null ? recipientExpiry : Math.min(earliestExpiry, recipientExpiry);
             }
-            if (needRecipientProof && request.mpfValidUntilMs() != null) {
-                ttlMs = Math.min(ttlMs, request.mpfValidUntilMs());
-            }
-            java.time.LocalDateTime ttlTime = java.time.LocalDateTime.ofInstant(
-                    Instant.ofEpochMilli(ttlMs), java.time.ZoneOffset.UTC);
-            long ttlSlot = cardanoConverters.time().toSlot(ttlTime);
+            long ttlSlot = kycClampedTtlSlot(earliestExpiry, senderStakeHash, "transfer", "transfer");
 
             String senderAddrBech32 = senderAddress.getAddress();
             Transaction transaction = quickTxBuilder.compose(tx)
@@ -2294,6 +2300,60 @@ public class RwaTokenModuleHandler
                         ListPlutusData.of()));
     }
 
+    record TransferKycProof(PlutusData data, Long validUntilMs) {}
+
+    static boolean requiresTransferSenderProof(boolean senderKyc, boolean receiverKyc,
+                                                BigInteger tokenChange, boolean sameCredential) {
+        return senderKyc || (receiverKyc && tokenChange.signum() > 0 && !sameCredential);
+    }
+
+    static ListPlutusData buildTransferDestinationActions(PlutusData recipientProof,
+            PlutusData senderProof, BigInteger tokenChange, boolean sameCredential,
+            int denylistRefIdx) {
+        var actions = ListPlutusData.of();
+        actions.add(ConstrPlutusData.of(0, recipientProof,
+                BigIntPlutusData.of(BigInteger.valueOf(denylistRefIdx))));
+        // Every transfer has a recipient output, including same-credential sends.
+        // A distinct sender change credential adds a second destination.
+        if (tokenChange.signum() > 0 && !sameCredential)
+            actions.add(ConstrPlutusData.of(0, senderProof,
+                    BigIntPlutusData.of(BigInteger.valueOf(denylistRefIdx))));
+        return actions;
+    }
+
+    private static boolean hasTransferProof(String mpfCbor, Long mpfExpiry,
+                                            CmtaAttestation attestation) {
+        return (mpfCbor != null && !mpfCbor.isBlank()) || mpfExpiry != null || attestation != null;
+    }
+
+    static TransferKycProof resolveTransferProof(String party, byte[] stakeHash,
+            short credentialType, boolean required, String mpfCbor, Long mpfExpiry,
+            CmtaAttestation attestation, String policyId, long networkId,
+            List<String> trustedVkeys) throws CborDeserializationException {
+        boolean membership = mpfCbor != null && !mpfCbor.isBlank();
+        if (attestation != null && (membership || mpfExpiry != null))
+            throw new IllegalArgumentException(party + " cannot supply both membership and attestation proofs");
+        if (attestation != null) {
+            var verified = CmtaAttestationVerifier.verify(attestation, stakeHash, credentialType,
+                    policyId, networkId, trustedVkeys, System.currentTimeMillis(), party);
+            return new TransferKycProof(ConstrPlutusData.of(0,
+                    ConstrPlutusData.of(0,
+                            BytesPlutusData.of(verified.payload()),
+                            BytesPlutusData.of(verified.signature()),
+                            BytesPlutusData.of(verified.issuerVkey()))), verified.validUntilMs());
+        }
+        if (membership != (mpfExpiry != null))
+            throw new IllegalArgumentException(party + " membership proof and expiry must be supplied together");
+        if (membership) {
+            if (mpfExpiry <= System.currentTimeMillis())
+                throw new IllegalArgumentException(party + " membership proof has expired");
+            return new TransferKycProof(buildMembershipProof(stakeHash, true, mpfCbor, mpfExpiry), mpfExpiry);
+        }
+        if (required)
+            throw new IllegalArgumentException(party + " proof required: publish Merkle membership or provide a trusted-entity attestation");
+        return new TransferKycProof(buildMembershipProof(stakeHash, false, null, null), null);
+    }
+
     /** A resolved MPF inclusion proof: the CBOR the redeemer carries plus the
      *  membership expiry the transaction's TTL must respect. */
     private record ResolvedMembership(String proofCborHex, long validUntilMs) {}
@@ -2333,6 +2393,15 @@ public class RwaTokenModuleHandler
                                                       short subjectCredentialType,
                                                       List<PlutusData> gsFields,
                                                       String subjectLabel, String verb) {
+        return resolveMembershipProof(policyId, subjectStakeHash, subjectCredentialType,
+                gsFields, subjectLabel, verb, false);
+    }
+
+    private ResolvedMembership resolveMembershipProof(String policyId, byte[] subjectStakeHash,
+                                                      short subjectCredentialType,
+                                                      List<PlutusData> gsFields,
+                                                      String subjectLabel, String verb,
+                                                      boolean unsubmittedGenesis) {
         byte[] onchainRoot = gsFields.get(GS_IDX_MEMBER_ROOT_HASH) instanceof BytesPlutusData rootBytes
                 ? rootBytes.getValue() : new byte[0];
         if (onchainRoot.length == 0) {
@@ -2343,8 +2412,11 @@ public class RwaTokenModuleHandler
                     + verb + ".");
         }
         long now = System.currentTimeMillis();
-        RwaTokenAllowlistService.MpfLeafView leaf = allowlistService
-                .inclusionProof(policyId, subjectStakeHash, subjectCredentialType, now)
+        RwaTokenAllowlistService.MpfLeafView leaf = (unsubmittedGenesis
+                ? allowlistService.inclusionProofFromSnapshot(policyId, onchainRoot,
+                        subjectStakeHash, subjectCredentialType, now)
+                : allowlistService.inclusionProof(policyId, subjectStakeHash,
+                        subjectCredentialType, now))
                 .orElseThrow(() -> new BuildPreconditionException(
                         subjectLabel + " " + HexUtil.encodeHexString(subjectStakeHash)
                         + " is not an allowlisted member of " + policyId
@@ -2392,11 +2464,11 @@ public class RwaTokenModuleHandler
             if (ttlMs - now < MIN_KYC_TTL_MS) {
                 throw new BuildPreconditionException(
                         subjectLabel + " " + HexUtil.encodeHexString(subjectStakeHash)
-                        + "'s allowlist membership expires at "
+                        + "'s KYC proof expires at "
                         + Instant.ofEpochMilli(membershipValidUntilMs)
                         + ", too soon to build a " + operation + " against (needs at least "
-                        + (MIN_KYC_TTL_MS / 1000) + "s). Renew their membership and "
-                        + "re-publish the member root.");
+                        + (MIN_KYC_TTL_MS / 1000) + "s). Provide a later attestation or "
+                        + "renew and publish their Merkle membership.");
             }
         }
         // Anchor the bound to the CHAIN TIP plus a duration, not to a wall-clock instant.
@@ -2415,7 +2487,11 @@ public class RwaTokenModuleHandler
         // network, devnets included. So "how far ahead" is just seconds, and the tip supplies
         // "from where". Falls back to the converters when the tip cannot be read, which keeps
         // behaviour identical on a public network if the backend is briefly unavailable.
-        long remainingSeconds = Math.max(0, (ttlMs - now) / 1000);
+        return ttlSlotForDeadline(ttlMs);
+    }
+
+    private long ttlSlotForDeadline(long ttlMs) {
+        long remainingSeconds = Math.max(0, (ttlMs - System.currentTimeMillis()) / 1000);
         var tipSlot = utxoProvider.currentTipSlot();
         if (tipSlot.isPresent()) {
             return tipSlot.get() + remainingSeconds;
@@ -2484,11 +2560,14 @@ public class RwaTokenModuleHandler
 
             // 1. Select a pure-ADA bootstrap UTxO from the admin's wallet. Its
             // OutputReference is the one-shot nonce for the GS mint + both LL mints.
-            List<Utxo> utilityUtxos = accountService.findAdaOnlyUtxo(adminAddress, 10_000_000L);
-            if (utilityUtxos.isEmpty()) {
-                return TransactionContext.typedError(
-                        "no ADA-only UTxOs at admin address (need ~10 ADA for fees + 3x min-utxo)");
-            }
+            // Use the backend's current UTxO view. A cached unspent bootstrap
+            // from an earlier attempt can still be used to build unsigned CBOR,
+            // but the earlier chain may be submitted later. Each new attempt
+            // therefore starts from a fresh, unreserved one-shot input.
+            GenesisFunding selectedFunding = preparedGenesis == null ? selectGenesisFunding(adminAddress)
+                    : new GenesisFunding(requirePreparedFunding(adminAddress, preparedGenesis), preparedGenesis.funding());
+            List<Utxo> utilityUtxos = selectedFunding.selected();
+            List<Utxo> eligibleUtxos = selectedFunding.eligible();
             Utxo bootstrap = utilityUtxos.getFirst();
             TransactionInput bootstrapInput = TransactionInput.builder()
                     .transactionId(bootstrap.getTxHash())
@@ -2535,6 +2614,31 @@ public class RwaTokenModuleHandler
             PlutusScript issuanceMintScript = protocolScriptBuilderService.getParameterizedIssuanceMintScript(
                     protocolParams, mintingLogicScript);
             String issuancePolicyId = issuanceMintScript.getPolicyId();
+            if (registrationRepository.existsByProgrammableTokenPolicyId(issuancePolicyId)) {
+                return TransactionContext.typedError("bootstrap input already belongs to a registration attempt; fund a fresh ADA-only UTxO and retry");
+            }
+            if (utxoProvider.findUtxoByAsset(globalStatePolicyId,
+                    RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX).isPresent()
+                    || utxoProvider.assetPresence(globalStatePolicyId,
+                    RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX)
+                    != UtxoProvider.AssetPresence.ABSENT) {
+                return TransactionContext.typedError("cannot confirm that this bootstrap's GS NFT is absent; refusing genesis build");
+            }
+            if (preparedGenesis != null && (!globalStatePolicyId.equals(preparedGenesis.globalStatePolicyId())
+                    || !issuancePolicyId.equals(preparedGenesis.programmableTokenPolicyId())))
+                return TransactionContext.typedError("Prepared policy no longer matches pinned bootstrap/deployment");
+            if (preparedGenesis == null && genesisReservationRepository.claim(globalStatePolicyId,
+                    bootstrap.getTxHash(), bootstrap.getOutputIndex()) != 1) {
+                return TransactionContext.typedError("bootstrap was reserved by another registration attempt; retry with a fresh ADA-only UTxO");
+            }
+            for (Utxo funding : utilityUtxos) {
+                String inputRef = funding.getTxHash().toLowerCase(java.util.Locale.ROOT)
+                        + "#" + funding.getOutputIndex();
+                if (preparedGenesis == null && genesisFundingReservationRepository.claim(inputRef, globalStatePolicyId) != 1) {
+                    return TransactionContext.typedError(
+                            "genesis funding input was reserved by another registration attempt: " + inputRef);
+                }
+            }
 
             // 3b. The rotatable minting authority. Its hash goes into the genesis GS datum
             //     field `minting_script_credential_hash`; the proxy reads it there at run
@@ -2728,6 +2832,11 @@ public class RwaTokenModuleHandler
             Transaction transaction = quickTxBuilder.compose(tx)
                     .feePayer(adminAddress)
                     .mergeOutputs(false)
+                    // A frozen initial-mint chain must eventually become
+                    // impossible to start, even if none of it was submitted.
+                    // The archived bootstrap reservation still excludes this
+                    // input from a replacement policy.
+                    .validTo(ttlSlotForDeadline(System.currentTimeMillis() + DEFAULT_TTL_MS))
                     .withCollateralInputs(TransactionInput.builder()
                             .transactionId(firstUtilityUtxo.getTxHash())
                             .index(firstUtilityUtxo.getOutputIndex()).build())
@@ -2744,12 +2853,25 @@ public class RwaTokenModuleHandler
                     // registration on preview is a STAKE_REGISTRATION, none a RegCert.
                     .build();
 
+            java.util.Set<String> permittedFunding = eligibleUtxos.stream()
+                    .map(u -> u.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + u.getOutputIndex())
+                    .collect(java.util.stream.Collectors.toSet());
+            var finalBody = transaction.getBody();
+            if (finalBody.getInputs() == null
+                    || finalBody.getInputs().stream().anyMatch(input -> !permittedFunding.contains(
+                    input.getTransactionId().toLowerCase(java.util.Locale.ROOT) + "#" + input.getIndex()))
+                    || finalBody.getCollateral() != null && finalBody.getCollateral().stream()
+                    .anyMatch(input -> !permittedFunding.contains(
+                            input.getTransactionId().toLowerCase(java.util.Locale.ROOT) + "#" + input.getIndex()))) {
+                return TransactionContext.typedError("genesis builder selected a reserved or stale funding input");
+            }
+
             // 7. Persist the registration row. issuancePolicyId IS the prog-token
             //    policy id (deterministic from the bootstrap UTxO + asset name +
             //    protocol params), so we use it as the row's primary key from genesis
             //    time onward. The subsequent registration tx just mints under this
             //    policy and registers it in the CIP-113 directory — no key rewrite.
-            registrationRepository.save(RwaTokenRegistrationEntity.builder()
+            var proposedRegistration = RwaTokenRegistrationEntity.builder()
                     .programmableTokenPolicyId(issuancePolicyId)
                     .issuerAdminPkh(adminPkh)
                     .globalStatePolicyId(globalStatePolicyId)
@@ -2779,35 +2901,22 @@ public class RwaTokenModuleHandler
                     // Its reward account is registered by THIS transaction (or was already),
                     // so mint, burn and registration can withdraw 0 from it.
                     .mintingAuthorityRewardRegistered(true)
-                    .build());
-
-            // 7b. The opt-in genesis allowlist seed, now that the row its leaves hang off
-            // exists. seedPublishedMember also marks the leaf PUBLISHED — inclusionProof
-            // proves against published leaves only (that is the trie whose root matches the
-            // chain), and this member's publishing transaction IS the genesis transaction,
-            // so no UpdateMemberRootHash will ever come along to mark it.
-            if (seededMemberPkh != null) {
-                allowlistService.seedPublishedMember(
-                        issuancePolicyId, seededMemberPkh, seededMemberCredentialType,
-                        seededMemberValidUntilMs);
-                byte[] persistedRoot = allowlistService.currentRoot(issuancePolicyId);
-                if (!Arrays.equals(persistedRoot, genesisMemberRootHash)) {
-                    // The datum is already sealed into the built transaction at this point,
-                    // so a divergence here means every later membership proof would be
-                    // rejected as root drift. Fail the build rather than emit a token whose
-                    // allowlist can never verify.
-                    return TransactionContext.typedError(
-                            "genesis allowlist seed produced root "
-                            + HexUtil.encodeHexString(persistedRoot)
-                            + " in the database but " + HexUtil.encodeHexString(genesisMemberRootHash)
-                            + " was written into the global-state datum — refusing to register a "
-                            + "token whose membership proofs could never verify. The usual cause is "
-                            + "leftover allowlist leaves for policy " + issuancePolicyId
-                            + " from an earlier aborted registration: the datum root is computed over "
-                            + "the single seeded member, the database root over every leaf. Clear "
-                            + "them and retry.");
-                }
+                    .build();
+            var previousRegistration = registrationRepository.findByProgrammableTokenPolicyId(issuancePolicyId);
+            if (previousRegistration.isPresent()) {
+                return TransactionContext.typedError(
+                        "this bootstrap already has a registration attempt; use a fresh ADA-only UTxO for a new token policy");
             }
+            registrationRepository.save(proposedRegistration);
+
+            // An unsubmitted genesis has no live GS NFT. Keep its exact member set in
+            // an immutable candidate snapshot; old mutable leaves from aborted builds
+            // must never enter this root or the chained registration proof.
+            allowlistService.saveGenesisSnapshot(issuancePolicyId, genesisMemberRootHash,
+                    seededMemberPkh == null ? null : new RwaTokenAllowlistService.MemberLeaf(
+                            HexUtil.encodeHexString(seededMemberPkh), seededMemberCredentialType,
+                            seededMemberValidUntilMs),
+                    TransactionUtil.getTxHash(transaction.serialize()));
 
             // 8. Auto-seed the bootstrap power-user DB row so the admin sees themselves
             // immediately on the admin page. The matching on-chain AddPowerUser tx is
@@ -3945,11 +4054,14 @@ public class RwaTokenModuleHandler
     public record ChainBuildResult(
             String genesisCborHex,
             String addPowerUserCborHex,
+            String cmtaProvenanceCborHex,
+            String issuanceProvenanceCborHex,
             /** Publishes {@code minting_logic} + {@code global_state} spend as reference
              *  scripts. Without it the registration tx cannot fit under max-tx-size when
              *  it carries a first mint — see {@link #buildPublishScriptsTransaction}. */
             String publishScriptsCborHex,
             String registrationCborHex,
+            String attestationCborHex,
             /** Conway RegCert for the BaFin transfer_logic_script stake
              *  credential — published in the same CIP-103 batch so the user
              *  doesn't need an interactive cert tx before their first transfer.
@@ -3968,10 +4080,342 @@ public class RwaTokenModuleHandler
             String powerUsersPolicyId,
             String genesisTxHash,
             String addPowerUserTxHash,
+            String cmtaProvenanceTxHash,
+            String issuanceProvenanceTxHash,
             String publishScriptsTxHash,
             String registrationTxHash,
+            String attestationTxHash,
             String registerTransferLogicTxHash,
             String registerThirdPartyTransferLogicTxHash) {}
+
+    /** Internal immutable selection. Never decoded from a public registration request. */
+    public record GenesisPlan(String globalStatePolicyId, String programmableTokenPolicyId, List<Utxo> funding) {}
+    private GenesisPlan preparedGenesis;
+    private org.cardanofoundation.cip113.model.Cip170AttestationData initialMintAttestation;
+    private java.time.Instant initialMintExpiresAt;
+
+    public void usePreparedGenesis(GenesisPlan plan,
+            org.cardanofoundation.cip113.model.Cip170AttestationData attestation, java.time.Instant expiresAt) {
+        this.preparedGenesis = java.util.Objects.requireNonNull(plan);
+        this.initialMintAttestation = attestation;
+        this.initialMintExpiresAt = java.util.Objects.requireNonNull(expiresAt);
+    }
+
+    /** Append the KERI-approved metadata child and any certificate suffix to a
+     * frozen registration prefix. The registration itself is never rebuilt here. */
+    public ChainBuildResult completeInitialMintChain(ChainBuildResult prefix,
+            String feePayerAddress, ProtocolBootstrapParams protocolParams,
+            org.cardanofoundation.cip113.model.Cip170AttestationData attestation,
+            Cip170MintChildBuilder childBuilder) throws Exception {
+        if (prefix == null || prefix.registrationCborHex() == null || prefix.registrationTxHash() == null
+                || prefix.attestationCborHex() != null || prefix.registerTransferLogicCborHex() != null)
+            throw new IllegalArgumentException("Expected an unpublished initial-mint prefix");
+        Transaction registration = Transaction.deserialize(HexUtil.decodeHexString(prefix.registrationCborHex()));
+        if (!prefix.registrationTxHash().equals(TransactionUtil.getTxHash(registration.serialize())))
+            throw new IllegalStateException("Frozen registration hash differs from its CBOR");
+        Integer reservedIndex = null;
+        for (int n = 0; n < registration.getBody().getOutputs().size(); n++) {
+            var out = registration.getBody().getOutputs().get(n);
+            if (out.getValue() != null && BigInteger.valueOf(60_000_000L).equals(out.getValue().getCoin())
+                    && Cip170MintChildBuilder.fundingOutput(registration, prefix.registrationTxHash(),
+                    feePayerAddress, 60_000_000L, n) != null) {
+                if (reservedIndex != null) throw new IllegalStateException("Registration has multiple reserved attestation outputs");
+                reservedIndex = n;
+            }
+        }
+        if (reservedIndex == null) throw new IllegalStateException("Registration has no reserved attestation output");
+        Transaction child = childBuilder.build(feePayerAddress, prefix.registrationCborHex(), attestation,
+                60_000_000L, reservedIndex);
+        checkedTxSize("mintAttestation", child);
+        String childCbor = child.serializeToHex();
+        String childHash = TransactionUtil.getTxHash(child.serialize());
+
+        String certCbor = null, certHash = null, thirdPartyCbor = null, thirdPartyHash = null;
+        try {
+            Utxo childChange = findOutputAtAddress(child, childHash, feePayerAddress,
+                    BigInteger.valueOf(5_500_000L));
+            if (childChange != null) {
+                hybridUtxoSupplier.add(childChange);
+                var cert = buildRegisterTransferLogicTransaction(prefix.programmableTokenPolicyId(),
+                        feePayerAddress, protocolParams, childChange, true);
+                if (cert.isSuccessful()) {
+                    certCbor = cert.unsignedCborTx();
+                    Transaction certTx = Transaction.deserialize(HexUtil.decodeHexString(certCbor));
+                    certHash = TransactionUtil.getTxHash(certTx.serialize());
+                    checkedTxSize("registerTransferLogic", certTx);
+                    Utxo certChange = findOutputAtAddress(certTx, certHash, feePayerAddress,
+                            BigInteger.valueOf(40_000_000L));
+                    if (certChange != null) {
+                        hybridUtxoSupplier.add(certChange);
+                        var thirdParty = buildRegisterThirdPartyTransferLogicTransaction(
+                                prefix.programmableTokenPolicyId(), feePayerAddress,
+                                protocolParams, certChange, true);
+                        if (thirdParty.isSuccessful()) {
+                            thirdPartyCbor = thirdParty.unsignedCborTx();
+                            Transaction thirdPartyTx = Transaction.deserialize(HexUtil.decodeHexString(thirdPartyCbor));
+                            thirdPartyHash = TransactionUtil.getTxHash(thirdPartyTx.serialize());
+                            checkedTxSize("registerThirdPartyTransferLogic", thirdPartyTx);
+                        } else log.warn("chain[registerThirdPartyTransferLogic] skipped: {}", thirdParty.error());
+                    }
+                } else log.warn("chain[registerTransferLogic] skipped: {}", cert.error());
+            }
+        } finally {
+            hybridUtxoSupplier.clear();
+            hybridScriptSupplier.clear();
+        }
+        return new ChainBuildResult(prefix.genesisCborHex(), prefix.addPowerUserCborHex(),
+                prefix.cmtaProvenanceCborHex(), prefix.issuanceProvenanceCborHex(),
+                prefix.publishScriptsCborHex(), prefix.registrationCborHex(), childCbor,
+                certCbor, thirdPartyCbor, prefix.globalStatePolicyId(),
+                prefix.programmableTokenPolicyId(), prefix.denylistPolicyId(),
+                prefix.powerUsersPolicyId(), prefix.genesisTxHash(), prefix.addPowerUserTxHash(),
+                prefix.cmtaProvenanceTxHash(), prefix.issuanceProvenanceTxHash(),
+                prefix.publishScriptsTxHash(), prefix.registrationTxHash(), childHash,
+                certHash, thirdPartyHash);
+    }
+
+    public GenesisPlan planGenesis(RwaTokenRegisterRequest request, ProtocolBootstrapParams params) throws Exception {
+        String error = creationPreflight(request);
+        if (error != null) throw new IllegalArgumentException(error);
+        List<Utxo> funding = selectGenesisFunding(request.getFeePayerAddress()).selected();
+        var input = txInputOf(funding.getFirst());
+        String gsPolicy = scriptBuilder.buildGlobalStateMintScript(input).getPolicyId();
+        var proxy = scriptBuilder.buildMintingLogicScript(gsPolicy);
+        String policy = protocolScriptBuilderService.getParameterizedIssuanceMintScript(params, proxy).getPolicyId();
+        return new GenesisPlan(gsPolicy, policy, List.copyOf(funding));
+    }
+
+    private List<Utxo> requirePreparedFunding(String address, GenesisPlan plan) {
+        if (plan.funding() == null || plan.funding().isEmpty()) throw new IllegalArgumentException("Prepared funding is absent");
+        var reservation = genesisReservationRepository.findById(plan.globalStatePolicyId())
+                .orElseThrow(() -> new IllegalArgumentException("Prepared bootstrap reservation is absent"));
+        var bootstrap = plan.funding().getFirst();
+        if (!bootstrap.getTxHash().equals(reservation.getBootstrapTxHash())
+                || bootstrap.getOutputIndex() != reservation.getBootstrapOutputIndex())
+            throw new IllegalArgumentException("Prepared bootstrap reservation differs");
+        var live = utxoProvider.findAllCurrentUtxosFromBlockfrost(address);
+        for (var expected : plan.funding()) {
+            var actual = live.stream().filter(u -> u.getTxHash().equals(expected.getTxHash())
+                    && u.getOutputIndex() == expected.getOutputIndex()).findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("Prepared funding was spent; cancel this attempt and prepare again"));
+            if (!address.equals(actual.getAddress()) || !address.equals(expected.getAddress())
+                    || actual.getAmount().size() != 1 || expected.getAmount().size() != 1
+                    || !"lovelace".equals(actual.getAmount().getFirst().getUnit())
+                    || !actual.getAmount().getFirst().getQuantity().equals(expected.getAmount().getFirst().getQuantity()))
+                throw new IllegalArgumentException("Prepared funding differs from live wallet output");
+            String ref = expected.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + expected.getOutputIndex();
+            var funding = genesisFundingReservationRepository.findById(ref)
+                    .orElseThrow(() -> new IllegalArgumentException("Prepared funding reservation is absent"));
+            if (!plan.globalStatePolicyId().equals(funding.getGlobalStatePolicyId()))
+                throw new IllegalArgumentException("Prepared funding belongs to another attempt");
+        }
+        return plan.funding();
+    }
+
+    private record GenesisFunding(List<Utxo> selected, List<Utxo> eligible) {}
+
+    private GenesisFunding selectGenesisFunding(String adminAddress) {
+            List<Utxo> directUtxos = utxoProvider.findAllCurrentUtxosFromBlockfrost(adminAddress);
+            List<Utxo> eligibleUtxos = directUtxos.stream()
+                    .filter(u -> adminAddress.equals(u.getAddress())
+                            && u.getAmount() != null && u.getAmount().size() == 1
+                            && "lovelace".equals(u.getAmount().getFirst().getUnit()))
+                    .filter(u -> !registrationRepository.existsByBootstrapTxHashAndBootstrapOutputIndex(
+                            u.getTxHash(), u.getOutputIndex()))
+                    .filter(u -> !genesisReservationRepository.existsByBootstrapTxHashAndBootstrapOutputIndex(
+                            u.getTxHash(), u.getOutputIndex()))
+                    .filter(u -> !genesisFundingReservationRepository.existsById(
+                            u.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + u.getOutputIndex()))
+                    .toList();
+            List<Utxo> utilityUtxos = accountService.findAdaOnlyUtxo(adminAddress,
+                    10_000_000L, ignored -> eligibleUtxos);
+            BigInteger eligibleTotal = utilityUtxos.stream()
+                    .map(u -> u.getAmount().getFirst().getQuantity())
+                    .reduce(BigInteger.ZERO, BigInteger::add);
+            if (eligibleTotal.compareTo(BigInteger.valueOf(10_000_000L)) < 0) {
+                throw new IllegalArgumentException(
+                        "existing registration attempts reserve the available bootstrap inputs. "
+                        + "Fund a fresh ADA-only UTxO with at least 10 ADA and retry; "
+                        + "a new token policy will be created");
+            }
+        return new GenesisFunding(utilityUtxos, eligibleUtxos);
+    }
+
+    /** Request-only checks; runs before preparation reserves any wallet input. */
+    public String creationPreflight(RwaTokenRegisterRequest request) {
+            String adminAddress = request.getFeePayerAddress();
+            if (adminAddress == null || adminAddress.isBlank()) {
+                return ("feePayerAddress is required");
+            }
+
+            // ── PHASE 0 ─ Preconditions decidable from the request alone ───
+            //
+            // Phase 1 does not merely BUILD the genesis tx, it PERSISTS a
+            // RwaTokenRegistrationEntity row plus the bootstrap power-user row as
+            // a side effect. Every mint precondition that used to fire in phase 3
+            // (supply cap, signer identity, receiver-KYC) therefore left orphan genesis
+            // rows behind for a token that would never reach the chain. Anything
+            // derivable from the request is refused HERE instead, before a single row
+            // is written. The remaining phase-3 checks (denylist covering node,
+            // can_mint, index re-derivation) depend on transactions that do not exist
+            // yet and cannot be hoisted.
+            String firstMintQuantity = request.getInitialMintQuantity() != null
+                    && !request.getInitialMintQuantity().isBlank()
+                    ? request.getInitialMintQuantity().trim()
+                    : "0";
+            BigInteger firstMint;
+            try {
+                firstMint = new BigInteger(firstMintQuantity);
+            } catch (NumberFormatException nfe) {
+                return (
+                        "initialMintQuantity must be a non-negative integer, got '"
+                        + firstMintQuantity + "'");
+            }
+            if (firstMint.signum() < 0) {
+                return (
+                        "initialMintQuantity must be >= 0, got " + firstMint);
+            }
+            boolean chainWillMint = firstMint.signum() > 0;
+
+            // Normalise once, here. Genesis PERSISTS the asset name verbatim while the
+            // registration's mismatch guard compares against a trimmed copy, so a
+            // whitespace-padded name would be refused in phase 3 — after the rows were
+            // written — for differing from itself.
+            if (request.getAssetName() != null) {
+                request.setAssetName(request.getAssetName().trim());
+            }
+
+            // Same derivation buildGlobalStateInitTransaction and phase 2 use; hoisted
+            // here so the mint preconditions can check it. Kept null-only (not
+            // blank-aware) so it stays byte-identical to the other two call sites.
+            String bootstrapPkh = request.getBootstrapPowerUserPkh() != null
+                    ? request.getBootstrapPowerUserPkh()
+                    : request.getAdminPubKeyHash();
+
+            // Unconditional: phase 2 runs on EVERY chain and feeds this value straight
+            // into HexUtil.decodeHexString. A malformed value used to throw there —
+            // i.e. after phase 1 had persisted both rows. A 40-char hex is worse than
+            // a non-hex one: it decodes, mints a node with a wrong-length key, and only
+            // fails at submit on the required_signers length.
+            if (bootstrapPkh == null || !bootstrapPkh.matches("[0-9a-fA-F]{56}")) {
+                return (
+                        "bootstrapPowerUserPkh (or adminPubKeyHash) must be 28-byte hex, got '"
+                        + bootstrapPkh + "'");
+            }
+
+            // Unconditional for the same reason: buildRegistrationTransaction resolves
+            // the recipient's stake credential on BOTH paths (it builds the
+            // prog-logic-base target address from it), so an enterprise or malformed
+            // recipient throws in phase 3 even for a structural registration.
+            String recipient = (request.getRecipientAddress() == null
+                    || request.getRecipientAddress().isBlank())
+                    ? adminAddress : request.getRecipientAddress();
+            byte[] recipientStakeHash;
+            try {
+                recipientStakeHash = new Address(recipient)
+                        .getDelegationCredentialHash().orElse(null);
+            } catch (Exception e) {
+                return (
+                        "recipientAddress is not a valid Cardano address: " + recipient);
+            }
+            if (recipientStakeHash == null) {
+                return (
+                        "recipient must be a base address with a stake credential (the minting "
+                        + "logic vets the STAKE credential under the CIP-113 address model): "
+                        + recipient);
+            }
+
+            if (chainWillMint) {
+                // (a) Supply cap. global_state.ak's MintSecurity branch recomputes
+                // `mintable_amount - minted` and rejects a negative remainder. The cap
+                // is written by THIS chain's genesis tx from initialMintableAmount, so
+                // the comparison is exact here — no chain lookup needed.
+                long cap = request.getInitialMintableAmount() != null
+                        ? request.getInitialMintableAmount() : 0L;
+                if (firstMint.compareTo(BigInteger.valueOf(cap)) > 0) {
+                    return (
+                            "initialMintQuantity " + firstMint + " exceeds initialMintableAmount "
+                            + cap + ". The supply cap is written by this same genesis transaction, "
+                            + "so raise initialMintableAmount or lower the first mint.");
+                }
+
+                // (b) The registration tx names the power-user node's OWN key in
+                // required_signers (minting_logic_script.ak's
+                // must_be_signed_by_credential against power_user_node_key). The only
+                // key the fee payer can witness is its own payment credential, so a
+                // bootstrap PU pkh that differs would demand a witness only a third
+                // party holds — and that surfaces at SUBMIT time, after genesis and
+                // AddPowerUser have already been broadcast and mempool-chained.
+                byte[] callerPkh;
+                try {
+                    callerPkh = callerPaymentCredential(adminAddress);
+                } catch (BuildPreconditionException bpe) {
+                    return (bpe.getMessage());
+                }
+                if (!HexUtil.encodeHexString(callerPkh).equalsIgnoreCase(bootstrapPkh)) {
+                    return (
+                            "registration with a first mint must be signed by the bootstrap power "
+                            + "user itself, but bootstrapPowerUserPkh=" + bootstrapPkh
+                            + " differs from the fee payer's payment credential "
+                            + HexUtil.encodeHexString(callerPkh)
+                            + ". Either pay for this chain from that power user's wallet, or "
+                            + "register with initialMintQuantity=0 and let them mint separately.");
+                }
+
+                // (b2) Same argument for the ADMIN credential. The registration tx puts
+                // it in required_signers too (must_be_signed_by_credential against the
+                // GS datum's admin_credential_hash), so a first mint needs BOTH keys and
+                // the fee payer can only witness one. Scoped to the mint path
+                // deliberately: the admin key is a required signer on the structural
+                // path as well, but that path is long-proven and byte-frozen, so
+                // tightening it is left as a separate, separately-verified change.
+                if (request.getAdminPubKeyHash() == null
+                        || !HexUtil.encodeHexString(callerPkh)
+                                .equalsIgnoreCase(request.getAdminPubKeyHash())) {
+                    return (
+                            "registration with a first mint must be signed by the admin too, but "
+                            + "adminPubKeyHash=" + request.getAdminPubKeyHash()
+                            + " differs from the fee payer's payment credential "
+                            + HexUtil.encodeHexString(callerPkh)
+                            + ". The registration transaction names both the admin credential and "
+                            + "the power-user node key in required_signers, and only the fee payer "
+                            + "signs — so pay for this chain from the admin's wallet, or register "
+                            + "with initialMintQuantity=0.");
+                }
+
+                // (c) Receiver KYC. verify_mint_destinations reads
+                // requires_receiver_kyc off the GS datum this same genesis tx writes,
+                // The root is empty unless the issuer explicitly opted to seed
+                // this recipient in the genesis datum. Without that seed, only
+                // the contract's power-user self-mint exemption can satisfy the gate.
+                if (request.isRequiresReceiverKyc()) {
+                    // …unless the caller opted into the genesis allowlist seed, which writes
+                    // a real member_root_hash covering exactly this recipient into the same
+                    // genesis datum. The chain builder proves against its exact
+                    // snapshot before submission, at the cost of asserting a KYC
+                    // status nobody checked —
+                    // see RwaTokenRegisterRequest#seedRecipientInAllowlistAtGenesis.
+                    if (!request.isSeedRecipientInAllowlistAtGenesis()
+                            && !Arrays.equals(recipientStakeHash, HexUtil.decodeHexString(bootstrapPkh))) {
+                        return (
+                                "cannot mint at registration while requiresReceiverKyc is on. The "
+                                + "minting logic demands a KYC membership proof against the global "
+                                + "state's member_root_hash, and genesis writes that root EMPTY — no "
+                                + "root can be published beforehand, because the token's policy id "
+                                + "does not exist until this transaction picks its bootstrap UTxO. "
+                                + "Fix by one of: (1) set requiresReceiverKyc=false for this chain "
+                                + "and turn it on afterwards from the admin page "
+                                + "(SetRequiresReceiverKyc); (2) register with initialMintQuantity=0, "
+                                + "enroll the recipient, publish the root (UpdateMemberRootHash), "
+                                + "then mint separately; or (3) send the first mint to an address "
+                                + "whose STAKE credential is the power user " + bootstrapPkh
+                                + ", which the contract exempts from the receiver-KYC check.");
+                    }
+                }
+            }
+
+        return null;
+    }
 
     /** Build the full rwa-token registration chain in one call.
      *
@@ -3999,179 +4443,15 @@ public class RwaTokenModuleHandler
     public TransactionContext<ChainBuildResult> buildFullRegistrationChain(
             RwaTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
-        try {
+        try (var provenance = RwaCip171ProvenanceService.beginCapture()) {
+            String preflightError = creationPreflight(request);
+            if (preflightError != null) return TransactionContext.typedError(preflightError);
             String adminAddress = request.getFeePayerAddress();
-            if (adminAddress == null || adminAddress.isBlank()) {
-                return TransactionContext.typedError("feePayerAddress is required");
-            }
-
-            // ── PHASE 0 ─ Preconditions decidable from the request alone ───
-            //
-            // Phase 1 does not merely BUILD the genesis tx, it PERSISTS a
-            // RwaTokenRegistrationEntity row plus the bootstrap power-user row as
-            // a side effect. Every mint precondition that used to fire in phase 3
-            // (supply cap, signer identity, receiver-KYC) therefore left orphan genesis
-            // rows behind for a token that would never reach the chain. Anything
-            // derivable from the request is refused HERE instead, before a single row
-            // is written. The remaining phase-3 checks (denylist covering node,
-            // can_mint, index re-derivation) depend on transactions that do not exist
-            // yet and cannot be hoisted.
-            String firstMintQuantity = request.getInitialMintQuantity() != null
-                    && !request.getInitialMintQuantity().isBlank()
-                    ? request.getInitialMintQuantity().trim()
-                    : "0";
-            BigInteger firstMint;
-            try {
-                firstMint = new BigInteger(firstMintQuantity);
-            } catch (NumberFormatException nfe) {
-                return TransactionContext.typedError(
-                        "initialMintQuantity must be a non-negative integer, got '"
-                        + firstMintQuantity + "'");
-            }
-            if (firstMint.signum() < 0) {
-                return TransactionContext.typedError(
-                        "initialMintQuantity must be >= 0, got " + firstMint);
-            }
-            boolean chainWillMint = firstMint.signum() > 0;
-
-            // Normalise once, here. Genesis PERSISTS the asset name verbatim while the
-            // registration's mismatch guard compares against a trimmed copy, so a
-            // whitespace-padded name would be refused in phase 3 — after the rows were
-            // written — for differing from itself.
-            if (request.getAssetName() != null) {
-                request.setAssetName(request.getAssetName().trim());
-            }
-
-            // Same derivation buildGlobalStateInitTransaction and phase 2 use; hoisted
-            // here so the mint preconditions can check it. Kept null-only (not
-            // blank-aware) so it stays byte-identical to the other two call sites.
+            String firstMintQuantity = request.getInitialMintQuantity() == null || request.getInitialMintQuantity().isBlank()
+                    ? "0" : request.getInitialMintQuantity().trim();
+            boolean chainWillMint = new BigInteger(firstMintQuantity).signum() > 0;
             String bootstrapPkh = request.getBootstrapPowerUserPkh() != null
-                    ? request.getBootstrapPowerUserPkh()
-                    : request.getAdminPubKeyHash();
-
-            // Unconditional: phase 2 runs on EVERY chain and feeds this value straight
-            // into HexUtil.decodeHexString. A malformed value used to throw there —
-            // i.e. after phase 1 had persisted both rows. A 40-char hex is worse than
-            // a non-hex one: it decodes, mints a node with a wrong-length key, and only
-            // fails at submit on the required_signers length.
-            if (bootstrapPkh == null || !bootstrapPkh.matches("[0-9a-fA-F]{56}")) {
-                return TransactionContext.typedError(
-                        "bootstrapPowerUserPkh (or adminPubKeyHash) must be 28-byte hex, got '"
-                        + bootstrapPkh + "'");
-            }
-
-            // Unconditional for the same reason: buildRegistrationTransaction resolves
-            // the recipient's stake credential on BOTH paths (it builds the
-            // prog-logic-base target address from it), so an enterprise or malformed
-            // recipient throws in phase 3 even for a structural registration.
-            String recipient = (request.getRecipientAddress() == null
-                    || request.getRecipientAddress().isBlank())
-                    ? adminAddress : request.getRecipientAddress();
-            byte[] recipientStakeHash;
-            try {
-                recipientStakeHash = new Address(recipient)
-                        .getDelegationCredentialHash().orElse(null);
-            } catch (Exception e) {
-                return TransactionContext.typedError(
-                        "recipientAddress is not a valid Cardano address: " + recipient);
-            }
-            if (recipientStakeHash == null) {
-                return TransactionContext.typedError(
-                        "recipient must be a base address with a stake credential (the minting "
-                        + "logic vets the STAKE credential under the CIP-113 address model): "
-                        + recipient);
-            }
-
-            if (chainWillMint) {
-                // (a) Supply cap. global_state.ak's MintSecurity branch recomputes
-                // `mintable_amount - minted` and rejects a negative remainder. The cap
-                // is written by THIS chain's genesis tx from initialMintableAmount, so
-                // the comparison is exact here — no chain lookup needed.
-                long cap = request.getInitialMintableAmount() != null
-                        ? request.getInitialMintableAmount() : 0L;
-                if (firstMint.compareTo(BigInteger.valueOf(cap)) > 0) {
-                    return TransactionContext.typedError(
-                            "initialMintQuantity " + firstMint + " exceeds initialMintableAmount "
-                            + cap + ". The supply cap is written by this same genesis transaction, "
-                            + "so raise initialMintableAmount or lower the first mint.");
-                }
-
-                // (b) The registration tx names the power-user node's OWN key in
-                // required_signers (minting_logic_script.ak's
-                // must_be_signed_by_credential against power_user_node_key). The only
-                // key the fee payer can witness is its own payment credential, so a
-                // bootstrap PU pkh that differs would demand a witness only a third
-                // party holds — and that surfaces at SUBMIT time, after genesis and
-                // AddPowerUser have already been broadcast and mempool-chained.
-                byte[] callerPkh;
-                try {
-                    callerPkh = callerPaymentCredential(adminAddress);
-                } catch (BuildPreconditionException bpe) {
-                    return TransactionContext.typedError(bpe.getMessage());
-                }
-                if (!HexUtil.encodeHexString(callerPkh).equalsIgnoreCase(bootstrapPkh)) {
-                    return TransactionContext.typedError(
-                            "registration with a first mint must be signed by the bootstrap power "
-                            + "user itself, but bootstrapPowerUserPkh=" + bootstrapPkh
-                            + " differs from the fee payer's payment credential "
-                            + HexUtil.encodeHexString(callerPkh)
-                            + ". Either pay for this chain from that power user's wallet, or "
-                            + "register with initialMintQuantity=0 and let them mint separately.");
-                }
-
-                // (b2) Same argument for the ADMIN credential. The registration tx puts
-                // it in required_signers too (must_be_signed_by_credential against the
-                // GS datum's admin_credential_hash), so a first mint needs BOTH keys and
-                // the fee payer can only witness one. Scoped to the mint path
-                // deliberately: the admin key is a required signer on the structural
-                // path as well, but that path is long-proven and byte-frozen, so
-                // tightening it is left as a separate, separately-verified change.
-                if (request.getAdminPubKeyHash() == null
-                        || !HexUtil.encodeHexString(callerPkh)
-                                .equalsIgnoreCase(request.getAdminPubKeyHash())) {
-                    return TransactionContext.typedError(
-                            "registration with a first mint must be signed by the admin too, but "
-                            + "adminPubKeyHash=" + request.getAdminPubKeyHash()
-                            + " differs from the fee payer's payment credential "
-                            + HexUtil.encodeHexString(callerPkh)
-                            + ". The registration transaction names both the admin credential and "
-                            + "the power-user node key in required_signers, and only the fee payer "
-                            + "signs — so pay for this chain from the admin's wallet, or register "
-                            + "with initialMintQuantity=0.");
-                }
-
-                // (c) Receiver KYC. verify_mint_destinations reads
-                // requires_receiver_kyc off the GS datum this same genesis tx writes,
-                // and genesis always writes member_root_hash EMPTY — no root can be
-                // published beforehand, because the prog-token policy id the allowlist
-                // is keyed on does not exist until genesis picks its bootstrap UTxO.
-                // The only satisfiable case is the contract's self-mint exemption,
-                // which compares the recipient's STAKE credential against the
-                // power-user node key.
-                if (request.isRequiresReceiverKyc()) {
-                    // …unless the caller opted into the genesis allowlist seed, which writes
-                    // a real member_root_hash covering exactly this recipient into the same
-                    // genesis datum. That makes the ordinary Membership proof path
-                    // satisfiable, at the cost of asserting a KYC status nobody checked —
-                    // see RwaTokenRegisterRequest#seedRecipientInAllowlistAtGenesis.
-                    if (!request.isSeedRecipientInAllowlistAtGenesis()
-                            && !Arrays.equals(recipientStakeHash, HexUtil.decodeHexString(bootstrapPkh))) {
-                        return TransactionContext.typedError(
-                                "cannot mint at registration while requiresReceiverKyc is on. The "
-                                + "minting logic demands a KYC membership proof against the global "
-                                + "state's member_root_hash, and genesis writes that root EMPTY — no "
-                                + "root can be published beforehand, because the token's policy id "
-                                + "does not exist until this transaction picks its bootstrap UTxO. "
-                                + "Fix by one of: (1) set requiresReceiverKyc=false for this chain "
-                                + "and turn it on afterwards from the admin page "
-                                + "(SetRequiresReceiverKyc); (2) register with initialMintQuantity=0, "
-                                + "enroll the recipient, publish the root (UpdateMemberRootHash), "
-                                + "then mint separately; or (3) send the first mint to an address "
-                                + "whose STAKE credential is the power user " + bootstrapPkh
-                                + ", which the contract exempts from the receiver-KYC check.");
-                    }
-                }
-            }
+                    ? request.getBootstrapPowerUserPkh() : request.getAdminPubKeyHash();
 
             // ── PHASE 1 ─ Build the genesis tx ─────────────────────────────
             // Delegates to buildGlobalStateInitTransaction, which also persists
@@ -4224,6 +4504,9 @@ public class RwaTokenModuleHandler
             // ordering can shift across SDK versions and preBalanceTx hooks).
             RwaTokenScriptBuilderService.RwaTokenScripts chainScripts =
                     resolveScripts(reg, protocolParams);
+            // Both records must reproduce the exact scripts used by this chain. A
+            // mismatch fails the transactional build before any CBOR is returned.
+            var provenanceRecords = provenance.records(reg, chainScripts);
             String gsSpendAddr = AddressProvider.getEntAddress(
                     chainScripts.globalStateSpend(), network.getCardanoNetwork()).getAddress();
             String puSpendAddr = AddressProvider.getEntAddress(
@@ -4269,6 +4552,39 @@ public class RwaTokenModuleHandler
             }
             hybridUtxoSupplier.add(addPuChange);
 
+            // ── PHASE 2.25 ─ Publish both mandatory CIP-171 records ──────
+            // Each label-1984 value describes one source pin. The CMTA validators
+            // and the core issuance policy have different source commits, so they
+            // occupy separate transactions. Spending each predecessor's admin
+            // change makes registration causally depend on both publications.
+            Transaction cmtaProvenanceTx = buildProvenanceTransaction(
+                    adminAddress, addPuChange, provenanceRecords.cmta());
+            String cmtaProvenanceCbor = cmtaProvenanceTx.serializeToHex();
+            String cmtaProvenanceTxHash = TransactionUtil.getTxHash(cmtaProvenanceTx.serialize());
+            checkedTxSize("cmtaProvenance", cmtaProvenanceTx);
+            Utxo cmtaProvenanceChange = findOutputAtAddress(
+                    cmtaProvenanceTx, cmtaProvenanceTxHash, adminAddress,
+                    BigInteger.valueOf(10_000_000L));
+            if (cmtaProvenanceChange == null) {
+                return TransactionContext.typedError(
+                        "chain[cmtaProvenance]: no admin change above 10 ADA to fund the next phase");
+            }
+            hybridUtxoSupplier.add(cmtaProvenanceChange);
+
+            Transaction issuanceProvenanceTx = buildProvenanceTransaction(
+                    adminAddress, cmtaProvenanceChange, provenanceRecords.issuance());
+            String issuanceProvenanceCbor = issuanceProvenanceTx.serializeToHex();
+            String issuanceProvenanceTxHash = TransactionUtil.getTxHash(issuanceProvenanceTx.serialize());
+            checkedTxSize("issuanceProvenance", issuanceProvenanceTx);
+            Utxo issuanceProvenanceChange = findOutputAtAddress(
+                    issuanceProvenanceTx, issuanceProvenanceTxHash, adminAddress,
+                    BigInteger.valueOf(10_000_000L));
+            if (issuanceProvenanceChange == null) {
+                return TransactionContext.typedError(
+                        "chain[issuanceProvenance]: no admin change above 10 ADA to fund registration");
+            }
+            hybridUtxoSupplier.add(issuanceProvenanceChange);
+
             // ── PHASE 2.5 ─ Publish the two big per-token scripts ──────────
             // The registration tx attaches five validators inline; minting_logic (7211 B)
             // and the global_state spend (4183 B) alone are 11 394 of the 16 384-byte
@@ -4298,7 +4614,7 @@ public class RwaTokenModuleHandler
             if (chainWillMint) {
                 TransactionContext<PublishedRefScripts> publishResult = buildPublishScriptsTransaction(
                         adminAddress, chainScripts.mintingAuthority(), chainScripts.globalStateSpend(),
-                        addPuChange);
+                        issuanceProvenanceChange);
                 if (!publishResult.isSuccessful()) {
                     return TransactionContext.typedError("chain[publishScripts]: " + publishResult.error());
                 }
@@ -4361,7 +4677,8 @@ public class RwaTokenModuleHandler
             // it also created sit at the admin's ENTERPRISE address precisely so this scan
             // (which matches on the fee-payer address) cannot pick one of them as a funding
             // input and destroy the reference script.
-            request.setChainingTransactionCborHex(chainWillMint ? publishCbor : addPuCbor);
+            request.setChainingTransactionCborHex(
+                    chainWillMint ? publishCbor : issuanceProvenanceCbor);
             request.setQuantity(firstMintQuantity);
             // Align the asset name with what genesis actually persisted. For a CIP-68
             // registration these two DIVERGE: the request carries the base name the user
@@ -4408,6 +4725,19 @@ public class RwaTokenModuleHandler
             Transaction regTx = Transaction.deserialize(HexUtil.decodeHexString(regCbor));
             String regTxHash = TransactionUtil
                     .getTxHash(regTx.serialize());
+
+            // Freeze the mint before asking Veridian to sign its transaction hash.
+            // The suffix depends on the KERI seal and must not be built in this
+            // rollback-only preview transaction.
+            if (preparedGenesis != null) {
+                return TransactionContext.ok(null, new ChainBuildResult(
+                        genesisCbor, addPuCbor, cmtaProvenanceCbor, issuanceProvenanceCbor,
+                        publishCbor, regCbor, null, null, null,
+                        reg.getGlobalStatePolicyId(), progTokenPolicyId,
+                        reg.getDenylistPolicyId(), reg.getPowerUsersPolicyId(),
+                        genesisTxHash, addPuTxHash, cmtaProvenanceTxHash,
+                        issuanceProvenanceTxHash, publishTxHash, regTxHash, null, null, null));
+            }
 
             // ── PHASE 4 ─ Register transferLogic stake credential ─────────
             // BaFin's transfer_logic_script needs its script-stake credential
@@ -4495,10 +4825,12 @@ public class RwaTokenModuleHandler
             }
 
             return TransactionContext.ok(null, new ChainBuildResult(
-                    genesisCbor, addPuCbor, publishCbor, regCbor, certCbor, thirdPartyCertCbor,
+                    genesisCbor, addPuCbor, cmtaProvenanceCbor, issuanceProvenanceCbor,
+                    publishCbor, regCbor, null, certCbor, thirdPartyCertCbor,
                     reg.getGlobalStatePolicyId(), progTokenPolicyId,
                     reg.getDenylistPolicyId(), reg.getPowerUsersPolicyId(),
-                    genesisTxHash, addPuTxHash, publishTxHash, regTxHash, certTxHash,
+                    genesisTxHash, addPuTxHash, cmtaProvenanceTxHash,
+                    issuanceProvenanceTxHash, publishTxHash, regTxHash, null, certTxHash,
                     thirdPartyCertTxHash));
         } catch (Exception e) {
             log.error("rwa-token chain build failed", e);
@@ -4519,6 +4851,33 @@ public class RwaTokenModuleHandler
      *
      *  <p>Used by the chain orchestrator to extract funding + script-locked
      *  outputs from each preceding tx for the next one to consume. */
+    private Transaction buildProvenanceTransaction(String adminAddress, Utxo funding,
+                                                   MetadataList record) throws Exception {
+        var metadata = MetadataBuilder.createMetadata();
+        metadata.put(1984L, record);
+        Tx tx = new Tx()
+                .from(adminAddress)
+                .collectFrom(List.of(funding))
+                .payToAddress(adminAddress, List.of(Amount.lovelace(BigInteger.valueOf(2_000_000L))))
+                .attachMetadata(metadata)
+                .withChangeAddress(adminAddress);
+        Transaction transaction = quickTxBuilder.compose(tx)
+                .feePayer(adminAddress)
+                .mergeOutputs(false)
+                .build();
+        TransactionBody body = transaction.getBody();
+        if (body.getInputs() == null || body.getInputs().size() != 1
+                || !funding.getTxHash().equals(body.getInputs().getFirst().getTransactionId())
+                || funding.getOutputIndex() != body.getInputs().getFirst().getIndex()) {
+            throw new IllegalStateException(
+                    "CIP-171 transaction did not exclusively spend its chained funding output");
+        }
+        if (body.getAuxiliaryDataHash() == null) {
+            throw new IllegalStateException("CIP-171 transaction has no auxiliary-data hash");
+        }
+        return transaction;
+    }
+
     private static Utxo findOutputAtAddress(Transaction tx, String txHash,
                                             String targetAddr, BigInteger minLovelace) {
         java.util.List<com.bloxbean.cardano.client.transaction.spec.TransactionOutput> outputs =
@@ -5752,7 +6111,7 @@ public class RwaTokenModuleHandler
                 return TransactionContext.typedError("GS UTxO is missing its inline datum");
             }
 
-            // Parse current datum, replace only field 7 (member_root_hash).
+            // Parse current datum, replace only field 8 (member_root_hash).
             PlutusData currentDatum = PlutusData.deserialize(
                     HexUtil.decodeHexString(gsUtxo.getInlineDatum()));
             if (!(currentDatum instanceof ConstrPlutusData currentConstr)) {
@@ -5764,7 +6123,7 @@ public class RwaTokenModuleHandler
                         + " fields, expected " + GS_DATUM_FIELD_COUNT
                         + " (pre-@7ae4ce3 global state — must be re-bootstrapped)");
             }
-            // Replace only field 7 (member_root_hash); everything else — including
+            // Replace only field 8 (member_root_hash); everything else — including
             // requires_sender_kyc / requires_receiver_kyc / network_id — is carried
             // through verbatim, which is what the validator's equals_data check requires.
             PlutusData newGsDatum = replaceGsField(gsFields, GS_IDX_MEMBER_ROOT_HASH, BytesPlutusData.of(newRootHash));
@@ -5830,6 +6189,35 @@ public class RwaTokenModuleHandler
                                     outs.removeFirst();
                             outs.addLast(first);
                         }
+                    })
+                    .postBalanceTx((bctx, txn) -> {
+                        TransactionBody body = txn.getBody();
+                        BigInteger feePadding = BigInteger.valueOf(10_000L);
+                        BigInteger newFee = body.getFee().add(feePadding);
+                        BigInteger totalCollateral = newFee.multiply(BigInteger.valueOf(2));
+                        if (totalCollateral.compareTo(BigInteger.valueOf(5_000_000L)) > 0) {
+                            throw new IllegalStateException("root update collateral exceeds 5 ADA");
+                        }
+                        BigInteger fundingLovelace = funding.getAmount().stream()
+                                .filter(a -> "lovelace".equals(a.getUnit()))
+                                .map(Amount::getQuantity)
+                                .findFirst().orElse(BigInteger.ZERO);
+                        if (fundingLovelace.compareTo(totalCollateral) <= 0) {
+                            throw new IllegalStateException("funding UTxO is too small for bounded collateral");
+                        }
+                        TransactionOutput change = body.getOutputs().stream()
+                                .filter(o -> adminAddress.equals(o.getAddress()))
+                                .findFirst().orElseThrow(() -> new IllegalStateException("root update has no admin change output"));
+                        if (change.getValue().getCoin().compareTo(feePadding) <= 0) {
+                            throw new IllegalStateException("root update change cannot cover fee padding");
+                        }
+                        body.setFee(newFee);
+                        change.getValue().setCoin(change.getValue().getCoin().subtract(feePadding));
+                        body.setTotalCollateral(totalCollateral);
+                        body.setCollateralReturn(TransactionOutput.builder()
+                                .address(adminAddress)
+                                .value(Value.builder().coin(fundingLovelace.subtract(totalCollateral)).build())
+                                .build());
                     })
                     .ignoreScriptCostEvaluationError(false)
                     .build();

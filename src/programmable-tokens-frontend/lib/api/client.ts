@@ -86,13 +86,22 @@ export async function apiPost<T, R = unknown>(
   data: T,
   options?: FetchOptions
 ): Promise<R> {
+  return apiPostRaw<R>(endpoint, JSON.stringify(data), options);
+}
+
+/** POST bytes prepared before wallet signing, without serializing them again. */
+export async function apiPostRaw<R = unknown>(
+  endpoint: string,
+  serializedJson: string,
+  options?: FetchOptions
+): Promise<R> {
   const url = `${API_BASE_URL}${API_PREFIX}${endpoint}`;
 
   try {
     const response = await fetchWithTimeout(url, {
       ...options,
       method: 'POST',
-      body: JSON.stringify(data),
+      body: serializedJson,
     });
 
     if (!response.ok) {

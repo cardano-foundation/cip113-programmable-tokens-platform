@@ -130,6 +130,8 @@ export interface MintTokenRequest {
   quantity: string;             // Amount as string to handle large numbers
   recipientAddress: string;     // Recipient address
   attestation?: Cip170AttestationData;  // Optional CIP-170 attestation
+  /** Server-issued opaque ID for a KEL-anchored mint intent. */
+  mintAttestationId?: string;
   /** rwa-token only: mints the (100) reference token alongside this user-token mint.
    *  Its registration cannot carry it — the registration path rejects a second asset name
    *  under the policy — so the CIP-68 pair is completed on the first mint instead. */
@@ -219,6 +221,16 @@ export interface TransferTokenRequest {
   // Receiver — kyc-extended only; recipient's MPF inclusion proof.
   mpfProofCborHex?: string;
   mpfValidUntilMs?: number;
+  senderAttestation?: CmtaAttestation;
+  recipientAttestation?: CmtaAttestation;
+}
+
+/** CMTA's 67-byte claim with a raw Ed25519 signature from a trusted issuer. */
+export interface CmtaAttestation {
+  payloadHex: string;
+  signatureHex: string;
+  /** Optional hint for older callers; the backend resolves a trusted key when omitted. */
+  issuerVkeyHex?: string;
 }
 
 // Backend returns plain text CBOR hex string (not JSON)

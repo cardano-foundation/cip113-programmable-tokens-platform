@@ -1,0 +1,27 @@
+CREATE TABLE mint_attestation_intent (
+    id varchar(64) PRIMARY KEY NOT NULL,
+    row_version bigint NOT NULL,
+    session_id varchar(128) NOT NULL,
+    wallet_aid varchar(128) NOT NULL,
+    issuer_aid varchar(128) NOT NULL,
+    credential_said varchar(128) NOT NULL,
+    fields_json text NOT NULL,
+    digest varchar(128) NOT NULL UNIQUE,
+    document_json text NOT NULL,
+    preimage text NOT NULL,
+    status varchar(32) NOT NULL,
+    request_said varchar(128),
+    request_json text,
+    request_sigs text,
+    request_atc text,
+    wallet_kel_floor varchar(32) NOT NULL,
+    dispatch_started boolean NOT NULL DEFAULT false,
+    sequence_number varchar(64),
+    kel_event_json text,
+    claim_owner varchar(64),
+    lease_until timestamp with time zone,
+    expires_at timestamp with time zone NOT NULL,
+    unsigned_cbor text,
+    transaction_hash varchar(64)
+);
+CREATE TABLE mint_attestation_nonce (nonce varchar(64) PRIMARY KEY, expires_at timestamp with time zone NOT NULL);
