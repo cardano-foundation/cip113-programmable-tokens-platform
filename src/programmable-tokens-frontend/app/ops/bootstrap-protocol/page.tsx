@@ -1386,6 +1386,13 @@ export default function BootstrapProtocolPage() {
                   unsignedCbor={genesisStep.unsignedCbor}
                   memberKeyHashes={multisig.members.map((m) => m.keyHash)}
                   onChange={setCosign}
+                  // partialSign = true, exactly as /sign does: one signature among several, so the
+                  // wallet must not refuse for the keys it does not hold.
+                  signSelf={
+                    wallet.connected
+                      ? () => wallet.wallet.signTx(genesisStep.unsignedCbor, true)
+                      : undefined
+                  }
                 />
                 <button
                   type="button"
