@@ -1298,9 +1298,20 @@ export default function BootstrapProtocolPage() {
                   {preparingGenesis ? "Building the genesis…" : "Proceed to phase two"}
                 </button>
 
-                {/* Kept visible: it says which cause was real, rather than leaving it a guess. */}
-                {gateNote && <p className="text-dark-300">{gateNote}</p>}
               </div>
+            )}
+
+            {/*
+              ⛔ OUTSIDE THE GATE BLOCK ON PURPOSE. This note says WHICH funding strategy built
+              the genesis, and it used to live inside the `!genesisStep` block — so it unmounted
+              the moment the build succeeded, destroying the answer exactly when it became one.
+              The operator was left asking which attempt had worked, which is the whole question
+              the note exists to settle. It now survives into phase two.
+            */}
+            {gateNote && (
+              <p className="rounded border border-dark-700 bg-dark-950 p-2 text-xs text-dark-300">
+                {gateNote}
+              </p>
             )}
 
             {/* ---- PHASE TWO: the ceremony ---- */}
