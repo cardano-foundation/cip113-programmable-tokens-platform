@@ -55,7 +55,7 @@ dependencies {
 
     implementation('com.easy1staking:cardano-client-lib-extensions:0.0.4')
 
-	implementation 'id.veridian:signify:0.1.2-378fa88-SNAPSHOT'
+	implementation 'id.veridian:signify:0.1.2-66227de-SNAPSHOT'
 
 	// Version comes from the Spring Boot BOM (io.spring.dependency-management), NOT from
 	// a dynamic `latest.release`.
