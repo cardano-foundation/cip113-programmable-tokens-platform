@@ -23,6 +23,7 @@ import { resolveMultisig, type ResolvedMultisig } from "@/lib/deployment/multisi
 import { verifyBlueprintBytes, type UpstreamPin } from "@/lib/deployment/blueprint";
 import { buildCoreCip171Record } from "@/lib/deployment/provenance";
 import { buildBootstrapRecord } from "@/lib/deployment/record";
+import { describeError } from "@/lib/deployment/describe-error";
 import { useWallet } from "@/contexts/wallet-context";
 import {
   planDeployment,
@@ -518,7 +519,11 @@ export default function BootstrapProtocolPage() {
       setPlanError(
         e instanceof MultiTxError
           ? e.message
-          : `Phase one failed: ${(e as Error).message}`,
+          : // Not "Phase one failed": by the time we get here phase one's transactions are
+            // submitted and confirmed, and what remains is reading the config UTxO back and
+            // BUILDING the genesis for the co-signature round. Saying "phase one" sends the
+            // operator to look at transactions that already landed.
+            `Phase one submitted; preparing the protocol genesis failed: ${describeError(e)}`,
       );
     }
   }, [planned, wallet, phaseOneDone, multisig]);
