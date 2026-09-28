@@ -1,198 +1,47 @@
-/**
- * Driving a core deployment from the browser: plan, verify, submit, record.
- *
- * `bootstrap.ts` knows how to BUILD the six transactions and nothing about where a wallet or a
- * chain comes from. This is the layer that supplies both — an Evolution signing client over
- * the connected CIP-30 wallet and Blockfrost — so the builder stays testable and this stays
- * thin.
- *
- * ## The plan is verified before it is offered for signature
- *
- * `buildBootstrapPlan` returns a complete `DeploymentParams`, transaction hashes included,
- * because every hash is pre-computed by the chained build. That makes a genuine pre-flight
- * possible: the plan is handed to the SAME verification an operator would run against a
- * finished deployment, re-deriving every script hash from the pinned blueprint. A plan that
- * does not verify is never shown a signature prompt.
- *
- * This is not circular. The derivation and the assertion come from opposite directions —
- * `createStandardScripts` applies parameters forward, `assertDeploymentScripts` re-derives from
- * the recorded `DeploymentParams` — and the second reads the fields the RECORD will carry, so
- * it catches a field written into the wrong slot, which is the failure the alpha.3 migration
- * actually shipped.
- */
+/** Browser-only bootstrap planning, sequential funding and durable submission checkpoints. */
 import {
-  evoClient,
-  previewChain,
-  preprodChain,
-  mainnetChain,
-  paymentCredentialHash,
+  evoClient, previewChain, preprodChain, mainnetChain, paymentCredentialHash,
+  EvoAddress, EvoTransaction, outputAssets,
+  type PlutusBlueprint,
 } from "@easy1staking/cip113-sdk-ts";
-import type { PlutusBlueprint } from "@easy1staking/cip113-sdk-ts";
-
 import {
-  buildPlan,
-  buildPhaseOne,
-  buildProtocolGenesis,
-  buildReferenceScripts,
-  awaitMultisigConfigUtxo,
-  selectBootstrapSeeds,
-  assembleDeploymentParams,
-  type BootstrapPlan,
-  type CeremonyStep,
-  type CeremonyContext,
-  selectSeedUtxos,
-  type ChainUtxo,
+  buildPlan, buildMultisigGenesis, buildStakeRegistrations, buildProtocolGenesis,
+  buildReferenceScripts, awaitMultisigConfigUtxo, assembleDeploymentParams,
+  selectSeedUtxos, plainWalletUtxos, resolveSeeds, availableFunding, refKey,
+  type BootstrapPlan, type CeremonyStep, type CeremonyContext, type WalletUtxo,
 } from "./ceremony";
 import { deriveCoreDeployment, type DeploymentSeeds } from "./derive";
-import { verifyDeployment, verifyPlanScripts, type VerificationResult } from "./verify";
-import { EvoAddress, EvoAssets, EvoTransaction, outputAssets } from "@easy1staking/cip113-sdk-ts";
-
-/** Lovelace parked in each prepared seed. Enough to be a useful input, small enough to be cheap. */
-const SEED_PREP_LOVELACE = 5_000_000n;
+import { verifyPlanScripts, type VerificationResult } from "./verify";
 import type { UpstreamPin } from "./blueprint";
-import type { ResolvedMultisig } from "./multisig";
+import { resolveMultisig, type ResolvedMultisig } from "./multisig";
 import type { CardanoNetwork } from "../utils/network";
+import { transactionHash } from "../tx/hash";
 
 function chainFor(network: CardanoNetwork) {
-  switch (network) {
-    case "mainnet":
-      return mainnetChain;
-    case "preprod":
-      return preprodChain;
-    case "preview":
-      return previewChain;
-  }
+  return network === "mainnet" ? mainnetChain : network === "preprod" ? preprodChain : previewChain;
 }
-
 function blockfrostBaseUrl(network: CardanoNetwork): string {
-  return (
-    process.env.NEXT_PUBLIC_BLOCKFROST_URL || `https://cardano-${network}.blockfrost.io/api/v0`
-  );
+  return process.env.NEXT_PUBLIC_BLOCKFROST_URL || `https://cardano-${network}.blockfrost.io/api/v0`;
 }
-
-/**
- * Is this reward address registered RIGHT NOW?
- *
- * Not "has it ever been seen": Blockfrost keeps returning an account after it is deregistered,
- * with `active: false`, and a deregistered credential must be registered again. Reading
- * presence as registration would build a delegate-only transaction for a credential that has
- * no registration to delegate — and that failure lands after four transactions have already
- * been submitted.
- *
- * Fails CLOSED: a network error throws rather than guessing, because both guesses are wrong in
- * a way that only surfaces mid-deployment.
- */
-async function isStakeRegisteredViaBlockfrost(
-  network: CardanoNetwork,
-  projectId: string,
-  rewardAddress: string,
-): Promise<boolean> {
-  const res = await fetch(`${blockfrostBaseUrl(network)}/accounts/${rewardAddress}`, {
-    headers: { project_id: projectId },
-  });
-  if (res.status === 404) return false;
-  if (!res.ok) {
-    throw new Error(
-      `Could not determine whether ${rewardAddress} is already registered (Blockfrost ` +
-        `returned ${res.status}). Refusing to guess: the wrong answer is only discovered ` +
-        `after four transactions have been submitted.`,
-    );
-  }
-  const body = (await res.json()) as { active?: boolean };
-  return body.active === true;
-}
-
-/**
- * An Evolution signing client over the connected CIP-30 wallet.
- *
- * Built the same way in every entry point below, because a client built with a different
- * provider or chain reads a different UTxO set — and these functions hand each other outrefs.
- */
 function signingClient(network: CardanoNetwork, rawWalletApi: unknown) {
   const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
-  if (!projectId) {
-    throw new Error(
-      "NEXT_PUBLIC_BLOCKFROST_API_KEY is not set. A deployment has to read the wallet's UTxOs, " +
-        "the protocol parameters and the nominee's registration state before it can build " +
-        "anything.",
-    );
-  }
+  if (!projectId) throw new Error("NEXT_PUBLIC_BLOCKFROST_API_KEY is not set.");
   const chain = chainFor(network);
-  return {
-    chain,
-    client: evoClient(chain)
-      .withCip30(rawWalletApi as never)
-      .withBlockfrost({ projectId, baseUrl: blockfrostBaseUrl(network) }),
-  };
+  return { chain, client: evoClient(chain).withCip30(rawWalletApi as never)
+    .withBlockfrost({ projectId, baseUrl: blockfrostBaseUrl(network) }) };
 }
-
-export interface WalletSeeds {
-  /** Three distinct UTxOs fit to be one-shot seeds, or null when the wallet has no three. */
-  seeds: DeploymentSeeds | null;
-  /** How many wallet UTxOs could serve as a seed. Below three, the wallet needs preparing. */
-  usableCount: number;
+async function walletUtxos(ctx: CeremonyContext): Promise<readonly WalletUtxo[]> {
+  return ctx.client.getUtxos(EvoAddress.fromBech32(ctx.changeAddress));
 }
-
-/**
- * What the connected wallet can offer as one-shot seeds.
- *
- * Read rather than asked for. Three specific outrefs are not something an operator should have
- * to find and transcribe, and a transcription error here is not caught by anything: a wrong
- * outref is still a valid parameter, it simply parameterises the deployment against a UTxO the
- * transaction cannot consume, and the failure names an input rather than a typo.
- */
-export async function findWalletSeeds(
-  network: CardanoNetwork,
-  rawWalletApi: unknown,
-  changeAddress: string,
-): Promise<WalletSeeds> {
+export interface WalletSeeds { seeds: DeploymentSeeds | null; usableCount: number }
+export async function findWalletSeeds(network: CardanoNetwork, rawWalletApi: unknown, changeAddress: string): Promise<WalletSeeds> {
   const { client } = signingClient(network, rawWalletApi);
-  const utxos = (await client.getUtxos(
-    EvoAddress.fromBech32(changeAddress) as never,
-  )) as unknown as ChainUtxo[];
-  const seeds = selectSeedUtxos(utxos, changeAddress);
-  const usableCount = utxos.filter(
-    (u) => !u.scriptRef && !EvoAssets.getUnits(u.assets as never).some((x: string) => x !== "lovelace"),
-  ).length;
-  return { seeds, usableCount };
-}
-
-/**
- * Split the wallet into three seed UTxOs, as one standalone transaction.
- *
- * For the wallet that holds a single large UTxO — the normal state of a freshly funded
- * deployer. Kept SEPARATE from the deployment rather than folded in as its first step: it is
- * ordinary, reversible housekeeping that can be repeated if it fails, whereas everything in the
- * plan proper is one-shot. Doing it first also means the deployment's first transaction spends
- * real confirmed UTxOs instead of predicted ones.
- */
-export async function prepareSeedUtxos(
-  network: CardanoNetwork,
-  rawWalletApi: unknown,
-  changeAddress: string,
-  wallet: { signTx(tx: string, partial: boolean): Promise<string>; submitTx(tx: string): Promise<string> },
-): Promise<string> {
-  const { client } = signingClient(network, rawWalletApi);
-  const addressObj = EvoAddress.fromBech32(changeAddress);
-  const utxos = (await client.getUtxos(addressObj as never)) as unknown as ChainUtxo[];
-
-  let tx = client.newTx();
-  for (let i = 0; i < 3; i++) {
-    tx = tx.payToAddress({ address: addressObj, assets: outputAssets(SEED_PREP_LOVELACE) });
-  }
-  const built = await tx.build({
-    changeAddress: addressObj,
-    availableUtxos: utxos.filter((u) => !u.scriptRef) as never,
-    passAdditionalUtxos: true,
-  });
-  const cbor = EvoTransaction.toCBORHex((await built.toTransaction()) as never);
-  return wallet.submitTx(await wallet.signTx(cbor, true));
+  const utxos = await client.getUtxos(EvoAddress.fromBech32(changeAddress));
+  return { seeds: selectSeedUtxos(utxos), usableCount: plainWalletUtxos(utxos).length };
 }
 
 export interface PlanDeploymentInput {
-  /** The raw CIP-30 API from `wallet.enable()`, as `useWallet().rawApi` provides it. */
   rawWalletApi: unknown;
-  /** The wallet's change address, bech32. Pays for everything; its stake key is the nominee. */
   changeAddress: string;
   network: CardanoNetwork;
   blueprint: PlutusBlueprint;
@@ -200,141 +49,233 @@ export interface PlanDeploymentInput {
   multisig: ResolvedMultisig;
   maxInlineDatumBytes: number;
   alwaysFailNonce: string;
-  /** Three existing wallet UTxOs, as chain references. */
   seeds?: DeploymentSeeds;
-  /** The same three as resolved UTxO objects — the builders need the whole output, not a ref. */
-  seedUtxos?: { protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown };
-  /**
-   * Whether the dispatcher permits unfracking. Default: yes.
-   *
-   * False compiles `programmable_logic_global` against the disabled sentinel. The unfracking
-   * validator is still deployed, registered and published either way — only the value the
-   * dispatcher was compiled against differs, and the deployment records both.
-   */
   unfrackingEnabled?: boolean;
-  /** Add the ~1 ADA self-output the miner needs to the last transaction. Build-time only. */
-  mineable?: boolean;
 }
-
-/**
- * Can the wallet in front of us ever satisfy the authority it is about to install?
- *
- * The harness refuses outright unless the config tree is the bootstrapping wallet's own key.
- * That is the right rule for a test fixture and the WRONG one here: Giovanni's stated scenario
- * is a designated deployer installing an authority held by other people, so the deployer's key
- * legitimately may not appear.
- *
- * But it is the difference between a deliberate handover and upstream's documented ONE-WAY
- * BRICK — a transposed hex pair in a member list produces a protocol whose upgrade credential
- * nobody can satisfy, and NOTHING else catches it: `upgrade_multisig` is parameterised by
- * `utxo_ref` alone, so the signer tree is not in the script hash and hash verification is blind
- * to it. So it is surfaced and must be acknowledged, never silently allowed and never refused.
- */
-export function deployerCanAuthorise(
-  changeAddress: string,
-  members: readonly { keyHash: string }[],
-): boolean {
+export interface CeremonyPlan {
+  plan: BootstrapPlan;
+  verification: VerificationResult;
+  ctx: CeremonyContext;
+  settings: DeploymentSettings;
+  multisig: ResolvedMultisig;
+}
+export interface DeploymentSettings {
+  network: CardanoNetwork;
+  changeAddress: string;
+  seeds: DeploymentSeeds;
+  members: string[];
+  threshold: number;
+  maxInlineDatumBytes: number;
+  alwaysFailNonce: string;
+  unfrackingEnabled: boolean;
+  blueprintSha256: string;
+}
+export function deployerCanAuthorise(changeAddress: string, members: readonly { keyHash: string }[]): boolean {
   const pkh = paymentCredentialHash(changeAddress).toLowerCase();
   return members.some((m) => m.keyHash.toLowerCase() === pkh);
 }
+function seedRefs(seeds: DeploymentSeeds) { return [seeds.paramsSeed, seeds.issuanceSeed, seeds.multisigSeed]; }
 
-export interface DeploymentPlan {
-  plan: BootstrapPlan;
-  /** Re-derived from the pinned blueprint. `ok === false` means nothing may be signed. */
-  verification: VerificationResult;
-}
-
-/*
- * `applyMinedStep` lived here and has been REMOVED with the mining feature (T-058).
- *
- * It repointed every `*RefInput` to the mined transaction's hash, which was correct only
- * because the mined step was always the LAST one — the reference-script transaction, published
- * last precisely so its hash could move without invalidating anything chained onto it. Mining
- * the genesis instead, as was briefly proposed, would have repointed all seven reference
- * inputs at the genesis while the scripts themselves sat in a later transaction, and
- * verification would still have passed: it re-derives script hashes from parameters and knows
- * nothing about where outputs live. The mining code itself is untouched under `lib/mining/`
- * and `/ops/mine-check`, ready to be re-wired once upstream says which transaction should
- * carry a low hash and why.
- */
-
-export interface CeremonyPlan {
-  plan: BootstrapPlan;
-  /** Two independent derivations agreeing. `ok === false` means nothing may be submitted. */
-  verification: VerificationResult;
-  /** Seed, multisig genesis, stake registrations — the deployer alone. */
-  phaseOne: CeremonyStep[];
-  /** Carried into phase two so the same client and UTxO set build both halves. */
-  ctx: CeremonyContext;
-}
-
-export async function planDeployment(input: PlanDeploymentInput): Promise<CeremonyPlan> {
-  const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
-  void projectId;
+/** Restoration re-derives the frozen plan; consumed seeds are resolved only for steps still to build. */
+export async function planDeployment(input: PlanDeploymentInput, restoring = false): Promise<CeremonyPlan> {
+  if (!input.seeds) throw new Error("Select three distinct wallet seed UTxOs, or prepare seeds first.");
+  const refs = seedRefs(input.seeds);
+  if (new Set(refs.map(refKey)).size !== 3) throw new Error("The three deployment seeds must be distinct.");
   const { chain, client } = signingClient(input.network, input.rawWalletApi);
-
-  const availableUtxos = (await (
-    client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
-  ).getUtxos(EvoAddress.fromBech32(input.changeAddress))) as readonly never[];
-
-  const ctx: CeremonyContext = {
-    client: client as never,
-    changeAddress: EvoAddress.fromBech32(input.changeAddress) as never,
-    availableUtxos,
-  };
-
-  if (!input.seeds) {
-    throw new Error(
-      "Three distinct seed UTxOs are required before planning. Use the seed-preparation step " +
-        "first: the alternative is a fragmentation transaction whose outputs do not exist on " +
-        "chain while everything after it is built and evaluated against them.",
-    );
-  }
-
+  const ctx: CeremonyContext = { client, changeAddress: input.changeAddress, availableUtxos: [] };
+  if (!restoring) resolveSeeds(await walletUtxos(ctx), refs);
   const plan = buildPlan({
-    blueprint: input.blueprint,
-    networkId: chain.id,
-    seeds: {
-      protocolParams: input.seeds.paramsSeed as never,
-      issuance: input.seeds.issuanceSeed as never,
-      upgradeMultisig: input.seeds.multisigSeed as never,
-    },
+    blueprint: input.blueprint, networkId: chain.id,
+    seeds: { protocolParams: input.seeds.paramsSeed, issuance: input.seeds.issuanceSeed,
+      upgradeMultisig: input.seeds.multisigSeed },
     alwaysFailNonce: input.alwaysFailNonce,
     maxInlineDatumBytes: BigInt(input.maxInlineDatumBytes),
     unfracking: input.unfrackingEnabled === false ? "disabled" : "enabled",
-  } as never);
-
-  // ⛔ THE GATE THAT REPLACES "nothing is signed until the plan verifies". Our derivation
-  // against the SDK's, before a single seed is spent. See verifyPlanScripts for why agreement
-  // between two independent implementations is worth more than either alone.
-  const ours = deriveCoreDeployment({
-    blueprint: input.blueprint,
-    seeds: input.seeds,
-    alwaysFailNonce: input.alwaysFailNonce,
-    maxInlineDatumBytes: input.maxInlineDatumBytes,
-    unfrackingEnabled: input.unfrackingEnabled,
   });
-  const verification = verifyPlanScripts(ours, plan as never);
+  const ours = deriveCoreDeployment({ blueprint: input.blueprint, seeds: input.seeds,
+    alwaysFailNonce: input.alwaysFailNonce, maxInlineDatumBytes: input.maxInlineDatumBytes,
+    unfrackingEnabled: input.unfrackingEnabled });
+  const verification = verifyPlanScripts(ours, plan);
+  if (!verification.ok) throw new Error("Deployment script derivation failed; no transaction may be signed.");
+  const settings: DeploymentSettings = {
+    network: input.network, changeAddress: input.changeAddress,
+    seeds: structuredClone(input.seeds), members: input.multisig.members.map((m) => m.keyHash),
+    threshold: input.multisig.required, maxInlineDatumBytes: input.maxInlineDatumBytes,
+    alwaysFailNonce: input.alwaysFailNonce, unfrackingEnabled: input.unfrackingEnabled !== false,
+    blueprintSha256: input.pin.sha256,
+  };
+  return { plan, verification, ctx, settings, multisig: input.multisig };
+}
+export async function restoreDeployment(settings: DeploymentSettings, input: Pick<PlanDeploymentInput, "rawWalletApi" | "blueprint" | "pin" | "changeAddress" | "network">) {
+  if (input.network !== settings.network || input.changeAddress !== settings.changeAddress) {
+    throw new Error("Reconnect the original deploying wallet on the saved network to resume.");
+  }
+  if (input.pin.sha256 !== settings.blueprintSha256) throw new Error("Saved deployment uses a different blueprint. Restore the original application version.");
+  return planDeployment({ ...input, ...settings, multisig: resolveMultisig(settings.members, settings.threshold) }, true);
+}
+export type ConfigUtxo = Awaited<ReturnType<typeof awaitMultisigConfigUtxo>>;
+export async function readConfig(planned: CeremonyPlan): Promise<ConfigUtxo> {
+  return awaitMultisigConfigUtxo({ plan: planned.plan, expectedTree: planned.multisig.tree,
+    utxosAt: (address) => planned.ctx.client.getUtxos(EvoAddress.fromBech32(address)) });
+}
+export const DEPLOYMENT_STEPS = ["upgrade multisig", "register credentials", "protocol genesis", "reference scripts"] as const;
+export type DeploymentStepLabel = typeof DEPLOYMENT_STEPS[number];
 
-  const phaseOne = verification.ok
-    ? await buildPhaseOne({
-        ctx,
-        plan,
-        needsSeedTx: false,
-        seedUtxo: input.seedUtxos?.upgradeMultisig as never,
-        upgradeMultisigTree: input.multisig.tree as never,
-        ownerAddress: ctx.changeAddress,
-        seedLovelace: DEFAULT_SEED_LOVELACE,
-      })
-    : [];
-
-  return { plan, verification, phaseOne, ctx };
+/** Called only after the predecessor is confirmed. Each call fetches fresh funding. */
+export async function buildDeploymentStep(planned: CeremonyPlan, label: DeploymentStepLabel, config?: ConfigUtxo): Promise<CeremonyStep> {
+  const utxos = await walletUtxos(planned.ctx);
+  const refs = seedRefs(planned.settings.seeds);
+  const ctx = { ...planned.ctx, availableUtxos: availableFunding(utxos, refs) };
+  if (!ctx.availableUtxos.length) throw new Error("No unreserved plain ADA funding UTxO is available. Fund the wallet separately from the three reserved seeds.");
+  switch (label) {
+    case "upgrade multisig": {
+      const [seedUtxo] = resolveSeeds(utxos, [planned.settings.seeds.multisigSeed]);
+      return buildMultisigGenesis({ ctx, plan: planned.plan, seedUtxo, upgradeMultisigTree: planned.multisig.tree });
+    }
+    case "register credentials": return buildStakeRegistrations(ctx, planned.plan);
+    case "protocol genesis": {
+      const [protocolParamsSeedUtxo, issuanceSeedUtxo] = resolveSeeds(utxos, refs.slice(0, 2));
+      if (!config) throw new Error("Read and verify the multisig config before building genesis.");
+      return buildProtocolGenesis({ ctx, plan: planned.plan, protocolParamsSeedUtxo, issuanceSeedUtxo,
+        upgradeMultisigConfigUtxo: config.utxo,
+        upgradeAuthoritySigners: planned.multisig.members.map((m) => m.keyHash) });
+    }
+    case "reference scripts": return buildReferenceScripts({ ctx, plan: planned.plan,
+      referenceScriptAddress: ctx.changeAddress, referenceScriptLovelace: 20_000_000n });
+  }
 }
 
-/** Lovelace per seed output. Each seed funds part of the transaction that consumes it. */
-export const DEFAULT_SEED_LOVELACE = 10_000_000n;
+export type StepStatus = "BUILT" | "SUBMITTING" | "CONFIRMED" | "INVALID";
+export interface SavedStep extends CeremonyStep { txHash: string; status: StepStatus }
+export interface DeploymentCheckpoint { version: 1; settings: DeploymentSettings; steps: SavedStep[] }
+export const checkpointKey = (network: CardanoNetwork) => `cip113-bootstrap-v1:${network}`;
+export interface CheckpointStorage { getItem(key: string): string | null; setItem(key: string, value: string): void }
+export function saveCheckpoint(storage: CheckpointStorage, checkpoint: DeploymentCheckpoint): void {
+  const key = checkpointKey(checkpoint.settings.network);
+  const text = JSON.stringify(checkpoint);
+  storage.setItem(key, text);
+  if (storage.getItem(key) !== text) throw new Error("Could not save the deployment checkpoint. Submission stopped.");
+}
+export function readCheckpoint(storage: CheckpointStorage, network: CardanoNetwork): DeploymentCheckpoint | null {
+  const raw = storage.getItem(checkpointKey(network));
+  if (!raw) return null;
+  const saved = JSON.parse(raw) as DeploymentCheckpoint;
+  if (saved.version !== 1 || saved.settings?.network !== network || !Array.isArray(saved.steps) || saved.steps.length > 4) {
+    throw new Error("Invalid deployment checkpoint. Keep it for diagnosis; do not start another deployment.");
+  }
+  const refs = seedRefs(saved.settings.seeds);
+  if (new Set(refs.map(refKey)).size !== 3) throw new Error("Invalid saved seed references.");
+  saved.steps.forEach((step, index) => {
+    if (step.label !== DEPLOYMENT_STEPS[index] || !["BUILT", "SUBMITTING", "CONFIRMED", "INVALID"].includes(step.status) ||
+        transactionHash(step.unsignedCbor) !== step.txHash ||
+        (index < saved.steps.length - 1 && step.status !== "CONFIRMED")) {
+      throw new Error("Deployment checkpoint transactions or order are invalid. Submission stopped.");
+    }
+  });
+  return saved;
+}
+export function saveBuiltStep(checkpoint: DeploymentCheckpoint, step: CeremonyStep, persist: (value: DeploymentCheckpoint) => void): SavedStep {
+  const existing = checkpoint.steps.find((s) => s.label === step.label);
+  if (existing) {
+    if (existing.unsignedCbor !== step.unsignedCbor) throw new Error("A frozen transaction cannot be replaced.");
+    return existing;
+  }
+  if (DEPLOYMENT_STEPS[checkpoint.steps.length] !== step.label || checkpoint.steps.some((s) => s.status !== "CONFIRMED")) {
+    throw new Error("Confirm the previous deployment step before building the next.");
+  }
+  const saved: SavedStep = { ...step, txHash: transactionHash(step.unsignedCbor), status: "BUILT" };
+  checkpoint.steps.push(saved);
+  persist(checkpoint);
+  return saved;
+}
 
-export { awaitMultisigConfigUtxo, buildProtocolGenesis, buildReferenceScripts, selectBootstrapSeeds, assembleDeploymentParams };
+/** A 404 proves only that the provider cannot see the transaction yet. */
+export async function checkDeploymentTransaction(network: CardanoNetwork, txHash: string): Promise<"CONFIRMED" | "UNKNOWN" | "INVALID"> {
+  const res = await fetch(`${blockfrostBaseUrl(network)}/txs/${txHash}`, {
+    headers: { project_id: process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "" }, cache: "no-store",
+  });
+  if (res.status === 404) return "UNKNOWN";
+  if (!res.ok) throw new Error(`Could not check ${txHash}: Blockfrost ${res.status}.`);
+  const tx = await res.json() as { hash?: string; block?: string; valid_contract?: boolean };
+  if (tx.hash !== txHash || !tx.block || !/^[0-9a-f]{64}$/.test(tx.block)) throw new Error("Provider did not identify the exact transaction in a block.");
+  if (tx.valid_contract === false) return "INVALID";
+  if (tx.valid_contract !== true) throw new Error("Provider did not confirm successful ledger execution.");
+  return "CONFIRMED";
+}
+export async function reconcileCheckpoint(checkpoint: DeploymentCheckpoint, persist: (value: DeploymentCheckpoint) => void,
+  check: (hash: string) => Promise<"CONFIRMED" | "UNKNOWN" | "INVALID">): Promise<void> {
+  for (const step of checkpoint.steps) {
+    if (step.status === "BUILT") continue;
+    const status = await check(step.txHash);
+    step.status = status === "UNKNOWN" ? "SUBMITTING" : status;
+    persist(checkpoint);
+    if (status !== "CONFIRMED") throw new Error(`${step.label}: ${step.txHash} is ${status}. Check confirmation again; no transaction was resubmitted.`);
+  }
+}
+export async function submitSavedStep(step: SavedStep, options: {
+  wallet: { signTx(tx: string, partial: boolean): Promise<string>; submitTx(tx: string): Promise<string> };
+  persist: () => void;
+  check: (hash: string) => Promise<"CONFIRMED" | "UNKNOWN" | "INVALID">;
+  signingCbor?: string;
+  wait?: () => Promise<void>;
+  attempts?: number;
+}): Promise<void> {
+  if (step.status === "INVALID") throw new Error("The saved transaction failed on chain. Stop this ceremony.");
+  if (step.status === "BUILT") {
+    const source = options.signingCbor ?? step.unsignedCbor;
+    if (transactionHash(source) !== step.txHash) throw new Error("The transaction body changed before signing.");
+    // Persist again before signing, including when a prior storage write failed.
+    options.persist();
+    const signed = await options.wallet.signTx(source, true);
+    if (transactionHash(signed) !== step.txHash) throw new Error("Wallet changed the frozen transaction body.");
+    // This is the crash boundary: a reload from here MUST reconcile, never replay.
+    step.status = "SUBMITTING";
+    options.persist();
+    const returnedHash = await options.wallet.submitTx(signed);
+    if (returnedHash.toLowerCase() !== step.txHash) throw new Error("Wallet returned a different transaction hash; check the saved hash before continuing.");
+  }
+  for (let attempt = 0; attempt < (options.attempts ?? 60); attempt++) {
+    const state = await options.check(step.txHash);
+    if (state !== "UNKNOWN") {
+      step.status = state;
+      options.persist();
+      if (state === "INVALID") throw new Error("The transaction was included with failed script execution. Stop this ceremony.");
+      return;
+    }
+    if (step.status === "CONFIRMED") { step.status = "SUBMITTING"; options.persist(); }
+    if (attempt + 1 < (options.attempts ?? 60)) await (options.wait?.() ?? new Promise((r) => setTimeout(r, 5000)));
+  }
+  throw new Error(`Confirmation is unknown for ${step.txHash}. Use Check confirmation; do not resubmit.`);
+}
+
+/** Optional preparation uses its own durable record before any one-shot plan exists. */
+export async function prepareSeedUtxos(network: CardanoNetwork, rawWalletApi: unknown, changeAddress: string,
+  wallet: { signTx(tx: string, partial: boolean): Promise<string>; submitTx(tx: string): Promise<string> }): Promise<string> {
+  const { client } = signingClient(network, rawWalletApi);
+  const key = `cip113-bootstrap-seeds:${network}:${changeAddress}`;
+  const raw = sessionStorage.getItem(key);
+  let step: SavedStep;
+  if (raw) {
+    step = JSON.parse(raw) as SavedStep;
+    if (transactionHash(step.unsignedCbor) !== step.txHash || !["BUILT", "SUBMITTING", "CONFIRMED", "INVALID"].includes(step.status)) throw new Error("Invalid saved seed preparation.");
+  } else {
+    const address = EvoAddress.fromBech32(changeAddress);
+    const utxos = plainWalletUtxos(await client.getUtxos(address));
+    let tx = client.newTx();
+    for (let i = 0; i < 3; i++) tx = tx.payToAddress({ address, assets: outputAssets(5_000_000n) });
+    const built = await tx.build({ changeAddress: address, availableUtxos: utxos, passAdditionalUtxos: true });
+    const cbor = EvoTransaction.toCBORHex(await built.toTransaction());
+    step = { label: "prepare seeds", unsignedCbor: cbor, txHash: transactionHash(cbor), status: "BUILT" };
+  }
+  const persist = () => {
+    const json = JSON.stringify(step); sessionStorage.setItem(key, json);
+    if (sessionStorage.getItem(key) !== json) throw new Error("Cannot save seed preparation; submission stopped.");
+  };
+  await submitSavedStep(step, { wallet, persist, check: (hash) => checkDeploymentTransaction(network, hash) });
+  sessionStorage.removeItem(key);
+  return step.txHash;
+}
+export { assembleDeploymentParams };
 
 /**
  * The block an indexer should intersect at: the one IMMEDIATELY BEFORE the genesis
