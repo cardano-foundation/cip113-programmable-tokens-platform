@@ -33,6 +33,8 @@
 
 import {
   planBootstrap,
+  EvoAssets,
+  EvoTransactionHash,
   buildSeedTx,
   buildMultisigGenesisTx,
   buildStakeRegistrationTx,
@@ -53,36 +55,62 @@ import {
   type ReferenceScriptsTxParams,
 } from "@easy1staking/cip113-sdk-ts";
 
-/**
- * A wallet UTxO, as the seed-selection code needs to read one.
- *
- * `scriptRef` and `assets` are here because a seed must be PLAIN: a UTxO carrying a reference
- * script or a native asset cannot be spent as a one-shot seed without dragging its payload
- * into the transaction that consumes it.
- */
-export interface ChainUtxo {
-  txHash: string;
-  outputIndex: number;
-  scriptRef?: unknown;
-  assets?: unknown;
+/** SDK objects are retained for builders; only the UI/plan uses these outrefs. */
+export interface ChainUtxo { txHash: string; outputIndex: number }
+export type WalletUtxo = BootstrapBuildContext["availableUtxos"][number];
+
+export function utxoRef(utxo: WalletUtxo): ChainUtxo {
+  const txHash = EvoTransactionHash.toHex(utxo.transactionId).toLowerCase();
+  const outputIndex = Number(utxo.index);
+  if (!/^[0-9a-f]{64}$/.test(txHash) || !Number.isSafeInteger(outputIndex) || outputIndex < 0) {
+    throw new Error("Wallet returned an invalid UTxO reference.");
+  }
+  return { txHash, outputIndex };
 }
 
-/**
- * Three plain UTxOs to seed a deployment, newest last.
- *
- * ⛔ THEY MUST BE DISTINCT. `protocolParams` and `upgradeMultisig` are the same type and are
- * not interchangeable: one UTxO in both slots deploys perfectly well and makes the
- * upgrade-multisig check vacuous, because the verifier then passes whichever of the two fields
- * it happens to read.
- */
-export function selectSeedUtxos(
-  utxos: readonly ChainUtxo[],
-  _changeAddress: string,
-): { paramsSeed: ChainUtxo; issuanceSeed: ChainUtxo; multisigSeed: ChainUtxo } | null {
-  const plain = utxos.filter((u) => !u.scriptRef);
+export function refKey(ref: ChainUtxo): string {
+  if (!/^[0-9a-f]{64}$/.test(ref.txHash) || !Number.isSafeInteger(ref.outputIndex) || ref.outputIndex < 0) {
+    throw new Error("Invalid seed reference: expected a transaction hash and nonnegative index.");
+  }
+  return `${ref.txHash}#${ref.outputIndex}`;
+}
+
+export function isPlainUtxo(utxo: WalletUtxo): boolean {
+  return !utxo.scriptRef && !utxo.datumOption &&
+    EvoAssets.getUnits(utxo.assets).every((unit) => unit === "lovelace");
+}
+
+export function plainWalletUtxos(utxos: readonly WalletUtxo[]): WalletUtxo[] {
+  const seen = new Set<string>();
+  return utxos.filter((u) => {
+    const key = refKey(utxoRef(u));
+    if (seen.has(key) || !isPlainUtxo(u)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function selectSeedUtxos(utxos: readonly WalletUtxo[], _changeAddress?: string) {
+  const plain = plainWalletUtxos(utxos);
   if (plain.length < 3) return null;
-  const [a, b, c] = plain;
-  return { paramsSeed: a, issuanceSeed: b, multisigSeed: c };
+  return { paramsSeed: utxoRef(plain[0]), issuanceSeed: utxoRef(plain[1]), multisigSeed: utxoRef(plain[2]) };
+}
+
+export function resolveSeeds(utxos: readonly WalletUtxo[], refs: readonly ChainUtxo[]): WalletUtxo[] {
+  const keys = refs.map(refKey);
+  if (new Set(keys).size !== keys.length) throw new Error("The three deployment seeds must be distinct.");
+  return keys.map((key) => {
+    const found = utxos.find((u) => refKey(utxoRef(u)) === key);
+    if (!found) throw new Error(`Seed ${key} is missing or already spent. Refresh the wallet before planning.`);
+    if (!isPlainUtxo(found)) throw new Error(`Seed ${key} must contain only ADA, with no datum or reference script.`);
+    return found;
+  });
+}
+
+/** Reserved seeds must never be fee or collateral candidates, including in other phases. */
+export function availableFunding(utxos: readonly WalletUtxo[], reserved: readonly ChainUtxo[]): WalletUtxo[] {
+  const keys = new Set(reserved.map(refKey));
+  return plainWalletUtxos(utxos).filter((u) => !keys.has(refKey(utxoRef(u))));
 }
 
 export { BOOTSTRAP_SEED_COUNT };
@@ -97,7 +125,7 @@ export type { BootstrapPlan, DeploymentParams };
  * in phase two that could be done in phase one must not be, because phase one spends
  * the one-shot seeds and there is no going back from it.
  */
-export const PHASE_ONE_STEPS = ["seed", "multisig-genesis", "stake-registrations"] as const;
+export const PHASE_ONE_STEPS = ["multisig-genesis", "stake-registrations"] as const;
 export const PHASE_TWO_STEPS = ["protocol-genesis", "reference-scripts"] as const;
 
 export interface CeremonyStep {
@@ -122,53 +150,20 @@ export function buildPlan(config: BootstrapConfig): BootstrapPlan {
 
 export { selectBootstrapSeeds, assertMultisigConfigUtxo, assembleDeploymentParams };
 
-/**
- * Phase one: the three transactions the deployer submits alone.
- *
- * Built together and submitted in order. They chain — the seed transaction's outputs
- * fund the two that follow — so they are built in one pass against the same UTxO set.
- */
-export async function buildPhaseOne(params: {
+/** Build one phase-one step only, after the previous step has confirmed. */
+export async function buildMultisigGenesis(params: {
   ctx: CeremonyContext;
   plan: BootstrapPlan;
-  /** False when the wallet already holds three usable seeds. */
-  needsSeedTx: boolean;
   seedUtxo: MultisigGenesisTxParams["seedUtxo"];
   upgradeMultisigTree: MultisigGenesisTxParams["upgradeMultisigTree"];
-  /** Where seed outputs are paid — the steps that consume them must be able to spend them. */
-  ownerAddress: SeedTxParams["ownerAddress"];
-  /** Lovelace per seed output. No default: each seed funds part of the transaction that
-   *  consumes it, so the right figure depends on the chain and on what should be left over. */
-  seedLovelace: SeedTxParams["seedLovelace"];
-}): Promise<CeremonyStep[]> {
-  const steps: CeremonyStep[] = [];
+}): Promise<CeremonyStep> {
+  const built = await buildMultisigGenesisTx({ ...params.ctx, ...params });
+  return { label: "upgrade multisig", unsignedCbor: built.cbor };
+}
 
-  if (params.needsSeedTx) {
-    const seedParams: SeedTxParams = {
-      ...params.ctx,
-      ownerAddress: params.ownerAddress,
-      seedLovelace: params.seedLovelace,
-    };
-    steps.push({ label: "seed UTxOs", unsignedCbor: await cborOf(await buildSeedTx(seedParams)) });
-  }
-
-  const multisigParams: MultisigGenesisTxParams = {
-    ...params.ctx,
-    plan: params.plan,
-    seedUtxo: params.seedUtxo,
-    upgradeMultisigTree: params.upgradeMultisigTree,
-  };
-  steps.push({
-    label: "upgrade multisig",
-    unsignedCbor: await cborOf(await buildMultisigGenesisTx(multisigParams)),
-  });
-
-  const regParams: StakeRegistrationTxParams = { ...params.ctx, plan: params.plan };
-  steps.push({
-    label: "register credentials",
-    unsignedCbor: await cborOf(await buildStakeRegistrationTx(regParams)),
-  });
-  return steps;
+export async function buildStakeRegistrations(ctx: CeremonyContext, plan: BootstrapPlan): Promise<CeremonyStep> {
+  const built = await buildStakeRegistrationTx({ ...ctx, plan });
+  return { label: "register credentials", unsignedCbor: built.cbor };
 }
 
 /**
@@ -260,7 +255,7 @@ export async function awaitMultisigConfigUtxo(params: {
   /** Gives up rather than polling forever — the operator is watching. */
   timeoutMs?: number;
   onAttempt?: (attempt: number) => void;
-}): Promise<unknown> {
+}): Promise<ReturnType<typeof assertMultisigConfigUtxo>> {
   const interval = params.intervalMs ?? 5_000;
   const timeout = params.timeoutMs ?? 10 * 60_000;
   const address = (params.plan as { addresses: { upgradeMultisig: string } }).addresses
@@ -298,9 +293,7 @@ export async function awaitMultisigConfigUtxo(params: {
   }
 }
 
-/** Every builder returns a signable transaction; this is how it becomes hex. */
-async function cborOf(built: unknown): Promise<string> {
-  const tx = await (built as { toTransaction: () => Promise<unknown> }).toTransaction();
-  const { EvoTransaction } = await import("@easy1staking/cip113-sdk-ts");
-  return (EvoTransaction as { toCBORHex: (t: never) => string }).toCBORHex(tx as never);
+/** SDK bootstrap builders return UnsignedTx, whose cbor is already serialized. */
+async function cborOf(built: { cbor: string }): Promise<string> {
+  return built.cbor;
 }
