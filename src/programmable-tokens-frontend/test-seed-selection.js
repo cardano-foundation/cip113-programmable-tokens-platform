@@ -29,7 +29,7 @@ const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
 const {
   selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
   resolveSeedUtxos, lovelaceOfUtxo, cborOf,
-  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf,
+  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf, providerEvaluatorWithAdditionalUtxos,
 } = await import("./.seeds-build/ceremony.js");
 
 const HASHES = [
@@ -332,6 +332,33 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
     "with nothing to exclude the list is returned untouched, unreadable entries included");
   ok(withoutOutputsOf([settled, { junk: true }], [HASHES[1]]).length === 1,
     "when filtering, an unreadable entry is dropped rather than funded from");
+}
+
+// ── the evaluator that forwards additional UTxOs ─────────────────────────────
+// ⛔ Evolution's PROVIDER evaluator discards them unless passAdditionalUtxos is set, and the
+// cip113 SDK never sets it. A custom evaluator receives them regardless — this asserts we
+// actually hand them on, because forwarding is the only thing this evaluator exists to do.
+{
+  let seenTx = null;
+  let seenUtxos = "unset";
+  const client = { effect: { evaluateTx: (tx, additional) => { seenTx = tx; seenUtxos = additional; return "EFFECT"; } } };
+  const ev = providerEvaluatorWithAdditionalUtxos(client);
+
+  const out = ev.evaluate({ body: 1 }, [{ a: 1 }, { b: 2 }], { ctx: true });
+  ok(out === "EFFECT", "the provider's Effect is returned untouched — no re-wrapping");
+  ok(JSON.stringify(seenTx) === JSON.stringify({ body: 1 }), "the transaction is passed through");
+  ok(Array.isArray(seenUtxos) && seenUtxos.length === 2,
+    "the selected UTxOs ARE forwarded — the whole point of this evaluator");
+  ok(seenUtxos !== undefined, "not dropped as Evolution's provider evaluator would");
+
+  // undefined must stay undefined: Blockfrost sends an empty additionalUtxoSet for it, and an
+  // empty array is not the same request as no array.
+  ev.evaluate({}, undefined, {});
+  ok(seenUtxos === undefined, "undefined is forwarded as undefined, not coerced to []");
+
+  let refused = "";
+  try { providerEvaluatorWithAdditionalUtxos({ effect: {} }); } catch (e) { refused = e.message; }
+  ok(/effect.evaluateTx/.test(refused), "a client without effect.evaluateTx is refused by name");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -588,15 +588,39 @@ export default function BootstrapProtocolPage() {
       // from UTxO set)" for an output that is demonstrably on chain. Coin selection reaches for
       // settled UTxOs instead; the seeds are unaffected, being passed explicitly.
       const phaseOneTxHashes = (submitted ?? []).map((t) => t.txHash);
+
+      // ⚑ THE FIRST ATTEMPT IS AN EXPERIMENT, AND IT IS FREE. Building the genesis submits
+      // nothing — it is a local build plus one Blockfrost evaluate call — so a failed attempt
+      // costs nothing beyond the wait. Phase one's deposits are already spent either way.
+      //
+      // So attempt 1 runs UNFILTERED, letting coin selection fund from phase one's change, which
+      // is exactly the case the injected evaluator is supposed to make evaluable by handing
+      // Blockfrost the input explicitly. If that works, chaining across the phase boundary is
+      // legitimate and no filter is needed. If it does not, attempts 2+ exclude phase one's
+      // outputs and the build succeeds anyway — and we have learned which it was.
+      let attemptNo = 0;
       const genesis = await buildWithFreshUtxos(
         planned.ctx,
-        async (address) =>
-          withoutOutputsOf(
-            (await (
-              planned.ctx.client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
-            ).getUtxos(EvoAddress.fromBech32(address))) as readonly unknown[],
-            phaseOneTxHashes,
-          ),
+        async (address) => {
+          attemptNo += 1;
+          const all = (await (
+            planned.ctx.client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
+          ).getUtxos(EvoAddress.fromBech32(address))) as readonly unknown[];
+          if (attemptNo === 1) {
+            setGateNote(
+              "Attempt 1: funding from every wallet UTxO, phase one's change included — testing " +
+                "whether handing Blockfrost the inputs explicitly makes them evaluable.",
+            );
+            return all;
+          }
+          const filtered = withoutOutputsOf(all, phaseOneTxHashes);
+          setGateNote(
+            `Attempt ${attemptNo}: excluding phase one's own outputs ` +
+              `(${all.length} UTxOs → ${filtered.length}). Blockfrost would not evaluate against ` +
+              `them even when supplied, so chaining across the phase boundary is not viable.`,
+          );
+          return filtered;
+        },
         (ctx) =>
           buildProtocolGenesis({
             ctx,

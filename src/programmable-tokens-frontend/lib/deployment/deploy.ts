@@ -44,6 +44,7 @@ import {
   isPlainSeedCandidate,
   assertCeremonyContext,
   resolveSeedUtxos,
+  providerEvaluatorWithAdditionalUtxos,
   type ChainUtxo,
 } from "./ceremony";
 import { deriveCoreDeployment, type DeploymentSeeds } from "./derive";
@@ -301,6 +302,11 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
 
   const ctx: CeremonyContext = {
     client: client as never,
+    // Reuses the provider's own evaluator and only changes one decision: it FORWARDS the
+    // transaction's selected UTxOs as Blockfrost's additionalUtxoSet, which Evolution's
+    // provider evaluator discards unless passAdditionalUtxos is set — and the SDK never sets it.
+    // See providerEvaluatorWithAdditionalUtxos.
+    evaluator: providerEvaluatorWithAdditionalUtxos(client) as never,
     // A bech32 STRING. The SDK declares `Address = string` and parses it itself; the parsed
     // object that used to be here satisfied `as never` and then failed the SDK's own guard at
     // whichever step ran first — see assertCeremonyContext.
@@ -364,7 +370,7 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
 /** Lovelace per seed output. Each seed funds part of the transaction that consumes it. */
 export const DEFAULT_SEED_LOVELACE = 10_000_000n;
 
-export { buildWithFreshUtxos, withoutOutputsOf } from "./ceremony";
+export { buildWithFreshUtxos, withoutOutputsOf, providerEvaluatorWithAdditionalUtxos } from "./ceremony";
 export { awaitMultisigConfigUtxo, buildProtocolGenesis, buildReferenceScripts, selectBootstrapSeeds, assembleDeploymentParams };
 export type { MultisigConfigLocation } from "./ceremony";
 

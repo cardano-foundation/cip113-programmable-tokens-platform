@@ -333,6 +333,48 @@ export function fingerprintUtxos(utxos: readonly unknown[]): string {
 }
 
 /**
+ * An evaluator that TELLS the provider about the UTxOs the transaction selected.
+ *
+ * ⛔ THIS IS THE ONE LEVER THE SDK ALREADY LEAVES OPEN, and it took five wrong turns to find.
+ * Evolution assembles `selectedUtxos + referenceInputs` and hands them to whatever evaluator is in
+ * play — `Evaluation.js` says "Always pass additionalUtxos … Custom evaluators use them". Its
+ * PROVIDER-based evaluator then throws them away unless `passAdditionalUtxos: true` is set in
+ * BuildOptions, which the cip113 SDK's `buildOptions(ctx)` never sets and callers cannot reach.
+ *
+ * ⚑ BUT `resolveEvaluator` CHECKS `options.evaluator` FIRST and returns it outright, and the SDK
+ * DOES forward `ctx.evaluator`. So a custom evaluator receives the selected UTxOs regardless of
+ * that flag — no upstream change needed. All this one does is forward them, which is the single
+ * decision Evolution's provider evaluator makes differently.
+ *
+ * Why it should matter: Blockfrost evaluates against its own ledger snapshot, and
+ * `/utils/txs/evaluate/utxos` takes an `additionalUtxoSet` for inputs it has not indexed. An output
+ * created two blocks ago is reported as "Unknown transaction input (missing from UTxO set)" while
+ * being demonstrably on chain — supplying it explicitly is what the endpoint is for.
+ *
+ * ⚠ UNPROVEN UNTIL IT RUNS. That Blockfrost honours `additionalUtxoSet` for this case is the
+ * documented purpose of the endpoint, not something measured here. If the same error survives with
+ * the input handed over explicitly, then Blockfrost is not honouring it and `withoutOutputsOf` is
+ * the permanent answer rather than a workaround. Either outcome is informative; that is the point.
+ */
+export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
+  const c = client as {
+    effect?: { evaluateTx?: (tx: unknown, additional?: unknown[]) => unknown };
+  };
+  if (typeof c?.effect?.evaluateTx !== "function") {
+    throw new Error(
+      "This client exposes no effect.evaluateTx, so the provider's evaluator cannot be reused. " +
+        "Expected an Evolution ReadOnlyClient or SigningClient.",
+    );
+  }
+  return {
+    // The signature Evolution calls: (tx, additionalUtxos, context). The context is unused — we
+    // delegate to the provider, which derives everything else itself.
+    evaluate: (tx: unknown, additionalUtxos: readonly unknown[] | undefined) =>
+      c.effect!.evaluateTx!(tx, additionalUtxos ? [...additionalUtxos] : undefined),
+  };
+}
+
+/**
  * Drop wallet UTxOs produced by the transactions named, so coin selection cannot fund from them.
  *
  * ⛔ THIS IS THE REAL FIX FOR "Unknown transaction input (missing from UTxO set)", and waiting is
