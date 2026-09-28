@@ -351,10 +351,11 @@ export function fingerprintUtxos(utxos: readonly unknown[]): string {
  * created two blocks ago is reported as "Unknown transaction input (missing from UTxO set)" while
  * being demonstrably on chain — supplying it explicitly is what the endpoint is for.
  *
- * ⚠ UNPROVEN UNTIL IT RUNS. That Blockfrost honours `additionalUtxoSet` for this case is the
- * documented purpose of the endpoint, not something measured here. If the same error survives with
- * the input handed over explicitly, then Blockfrost is not honouring it and `withoutOutputsOf` is
- * the permanent answer rather than a workaround. Either outcome is informative; that is the point.
+ * ⚑ PROVEN ON PREVIEW, 2026-09-28. With this evaluator injected, the protocol genesis built while
+ * funding from phase one's change — the very output the same Blockfrost endpoint had refused as
+ * "Unknown transaction input (missing from UTxO set)" two blocks earlier. So the endpoint honours
+ * `additionalUtxoSet`, and the fix is forwarding, not waiting: the 3-block gate and the
+ * exclusion filter both became belt-and-braces rather than load-bearing.
  */
 export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
   const c = client as {

@@ -589,15 +589,18 @@ export default function BootstrapProtocolPage() {
       // settled UTxOs instead; the seeds are unaffected, being passed explicitly.
       const phaseOneTxHashes = (submitted ?? []).map((t) => t.txHash);
 
-      // ⚑ THE FIRST ATTEMPT IS AN EXPERIMENT, AND IT IS FREE. Building the genesis submits
-      // nothing — it is a local build plus one Blockfrost evaluate call — so a failed attempt
-      // costs nothing beyond the wait. Phase one's deposits are already spent either way.
+      // ⚑ MEASURED ON PREVIEW 2026-09-28: ATTEMPT 1 SUCCEEDS. Blockfrost honours
+      // `additionalUtxoSet`, so with the injected evaluator forwarding the selected inputs, the
+      // genesis funds happily from phase one's change — an output two blocks old that the same
+      // endpoint had previously called "Unknown transaction input (missing from UTxO set)".
+      // Chaining across the phase boundary is therefore legitimate.
       //
-      // So attempt 1 runs UNFILTERED, letting coin selection fund from phase one's change, which
-      // is exactly the case the injected evaluator is supposed to make evaluable by handing
-      // Blockfrost the input explicitly. If that works, chaining across the phase boundary is
-      // legitimate and no filter is needed. If it does not, attempts 2+ exclude phase one's
-      // outputs and the build succeeds anyway — and we have learned which it was.
+      // ⛔ THE FILTERED FALLBACK STAYS ANYWAY, and deliberately so. One green run justifies
+      // PREFERRING the unfiltered path, not deleting the safety net behind it — and it costs
+      // nothing, because building the genesis submits nothing: it is a local build plus one
+      // evaluate call, so a wasted attempt costs only the wait. Attempt 1 takes the correct path;
+      // attempts 2+ exclude phase one's outputs and still get there. The note says which ran, so
+      // a future regression reports itself instead of being rediscovered.
       let attemptNo = 0;
       const genesis = await buildWithFreshUtxos(
         planned.ctx,
@@ -608,8 +611,9 @@ export default function BootstrapProtocolPage() {
           ).getUtxos(EvoAddress.fromBech32(address))) as readonly unknown[];
           if (attemptNo === 1) {
             setGateNote(
-              "Attempt 1: funding from every wallet UTxO, phase one's change included — testing " +
-                "whether handing Blockfrost the inputs explicitly makes them evaluable.",
+              "Attempt 1: funded from every wallet UTxO, phase one's change included. This is the " +
+                "expected path — the injected evaluator hands Blockfrost the selected inputs, so " +
+                "an output created moments ago is evaluable.",
             );
             return all;
           }
