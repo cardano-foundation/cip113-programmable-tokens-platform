@@ -154,6 +154,49 @@ export function isPlainSeedCandidate(utxo: unknown): boolean {
   }
 }
 
+/**
+ * Validate a ceremony context BEFORE anything is planned or built.
+ *
+ * ⛔ THE SDK ALREADY CHECKS ALL OF THIS — and that is the problem, because it checks it inside
+ * each build step. A context that is wrong in one field therefore fails at whichever step happens
+ * to run first, and in a two-phase ceremony that can be AFTER the seed transaction is submitted:
+ * the operator sees "bootstrap multisig-genesis: changeAddress is required (bech32)" with three
+ * one-shot seeds already spent, and nothing about the message says the context was malformed from
+ * the start.
+ *
+ * ⚑ `Address` IS A BECH32 STRING IN THIS SDK (`export type Address = string`), not an Evolution
+ * `Address` object. Passing the object satisfies `as never` and fails this check — measured on
+ * preview, where the context was built with `EvoAddress.fromBech32(...) as never`. The SDK calls
+ * `EvoAddress.fromBech32(ctx.changeAddress)` itself; handing it an already-parsed object is one
+ * conversion too many.
+ */
+export function assertCeremonyContext(ctx: CeremonyContext, where = "ceremony"): void {
+  if (!ctx || typeof ctx !== "object") throw new Error(`${where}: a build context is required.`);
+  const c = ctx as { client?: { newTx?: unknown }; changeAddress?: unknown; availableUtxos?: unknown };
+  if (!c.client || typeof c.client.newTx !== "function") {
+    throw new Error(`${where}: client must be an Evolution ReadOnlyClient or SigningClient.`);
+  }
+  if (typeof c.changeAddress !== "string" || c.changeAddress.length === 0) {
+    throw new Error(
+      `${where}: changeAddress must be a bech32 STRING, not a parsed Address object — this SDK ` +
+        `declares \`Address = string\` and parses it itself. Got ` +
+        `${typeof c.changeAddress}${typeof c.changeAddress === "object" ? " (an object)" : ""}.`,
+    );
+  }
+  if (!Array.isArray(c.availableUtxos)) {
+    throw new Error(
+      `${where}: availableUtxos must be an array — exactly the UTxOs these transactions may ` +
+        `spend. Without it coin selection is free to spend reference-script and seed UTxOs.`,
+    );
+  }
+  if (c.availableUtxos.length === 0) {
+    throw new Error(
+      `${where}: availableUtxos is empty, so nothing can fund the ceremony. If a wallet view was ` +
+        `filtered, check the filter before checking the wallet.`,
+    );
+  }
+}
+
 export { BOOTSTRAP_SEED_COUNT };
 export type { BootstrapPlan, DeploymentParams };
 

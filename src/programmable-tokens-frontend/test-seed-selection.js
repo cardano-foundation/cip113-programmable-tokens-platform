@@ -26,9 +26,8 @@ function ok(cond, name) {
 
 async function main() {
 const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
-const { selectSeedUtxos, toChainUtxo, isPlainSeedCandidate } = await import(
-  "./.seeds-build/ceremony.js"
-);
+const { selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext } =
+  await import("./.seeds-build/ceremony.js");
 
 const HASHES = [
   "5403b9c6cdf1ecd35403b9c6cdf1ecd35403b9c6cdf1ecd35403b9c6cdf1ecd3",
@@ -114,6 +113,42 @@ function providerUtxo(hashHex, index, { assets, scriptRef } = {}) {
   const all = HASHES.map((h, i) => providerUtxo(h, i, { scriptRef: { cbor: "00" } }));
   ok(selectSeedUtxos(all, "addr_test1irrelevant") === null,
     "reference-script UTxOs are never selected as seeds");
+}
+
+// ── assertCeremonyContext ─────────────────────────────────────────────────────
+// ⛔ THE POINT: this SDK declares `Address = string`. A parsed Evolution Address object
+// satisfies an `as never` cast and then fails the SDK's own guard at whichever step runs
+// FIRST — which in a two-phase ceremony can be after the one-shot seeds are already spent.
+{
+  const BECH32 =
+    "addr_test1qqew0cqw4c59q2325fcu7sszkxcph9x23mlxgt3cpjfatcs9zrqvaqcx7xpujngkxmmy7cs5ka6th8ugs5kx4n6z0yjqcc6wxm";
+  const client = { newTx: () => ({}) };
+  const utxos = [providerUtxo(HASHES[0], 0)];
+
+  let threw = null;
+  try {
+    assertCeremonyContext({ client, changeAddress: BECH32, availableUtxos: utxos }, "t");
+  } catch (e) {
+    threw = e;
+  }
+  ok(threw === null, "a bech32 STRING changeAddress is accepted");
+
+  const cases = [
+    ["a parsed Address OBJECT is refused, naming the type", { client, changeAddress: { bech32: BECH32 }, availableUtxos: utxos }, /bech32 STRING/],
+    ["an empty changeAddress is refused", { client, changeAddress: "", availableUtxos: utxos }, /bech32 STRING/],
+    ["a missing client is refused", { changeAddress: BECH32, availableUtxos: utxos }, /client/],
+    ["availableUtxos omitted is refused, saying why there is no default", { client, changeAddress: BECH32 }, /availableUtxos must be an array/],
+    ["availableUtxos EMPTY is refused separately from missing", { client, changeAddress: BECH32, availableUtxos: [] }, /empty/],
+  ];
+  for (const [name, ctx, re] of cases) {
+    let msg = "";
+    try {
+      assertCeremonyContext(ctx, "t");
+    } catch (e) {
+      msg = e.message;
+    }
+    ok(re.test(msg), name);
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

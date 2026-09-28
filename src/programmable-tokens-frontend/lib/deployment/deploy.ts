@@ -42,6 +42,7 @@ import {
   type CeremonyContext,
   selectSeedUtxos,
   isPlainSeedCandidate,
+  assertCeremonyContext,
   type ChainUtxo,
 } from "./ceremony";
 import { deriveCoreDeployment, type DeploymentSeeds } from "./derive";
@@ -291,9 +292,14 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
 
   const ctx: CeremonyContext = {
     client: client as never,
-    changeAddress: EvoAddress.fromBech32(input.changeAddress) as never,
+    // A bech32 STRING. The SDK declares `Address = string` and parses it itself; the parsed
+    // object that used to be here satisfied `as never` and then failed the SDK's own guard at
+    // whichever step ran first — see assertCeremonyContext.
+    changeAddress: input.changeAddress,
     availableUtxos,
   };
+  // Fail here, before the plan and before any seed is spent, rather than inside step 2.
+  assertCeremonyContext(ctx, "plan deployment");
 
   if (!input.seeds) {
     throw new Error(
