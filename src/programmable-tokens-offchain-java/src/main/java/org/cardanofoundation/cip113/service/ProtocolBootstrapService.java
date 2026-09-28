@@ -145,12 +145,34 @@ public class ProtocolBootstrapService {
             if (defaultTxHash != null && !defaultTxHash.isEmpty()) {
                 protocolBootstrapParams = bootstrapsByTxHash.get(defaultTxHash);
                 if (protocolBootstrapParams == null) {
-                    throw new IllegalStateException(
-                            "programmable.token.default.txHash names " + defaultTxHash
-                                    + ", which is not a CIP-113 " + plutus.preamble().version() + " deployment in "
-                                    + protocolBootstrapFilename);
+                    // ⚑ A PINNED HASH CANNOT RESOLVE AGAINST AN EMPTY FILE, and that is the exact
+                    // state allow-no-deployment exists for — so throwing here made the flag
+                    // unusable on any profile that pins one. The preview profile pins a hash while
+                    // its record file is [], so preview could not start WITH the flag on: the
+                    // refusal above was skipped, and then this one fired four lines later.
+                    //
+                    // The distinction that matters is whether there is anything to have matched:
+                    //   records exist + pin matches none -> real misconfiguration, still fatal.
+                    //   no records at all                -> the no-deployment state; the pin is
+                    //                                       merely premature, so warn and carry on.
+                    if (bootstrapsByTxHash.isEmpty() && allowNoDeployment) {
+                        log.warn("programmable.token.default.txHash pins {} but {} records no "
+                                + "deployment yet, so nothing can match it. Starting anyway because "
+                                + "cip113.allow-no-deployment=true; protocol operations stay refused. "
+                                + "Record the deployment and restart, or clear the pin.",
+                                defaultTxHash, protocolBootstrapFilename);
+                    } else {
+                        throw new IllegalStateException(
+                                "programmable.token.default.txHash names " + defaultTxHash
+                                        + ", which is not a CIP-113 " + plutus.preamble().version() + " deployment in "
+                                        + protocolBootstrapFilename
+                                        + " (which records " + bootstrapsByTxHash.size() + " deployment(s): "
+                                        + bootstrapsByTxHash.keySet() + ")");
+                    }
                 }
-                log.info("Using default protocol bootstrap with txHash: {}", defaultTxHash);
+                if (protocolBootstrapParams != null) {
+                    log.info("Using default protocol bootstrap with txHash: {}", defaultTxHash);
+                }
             } else if (firstUsable != null) {
                 protocolBootstrapParams = firstUsable;
                 log.info("No default txHash configured, using bootstrap: {}",
