@@ -336,7 +336,7 @@ export async function buildPhaseOne(params: {
       ownerAddress: params.ownerAddress,
       seedLovelace: params.seedLovelace,
     };
-    steps.push({ label: "seed UTxOs", unsignedCbor: await cborOf(await buildSeedTx(seedParams)) });
+    steps.push({ label: "seed UTxOs", unsignedCbor: cborOf(await buildSeedTx(seedParams)) });
   }
 
   const multisigParams: MultisigGenesisTxParams = {
@@ -347,13 +347,13 @@ export async function buildPhaseOne(params: {
   };
   steps.push({
     label: "upgrade multisig",
-    unsignedCbor: await cborOf(await buildMultisigGenesisTx(multisigParams)),
+    unsignedCbor: cborOf(await buildMultisigGenesisTx(multisigParams)),
   });
 
   const regParams: StakeRegistrationTxParams = { ...params.ctx, plan: params.plan };
   steps.push({
     label: "register credentials",
-    unsignedCbor: await cborOf(await buildStakeRegistrationTx(regParams)),
+    unsignedCbor: cborOf(await buildStakeRegistrationTx(regParams)),
   });
   return steps;
 }
@@ -392,7 +392,7 @@ export async function buildProtocolGenesis(params: {
   };
   return {
     label: "protocol genesis",
-    unsignedCbor: await cborOf(await buildProtocolGenesisTx(genesisParams)),
+    unsignedCbor: cborOf(await buildProtocolGenesisTx(genesisParams)),
   };
 }
 
@@ -420,7 +420,7 @@ export async function buildReferenceScripts(params: {
   };
   return {
     label: "reference scripts",
-    unsignedCbor: await cborOf(await buildReferenceScriptsTx(refParams)),
+    unsignedCbor: cborOf(await buildReferenceScriptsTx(refParams)),
   };
 }
 
@@ -485,9 +485,31 @@ export async function awaitMultisigConfigUtxo(params: {
   }
 }
 
-/** Every builder returns a signable transaction; this is how it becomes hex. */
-async function cborOf(built: unknown): Promise<string> {
-  const tx = await (built as { toTransaction: () => Promise<unknown> }).toTransaction();
-  const { EvoTransaction } = await import("@easy1staking/cip113-sdk-ts");
-  return (EvoTransaction as { toCBORHex: (t: never) => string }).toCBORHex(tx as never);
+/**
+ * The CBOR of a built ceremony step.
+ *
+ * ⛔ THE SDK'S BUILDERS RETURN `UnsignedTx`, WHICH ALREADY CARRIES `cbor` AS HEX. They do not
+ * return an Evolution build result, so there is no `toTransaction()` on them and never was — this
+ * wrapper used to call it and every one of the five steps failed with "built.toTransaction is not
+ * a function" the moment it was reached. `buildPhaseOne` runs with `needsSeedTx: false`, so
+ * multisig-genesis was the first step to get here and the first to fail.
+ *
+ * ⚑ DO NOT "RESTORE" THE CONVERSION. Two different objects are in play and only one needs it:
+ * an Evolution `tx.build()` result (SignBuilder or TransactionResultBase) does expose
+ * `toTransaction()`, and `prepareSeedUtxos` calls it correctly because it drives the Evolution
+ * builder directly. The SDK's `finish()` does the conversion internally and hands back the hex.
+ */
+export function cborOf(built: unknown): string {
+  const u = built as { cbor?: unknown };
+  if (typeof u?.cbor !== "string" || u.cbor.length === 0) {
+    throw new Error(
+      "A ceremony builder returned no CBOR. Expected the SDK's UnsignedTx with a `cbor` hex " +
+        "string; got " +
+        (built === null || built === undefined
+          ? String(built)
+          : `${typeof built} with keys [${Object.keys(u).join(", ")}]`) +
+        ".",
+    );
+  }
+  return u.cbor;
 }

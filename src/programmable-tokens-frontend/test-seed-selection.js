@@ -28,7 +28,7 @@ async function main() {
 const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
 const {
   selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
-  resolveSeedUtxos, lovelaceOfUtxo,
+  resolveSeedUtxos, lovelaceOfUtxo, cborOf,
 } = await import("./.seeds-build/ceremony.js");
 
 const HASHES = [
@@ -210,6 +210,31 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
     "a seed missing from the wallet is refused by name, suggesting it was spent");
   ok(resolveSeedUtxos([...available, { not: "a utxo" }], seeds).issuance !== undefined,
     "a non-UTxO entry in the wallet list is skipped rather than throwing");
+}
+
+// ── cborOf ────────────────────────────────────────────────────────────────────
+// ⛔ The SDK's builders return UnsignedTx, which ALREADY carries cbor as hex. Calling
+// toTransaction() on it — a method it has never had — failed every one of the five steps.
+{
+  ok(cborOf({ cbor: "84a300d9010281", txHash: "ab".repeat(32) }) === "84a300d9010281",
+    "cborOf reads UnsignedTx.cbor straight through");
+
+  // An Evolution build result is the OTHER object, and must NOT be silently accepted here:
+  // accepting it would mean a step whose CBOR came from somewhere unverified.
+  for (const [name, value, re] of [
+    ["an Evolution build result is refused, listing its keys", { toTransaction: () => {}, effect: {} }, /keys \[/],
+    ["undefined is refused by name", undefined, /undefined/],
+    ["an empty cbor is refused", { cbor: "" }, /no CBOR/],
+    ["a non-string cbor is refused", { cbor: 123 }, /no CBOR/],
+  ]) {
+    let msg = "";
+    try {
+      cborOf(value);
+    } catch (e) {
+      msg = e.message;
+    }
+    ok(re.test(msg), name);
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
