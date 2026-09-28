@@ -98,6 +98,16 @@ rwaToken:
   creationAudience: ${RWA_TOKEN_CREATION_AUDIENCE:}
   enabled: ${SECURITY_TOKEN_ENABLED:true}
 
+# Start with no CIP-113 deployment recorded, to check the database, the migrations and the
+# node peer BEFORE a ceremony spends one-shot seeds that cannot be recovered. The service
+# still REFUSES every protocol operation individually; this only keeps the process up.
+#
+# ⚑ Declared here so the env var has a NAME THIS FILE STATES. Relaxed binding does reach the
+# @Value without this block, but only via a spelling nothing in the repo writes down, and the
+# chart that has to set it should not have to infer it. See ProtocolBootstrapService.
+cip113:
+  allow-no-deployment: ${CIP113_ALLOW_NO_DEPLOYMENT:false}
+
 management:
   endpoints:
     web:
@@ -144,7 +154,11 @@ uplc-link:
 wallet:
   mnemonic: ""
 
-# Sole supported Preview deployment: CIP-113 0.5.0-alpha.4 / bootstrap schema 3.
+# Sole supported Preview deployment: CIP-113 0.0.1 / bootstrap schema 3.
+# ⛔ NO PREVIEW INSTANCE EXISTS YET. alpha.5 moves eight of twelve script hashes, so the
+# alpha.4 instance this pointed at is abandoned, not upgraded; protocol-bootstraps-preview.json
+# is an empty array until the redeploy. The backend fails closed on an empty file, which is
+# the intended state — it must not serve an instance that is no longer current.
 # The explicit pin prevents an operator typo or stale environment value from silently
 # selecting a different protocol instance.
 programmable:

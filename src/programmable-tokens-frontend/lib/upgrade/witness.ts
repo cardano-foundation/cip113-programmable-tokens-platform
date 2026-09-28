@@ -18,6 +18,7 @@
  */
 import { blake2b } from "@noble/hashes/blake2";
 import { splitVkeyWitnesses, vkeyOfWitnessEntry, assembleSignedTxPreservingBody } from "../tx/witness-set";
+import { verifyWitnessSet } from "../tx/hash";
 
 /** Cardano key hashes are blake2b-224 (28 bytes) of the public key. */
 export function keyHashOfVkey(vkeyHex: string): string {
@@ -72,18 +73,24 @@ function extractKeyZeroValue(witnessSet: Uint8Array): Uint8Array {
 export interface SignerCheck {
   witnessSetHex: string;
   keyHashes: string[];
-  /** Hashes that are declared members. */
+  /** Hashes that are declared members AND whose signature verifies. */
   members: string[];
   /** Hashes that are not — a signature from outside the authority. */
   strangers: string[];
+  /** Declared members whose signature did NOT verify against this transaction.
+   *  Counted nowhere: a witness that does not verify is not a signature. */
+  forged: string[];
 }
 
 export interface QuorumResult {
   required: number;
-  /** Distinct declared members who signed. Duplicates collapse. */
+  /** Distinct declared members whose signature VERIFIED. Duplicates collapse. */
   signed: string[];
   missing: string[];
   strangers: string[];
+  /** Declared members who supplied a witness that does not verify. Distinct from
+   *  `missing`: they tried, and what they sent is unusable. */
+  forged: string[];
   satisfied: boolean;
   checks: SignerCheck[];
 }
@@ -94,40 +101,67 @@ export interface QuorumResult {
  * Duplicates collapse and strangers are reported rather than ignored: a stranger's witness in
  * the assembled transaction is not merely useless, it is a signature the ledger will weigh
  * against a quorum that does not include them.
+ *
+ * ## The transaction is REQUIRED, and that is the point
+ *
+ * This used to take witnesses and members and nothing else, which meant it could only ask
+ * whether a witness CLAIMED to come from a declared key — the vkey is public, so that claim
+ * costs an attacker nothing. A declared vkey beside sixty-four bytes of noise counted toward
+ * quorum and failed at the ledger, after every honest signer had already done their part.
+ *
+ * With the transaction in hand each signature is checked against its body hash, so "signed"
+ * means signed. There is deliberately no overload that omits it: an unverified quorum is not a
+ * weaker answer to the same question, it is a confident answer to a different one.
  */
 export function checkQuorum(
   witnessSetHexes: readonly string[],
   memberKeyHashes: readonly string[],
   required: number,
+  unsignedTxHex: string,
 ): QuorumResult {
   const members = new Set(memberKeyHashes.map((h) => h.toLowerCase()));
   const signed = new Set<string>();
   const strangers = new Set<string>();
+  const forged = new Set<string>();
   const checks: SignerCheck[] = [];
 
   for (const hex of witnessSetHexes) {
-    const keyHashes = keyHashesInWitnessSet(hex);
+    const verified = verifyWitnessSet(unsignedTxHex, hex);
+    const keyHashes = verified.map((v) => v.keyHash).filter(Boolean);
     const mine: string[] = [];
     const theirs: string[] = [];
-    for (const h of keyHashes) {
-      if (members.has(h)) {
-        mine.push(h);
-        signed.add(h);
-      } else {
+    const bad: string[] = [];
+    for (const v of verified) {
+      const h = v.keyHash.toLowerCase();
+      if (!members.has(h)) {
+        // Reported as a stranger whether or not it verifies. A valid signature from
+        // outside the authority is not better than an invalid one — it is a signature
+        // the ledger weighs against a quorum that does not include them.
         theirs.push(h);
         strangers.add(h);
+        continue;
       }
+      if (!v.valid) {
+        bad.push(h);
+        forged.add(h);
+        continue;
+      }
+      mine.push(h);
+      signed.add(h);
     }
-    checks.push({ witnessSetHex: hex, keyHashes, members: mine, strangers: theirs });
+    checks.push({ witnessSetHex: hex, keyHashes, members: mine, strangers: theirs, forged: bad });
   }
 
-  const missing = [...members].filter((h) => !signed.has(h));
+  // A member who sent something unusable is NOT missing — they are a different
+  // problem with a different fix (re-sign, rather than chase). Reported apart.
+  const missing = [...members].filter((h) => !signed.has(h) && !forged.has(h));
   return {
     required,
     signed: [...signed],
     missing,
     strangers: [...strangers],
-    satisfied: signed.size >= required && strangers.size === 0,
+    forged: [...forged],
+    satisfied: signed.size >= required && strangers.size === 0 && forged.size === 0,
     checks,
   };
 }

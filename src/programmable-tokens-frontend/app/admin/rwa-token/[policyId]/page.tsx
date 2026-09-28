@@ -7,7 +7,8 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Plus, Trash2, ShieldCheck } from "lucide-react";
+import { Loader2, Plus, Trash2, ShieldCheck, ArrowLeft } from "lucide-react";
+import Link from "next/link";
 import {
   listDenylist,
   addDenylistEntry,
@@ -87,6 +88,13 @@ export default function RwaTokenAdminPage() {
   return (
     <PageContainer>
       <div className="max-w-4xl mx-auto py-10 space-y-6">
+        <Link
+          href="/admin"
+          className="inline-flex items-center gap-1.5 text-xs text-dark-400 transition-colors hover:text-primary-400"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" /> Back to token administration
+        </Link>
+
         <div className="space-y-1">
           <h1 className="text-3xl font-bold text-white">RWA-Token Admin</h1>
           <p className="text-xs font-mono text-dark-400 break-all">{policyId}</p>
@@ -243,6 +251,25 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
       <Button type="button" variant="secondary" onClick={() => void refresh()} disabled={!rawApi || busy}>
         Load current and pending members
       </Button>
+
+      {members && (
+        <div className="space-y-2 text-xs text-dark-300">
+          <p className="font-semibold text-white">
+            Published members ({members.baseline.length})
+          </p>
+          {members.baseline.length === 0 && <p>No members in the current on-chain root.</p>}
+          {members.baseline.map((member) => (
+            <div key={pendingKey(member)} className="rounded bg-dark-900 p-2">
+              <p className="font-mono break-all">{member.credentialHash}</p>
+              <p>
+                {member.credentialType === 0 ? "Stake key" : "Stake script"}
+                {" · expires "}{new Date(member.validUntilMs).toLocaleString()}
+                {member.validUntilMs <= Date.now() && " · expired"}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="space-y-2">
         <label className="block text-sm text-white" htmlFor="manual-member-address">Stake or payment address</label>

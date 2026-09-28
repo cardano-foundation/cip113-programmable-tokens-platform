@@ -252,7 +252,7 @@ class RwaCip171ProvenanceServiceTest {
 
     @Test void coreDependencyRecoveryEvidenceCannotBeOmittedOrAltered() throws Exception {
         var mapper = new ObjectMapper();
-        for (String field : new String[]{"repository", "commit", "archive_sha256", "lock_etag", "missing", "cmta"}) {
+        for (String field : new String[]{"repository", "commit", "archive_sha256", "version", "lock_etag", "missing", "cmta"}) {
             var receipt = mapper.readTree(read("cip171-rebuild-receipt.json"));
             for (var entry : receipt.path("blueprints")) {
                 if (entry.path("name").asText().equals("cip113-core")) {

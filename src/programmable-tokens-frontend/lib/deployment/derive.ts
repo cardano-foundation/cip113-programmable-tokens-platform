@@ -32,7 +32,7 @@
  *
  * Every parameterisation is recorded, because that record IS the CIP-171 payload.
  */
-import { createStandardScripts } from "@easy1staking/cip113-sdk-ts";
+import { createStandardScripts, UNFRACKING_DISABLED } from "@easy1staking/cip113-sdk-ts";
 import type { PlutusBlueprint, PlutusScript, TxInput, StandardScripts } from "@easy1staking/cip113-sdk-ts";
 
 export interface DeploymentSeeds {
@@ -54,8 +54,47 @@ export interface DeriveCoreDeploymentInput {
    */
   alwaysFailNonce?: string;
   alwaysFailHash?: string;
-  /** Baked into transfer, third_party, unfracking and issuance_logic. Live preview uses 1024. */
+  /**
+   * Baked into the compiled hashes of transfer, third_party, unfracking and issuance_logic,
+   * so changing it means redeploying all four and upgrading the protocol. It is a deployment
+   * choice, not a setting.
+   *
+   * ⚠ 1024 IS THE AGREED STARTING POINT, NOT A DERIVED ONE. Giovanni ruled on
+   * 2026-09-23: "datum size should be configurable from the UI and 1024 is the
+   * starting point." So it is a deliberate provisional choice — which is a
+   * different thing from a value nobody chose, and a different thing again from
+   * one a cost model produced. The SDK's own constant says why it is neither:
+   * "a security parameter with no upstream guidance; 1024 is what upstream's own test
+   * fixtures use and is NOT a recommendation. The production value is deferred."
+   *
+   * ⚠ That deployed instances carry 1024 is still NOT evidence for 1024 — they
+   * inherited it, and citing them back as precedent is how a fixture becomes a
+   * decision nobody made. This comment used to read "Live preview uses 1024",
+   * which did exactly that. The ruling above makes 1024 a chosen starting value;
+   * it does not make the deployments that already carried it into support for it.
+   *
+   * A real value would come from a cost model — upstream's
+   * `validators/programmable_logic/datum_size_cost.test.ak` is where that lives. Until one is
+   * chosen deliberately, every deployment is parameterised by a placeholder.
+   */
   maxInlineDatumBytes: number;
+  /**
+   * Whether the dispatcher is compiled to permit unfracking at all. Default: yes.
+   *
+   * ⛔ THIS IS A DEPLOYMENT CHOICE THAT CANNOT BE CHANGED WITHOUT REPLACING THE DISPATCHER.
+   * `programmable_logic_global` takes the unfracking hash as a COMPILE-TIME parameter, so
+   * disabling it means compiling the dispatcher against {@link UNFRACKING_DISABLED} — a 28-byte
+   * sentinel no script can hash to — and the dispatcher's own hash moves accordingly.
+   *
+   * The unfracking VALIDATOR is still built, deployed, registered and published either way. Only
+   * the value the dispatcher was compiled against differs, which is why the deployment has to
+   * record both: see {@link CoreScriptSet.unfrackingParameter}.
+   *
+   * Reversible later, at a price: recompile the dispatcher with the real hash, publish it as a
+   * reference script, and `PROTOCOL_UPGRADE` the params datum's `plg_cred` to point at it. No new
+   * unfracking deployment, no registry node touched, no token reissued.
+   */
+  unfrackingEnabled?: boolean;
 }
 
 /** One applied parameterisation, in the shape CIP-171 publishes. */
@@ -78,6 +117,8 @@ export interface DerivedCoreDeployment {
   issuanceLogic: string;
   programmableLogicGlobal: string;
   upgradeMultisig: string;
+  /** The unfracking hash the dispatcher was compiled against — real hash or sentinel. */
+  unfrackingParameter: string;
   /** Feeds the CIP-171 record; empty means provenance cannot be published. */
   parameterizations: ParameterizationRecord[];
 }
@@ -109,6 +150,17 @@ export interface CoreScriptSet {
   issuanceLogic: PlutusScript;
   programmableLogicGlobal: PlutusScript;
   upgradeMultisig: PlutusScript;
+  /**
+   * The unfracking hash `programmable_logic_global` was COMPILED AGAINST — the real
+   * `unfracking.hash`, or {@link UNFRACKING_DISABLED}.
+   *
+   * ⛔ NOT INFERABLE FROM THE DEPLOYMENT, which is the whole reason it is recorded. Both values
+   * are legitimately present in a deployment where unfracking is disabled: the real script is
+   * deployed, registered and published, so `unfracking.scriptHash` derives and verifies on its
+   * own — and re-deriving the dispatcher from THAT value would produce a different dispatcher
+   * hash than the one on chain. Which of the two was used is a fact that has to be written down.
+   */
+  unfrackingParameter: string;
   /**
    * The raw builders, for the one script a CORE deployment does not deploy: `issuance_mint`
    * is parameterised per minting-logic hash, so the instance a bootstrap needs is a dummy
@@ -168,10 +220,16 @@ export function buildCoreScriptSet(input: DeriveCoreDeploymentInput): CoreScript
     maxInlineDatumBytes,
   );
 
+  // ⛔ The dispatcher is compiled against the PARAMETER, which is the sentinel when unfracking is
+  // disabled — never against `unfracking.hash` in that case. Passing the real hash here would
+  // produce a dispatcher that does not match the one the deployment records.
+  const unfrackingParameter =
+    input.unfrackingEnabled === false ? UNFRACKING_DISABLED : unfracking.hash;
+
   const programmableLogicGlobal = scripts.programmableLogicGlobal(
     transfer.hash,
     thirdParty.hash,
-    unfracking.hash,
+    unfrackingParameter,
   );
 
   const upgradeMultisig = scripts.upgradeMultisig(seeds.multisigSeed);
@@ -189,6 +247,7 @@ export function buildCoreScriptSet(input: DeriveCoreDeploymentInput): CoreScript
     issuanceLogic,
     programmableLogicGlobal,
     upgradeMultisig,
+    unfrackingParameter,
     builders: scripts,
     parameterizations,
   };
@@ -208,6 +267,7 @@ export function deriveCoreDeployment(input: DeriveCoreDeploymentInput): DerivedC
     issuanceLogic: s.issuanceLogic.hash,
     programmableLogicGlobal: s.programmableLogicGlobal.hash,
     upgradeMultisig: s.upgradeMultisig.hash,
+    unfrackingParameter: s.unfrackingParameter,
     parameterizations: s.parameterizations,
   };
 }

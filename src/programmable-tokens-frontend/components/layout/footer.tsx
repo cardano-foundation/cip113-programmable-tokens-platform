@@ -107,6 +107,15 @@ export function Footer() {
             <p className="text-sm text-dark-300 mb-2">
               Built on top of the CIP-113 standard and the original CIP-143 implementation.
             </p>
+            <p className="mb-2 text-sm text-dark-300">
+              <Link href="/legal#terms" className="hover:text-primary-400">
+                Terms &amp; Conditions
+              </Link>
+              <span className="mx-2 text-dark-500">|</span>
+              <Link href="/legal#privacy" className="hover:text-primary-400">
+                Privacy
+              </Link>
+            </p>
             <p className="text-sm text-dark-400">
               © {currentYear} Cardano Foundation
             </p>

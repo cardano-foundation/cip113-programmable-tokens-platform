@@ -10,13 +10,13 @@
       "name": "cip113-core",
       "resource": "plutus.json",
       "repository": "https://github.com/cardano-foundation/cip113-programmable-tokens",
-      "commit": "7e8a63198c5b240135f1aa2f043ce5d7c046b2c4",
-      "commit_date": "2026-09-10T14:05:14+01:00",
-      "upstream_version": "0.5.0-alpha.4",
+      "commit": "6b75ba3286b4692ca23059ff51285db357fb09c6",
+      "commit_date": "2026-09-24T00:00:00+01:00",
+      "upstream_version": "0.0.1",
       "aiken_compiler": "v1.1.23+8949565",
-      "sha256": "5ff5d6d2990d815973e4edcf6d46e7c3d0ff4bf3cb7c17a3e672e091b7ea0b46",
+      "sha256": "b6c8cb096a15e02f1b9c719fb8c617b624c1aa7719f2258d45faa3e8f144e7b9",
       "verbatim_from_upstream": true,
-      "note": "Upstream's committed plutus.json, byte for byte. It reproduces from source with aiken v1.1.23+8949565: all 34 validator entries and the complete artifact are identical. The SDK pins and operates this exact artifact."
+      "note": "Upstream's committed plutus.json, byte for byte, taken from the SDK's vendored copy at blueprints/standard/v0.0.1 and sha-verified against that directory's UPSTREAM_PIN.json. v0.0.1 is the first non-dev version and the intended mainnet release candidate. MEASURED, not assumed: all 34 compiledCode entries are byte-identical to 0.5.0-alpha.5 and the ONLY difference in the whole artifact is preamble.version, so EVERY derived script hash is unchanged and an alpha.5 instance would be reachable by a v0.0.1 build. Note the artifact SHA256 still changes, because preamble.version is inside the hashed file — 'byte-identical' is true of the compiled code and false of the file, and conflating the two leads either to skipping this pin update or to doubting the zero-hash claim. Pinned to the COMMIT, not the version string: upstream publishes no git tags."
     },
     {
       "name": "rwa-token",

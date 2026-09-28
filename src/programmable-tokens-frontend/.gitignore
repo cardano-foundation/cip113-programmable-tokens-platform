@@ -58,3 +58,9 @@ frontend.log
 .stake-build/
 .attestation-build/
 .mint-recovery-build/
+.registry-build/
+.mine-build/
+.witness-build/
+.hash-build/
+.sdkrec-build/
+.colour-build/

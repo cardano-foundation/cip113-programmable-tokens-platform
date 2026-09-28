@@ -91,3 +91,85 @@ export function toBootstrapRecord(
   // schemaVersion first so the emitted file reads like the committed ones.
   return [{ schemaVersion: 3, ...deployment }];
 }
+
+/**
+ * The gate that runs BEFORE anything is submitted, now that the record cannot.
+ *
+ * ⛔ WHY THIS EXISTS AT ALL. The old invariant — "a plan that does not verify is never shown a
+ * signature prompt" — worked because all five transactions, with every pre-computed hash,
+ * existed before the first submission. Splitting the ceremony into two phases dissolves that:
+ * at phase one there is no complete `DeploymentParams` to verify, because the config UTxO
+ * outref and all seven `*RefInput`s belong to transactions that have not happened. Without a
+ * replacement, phase one would be ungated and the one-shot seeds would be spent on a protocol
+ * nobody had checked.
+ *
+ * ## What it checks instead, and why that is worth more than it sounds
+ *
+ * Two INDEPENDENT derivations of the same twelve values: this platform's `derive.ts`, and the
+ * SDK's `planBootstrap`. They share a blueprint and nothing else — different code, different
+ * repository, written months apart. Agreement means the parameterisation chain is right in both
+ * or wrong in both in exactly the same way; disagreement means one of them is broken and
+ * nothing may be spent.
+ *
+ * The full-record `verifyDeployment` still runs after phase two, on the assembled params. This
+ * does not replace it — it covers the window the split opened.
+ */
+export function verifyPlanScripts(
+  ours: {
+    alwaysFailHash: string; issuanceCborHexPolicy: string; registryPolicy: string;
+    paramsPolicy: string; programmableLogicBase: string; transfer: string; thirdParty: string;
+    unfracking: string; issuanceLogic: string; programmableLogicGlobal: string;
+    upgradeMultisig: string; unfrackingParameter: string;
+  },
+  plan: {
+    scripts: Record<string, { hash: string }>;
+    unfrackingParameter: string;
+  },
+): VerificationResult {
+  const pairs: Array<[string, string, string]> = [
+    ["always_fail", ours.alwaysFailHash, plan.scripts.alwaysFail?.hash],
+    ["issuance_cbor_hex_mint", ours.issuanceCborHexPolicy, plan.scripts.issuanceCborHexMint?.hash],
+    ["registry", ours.registryPolicy, plan.scripts.registry?.hash],
+    ["protocol_params", ours.paramsPolicy, plan.scripts.protocolParams?.hash],
+    ["programmable_logic_base", ours.programmableLogicBase, plan.scripts.programmableLogicBase?.hash],
+    ["transfer", ours.transfer, plan.scripts.transfer?.hash],
+    ["third_party", ours.thirdParty, plan.scripts.thirdParty?.hash],
+    ["unfracking", ours.unfracking, plan.scripts.unfracking?.hash],
+    ["issuance_logic", ours.issuanceLogic, plan.scripts.issuanceLogic?.hash],
+    ["programmable_logic_global", ours.programmableLogicGlobal, plan.scripts.programmableLogicGlobal?.hash],
+    ["upgrade_multisig", ours.upgradeMultisig, plan.scripts.upgradeMultisig?.hash],
+    ["unfracking_parameter", ours.unfrackingParameter, plan.unfrackingParameter],
+  ];
+
+  const checks: DerivedCheck[] = [];
+  const mismatches: DerivedCheck[] = [];
+  for (const [name, mine, theirs] of pairs) {
+    // A missing value is a MISMATCH, not a skip. Silently passing over a hash the SDK did not
+    // produce would turn a structural change upstream into a check that quietly shrank.
+    const ok = Boolean(mine) && Boolean(theirs) && mine.toLowerCase() === theirs.toLowerCase();
+    const check: DerivedCheck = {
+      name,
+      derived: mine ?? "(absent)",
+      deployed: theirs ?? "(absent)",
+      matches: ok,
+    };
+    checks.push(check);
+    if (!ok) mismatches.push(check);
+  }
+
+  if (checks.length !== pairs.length) {
+    return { ok: false, checks, mismatches, error: "the cross-check list changed shape" };
+  }
+  return {
+    ok: mismatches.length === 0,
+    checks,
+    mismatches,
+    error:
+      mismatches.length === 0
+        ? undefined
+        : `${mismatches.length} of ${checks.length} script hashes differ between this platform's ` +
+          "derivation and the SDK's. One of the two is wrong and nothing may be submitted: the " +
+          "seeds are one-shot, so a protocol deployed from a bad parameterisation cannot be redone " +
+          "with the same inputs.",
+  };
+}

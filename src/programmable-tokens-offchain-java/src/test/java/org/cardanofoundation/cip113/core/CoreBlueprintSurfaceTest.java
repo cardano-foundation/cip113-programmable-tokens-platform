@@ -114,7 +114,7 @@ class CoreBlueprintSurfaceTest {
                     List.of(new Param("transfer_hash", "aiken/crypto/ScriptHash"),
                             new Param("third_party_hash", "aiken/crypto/ScriptHash"),
                             new Param("unfracking_hash", "aiken/crypto/ScriptHash"))),
-            entry("protocol_params", "355e7d7edf03b288fe5fc314752cacb01f0c8930f13d8b6b83102d06",
+            entry("protocol_params", "81926958b1a6a33fd68068ed1ff909dab60c519f0ec913bc3847c372",
                     Set.of("else", "mint", "spend"),
                     List.of(new Param("utxo_ref", "cardano/transaction/OutputReference"))),
             entry("registry", "3d5e0abfae7f7e01c67853a397f2069c7e2ba214032745482d47f763",

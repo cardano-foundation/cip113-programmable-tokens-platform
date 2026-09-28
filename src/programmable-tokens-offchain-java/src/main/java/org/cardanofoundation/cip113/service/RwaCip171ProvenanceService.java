@@ -30,13 +30,13 @@ public final class RwaCip171ProvenanceService {
     private RwaCip171ProvenanceService() {}
 
     private static final ThreadLocal<Capture> ACTIVE = new ThreadLocal<>();
-    // The core source pins a floating fuzz branch through this archive ETag. Keep this
+    // The core source uses this verified fuzz release archive. Keep this
     // reviewed recipe aligned with scripts/verify-cip171-sources.py when upgrading sources.
     private static final Map<String, String> CORE_FUZZ_DEPENDENCY = Map.of(
             "repository", "https://github.com/aiken-lang/fuzz",
             "commit", "06874926ec70747f3fc4e2b9364ee9e1393441cc",
-            "archive_sha256", "b8158eb84ec81114cfc5fa179927a82aafae64de41001e9767fdb02ceb8892d9",
-            "lock_etag", "9843473958e51725a9274b487d2d4aac0395ec1a2e30f090724fa737226bc127");
+            "archive_sha256", "650f07744dabe59935a655bdf50dc8962a3f05d65611b91bd825c6b3505db3a1",
+            "version", "v2.2.0");
     private static final Map<String, String> CMTA_TITLES = Map.of(
             "global_state_mint", "global_state.global_state_mint_validator.mint",
             "global_state_spend", "global_state.global_state_spend_validator.spend",

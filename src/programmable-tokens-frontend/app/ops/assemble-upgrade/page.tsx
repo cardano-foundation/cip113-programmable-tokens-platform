@@ -27,6 +27,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { getCardanoNetwork } from "@/lib/utils/network";
 import { checkQuorum, assembleUpgradeTx, type QuorumResult } from "@/lib/upgrade/witness";
+import { transactionHash } from "@/lib/tx/hash";
 
 export default function AssembleUpgradePage() {
   const network = getCardanoNetwork();
@@ -47,14 +48,27 @@ export default function AssembleUpgradePage() {
     [witnessText],
   );
 
-  const quorum: QuorumResult | null = useMemo(() => {
-    if (members.length === 0 || witnesses.length === 0) return null;
+  const tx = unsignedTx.replace(/\s+/g, "").toLowerCase();
+
+  /** The value every signer's signature commits to. Shown so the assembler and the
+   *  signers can confirm out of band that they are working on the same transaction. */
+  const txHash = useMemo(() => {
+    if (!tx) return null;
     try {
-      return checkQuorum(witnesses, members, Number(threshold));
+      return transactionHash(tx);
     } catch {
       return null;
     }
-  }, [witnesses, members, threshold]);
+  }, [tx]);
+
+  const quorum: QuorumResult | null = useMemo(() => {
+    if (members.length === 0 || witnesses.length === 0 || !tx) return null;
+    try {
+      return checkQuorum(witnesses, members, Number(threshold), tx);
+    } catch {
+      return null;
+    }
+  }, [witnesses, members, threshold, tx]);
 
   const assemble = () => {
     setError(null);
@@ -124,7 +138,12 @@ export default function AssembleUpgradePage() {
       <section className="space-y-2">
         <h2 className="text-lg font-semibold text-white">3. Collected witnesses</h2>
         <p className="text-xs text-dark-400">
-          One witness-set hex per line, as each wallet returned it from a partial sign.
+          One witness-set hex per line, as each wallet returned it from a partial sign. Signers
+          can produce one at{" "}
+          <a href="/sign" className="text-primary-400 underline hover:text-primary-300">
+            /sign
+          </a>{" "}
+          — that page is reachable even when these operator tools are switched off.
         </p>
         <textarea
           className="h-28 w-full rounded bg-dark-900 px-2 py-1 font-mono text-xs text-white"
@@ -133,6 +152,17 @@ export default function AssembleUpgradePage() {
           onChange={(e) => setWitnessText(e.target.value)}
         />
       </section>
+
+      {txHash && (
+        <div className="rounded border border-primary-500/30 bg-primary-500/5 p-3">
+          <p className="text-[10px] uppercase tracking-wider text-dark-400">Transaction hash</p>
+          <p className="mt-1 break-all font-mono text-sm text-primary-400">{txHash}</p>
+          <p className="mt-1 text-[11px] text-dark-500">
+            Every signature commits to exactly these bytes. Give signers this hash so they can
+            confirm they signed the same transaction you are assembling.
+          </p>
+        </div>
+      )}
 
       {quorum && (
         <section className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3 text-xs">
@@ -155,9 +185,19 @@ export default function AssembleUpgradePage() {
               rejects.
             </p>
           )}
-          {quorum.checks.some((c) => c.members.length === 0 && c.strangers.length === 0) && (
-            <p className="text-amber-300">One pasted witness carried no vkey at all.</p>
+          {quorum.forged.length > 0 && (
+            <p className="text-red-300">
+              {quorum.forged.length} declared member
+              {quorum.forged.length === 1 ? "" : "s"} supplied a signature that does NOT verify
+              against this transaction:{" "}
+              {quorum.forged.map((h) => h.slice(0, 12) + "…").join(", ")}. Either they signed a
+              different draft, or the witness was altered in transit. Ask them to sign this
+              exact hash again — these are not counted toward the quorum.
+            </p>
           )}
+          {quorum.checks.some(
+            (c) => c.members.length === 0 && c.strangers.length === 0 && c.forged.length === 0,
+          ) && <p className="text-amber-300">One pasted witness carried no vkey at all.</p>}
         </section>
       )}
 

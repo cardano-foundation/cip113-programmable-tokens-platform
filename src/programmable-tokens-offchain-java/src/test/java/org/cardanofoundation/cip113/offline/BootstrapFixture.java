@@ -139,7 +139,22 @@ public final class BootstrapFixture {
         return ConstrPlutusData.of(0, BytesPlutusData.of(""));
     }
 
+    /**
+     * The bootstrap as it must now be built. See {@link #bootstrap(OfflineChain, boolean)}.
+     */
     public static Bootstrapped bootstrap(OfflineChain chain) throws Exception {
+        return bootstrap(chain, true);
+    }
+
+    /**
+     * @param activateUpgradeAuthority when false, the genesis omits the withdraw-0 from
+     *   `upgrade_cred` and is built exactly as alpha.4 built it. THE ONLY CALLER THAT MAY PASS
+     *   FALSE IS THE NEGATIVE CONTROL, which asserts the chain refuses it. It exists so that
+     *   "the alpha.5 genesis succeeds" is a claim with a falsifier: without it, the success
+     *   could be the check passing, or the check never running, and the two are
+     *   indistinguishable from a green test.
+     */
+    public static Bootstrapped bootstrap(OfflineChain chain, boolean activateUpgradeAuthority) throws Exception {
         var validators = protocolValidators();
         var protocolSeed = chain.seedAda("cip113-alpha4-protocol-seed", ADMIN.baseAddress(), 0, 200);
         var issuanceSeed = chain.seedAda("cip113-alpha4-issuance-seed", ADMIN.baseAddress(), 0, 200);
@@ -183,8 +198,13 @@ public final class BootstrapFixture {
         chain.withScripts(alwaysFail, upgradeMultisig, protocolParams, plb, issuanceCborHex, registry,
                 transfer, thirdParty, unfracking, plg, issuanceLogic);
 
+        // ⚑ The SCRIPT SUPPLIER is not optional since alpha.5. The genesis reads the multisig
+        // config UTxO as a reference input, and the builder resolves reference scripts through
+        // this supplier — without it the build dies with a bare
+        // "Cannot invoke ScriptSupplier.getScript because scriptSupplier is null", long before
+        // anything is evaluated, which names neither the reference input nor the reason.
         var quickTxBuilder = new QuickTxBuilder(chain.utxoSupplier(), chain.protocolParamsSupplier(),
-                chain.transactionProcessor());
+                chain.scriptSupplier(), chain.transactionProcessor());
 
         // Mutable upgrade authority config. The datum is MultisigScript::Signature(admin payment key).
         var adminPkh = new Address(ADMIN.baseAddress()).getPaymentCredentialHash().orElseThrow();
@@ -246,7 +266,36 @@ public final class BootstrapFixture {
                 .add(BigInteger.valueOf(1_999_999)).divide(BigInteger.valueOf(1_000_000))
                 .multiply(BigInteger.valueOf(1_000_000));
 
-        var stateTx = new Tx().collectFrom(List.of(protocolSeed, issuanceSeed))
+        // ---- alpha.5: the upgrade authority activates itself at genesis ----
+        //
+        // `protocol_params.mint` now demands a withdraw-0 from `upgrade_cred`, proving the
+        // authority the datum names can actually run and authorise BEFORE the params NFT
+        // exists. Three things are needed and each fails differently without the others:
+        //
+        //   - the withdrawal itself, which runs `upgrade_multisig.withdraw`;
+        //   - the config UTxO as a REFERENCE INPUT, because that handler finds its
+        //     MultisigScript tree among `self.reference_inputs` by the config NFT's policy;
+        //   - the admin in `extra_signatories`, because the tree here is Signature(admin)
+        //     and `addSigner` naming a key is not the same as a witness being present.
+        //
+        // ⚑ ONE VALUE IN THREE ROLES: `upgrade_multisig`'s script hash is the config NFT's
+        // policy id AND the withdraw-0 credential. There is deliberately no second constant.
+        //
+        // The redeemer is void: the handler binds `_redeemer: Data` and ignores it. It exists
+        // only because a script witness must have one.
+        var upgradeRewardAddress = AddressProvider.getRewardAddress(
+                Credential.fromScript(upgradeMultisig.getScriptHash()), NETWORK).getAddress();
+
+        var stateTx = new Tx().collectFrom(List.of(protocolSeed, issuanceSeed));
+        if (activateUpgradeAuthority) {
+            stateTx = stateTx
+                    .readFrom(multisigUtxo)
+                    .withdraw(upgradeRewardAddress, BigInteger.ZERO, ConstrPlutusData.of(0))
+                    // The witness for that withdrawal. Without it the builder has no script for
+                    // the reward credential and dies resolving one, before evaluation.
+                    .attachRewardValidator(upgradeMultisig);
+        }
+        stateTx = stateTx
                 .mintAsset(protocolParams, protocolParamNft, ConstrPlutusData.of(0))
                 .mintAsset(registry, registryNft, ConstrPlutusData.of(0))
                 .mintAsset(issuanceCborHex, issuanceNft, ConstrPlutusData.of(0))
@@ -262,6 +311,8 @@ public final class BootstrapFixture {
                 .withChangeAddress(ADMIN.baseAddress());
         var builtState = quickTxBuilder.compose(stateTx)
                 .withSigner(SignerProviders.signerFrom(ADMIN)).withTxEvaluator(chain.evaluator())
+                // Satisfies the Signature(admin) leaf of the tree in the config UTxO.
+                .withRequiredSigners(adminPkh)
                 .feePayer(ADMIN.baseAddress()).mergeOutputs(false).buildAndSign();
         var stateHash = TransactionUtil.getTxHash(builtState);
         var stateOutputs = chain.submit(builtState);

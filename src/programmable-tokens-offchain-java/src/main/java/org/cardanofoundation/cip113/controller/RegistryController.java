@@ -59,7 +59,13 @@ public class RegistryController {
      * @param policyId the token policy ID
      * @return the token configuration or 404 if not found
      */
-    @GetMapping("/token/{blacklistNodePolicyId}")
+    // ⛔ THE TEMPLATE NAME MUST MATCH THE PARAMETER. This said {blacklistNodePolicyId} while the
+    // parameter is policyId, and Spring resolves an unannotated @PathVariable by NAME — so the two
+    // never met and this endpoint could not serve a request at all. It went unnoticed because no
+    // client in this repository has ever called /registry/*; the registry page is the first.
+    // The old name was also wrong on its own terms: this takes a TOKEN policy id, and a blacklist
+    // node policy is a different value.
+    @GetMapping("/token/{policyId}")
     public ResponseEntity<RegistryNode> getTokenByPolicyId(@PathVariable String policyId) {
         log.debug("GET /token/{} - fetching token configuration", policyId);
         return registryService.getByKey(policyId)
@@ -74,7 +80,8 @@ public class RegistryController {
      * @param policyId the token policy ID
      * @return map with "registered" boolean
      */
-    @GetMapping("/is-registered/{blacklistNodePolicyId}")
+    // Same defect, same fix — see the note above.
+    @GetMapping("/is-registered/{policyId}")
     public ResponseEntity<Map<String, Boolean>> isTokenRegistered(@PathVariable String policyId) {
         log.debug("GET /is-registered/{} - checking if token is registered", policyId);
         boolean isRegistered = registryService.isTokenRegistered(policyId);

@@ -15,7 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
+import tomllib
 from urllib.parse import urlparse
 from urllib.request import urlopen
 from zipfile import ZipFile
@@ -28,8 +28,8 @@ RECEIPT = "cip171-rebuild-receipt.json"
 CORE_FUZZ = {
     "repository": "https://github.com/aiken-lang/fuzz",
     "commit": "06874926ec70747f3fc4e2b9364ee9e1393441cc",
-    "archive_sha256": "b8158eb84ec81114cfc5fa179927a82aafae64de41001e9767fdb02ceb8892d9",
-    "lock_etag": "9843473958e51725a9274b487d2d4aac0395ec1a2e30f090724fa737226bc127",
+    "archive_sha256": "650f07744dabe59935a655bdf50dc8962a3f05d65611b91bd825c6b3505db3a1",
+    "version": "v2.2.0",
 }
 
 
@@ -92,20 +92,22 @@ def verify_fuzz_archive(archive):
 
 
 def prepare_core_dependency(project):
-    # The pinned lock records a branch ETag, whose one-hour timestamp otherwise
-    # permits Aiken to fetch today's branch. Recover its original immutable ZIP.
+    # Aiken consumes this versioned cache entry. Verify the release archive's
+    # bytes and commit rather than trusting that a remote tag never moves.
     lock = project / "aiken.lock"
     original = lock.read_text()
-    pattern = (r'("aiken-lang/fuzz@main" = \[\{ secs_since_epoch = )\d+'
-               r'(, nanos_since_epoch = 305060000 \}, "' + CORE_FUZZ["lock_etag"] + r'"\])')
-    prepared, replacements = re.subn(pattern, lambda match: match[1] + str(int(time.time())) + match[2], original)
-    if replacements != 1:
-        raise ValueError("Core source lock does not identify the verified fuzz dependency")
+    manifest = tomllib.loads((project / "aiken.toml").read_text())
+    locked = tomllib.loads(original)
+    for records in (manifest.get("dependencies", []), locked.get("requirements", []), locked.get("packages", [])):
+        matches = [entry for entry in records if entry.get("name") == "aiken-lang/fuzz"]
+        if (len(matches) != 1 or matches[0].get("version") != CORE_FUZZ["version"]
+                or matches[0].get("source") != "github"):
+            raise ValueError("Core source manifest or lock does not identify the verified fuzz release")
     cache = aiken_package_cache()
     cache.mkdir(parents=True, exist_ok=True)
-    archive = cache / ("aiken-lang-fuzz-main@" + CORE_FUZZ["lock_etag"] + ".zip")
+    archive = cache / ("aiken-lang-fuzz-" + CORE_FUZZ["version"] + ".zip")
     if not archive.exists():
-        url = "https://codeload.github.com/aiken-lang/fuzz/legacy.zip/" + CORE_FUZZ["commit"]
+        url = "https://codeload.github.com/aiken-lang/fuzz/legacy.zip/" + CORE_FUZZ["version"]
         with tempfile.NamedTemporaryFile(dir=cache, prefix=".cip171-fuzz-", delete=False) as output:
             temporary = Path(output.name)
             try:
@@ -122,8 +124,7 @@ def prepare_core_dependency(project):
         finally:
             temporary.unlink(missing_ok=True)
     verify_fuzz_archive(archive)
-    lock.write_text(prepared)
-    return prepared
+    return original
 
 
 def rebuild(pin, resources, workspace):
@@ -144,7 +145,7 @@ def rebuild(pin, resources, workspace):
     project = contained_path(checkout, pin["source_path"])
     if not (project / "aiken.toml").is_file():
         raise ValueError(f"Missing Aiken project: {name}")
-    prepared_lock = prepare_core_dependency(project) if name == "cip113-core" else None
+    original_lock = prepare_core_dependency(project) if name == "cip113-core" else None
     # A committed blueprint can be stale. Only a fresh compiler output counts.
     artifact = project / "plutus.json"
     artifact.unlink(missing_ok=True)
@@ -154,10 +155,10 @@ def rebuild(pin, resources, workspace):
     run(*command, cwd=project)
     expected_artifact = str(artifact.relative_to(checkout))
     permitted_changes = {expected_artifact}
-    if prepared_lock is not None:
-        if (project / "aiken.lock").read_text() != prepared_lock:
-            raise ValueError(f"Build changed the recovered dependency lock: {name}")
-        permitted_changes.add(str((project / "aiken.lock").relative_to(checkout)))
+    if original_lock is not None:
+        if (project / "aiken.lock").read_text() != original_lock:
+            raise ValueError(f"Build changed the pinned dependency lock: {name}")
+        verify_fuzz_archive(aiken_package_cache() / ("aiken-lang-fuzz-" + CORE_FUZZ["version"] + ".zip"))
     changes = run("git", "diff", "--name-only", "HEAD", cwd=checkout).splitlines()
     if any(path not in permitted_changes for path in changes):
         raise ValueError(f"Build changed pinned source or dependency lock: {name}: {changes}")

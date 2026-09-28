@@ -26,13 +26,23 @@ import { buildBootstrapRecord } from "@/lib/deployment/record";
 import { useWallet } from "@/contexts/wallet-context";
 import {
   planDeployment,
+  assembleDeploymentParams,
   previousBlockOf,
   deployerCanAuthorise,
   findWalletSeeds,
   prepareSeedUtxos,
-  type DeploymentPlan,
+  awaitMultisigConfigUtxo,
+  buildProtocolGenesis,
+  buildReferenceScripts,
+  type CeremonyPlan,
 } from "@/lib/deployment/deploy";
+import { EvoAddress } from "@easy1staking/cip113-sdk-ts";
+import { MiningPanel } from "@/components/mining/mining-panel";
+import { spliceMinedBody } from "@/lib/mining/locate";
 import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
+import { CosignaturePanel, type CosignatureState } from "@/components/deployment/cosignature-panel";
+import { SdkRecordDownload } from "@/components/deployment/sdk-record-download";
+import { assembleUpgradeTx } from "@/lib/upgrade/witness";
 import { waitForTxConfirmation } from "@/lib/utils/tx-confirmation";
 import { buildSyncStart } from "@/lib/deployment/record";
 import {
@@ -69,6 +79,13 @@ export default function BootstrapProtocolPage() {
   const [multisigSeed, setMultisigSeed] = useState<TxInputForm>(EMPTY);
   const [nonce, setNonce] = useState("");
   const [maxInline, setMaxInline] = useState("1024");
+  /**
+   * Whether the dispatcher permits unfracking. Default: yes.
+   *
+   * ⛔ THIS IS BAKED INTO THE DISPATCHER'S HASH AND CANNOT BE CHANGED AFTERWARDS without deploying
+   * a replacement dispatcher and a protocol upgrade. It is a deployment choice, not a setting.
+   */
+  const [unfrackingEnabled, setUnfrackingEnabled] = useState(true);
   const [membersText, setMembersText] = useState("");
   const [threshold, setThreshold] = useState("1");
 
@@ -76,6 +93,10 @@ export default function BootstrapProtocolPage() {
   const [error, setError] = useState<string | null>(null);
   const [derived, setDerived] = useState<DerivedCoreDeployment | null>(null);
   const [multisig, setMultisig] = useState<ResolvedMultisig | null>(null);
+  // Signatures from the declared participants over the upgrade-multisig transaction.
+  // Every member must sign — see CosignaturePanel for why that is stricter than the
+  // on-chain threshold on purpose.
+  const [cosign, setCosign] = useState<CosignatureState>({ witnesses: [], complete: false });
   const [pin, setPin] = useState<UpstreamPin | null>(null);
   const [blueprintSha, setBlueprintSha] = useState<string | null>(null);
 
@@ -85,7 +106,7 @@ export default function BootstrapProtocolPage() {
 
   const wallet = useWallet();
   const [planning, setPlanning] = useState(false);
-  const [planned, setPlanned] = useState<DeploymentPlan | null>(null);
+  const [planned, setPlanned] = useState<CeremonyPlan | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<{ label: string; txHash: string }[] | null>(null);
@@ -99,6 +120,12 @@ export default function BootstrapProtocolPage() {
   /** Set when the deploying wallet is NOT among the upgrade signers — see below. */
   const [cannotAuthorise, setCannotAuthorise] = useState(false);
   const [acceptedNoAuthority, setAcceptedNoAuthority] = useState(false);
+  /**
+   * Whether to add the ~1 ADA output a search needs. BUILD-TIME: the output has to exist before
+   * the body is built, so this cannot be turned on after planning.
+   */
+  const [mineable, setMineable] = useState(false);
+  const [mined, setMined] = useState<{ txHash: string; nonce: number } | null>(null);
 
   /**
    * Seeds are READ FROM THE WALLET and locked, not typed.
@@ -217,6 +244,7 @@ export default function BootstrapProtocolPage() {
         },
         alwaysFailNonce: nonce.trim() || undefined,
         maxInlineDatumBytes: Number(maxInline),
+        unfrackingEnabled,
       });
       setDerived(result);
       setStage("derived");
@@ -224,7 +252,7 @@ export default function BootstrapProtocolPage() {
       setError((e as Error).message);
       setStage("error");
     }
-  }, [memberEntries, threshold, paramsSeed, issuanceSeed, multisigSeed, nonce, maxInline]);
+  }, [memberEntries, threshold, paramsSeed, issuanceSeed, multisigSeed, nonce, maxInline, unfrackingEnabled]);
 
   const cip171 = useMemo(() => {
     if (!derived || !pin) return null;
@@ -284,6 +312,36 @@ export default function BootstrapProtocolPage() {
       setVerification({ ok: false, checks: [], mismatches: [], error: (e as Error).message });
     }
   }, [pastedDeployment, loadBlueprint]);
+
+  // The SDK-shaped download is derived from the SAME record the platform download
+  // emits — one deployment must not be able to produce two artefacts that disagree.
+  const verifiedEntry = useMemo(() => {
+    if (!verifiedParams || !verification?.ok) return null;
+    try {
+      return toBootstrapRecord(verifiedParams, verification)[0] ?? null;
+    } catch {
+      return null;
+    }
+  }, [verifiedParams, verification]);
+
+  /**
+   * The assembled record — and it CANNOT exist before phase two.
+   *
+   * `DeploymentParams` names the genesis hash, the reference-script hash and the config
+   * UTxO's outref. All three are observations of transactions that have been submitted, so
+   * there is nothing honest to emit until they have.
+   */
+  const [deployedParams, setDeployedParams] = useState<Record<string, unknown> | null>(null);
+
+  const deployedEntry = useMemo(() => {
+    if (!planned?.verification.ok || !deployComplete) return null;
+    try {
+      if (!deployedParams) return null;
+      return toBootstrapRecord(deployedParams, planned.verification)[0] ?? null;
+    } catch {
+      return null;
+    }
+  }, [planned, deployComplete, deployedParams]);
 
   const downloadVerifiedRecord = useCallback(() => {
     if (!verifiedParams || !verification) return;
@@ -353,7 +411,10 @@ export default function BootstrapProtocolPage() {
         multisig: ms,
         maxInlineDatumBytes: Number(maxInline),
         alwaysFailNonce: nonce.trim(),
+        unfrackingEnabled,
+        mineable,
       });
+      setMined(null);
       setPlanned(result);
     } catch (e) {
       setPlanError((e as Error).message);
@@ -371,50 +432,140 @@ export default function BootstrapProtocolPage() {
     paramsSeed,
     issuanceSeed,
     multisigSeed,
+    unfrackingEnabled,
+    mineable,
   ]);
 
-  const submitDeploy = useCallback(async () => {
-    if (!planned || !planned.verification.ok) return;
+  // ---- THE CEREMONY, IN TWO PHASES --------------------------------------------------
+  //
+  // ⛔ THE SPLIT IS FORCED, NOT CHOSEN. alpha.5's `protocol_params.mint` demands a withdraw-0
+  // from `upgrade_cred`, whose handler finds its authority tree in the upgrade-multisig CONFIG
+  // UTXO among the transaction's reference inputs. That UTxO is an output of the multisig
+  // genesis, and a reference input must exist at submission — so the genesis cannot be built
+  // or submitted until the multisig genesis is on chain.
+  //
+  // Phase one is the deployer alone and SPENDS THE ONE-SHOT SEEDS. Phase two needs every
+  // declared participant and happens with people waiting.
+
+  /** The three seed UTxOs as objects, resolved when the operator supplied them. */
+  const [seedUtxos, setSeedUtxos] = useState<{
+    protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown;
+  } | null>(null);
+
+  /** Set once phase one lands. Read back off the chain and vetted, never reconstructed. */
+  const [configUtxo, setConfigUtxo] = useState<unknown | null>(null);
+  /** The genesis, frozen. Built only after the config UTxO exists; this is what gets signed. */
+  const [genesisStep, setGenesisStep] = useState<{ label: string; unsignedCbor: string } | null>(
+    null,
+  );
+  const [phaseOneDone, setPhaseOneDone] = useState(false);
+
+  const submitPhaseOne = useCallback(async () => {
+    if (!planned || !planned.verification.ok || phaseOneDone) return;
     setPlanError(null);
-    const phaseText = (p: MultiTxPhase) =>
-      p.phase === "signing"
-        ? "Waiting for signatures — every transaction is signed before any is submitted."
-        : `${p.phase} ${p.label}`;
     try {
-      const result = await signAndSubmitSequence(wallet.wallet, planned.plan.steps, {
-        onPhase: (p) => setProgress(phaseText(p)),
+      const result = await signAndSubmitSequence(wallet.wallet, planned.phaseOne, {
+        onPhase: (p: MultiTxPhase) =>
+          setProgress(p.phase === "signing" ? "Waiting for your signature…" : `${p.phase} ${p.label}`),
         waitForConfirmation: (txHash) => waitForTxConfirmation(txHash),
       });
       setSubmitted(result.submitted);
-      setDeployComplete(result.submitted.length === planned.plan.steps.length);
+      setPhaseOneDone(result.submitted.length === planned.phaseOne.length);
+
+      // ⚑ POLLS FOR THE UTXO, NOT THE TRANSACTION. We must wait either way; querying the
+      // multisig address and filtering by the config NFT's policy answers both "has it
+      // confirmed" and "which UTxO is it" in one mechanism, and is self-verifying where a
+      // predicted output index is not.
+      setProgress("Waiting for the upgrade-multisig config UTxO to appear on chain…");
+      const utxo = await awaitMultisigConfigUtxo({
+        plan: planned.plan,
+        expectedTree: multisig?.tree as never,
+        utxosAt: async (address: string) =>
+          (await (
+            planned.ctx.client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
+          ).getUtxos(EvoAddress.fromBech32(address))) as readonly unknown[],
+        onAttempt: (n: number) => setProgress(`Waiting for the config UTxO on chain (check ${n})…`),
+      });
+      setConfigUtxo(utxo);
+
+      setProgress("Building the protocol genesis…");
+      const genesis = await buildProtocolGenesis({
+        ctx: planned.ctx,
+        plan: planned.plan,
+        protocolParamsSeedUtxo: seedUtxos?.protocolParams as never,
+        issuanceSeedUtxo: seedUtxos?.issuance as never,
+        upgradeMultisigConfigUtxo: utxo as never,
+        upgradeAuthoritySigners: (multisig?.members ?? []).map((m) => m.keyHash) as never,
+      });
+      setGenesisStep(genesis);
       setProgress(null);
-      // The indexer has to start BEFORE the genesis, so resolve it from the chain rather than
-      // asking the operator to work it out.
-      try {
-        setSyncStart(
-          buildSyncStart(await previousBlockOf(network, planned.plan.deployment.txHash)),
+    } catch (e) {
+      setProgress(null);
+      setPlanError(
+        e instanceof MultiTxError
+          ? e.message
+          : `Phase one failed: ${(e as Error).message}`,
+      );
+    }
+  }, [planned, wallet, phaseOneDone, multisig, seedUtxos]);
+
+  const submitPhaseTwo = useCallback(async () => {
+    if (!planned || !genesisStep || !cosign.complete) return;
+    setPlanError(null);
+    try {
+      // Merge the participants' witnesses into the genesis BEFORE the deployer signs.
+      // `assembleUpgradeTx` splices without re-encoding the body, and the wallet's own
+      // signature is merged on top by the same assembler — so every signature commits to the
+      // identical bytes each participant verified against.
+      const signedGenesis = {
+        ...genesisStep,
+        unsignedCbor: assembleUpgradeTx(genesisStep.unsignedCbor, cosign.witnesses),
+      };
+      setProgress("Building the reference-script transaction…");
+      const refScripts = await buildReferenceScripts({
+        ctx: planned.ctx,
+        plan: planned.plan,
+        referenceScriptAddress: planned.ctx.changeAddress,
+        referenceScriptLovelace: 20_000_000n as never,
+      });
+
+      const result = await signAndSubmitSequence(wallet.wallet, [signedGenesis, refScripts], {
+        onPhase: (p: MultiTxPhase) =>
+          setProgress(p.phase === "signing" ? "Waiting for your signature…" : `${p.phase} ${p.label}`),
+        waitForConfirmation: (txHash) => waitForTxConfirmation(txHash),
+      });
+      const all = [...(submitted ?? []), ...result.submitted];
+      setSubmitted(all);
+      setDeployComplete(result.submitted.length === 2);
+      setProgress(null);
+
+      const genesisHash = result.submitted[0]?.txHash;
+      const refHash = result.submitted[1]?.txHash;
+      if (genesisHash && refHash && configUtxo) {
+        setDeployedParams(
+          assembleDeploymentParams(planned.plan, {
+            protocolGenesisTxHash: genesisHash,
+            referenceScriptsTxHash: refHash,
+            multisigConfigUtxo: configUtxo,
+          } as never) as unknown as Record<string, unknown>,
         );
-      } catch (e) {
-        setPlanError(
-          `Deployed, but the sync-start block could not be resolved: ${(e as Error).message}`,
-        );
+      }
+      if (genesisHash) {
+        try {
+          setSyncStart(buildSyncStart(await previousBlockOf(network, genesisHash)));
+        } catch (e) {
+          setPlanError(
+            `Deployed, but the sync-start block could not be resolved: ${(e as Error).message}`,
+          );
+        }
       }
     } catch (e) {
       setProgress(null);
-      if (e instanceof MultiTxError) {
-        setSubmitted(e.result.submitted);
-        setPlanError(
-          `${e.message} — ${e.result.submitted.length} transaction(s) ARE on chain and cannot ` +
-            `be unwound; ${e.result.unsubmitted.join(", ") || "none"} never left. ` +
-            `This page cannot resume: the seeds this plan derives from are spent, so pressing ` +
-            `"Build and verify" again derives a DIFFERENT protocol rather than continuing this ` +
-            `one. Record the hashes above before leaving.`,
-        );
-      } else {
-        setPlanError((e as Error).message);
-      }
+      setPlanError(
+        e instanceof MultiTxError ? e.message : `Phase two failed: ${(e as Error).message}`,
+      );
     }
-  }, [planned, wallet, network]);
+  }, [planned, genesisStep, cosign, wallet, network, submitted, configUtxo]);
 
   const downloadDeployedRecord = useCallback(() => {
     if (!planned?.verification.ok) return;
@@ -424,17 +575,15 @@ export default function BootstrapProtocolPage() {
     // plan, and it would still VERIFY, because verification is derivation from the blueprint
     // and knows nothing about what was submitted. The platform indexes against this file.
     if (!deployComplete) return;
-    const record = toBootstrapRecord(
-      planned.plan.deployment as unknown as Record<string, unknown>,
-      planned.verification,
-    );
+    if (!deployedParams) return;
+    const record = toBootstrapRecord(deployedParams, planned.verification);
     const blob = new Blob([JSON.stringify(record, null, 2)], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `protocol-bootstraps-${network}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-  }, [planned, network, deployComplete]);
+  }, [planned, network, deployComplete, deployedParams]);
 
   const downloadRecord = useCallback(() => {
     if (!derived) return;
@@ -595,12 +744,19 @@ export default function BootstrapProtocolPage() {
           Payment key hashes or bech32 addresses, one per line. An address is reduced to its
           payment credential; a script credential is refused, because a script cannot sign.
         </p>
+        <p className="text-xs text-accent-300">
+          Ask participants for an ADDRESS, not a key hash. A bech32 address carries a checksum,
+          so a character mistyped or mangled on the way here is rejected the moment you paste
+          it. A key hash has none — every wrong one is 56 valid-looking characters, and the
+          mistake survives to the signing round, where the member list is already on chain and
+          the fix costs the whole ceremony.
+        </p>
         <textarea
           id="multisig-members"
           rows={6}
           spellCheck={false}
           className={`w-full ${FIELD}`}
-          placeholder={"addr_test1...\n32e7e00eae28502a2aa271cf4202b1b01b94ca8efe642e380c93d5e2"}
+          placeholder={"addr_test1... (preferred — checksummed)\naddr_test1..."}
           value={membersText}
           onChange={(e) => setMembersText(e.target.value)}
         />
@@ -637,7 +793,10 @@ export default function BootstrapProtocolPage() {
               onChange={(e) => setNonce(e.target.value)}
             />
           </label>
-          <label className="flex items-center gap-2">
+        </div>
+
+        <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
+          <label className="flex items-center gap-2 text-sm text-dark-200">
             <span>max inline datum bytes</span>
             <input
               type="number"
@@ -647,6 +806,52 @@ export default function BootstrapProtocolPage() {
               onChange={(e) => setMaxInline(e.target.value)}
             />
           </label>
+          <p className="text-xs text-dark-400">
+            Compiled into <code>transfer</code>, <code>third_party</code>, <code>unfracking</code>{" "}
+            and <code>issuance_logic</code>, so it is part of all four script hashes. Changing it
+            later means redeploying those four and upgrading the protocol — a deployment choice,
+            not a setting.
+          </p>
+          <p className="text-xs text-accent-300">
+            1024 is the agreed starting point, not a derived one. Upstream ships no guidance for
+            this parameter and the SDK&apos;s own constant calls 1024 &ldquo;what upstream&apos;s
+            test fixtures use&rdquo; and explicitly not a recommendation — so it is a deliberate
+            provisional choice rather than a cost model, and worth revisiting when one exists.
+            Change it here before deploying if you have a better number; it cannot be changed
+            afterwards.
+          </p>
+        </div>
+
+        <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
+          <label className="flex items-start gap-2 text-sm text-dark-200">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={unfrackingEnabled}
+              onChange={(e) => setUnfrackingEnabled(e.target.checked)}
+            />
+            <span>
+              Permit unfracking
+              <span className="ml-2 font-mono text-[0.68rem] uppercase tracking-wider text-dark-400">
+                {unfrackingEnabled ? "enabled" : "disabled — sentinel"}
+              </span>
+            </span>
+          </label>
+          <p className="text-xs text-dark-400">
+            The unfracking validator is built, deployed, registered and published either way. This
+            changes only the hash <code>programmable_logic_global</code> is compiled against: the
+            real script hash, or a 28-byte sentinel no script can hash to. With the sentinel the
+            dispatcher&apos;s unfracking arm can never be satisfied, and the deployment records
+            both values because neither implies the other.
+          </p>
+          {!unfrackingEnabled && (
+            <p className="text-xs text-accent-300">
+              Baked into the dispatcher&apos;s hash and not changeable by configuration afterwards.
+              Enabling it later means compiling a replacement dispatcher, publishing it as a
+              reference script, and a protocol upgrade repointing <code>plg_cred</code> — no new
+              unfracking deployment and no token reissued, but an upgrade rather than a switch.
+            </p>
+          )}
         </div>
       </section>
 
@@ -684,6 +889,24 @@ export default function BootstrapProtocolPage() {
                 </div>
               ))}
           </dl>
+
+          {/* The two unfracking values, explained where they are shown — they look like a
+              duplicate until you know one is the script and the other is what the dispatcher was
+              compiled against. */}
+          <p className="text-xs text-dark-400">
+            <code>unfracking</code> is the validator this deployment publishes.{" "}
+            <code>unfrackingParameter</code> is the hash{" "}
+            <code>programmableLogicGlobal</code> was compiled against —{" "}
+            {derived.unfrackingParameter === derived.unfracking ? (
+              <>the same value, so unfracking is permitted.</>
+            ) : (
+              <>
+                the disabled sentinel, so unfracking can never be invoked. The validator is still
+                deployed, registered and published; only the dispatcher refuses it.
+              </>
+            )}{" "}
+            Both are recorded because neither can be derived from the other.
+          </p>
 
           {multisig && (
             <p className="text-xs text-dark-300">
@@ -733,6 +956,30 @@ export default function BootstrapProtocolPage() {
           not the nonce, and it cannot be recovered from the record afterwards.
         </p>
 
+        <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
+          <label className="flex items-start gap-2 text-sm text-dark-200">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={mineable}
+              onChange={(e) => setMineable(e.target.checked)}
+              disabled={planning || !!planned}
+            />
+            <span>Mine a low hash for the reference-script transaction</span>
+          </label>
+          <p className="text-xs text-dark-400">
+            Its outputs are the seven published reference scripts, which every future protocol
+            operation reads — a low transaction hash makes them sort early in those transactions,
+            keeping the indices that point at them predictable. It is the last transaction of the
+            plan precisely so its hash can move without invalidating anything built after it.
+          </p>
+          <p className="text-xs text-dark-400">
+            Adds one extra output of about 1 ADA back to your own address, which a search
+            increments one lovelace at a time. That output has to exist before the transaction is
+            built, so this cannot be turned on after planning.
+          </p>
+        </div>
+
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
@@ -755,26 +1002,14 @@ export default function BootstrapProtocolPage() {
 
         {planned && (
           <div className="space-y-3">
-            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
-              <dt className="text-dark-400">Total cost</dt>
-              <dd className="text-white">
-                {(Number(planned.plan.totalCostLovelace) / 1_000_000).toFixed(6)} ADA — outputs,
-                deposits and fees, measured from the wallet balance rather than estimated
-              </dd>
-              <dt className="text-dark-400">Wallet balance</dt>
-              <dd className="text-white">
-                {(Number(planned.plan.walletBalanceLovelace) / 1_000_000).toFixed(6)} ADA
-              </dd>
-              <dt className="text-dark-400">Nominee stake key</dt>
-              <dd className="text-white">
-                {planned.plan.nomineeAlreadyRegistered
-                  ? "already registered — step 5 delegates only"
-                  : "not registered — step 5 registers and delegates"}
-              </dd>
-            </dl>
+            <p className="text-xs text-dark-400">
+              Phase one is yours alone and spends the three one-shot seeds. Phase two needs a
+              signature from every declared participant and is built only once phase one has
+              confirmed on chain — the genesis references a UTxO that does not exist until then.
+            </p>
 
             <ol className="space-y-1 font-mono text-xs text-dark-300">
-              {planned.plan.steps.map((s) => (
+              {planned.phaseOne.map((s) => (
                 <li key={s.label}>
                   {s.label} — {s.unsignedCbor.length / 2} bytes
                 </li>
@@ -824,21 +1059,81 @@ export default function BootstrapProtocolPage() {
               </div>
             )}
 
+            {/* The mining panel lived here. Mining is not wired into the ceremony (T-058
+                dropped): it was only ever safe on the LAST transaction, whose hash nothing is
+                chained onto, and where it belongs under alpha.5 is an open question upstream.
+                `lib/mining/` and /ops/mine-check are untouched and ready to re-wire. */}
+
             {progress && <p className="text-xs text-amber-200">{progress}</p>}
 
-            <button
-              type="button"
-              onClick={submitDeploy}
-              disabled={
-                !planned.verification.ok ||
-                !!progress ||
-                deployComplete ||
-                (cannotAuthorise && !acceptedNoAuthority)
-              }
-              className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
-            >
-              Sign all six and submit
-            </button>
+            {/* ---- PHASE ONE: the deployer alone ---- */}
+            {!phaseOneDone && (
+              <>
+                <button
+                  type="button"
+                  onClick={submitPhaseOne}
+                  disabled={
+                    !planned.verification.ok ||
+                    !!progress ||
+                    (cannotAuthorise && !acceptedNoAuthority)
+                  }
+                  className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
+                >
+                  Submit phase one (seed, multisig, registrations)
+                </button>
+                <p className="text-xs text-dark-400">
+                  Three transactions, signed by you. They spend the seed UTxOs, so from here the
+                  deployment cannot be rebuilt from the same inputs.
+                </p>
+              </>
+            )}
+
+            {/* T-059: quiet, once, and accurate in BOTH directions. The genesis and the
+                witnesses are circulated by paste and survive a lost tab; what does not is the
+                plan, which is the record both repositories need. */}
+            {phaseOneDone && !deployComplete && (
+              <p className="rounded border border-dark-700 bg-dark-950 p-2 text-xs text-dark-300">
+                Keep this tab open. The transactions already submitted cannot be undone and
+                their seed UTxOs are spent — and while the deployment record can be rebuilt from
+                the genesis hex you circulate, the plan behind it only lives here.
+              </p>
+            )}
+
+            {/* ---- BETWEEN: waiting for the config UTxO, then the frozen genesis ---- */}
+            {phaseOneDone && !genesisStep && (
+              <p className="text-xs text-amber-200">
+                Phase one is on chain. Building the genesis once the upgrade-multisig config
+                UTxO is visible — it is a reference input, so it must exist before the genesis
+                can be built or submitted.
+              </p>
+            )}
+
+            {/* ---- PHASE TWO: the ceremony ---- */}
+            {genesisStep && multisig && (
+              <>
+                <CosignaturePanel
+                  unsignedCbor={genesisStep.unsignedCbor}
+                  memberKeyHashes={multisig.members.map((m) => m.keyHash)}
+                  onChange={setCosign}
+                />
+                <button
+                  type="button"
+                  onClick={submitPhaseTwo}
+                  disabled={!!progress || deployComplete || !cosign.complete}
+                  className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
+                >
+                  Submit the genesis and publish the reference scripts
+                </button>
+                {!cosign.complete && (
+                  <p className="text-xs text-dark-400">
+                    Waiting on participant signatures. Every declared member must sign the
+                    PROTOCOL GENESIS — it carries the withdraw-0 whose authority tree they are —
+                    and there is no override: an unproven key recorded as an authority is what
+                    this step exists to prevent.
+                  </p>
+                )}
+              </>
+            )}
           </div>
         )}
 
@@ -861,13 +1156,18 @@ export default function BootstrapProtocolPage() {
               </p>
             )}
             {deployComplete ? (
-              <button
-                type="button"
-                onClick={downloadDeployedRecord}
-                className="rounded border border-green-700 px-3 py-1.5 text-xs text-green-200"
-              >
-                Download bootstrap record
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={downloadDeployedRecord}
+                  className="rounded border border-green-700 px-3 py-1.5 text-xs text-green-200"
+                >
+                  Download bootstrap record
+                </button>
+                {deployedEntry && (
+                  <SdkRecordDownload entry={deployedEntry} network={network} />
+                )}
+              </>
             ) : (
               <p className="rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-200">
                 Partial deployment — no bootstrap record is offered. The record would name
@@ -944,6 +1244,9 @@ export default function BootstrapProtocolPage() {
                 >
                   Download bootstrap record
                 </button>
+                {verifiedEntry && (
+                  <SdkRecordDownload entry={verifiedEntry} network={network} />
+                )}
               </>
             ) : (
               <p className="text-xs text-red-300">

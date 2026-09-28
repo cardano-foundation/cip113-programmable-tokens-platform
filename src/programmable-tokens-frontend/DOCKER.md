@@ -38,7 +38,7 @@ Copy `.env.docker.example` to `.env.docker` and set the Blockfrost key and
 `NEXT_PUBLIC_API_BASE_URL_<NETWORK>` for each network you build. The example file
 also defines optional `NEXT_PUBLIC_BASE_URL_<NETWORK>` values. Run
 `./build-docker.sh preview`, `preprod`, `mainnet`, or `all` to build images tagged
-`easy1staking/cip113-frontend:<git-tag>-<network>` and `:<network>`.
+`cardanofoundation/cip113-frontend:<git-tag>-<network>` and `:<network>`.
 
 **Current script behavior:** `build-docker.sh` passes `--push` to `docker build`
 even without its optional `--push` argument. It therefore requires a configured
@@ -64,7 +64,7 @@ a new image for a different backend, Blockfrost key, or network.
 
 The frontend's `docker-compose.yml` defines preview on host port 3000 and optional
 preprod and mainnet profiles on ports 3001 and 3002. It runs prebuilt
-`easy1staking/cip113-frontend` images; it does not build them or use the
+`cardanofoundation/cip113-frontend` images; it does not build them or use the
 `cardanofoundation` images from CI. For an image you built locally with that
 tag, run:
 

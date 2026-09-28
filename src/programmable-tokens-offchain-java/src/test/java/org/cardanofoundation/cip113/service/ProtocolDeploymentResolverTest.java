@@ -1,6 +1,7 @@
 package org.cardanofoundation.cip113.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.entity.ProtocolParamsEntity;
@@ -23,14 +24,38 @@ class ProtocolDeploymentResolverTest {
             "8314e59f3e240ba89fb7f7037cf3094307132ede0ac3a1d2515a09a9cc333bc8";
     private static ProtocolBootstrapParams deployment;
 
+    /**
+     * ⚑ READS src/test/resources/protocol-bootstraps-preview.json, WHICH SHADOWS THE SHIPPED
+     * ONE. The shipped records are empty arrays: alpha.5 abandoned the alpha.4 instance and no
+     * replacement is deployed yet, so every test that needs a real recorded generation broke
+     * silently when they were emptied — this class among them, and nobody noticed because the
+     * offline set was being run by name.
+     *
+     * The test resource is that alpha.4 record, preserved. The resolver under test is
+     * version-agnostic — it decides WHICH recorded generation answers a query — so a real
+     * generation is exactly the right input, and pinning it here means this stops breaking
+     * every time the deployed protocol changes.
+     */
     @BeforeAll
     static void loadCommittedRecord() throws Exception {
         var stream = ProtocolDeploymentResolverTest.class.getClassLoader()
                 .getResourceAsStream("protocol-bootstraps-preview.json");
-        List<ProtocolBootstrapParams> records = new ObjectMapper().readValue(stream, new TypeReference<>() {});
+        List<ProtocolBootstrapParams> records = laxMapper().readValue(stream, new TypeReference<>() {});
         assertEquals(1, records.size(), "latest-only configuration must expose one contract generation");
         deployment = records.getFirst();
         assertEquals(DEPLOYMENT_TX, deployment.txHash());
+    }
+
+    /**
+     * ⛔ MATCHES SPRING'S MAPPER, not Jackson's default. Spring Boot disables
+     * FAIL_ON_UNKNOWN_PROPERTIES; a bare `new ObjectMapper()` does not. A record carrying a
+     * field this build's model does not know — `unfrackingParameter`, added when the dispatcher
+     * began recording what it was compiled against — parses fine in the running application and
+     * threw here. A test stricter than production fails on inputs production accepts, which is
+     * a false alarm rather than a finding.
+     */
+    private static ObjectMapper laxMapper() {
+        return new ObjectMapper().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     }
 
     private static ProtocolParamsEntity version(String txHash, String registryPolicy, String plb) {
@@ -62,7 +87,7 @@ class ProtocolDeploymentResolverTest {
     }
 
     private static ProtocolDeploymentResolver resolverOver(List<ProtocolParamsEntity> indexed) throws Exception {
-        var bootstrapService = new ProtocolBootstrapService(new ObjectMapper(), new AppConfig.Network("preview"));
+        var bootstrapService = new ProtocolBootstrapService(laxMapper(), new AppConfig.Network("preview"));
         bootstrapService.init();
         var repo = Mockito.mock(ProtocolParamsRepository.class);
         Mockito.when(repo.findAllByOrderBySlotAsc()).thenReturn(indexed);

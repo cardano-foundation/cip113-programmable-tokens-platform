@@ -53,7 +53,10 @@ export function buildBootstrapRecord(input: BootstrapRecordInput): Record<string
     transfer: { scriptHash: d.transfer },
     thirdParty: { scriptHash: d.thirdParty },
     unfracking: { scriptHash: d.unfracking },
-    programmableLogicGlobal: { scriptHash: d.programmableLogicGlobal },
+    programmableLogicGlobal: {
+      scriptHash: d.programmableLogicGlobal,
+      unfrackingParameter: d.unfrackingParameter,
+    },
     maxInlineDatumBytes: input.maxInlineDatumBytes,
     issuanceLogic: { scriptHash: d.issuanceLogic },
     upgradeMultisig: {

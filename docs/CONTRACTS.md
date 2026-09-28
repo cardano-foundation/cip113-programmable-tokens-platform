@@ -65,14 +65,14 @@ and rwa-token; `v1.1.21+42babe5` for the four first-party modules).
 
 ```bash
 git clone https://github.com/cardano-foundation/cip113-programmable-tokens /tmp/cip113
-cd /tmp/cip113 && git checkout 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4
+cd /tmp/cip113 && git checkout 6b75ba3286b4692ca23059ff51285db357fb09c6
 
 # our bytes ARE upstream's committed bytes
 shasum -a 256 plutus.json
-# -> 5ff5d6d2990d815973e4edcf6d46e7c3d0ff4bf3cb7c17a3e672e091b7ea0b46
+# -> b6c8cb096a15e02f1b9c719fb8c617b624c1aa7719f2258d45faa3e8f144e7b9
 
-# The core's aiken-lang/fuzz dependency is declared as moving `main`; run the
-# repository verifier below to restore its original archive before building.
+# The core pins aiken-lang/fuzz v2.2.0. The repository verifier below also
+# verifies the release archive's checksum and source commit before building.
 ```
 
 ### rwa-token — a rebuild, not upstream's file
@@ -95,15 +95,17 @@ aiken build
 shasum -a 256 plutus.json     # the rebuild we ship:   2f1f1799…
 ```
 
-For a release check, run `python3 scripts/verify-cip171-sources.py` from this
-repository. It checks out both exact commits, restores the core's original
-`aiken-lang/fuzz` archive (`06874926ec70747f3fc4e2b9364ee9e1393441cc`),
+For a release check, run `python3 scripts/verify-cip171-sources.py` with Python
+3.11 or later from this repository. It checks out both exact commits and verifies
+the core's `aiken-lang/fuzz` v2.2.0 archive (`06874926ec70747f3fc4e2b9364ee9e1393441cc`),
 uses Aiken `v1.1.23+8949565`, and compares both rebuilt blueprint hashes with
-the shipped resources and the checked-in CIP-171 rebuild receipt. The original
+the shipped resources and the checked-in CIP-171 rebuild receipt. The release
 dependency archive has SHA-256
-`b8158eb84ec81114cfc5fa179927a82aafae64de41001e9767fdb02ceb8892d9`.
-The core's floating dependency means a plain future `aiken build` may resolve
-a different version; an external verifier also needs this pinned archive.
+`650f07744dabe59935a655bdf50dc8962a3f05d65611b91bd825c6b3505db3a1`.
+The verifier checks both source dependency declarations and the lock, places the
+verified archive in Aiken's versioned package cache, and requires the lock to stay
+unchanged during the build. An external verifier should check this archive too,
+because a version tag alone does not guarantee immutable content.
 
 `contracts-pin.json` records `upstream_committed_sha256` alongside ours, so it stays possible
 to tell whether upstream has since regenerated. If `301b2d9f…` ever changes, check whether
@@ -116,7 +118,11 @@ their blueprint now reproduces — and if it does, drop the exception and ship t
 2. Copy it over the resource file.
 3. Update that blueprint's entry in `contracts-pin.json`: `commit`, `commit_date`, `sha256`,
    `aiken_compiler`, and `upstream_version` if it moved.
-4. Run the tests. Two will speak up, and they mean different things:
+4. Regenerate the CIP-171 receipt with `python3 scripts/verify-cip171-sources.py --write`.
+   It publishes the receipt only after both exact source builds reproduce the full
+   shipped artifacts. If a dependency changes, review its version, commit and archive
+   checksum in the verifier and runtime receipt checks before regenerating.
+5. Run the tests. Two will speak up, and they mean different things:
    - `ContractBlueprintPinTest` — the bytes changed but the pin did not. Bookkeeping.
    - `CoreBlueprintSurfaceTest` — the **contract surface** changed: a validator appeared or
      vanished, or a parameter changed name or type. Its failure output is the migration

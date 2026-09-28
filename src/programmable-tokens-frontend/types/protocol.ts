@@ -8,14 +8,6 @@ export interface ProtocolBootstrapParams extends DeploymentParams {
   schemaVersion: 3;
 }
 
-export type RegistryDatum = {
-  key: string;
-  next: any;
-  transferScriptHash: string;
-  thirdPartyScriptHash: string;
-  metadata: any;
-};
-
 export interface BlueprintValidator {
   title: string;
   compiledCode: string;
@@ -46,6 +38,15 @@ export interface ModuleBlueprint {
   validators: ModuleValidator[];
 }
 
+export interface Cip68TokenMetadata {
+  name: string;
+  description?: string | null;
+  ticker?: string | null;
+  decimals?: number | null;
+  url?: string | null;
+  logo?: string | null;
+}
+
 export interface TokenContext {
   policyId: string;
   moduleId: string;
@@ -62,6 +63,13 @@ export interface TokenContext {
    *  correct one survives in rows written before the registration callback was fixed. Offered
    *  as a CANDIDATE: accept it only after deriving the token's policy id from it. */
   blacklistAdminPkh?: string;
+  /** Read back from the reference token's datum. Null does NOT mean "no metadata" — see
+   *  {@link TokenContext.cip68Status}, which says which of three things happened. */
+  cip68Metadata?: Cip68TokenMetadata | null;
+  /** NOT_CIP68 | REFERENCE_TOKEN_NOT_FOUND | NO_READABLE_DATUM, or null when metadata was found.
+   *  "The token published nothing" is a fact about the token; "we have not indexed it" is a fact
+   *  about us, and a UI must not render them the same way. */
+  cip68Status?: 'NOT_CIP68' | 'REFERENCE_TOKEN_NOT_FOUND' | 'NO_READABLE_DATUM' | null;
   /** RWA-token only: whether the on-chain validator requires the recipient
    *  to be in the allowlist. `null` for modules that don't carry this flag. */
   requiresReceiverKyc?: boolean | null;
