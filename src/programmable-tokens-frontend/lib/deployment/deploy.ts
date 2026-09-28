@@ -364,6 +364,7 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
 /** Lovelace per seed output. Each seed funds part of the transaction that consumes it. */
 export const DEFAULT_SEED_LOVELACE = 10_000_000n;
 
+export { buildWithFreshUtxos } from "./ceremony";
 export { awaitMultisigConfigUtxo, buildProtocolGenesis, buildReferenceScripts, selectBootstrapSeeds, assembleDeploymentParams };
 export type { MultisigConfigLocation } from "./ceremony";
 

@@ -29,6 +29,7 @@ const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
 const {
   selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
   resolveSeedUtxos, lovelaceOfUtxo, cborOf,
+  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf,
 } = await import("./.seeds-build/ceremony.js");
 
 const HASHES = [
@@ -235,6 +236,66 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
     }
     ok(re.test(msg), name);
   }
+}
+
+// ── retry classification ─────────────────────────────────────────────────────
+// The REAL error, verbatim from preview, nested exactly as Evolution delivers it.
+{
+  const REF = "ae94a42a38b8865c9399fc69de272fce30ef73d25f7d6c9a2c24c65d5a608bc4#0";
+  const real = new Error("Script evaluation failed", {
+    cause: {
+      message: "Blockfrost evaluateTx failed",
+      response: { status: 400, body: { ScriptFailures: { "mint:0": { CannotCreateEvaluationContext: {
+        reason: `Unknown transaction input (missing from UTxO set): ${REF}` } } } } },
+    },
+  });
+  ok(isMissingUtxoEvaluation(real) === true, "the missing-input evaluation failure is retryable");
+  ok(missingInputOf(real) === REF, "the missing outref is extracted for the progress message");
+
+  // ⛔ Everything else must NOT be retried: repeating a transaction the validator rejected
+  // only wastes the operator's time, and each ceremony attempt strands stake deposits.
+  ok(isMissingUtxoEvaluation(new Error("Script evaluation failed: validator returned False")) === false,
+    "a genuine validator rejection is NOT retried");
+  ok(isMissingUtxoEvaluation(new Error("Insufficient funds")) === false, "a funding failure is NOT retried");
+  ok(missingInputOf(new Error("boom")) === null, "no outref reported when there is none");
+}
+
+// ── buildWithFreshUtxos ───────────────────────────────────────────────────────
+{
+  const ctx = { client: { newTx: () => ({}) }, changeAddress: "addr_test1q", availableUtxos: [1] };
+  const REF = "ae94a42a38b8865c9399fc69de272fce30ef73d25f7d6c9a2c24c65d5a608bc4#0";
+  const missing = () => new Error(`Unknown transaction input (missing from UTxO set): ${REF}`);
+
+  let reads = 0;
+  const read = async () => { reads += 1; return [{ n: reads }]; };
+
+  // Succeeds on the third try; the wallet is re-read before EVERY attempt, not just the first.
+  let tries = 0;
+  const out = await buildWithFreshUtxos(ctx, read, async (c) => {
+    tries += 1;
+    if (tries < 3) throw missing();
+    return c.availableUtxos;
+  }, { attempts: 4, delayMs: 1 });
+  ok(tries === 3 && reads === 3, "re-reads the wallet before every attempt, not once");
+  ok(JSON.stringify(out) === JSON.stringify([{ n: 3 }]),
+    "the build receives the FRESH utxo set, not the stale one from the context");
+
+  // A non-retryable failure escapes immediately.
+  let attempts2 = 0;
+  let escaped = "";
+  try {
+    await buildWithFreshUtxos(ctx, read, async () => { attempts2 += 1; throw new Error("validator said no"); },
+      { attempts: 4, delayMs: 1 });
+  } catch (e) { escaped = e.message; }
+  ok(attempts2 === 1 && /validator said no/.test(escaped),
+    "a non-retryable failure is rethrown on the FIRST attempt");
+
+  // Exhaustion rethrows the real error rather than a wrapper.
+  let last = "";
+  try {
+    await buildWithFreshUtxos(ctx, read, async () => { throw missing(); }, { attempts: 2, delayMs: 1 });
+  } catch (e) { last = e.message; }
+  ok(last.includes(REF), "after the last attempt the ORIGINAL error is rethrown, naming the input");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

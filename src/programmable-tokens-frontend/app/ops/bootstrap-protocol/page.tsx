@@ -33,6 +33,7 @@ import {
   findWalletSeeds,
   prepareSeedUtxos,
   awaitMultisigConfigUtxo,
+  buildWithFreshUtxos,
   type MultisigConfigLocation,
   buildProtocolGenesis,
   buildReferenceScripts,
@@ -500,18 +501,41 @@ export default function BootstrapProtocolPage() {
       });
       setConfigUtxo(utxo);
 
-      setProgress("Building the protocol genesis…");
-      const genesis = await buildProtocolGenesis({
-        ctx: planned.ctx,
-        plan: planned.plan,
-        protocolParamsSeedUtxo: planned.seedUtxos.protocolParams as never,
-        issuanceSeedUtxo: planned.seedUtxos.issuance as never,
-        // `.utxo`, not the wrapper: awaitMultisigConfigUtxo returns { utxo, ref } and this
-        // parameter is a UTxO. The wrapper carries no `transactionId`, which is what the SDK
-        // checks, so passing it refused with "upgradeMultisigConfigUtxo is required".
-        upgradeMultisigConfigUtxo: utxo.utxo as never,
-        upgradeAuthoritySigners: (multisig?.members ?? []).map((m) => m.keyHash) as never,
-      });
+      // ⛔ RE-READ THE WALLET FIRST. planned.ctx.availableUtxos was captured when the plan was
+      // made, and phase one has spent some of those outputs since — coin selection funding this
+      // transaction from one of them produces "Unknown transaction input (missing from UTxO
+      // set)" at evaluation. The same wrapper also retries that one failure, because Blockfrost's
+      // evaluation endpoint can lag its query endpoints by a block or two and then the input is
+      // real and merely early. See buildWithFreshUtxos.
+      setProgress("Re-reading the wallet, then building the protocol genesis…");
+      const genesis = await buildWithFreshUtxos(
+        planned.ctx,
+        async (address) =>
+          (await (
+            planned.ctx.client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
+          ).getUtxos(EvoAddress.fromBech32(address))) as readonly unknown[],
+        (ctx) =>
+          buildProtocolGenesis({
+            ctx,
+            plan: planned.plan,
+            protocolParamsSeedUtxo: planned.seedUtxos.protocolParams as never,
+            issuanceSeedUtxo: planned.seedUtxos.issuance as never,
+            // `.utxo`, not the wrapper: awaitMultisigConfigUtxo returns { utxo, ref } and this
+            // parameter is a UTxO. The wrapper carries no `transactionId`, which is what the SDK
+            // checks, so passing it refused with "upgradeMultisigConfigUtxo is required".
+            upgradeMultisigConfigUtxo: utxo.utxo as never,
+            upgradeAuthoritySigners: (multisig?.members ?? []).map((m) => m.keyHash) as never,
+          }),
+        {
+          attempts: 4,
+          delayMs: 10_000,
+          onAttempt: (n, why) =>
+            setProgress(
+              `Evaluation could not resolve ${why} — re-reading the wallet and retrying ` +
+                `(attempt ${n} of 4, 10s apart)…`,
+            ),
+        },
+      );
       setGenesisStep(genesis);
       setProgress(null);
     } catch (e) {

@@ -245,6 +245,87 @@ export function resolveSeedUtxos(
   };
 }
 
+/**
+ * Build a step, re-reading the wallet first and retrying a "missing from UTxO set" evaluation.
+ *
+ * ⛔ TWO DIFFERENT CAUSES WEAR THE SAME ERROR, and only one of them is a waiting problem:
+ *
+ *   CannotCreateEvaluationContext: Unknown transaction input (missing from UTxO set): <ref>
+ *
+ * (a) STALE — the context's `availableUtxos` was captured when the plan was made, and phase one
+ *     has spent some of them since. Coin selection then funds this transaction from an output
+ *     that no longer exists. No amount of waiting fixes it; the set has to be re-read.
+ * (b) LAGGING — the input is genuinely still unspent, but Blockfrost's evaluation endpoint is
+ *     working from a slightly older ledger snapshot than its query endpoints, so a UTxO created
+ *     one or two blocks ago is invisible to `/utils/txs/evaluate/utxos` while
+ *     `/addresses/.../utxos` already lists it. Here waiting IS the fix.
+ *
+ * Distinguishing them after the fact is unreliable — a UTxO that was unspent at build time may be
+ * spent by the time anyone looks, especially across repeated attempts — so this handles both: it
+ * re-reads before every try (covering a) and retries with a pause (covering b). A failure that is
+ * neither is rethrown immediately rather than retried, because repeating a transaction the
+ * validator rejected only wastes the operator's time.
+ */
+export async function buildWithFreshUtxos<T>(
+  ctx: CeremonyContext,
+  readUtxos: (address: string) => Promise<readonly unknown[]>,
+  build: (ctx: CeremonyContext) => Promise<T>,
+  opts: { attempts?: number; delayMs?: number; onAttempt?: (n: number, why: string) => void } = {},
+): Promise<T> {
+  const attempts = opts.attempts ?? 4;
+  const delay = opts.delayMs ?? 10_000;
+  let last: unknown;
+
+  for (let n = 1; n <= attempts; n += 1) {
+    // Re-read EVERY time: between two attempts the wallet may have changed again.
+    const fresh = await readUtxos(ctx.changeAddress);
+    const attemptCtx: CeremonyContext = { ...ctx, availableUtxos: fresh as CeremonyContext["availableUtxos"] };
+    assertCeremonyContext(attemptCtx, "build step");
+    try {
+      return await build(attemptCtx);
+    } catch (e) {
+      last = e;
+      if (!isMissingUtxoEvaluation(e) || n === attempts) throw e;
+      opts.onAttempt?.(n, missingInputOf(e) ?? "an input was missing from the UTxO set");
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw last;
+}
+
+/** Only this failure is worth retrying; anything else is rethrown at once. */
+export function isMissingUtxoEvaluation(err: unknown): boolean {
+  return /missing from UTxO set|CannotCreateEvaluationContext|Unknown transaction input/i.test(
+    serialiseError(err),
+  );
+}
+
+/** The outref the evaluator could not resolve, for a message that names it. */
+export function missingInputOf(err: unknown): string | null {
+  const m = serialiseError(err).match(/([0-9a-f]{64})#(\d+)/i);
+  return m ? `${m[1]}#${m[2]}` : null;
+}
+
+function serialiseError(err: unknown): string {
+  const seen = new Set<unknown>();
+  const parts: string[] = [];
+  let cur: unknown = err;
+  for (let i = 0; i < 6 && cur != null && !seen.has(cur); i += 1) {
+    seen.add(cur);
+    const e = cur as { message?: unknown; response?: { body?: unknown } };
+    if (typeof e.message === "string") parts.push(e.message);
+    if (e.response?.body !== undefined) {
+      try {
+        parts.push(typeof e.response.body === "string" ? e.response.body : JSON.stringify(e.response.body));
+      } catch {
+        /* unserialisable body; the message above still counts */
+      }
+    }
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return parts.join(" ");
+}
+
 export function assertCeremonyContext(ctx: CeremonyContext, where = "ceremony"): void {
   if (!ctx || typeof ctx !== "object") throw new Error(`${where}: a build context is required.`);
   const c = ctx as { client?: { newTx?: unknown }; changeAddress?: unknown; availableUtxos?: unknown };
