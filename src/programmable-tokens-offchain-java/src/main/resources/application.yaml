@@ -88,20 +88,15 @@ keri:
 kycExtended:
   enabled: ${KYC_EXTENDED_ENABLED:true}
   rootHashUpdateIntervalSeconds: ${KYC_EXTENDED_ROOT_UPDATE_INTERVAL_SECONDS:30}
-  memberValidityDays: ${KYC_EXTENDED_MEMBER_VALIDITY_DAYS:30}
   postInsertSyncDelayMs: ${KYC_EXTENDED_POST_INSERT_SYNC_DELAY_MS:5000}
-  postInsertCoalesceMs: ${KYC_EXTENDED_POST_INSERT_COALESCE_MS:30000}
 
-# rwa-token autonomous root-sync job. Same admin-signing-key reuse caveat
-# as the kyc-extended block above.
+# CMTA creation requests are signed for this deployment; the issuer wallet
+# publishes member-root updates when its key is the on-chain admin.
 rwaToken:
   # Required: exact frontend NEXT_PUBLIC_API_BASE_URL (without trailing slash) plus /api/v1.
   # Example: https://issuer.example/api/v1. Must identify this deployment, not just its network.
   creationAudience: ${RWA_TOKEN_CREATION_AUDIENCE:}
   enabled: ${SECURITY_TOKEN_ENABLED:true}
-  rootHashUpdateIntervalSeconds: ${SECURITY_TOKEN_ROOT_UPDATE_INTERVAL_SECONDS:30}
-  memberValidityDays: ${SECURITY_TOKEN_MEMBER_VALIDITY_DAYS:30}
-  postInsertSyncDelayMs: ${SECURITY_TOKEN_POST_INSERT_SYNC_DELAY_MS:5000}
 
 management:
   endpoints:
@@ -163,9 +158,9 @@ blockfrost:
 koios:
   url: ${KOIOS_URL:https://preview.koios.rest/api/v1/}
 
-# Off by default on preview: KERI is only needed by the kyc modules, both of which are
-# in modules.disabled, and its client otherwise dials localhost:3901 on every boot of a
-# laptop that is not running a KERI agent. Still overridable via KERI_ENABLED=true.
+# Off by default on preview: KYC and optional CMTA CIP-170 need KERI, but a
+# local backend without a KERI agent should not dial localhost:3901 at boot.
+# Enable it with KERI_ENABLED=true when using those flows.
 keri:
   enabled: ${KERI_ENABLED:false}
 

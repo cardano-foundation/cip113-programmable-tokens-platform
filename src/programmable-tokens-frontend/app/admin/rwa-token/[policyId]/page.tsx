@@ -112,11 +112,12 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
   const [state, setState] = useState<Awaited<ReturnType<typeof getRwaTokenGlobalState>> | null>(null);
   const [members, setMembers] = useState<RwaMemberList | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [stakeAddress, setStakeAddress] = useState("");
+  const [memberAddress, setMemberAddress] = useState("");
+  const [addressFeedback, setAddressFeedback] = useState<{ valid: boolean; message: string } | null>(null);
   const [expiry, setExpiry] = useState("");
   const [candidate, setCandidate] = useState<(RwaMemberCandidate & {
     approvedAdded: RwaMemberLeaf[];
-    manualStakeAddress?: string;
+    manualAddress?: string;
   }) | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -159,8 +160,8 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
       if (!state || getPaymentKeyHash(adminAddress).toLowerCase() !== state.adminCredentialHash.toLowerCase())
         throw new Error("The connected wallet is not the current on-chain GS admin");
       let manualMember;
-      if (stakeAddress.trim()) {
-        const credential = resolveStakeMemberAddress(stakeAddress, getCardanoNetwork());
+      if (memberAddress.trim()) {
+        const credential = resolveStakeMemberAddress(memberAddress, getCardanoNetwork());
         const validUntilMs = new Date(expiry).getTime();
         if (!Number.isSafeInteger(validUntilMs) || validUntilMs <= Date.now()) throw new Error("Choose a future expiry");
         manualMember = { ...credential, validUntilMs };
@@ -186,7 +187,7 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
       if (approvedAdded.map(key).sort().join("|") !== proposal.added.map(key).sort().join("|"))
         throw new Error("Backend proposal includes an unselected member or changed expiry");
       setCandidate({ ...proposal, approvedAdded,
-        manualStakeAddress: manualMember ? stakeAddress.trim() : undefined });
+        manualAddress: manualMember ? memberAddress.trim() : undefined });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -244,9 +245,25 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
       </Button>
 
       <div className="space-y-2">
-        <label className="block text-sm text-white" htmlFor="manual-stake-address">Stake address</label>
-        <Input id="manual-stake-address" value={stakeAddress} onChange={(e) => { setStakeAddress(e.target.value); setCandidate(null); }} placeholder={getCardanoNetwork() === "mainnet" ? "stake1…" : "stake_test1…"} />
-        <p className="text-xs text-dark-400">The address determines the stake credential and whether it is a key or script.</p>
+        <label className="block text-sm text-white" htmlFor="manual-member-address">Stake or payment address</label>
+        <Input id="manual-member-address" value={memberAddress}
+          onChange={(e) => { setMemberAddress(e.target.value); setAddressFeedback(null); setCandidate(null); }}
+          onBlur={() => {
+            if (!memberAddress.trim()) { setAddressFeedback(null); return; }
+            try {
+              const credential = resolveStakeMemberAddress(memberAddress, getCardanoNetwork());
+              setAddressFeedback({ valid: true,
+                message: `Stake ${credential.credentialType === 0 ? "key" : "script"} credential: ${credential.credentialHash}` });
+            } catch (e) {
+              setAddressFeedback({ valid: false, message: e instanceof Error ? e.message : String(e) });
+            }
+          }}
+          placeholder={getCardanoNetwork() === "mainnet" ? "stake1… or addr1…" : "stake_test1… or addr_test1…"} />
+        <p className="text-xs text-dark-400">A base payment address supplies its stake credential. Enterprise addresses have no stake credential.</p>
+        {addressFeedback && <p role={addressFeedback.valid ? "status" : "alert"}
+          className={`text-xs break-all ${addressFeedback.valid ? "text-green-400" : "text-red-400"}`}>
+          {addressFeedback.message}
+        </p>}
         <label className="block text-sm text-white" htmlFor="manual-expiry">Valid until</label>
         <Input id="manual-expiry" type="datetime-local" value={expiry} onChange={(e) => { setExpiry(e.target.value); setCandidate(null); }} />
       </div>
@@ -278,7 +295,7 @@ function MemberRootHashSection({ policyId }: { policyId: string }) {
 
       {candidate && <div className="space-y-3 rounded border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-dark-200">
         <p className="font-semibold text-white">Review before wallet signing</p>
-        {candidate.manualStakeAddress && <p className="font-mono break-all">Manual stake address: {candidate.manualStakeAddress}</p>}
+        {candidate.manualAddress && <p className="font-mono break-all">Manual address: {candidate.manualAddress}</p>}
         <p>Current members: {candidate.baseline.length}. Added or updated: {candidate.added.length}. New total: {candidate.leaves.length}.</p>
         {candidate.added.map((member) => <p key={pendingKey(member)} className="font-mono break-all">
           {member.credentialHash} ({member.credentialType === 0 ? "stake key" : "stake script"}) — expires {new Date(member.validUntilMs).toLocaleString()}
