@@ -43,6 +43,7 @@ import {
   selectSeedUtxos,
   isPlainSeedCandidate,
   assertCeremonyContext,
+  resolveSeedUtxos,
   type ChainUtxo,
 } from "./ceremony";
 import { deriveCoreDeployment, type DeploymentSeeds } from "./derive";
@@ -216,7 +217,6 @@ export interface PlanDeploymentInput {
   /** Three existing wallet UTxOs, as chain references. */
   seeds?: DeploymentSeeds;
   /** The same three as resolved UTxO objects — the builders need the whole output, not a ref. */
-  seedUtxos?: { protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown };
   /**
    * Whether the dispatcher permits unfracking. Default: yes.
    *
@@ -279,6 +279,15 @@ export interface CeremonyPlan {
   phaseOne: CeremonyStep[];
   /** Carried into phase two so the same client and UTxO set build both halves. */
   ctx: CeremonyContext;
+  /**
+   * The three seed UTxOs as objects, resolved from the same UTxO set the plan was built against.
+   *
+   * ⚑ RETURNED RATHER THAN RE-DERIVED BY THE CALLER. The page kept its own `seedUtxos` state for
+   * this and never set it, so phase two passed `undefined` for both of protocol-genesis's seeds.
+   * Carrying them on the plan makes that state unnecessary and keeps the objects tied to the
+   * outrefs the plan is parameterised by.
+   */
+  seedUtxos: { protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown };
 }
 
 export async function planDeployment(input: PlanDeploymentInput): Promise<CeremonyPlan> {
@@ -308,6 +317,9 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
         "chain while everything after it is built and evaluated against them.",
     );
   }
+
+  // The builders SPEND these; the plan below is only parameterised by their outrefs.
+  const seedUtxos = resolveSeedUtxos(availableUtxos, input.seeds);
 
   const plan = buildPlan({
     blueprint: input.blueprint,
@@ -339,14 +351,14 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
         ctx,
         plan,
         needsSeedTx: false,
-        seedUtxo: input.seedUtxos?.upgradeMultisig as never,
+        seedUtxo: seedUtxos.upgradeMultisig as never,
         upgradeMultisigTree: input.multisig.tree as never,
         ownerAddress: ctx.changeAddress,
         seedLovelace: DEFAULT_SEED_LOVELACE,
       })
     : [];
 
-  return { plan, verification, phaseOne, ctx };
+  return { plan, verification, phaseOne, ctx, seedUtxos };
 }
 
 /** Lovelace per seed output. Each seed funds part of the transaction that consumes it. */

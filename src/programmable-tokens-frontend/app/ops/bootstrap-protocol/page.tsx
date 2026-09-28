@@ -456,11 +456,6 @@ export default function BootstrapProtocolPage() {
   // Phase one is the deployer alone and SPENDS THE ONE-SHOT SEEDS. Phase two needs every
   // declared participant and happens with people waiting.
 
-  /** The three seed UTxOs as objects, resolved when the operator supplied them. */
-  const [seedUtxos, setSeedUtxos] = useState<{
-    protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown;
-  } | null>(null);
-
   /** Set once phase one lands. Read back off the chain and vetted, never reconstructed. */
   const [configUtxo, setConfigUtxo] = useState<unknown | null>(null);
   /** The genesis, frozen. Built only after the config UTxO exists; this is what gets signed. */
@@ -501,8 +496,8 @@ export default function BootstrapProtocolPage() {
       const genesis = await buildProtocolGenesis({
         ctx: planned.ctx,
         plan: planned.plan,
-        protocolParamsSeedUtxo: seedUtxos?.protocolParams as never,
-        issuanceSeedUtxo: seedUtxos?.issuance as never,
+        protocolParamsSeedUtxo: planned.seedUtxos.protocolParams as never,
+        issuanceSeedUtxo: planned.seedUtxos.issuance as never,
         upgradeMultisigConfigUtxo: utxo as never,
         upgradeAuthoritySigners: (multisig?.members ?? []).map((m) => m.keyHash) as never,
       });
@@ -516,7 +511,7 @@ export default function BootstrapProtocolPage() {
           : `Phase one failed: ${(e as Error).message}`,
       );
     }
-  }, [planned, wallet, phaseOneDone, multisig, seedUtxos]);
+  }, [planned, wallet, phaseOneDone, multisig]);
 
   const submitPhaseTwo = useCallback(async () => {
     if (!planned || !genesisStep || !cosign.complete) return;

@@ -26,8 +26,10 @@ function ok(cond, name) {
 
 async function main() {
 const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
-const { selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext } =
-  await import("./.seeds-build/ceremony.js");
+const {
+  selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
+  resolveSeedUtxos, lovelaceOfUtxo,
+} = await import("./.seeds-build/ceremony.js");
 
 const HASHES = [
   "5403b9c6cdf1ecd35403b9c6cdf1ecd35403b9c6cdf1ecd35403b9c6cdf1ecd3",
@@ -37,11 +39,11 @@ const HASHES = [
 ];
 
 /** A UTxO shaped as the PROVIDER returns one. */
-function providerUtxo(hashHex, index, { assets, scriptRef } = {}) {
+function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
   return {
     transactionId: TransactionHash.fromHex(hashHex),
     index: BigInt(index),
-    assets: assets ?? Assets.fromLovelace(40_000_000n),
+    assets: assets ?? Assets.fromLovelace(lovelace ?? 40_000_000n),
     ...(scriptRef ? { scriptRef } : {}),
   };
 }
@@ -95,8 +97,12 @@ function providerUtxo(hashHex, index, { assets, scriptRef } = {}) {
   const utxos = HASHES.map((h, i) => providerUtxo(h, i));
   const seeds = selectSeedUtxos(utxos, "addr_test1irrelevant");
   ok(seeds !== null, "four provider-shaped ada-only UTxOs yield seeds");
-  ok(seeds.paramsSeed.txHash === HASHES[0] && seeds.paramsSeed.outputIndex === 0,
-    "the first seed carries a real hash and index, not undefined");
+  // Not pinned to a particular hash: equal-value UTxOs tie-break lexicographically on the outref,
+  // which is deliberate (reproducible across machines) and not a property worth freezing here.
+  ok(/^[0-9a-f]{64}$/.test(seeds.paramsSeed.txHash) &&
+     Number.isSafeInteger(seeds.paramsSeed.outputIndex) &&
+     HASHES.includes(seeds.paramsSeed.txHash),
+    "the first seed carries a REAL hash and index from the input, not undefined");
   const refs = new Set(
     [seeds.paramsSeed, seeds.issuanceSeed, seeds.multisigSeed].map((r) => `${r.txHash}#${r.outputIndex}`),
   );
@@ -149,6 +155,61 @@ function providerUtxo(hashHex, index, { assets, scriptRef } = {}) {
     }
     ok(re.test(msg), name);
   }
+}
+
+// ── dust seeds ────────────────────────────────────────────────────────────────
+// ⛔ MEASURED ON PREVIEW: the wallet offered a 2 ADA output as a seed while 40 ADA outputs sat
+// further down the provider's list. Each seed part-funds the transaction that consumes it.
+{
+  const dusty = [
+    providerUtxo(HASHES[0], 0, { lovelace: 2_000_000n }),
+    providerUtxo(HASHES[1], 0, { lovelace: 40_000_000n }),
+    providerUtxo(HASHES[2], 0, { lovelace: 2_000_000n }),
+    providerUtxo(HASHES[3], 0, { lovelace: 40_000_000n }),
+    providerUtxo(HASHES[0], 1, { lovelace: 40_000_000n }),
+  ];
+  const seeds = selectSeedUtxos(dusty, "addr_test1irrelevant");
+  const chosen = [seeds.paramsSeed, seeds.issuanceSeed, seeds.multisigSeed].map(
+    (r) => `${r.txHash}#${r.outputIndex}`,
+  );
+  const dustRefs = [`${HASHES[0]}#0`, `${HASHES[2]}#0`];
+  ok(!chosen.some((c) => dustRefs.includes(c)),
+    "the three LARGEST plain UTxOs are chosen, not the first three the provider listed");
+  ok(lovelaceOfUtxo(dusty[1]) === 40_000_000n, "lovelaceOfUtxo reads a UTxO's ada");
+  ok(lovelaceOfUtxo({ assets: "garbage" }) === 0n, "lovelaceOfUtxo returns 0n for unreadable assets");
+
+  // Deterministic: the same input must give the same three, or two machines disagree.
+  const again = selectSeedUtxos([...dusty].reverse(), "addr_test1irrelevant");
+  const chosenAgain = [again.paramsSeed, again.issuanceSeed, again.multisigSeed].map(
+    (r) => `${r.txHash}#${r.outputIndex}`,
+  );
+  ok(JSON.stringify(chosen) === JSON.stringify(chosenAgain),
+    "selection is order-independent — a reversed UTxO list yields the same three seeds");
+}
+
+// ── resolveSeedUtxos ──────────────────────────────────────────────────────────
+// ⛔ The plan is parameterised by OUTREFS; the builders SPEND UTxOs. Supplying those from a
+// field nobody populated is what produced "the upgradeMultisig seed UTxO is required".
+{
+  const available = HASHES.map((h, i) => providerUtxo(h, i));
+  const seeds = selectSeedUtxos(available, "addr_test1irrelevant");
+  const resolved = resolveSeedUtxos(available, seeds);
+  ok(resolved.upgradeMultisig !== undefined && resolved.protocolParams !== undefined &&
+     resolved.issuance !== undefined, "all three seeds resolve to real UTxO objects");
+  ok(toChainUtxo(resolved.upgradeMultisig).txHash === seeds.multisigSeed.txHash &&
+     toChainUtxo(resolved.upgradeMultisig).outputIndex === seeds.multisigSeed.outputIndex,
+    "the resolved object is the SAME outref the plan is parameterised by");
+
+  let msg = "";
+  try {
+    resolveSeedUtxos(available.slice(1), seeds);
+  } catch (e) {
+    msg = e.message;
+  }
+  ok(/is not among the wallet/.test(msg) && /spent/.test(msg),
+    "a seed missing from the wallet is refused by name, suggesting it was spent");
+  ok(resolveSeedUtxos([...available, { not: "a utxo" }], seeds).issuance !== undefined,
+    "a non-UTxO entry in the wallet list is skipped rather than throwing");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

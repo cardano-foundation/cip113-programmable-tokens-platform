@@ -78,7 +78,21 @@ export function selectSeedUtxos(
   utxos: readonly unknown[],
   _changeAddress: string,
 ): { paramsSeed: ChainUtxo; issuanceSeed: ChainUtxo; multisigSeed: ChainUtxo } | null {
-  const plain = utxos.filter(isPlainSeedCandidate).map(toChainUtxo);
+  // ⚑ LARGEST FIRST, NOT FIRST-ENCOUNTERED. Selection used to take whichever three plain UTxOs
+  // the provider happened to list first, and a wallet that has been used for a while holds dust:
+  // the preview wallet offered a 2 ADA output as a seed while 40 ADA outputs sat further down the
+  // list. Each seed part-funds the transaction that consumes it, so a dust seed forces coin
+  // selection to make up the difference and can leave the funded output below its min-UTxO.
+  // Ties break on the outref so the choice is reproducible across calls and machines.
+  const plain = utxos
+    .filter(isPlainSeedCandidate)
+    .map((u) => ({ ref: toChainUtxo(u), lovelace: lovelaceOfUtxo(u) }))
+    .sort(
+      (x, y) =>
+        (y.lovelace > x.lovelace ? 1 : y.lovelace < x.lovelace ? -1 : 0) ||
+        `${x.ref.txHash}#${x.ref.outputIndex}`.localeCompare(`${y.ref.txHash}#${y.ref.outputIndex}`),
+    )
+    .map((e) => e.ref);
   if (plain.length < BOOTSTRAP_SEED_COUNT) return null;
   const [a, b, c] = plain;
   return { paramsSeed: a, issuanceSeed: b, multisigSeed: c };
@@ -170,6 +184,67 @@ export function isPlainSeedCandidate(utxo: unknown): boolean {
  * `EvoAddress.fromBech32(ctx.changeAddress)` itself; handing it an already-parsed object is one
  * conversion too many.
  */
+/** Lovelace in a wallet UTxO, or 0n when its assets cannot be read. */
+export function lovelaceOfUtxo(utxo: unknown): bigint {
+  const u = utxo as { assets?: unknown };
+  try {
+    // ⛔ lovelaceOf RETURNS undefined FOR A WRONG-SHAPED VALUE — measured: lovelaceOf("garbage")
+    // and lovelaceOf({}) are both undefined, and only undefined/null throw. An undefined here
+    // would make every comparison in the seed sort false and silently un-sort it, so the coercion
+    // is the guard.
+    const v = EvoAssets.lovelaceOf(u.assets as never);
+    return typeof v === "bigint" ? v : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+/**
+ * The three seed UTxOs as OBJECTS, resolved from the wallet by the outrefs already chosen.
+ *
+ * ⛔ THE PLAN TAKES OUTREFS; THE BUILDERS TAKE UTxOs. `planBootstrap` is parameterised by
+ * `TxInput` — `{ txHash, outputIndex }` — but `buildMultisigGenesisTx` and
+ * `buildProtocolGenesisTx` have to SPEND the outputs, so they need the real thing. Those two
+ * requirements were satisfied from different places: the outrefs from selection, the objects from
+ * a `seedUtxos` field nobody ever populated. It was permanently `undefined`, so the SDK refused at
+ * multisig-genesis with the outref it expected, which reads as a missing UTxO on chain rather than
+ * as a parameter never passed.
+ *
+ * ⚑ Resolving them HERE, from the same `availableUtxos` the context carries, means the objects and
+ * the outrefs cannot disagree — the failure mode where a deployment is parameterised by one UTxO
+ * and spends another.
+ */
+export function resolveSeedUtxos(
+  available: readonly unknown[],
+  seeds: { paramsSeed: ChainUtxo; issuanceSeed: ChainUtxo; multisigSeed: ChainUtxo },
+): { protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown } {
+  const key = (r: ChainUtxo) => `${r.txHash}#${r.outputIndex}`;
+  const byRef = new Map<string, unknown>();
+  for (const u of available) {
+    try {
+      byRef.set(key(toChainUtxo(u)), u);
+    } catch {
+      // Not a wallet UTxO shape; nothing here can be a seed.
+    }
+  }
+  const find = (ref: ChainUtxo, role: string): unknown => {
+    const hit = byRef.get(key(ref));
+    if (!hit) {
+      throw new Error(
+        `The ${role} seed ${key(ref)} is not among the wallet's spendable UTxOs. It was chosen as ` +
+          `a seed, so either it has been spent since (re-read the wallet and plan again) or the ` +
+          `UTxO set was filtered after selection.`,
+      );
+    }
+    return hit;
+  };
+  return {
+    protocolParams: find(seeds.paramsSeed, "protocolParams"),
+    issuance: find(seeds.issuanceSeed, "issuance"),
+    upgradeMultisig: find(seeds.multisigSeed, "upgradeMultisig"),
+  };
+}
+
 export function assertCeremonyContext(ctx: CeremonyContext, where = "ceremony"): void {
   if (!ctx || typeof ctx !== "object") throw new Error(`${where}: a build context is required.`);
   const c = ctx as { client?: { newTx?: unknown }; changeAddress?: unknown; availableUtxos?: unknown };
