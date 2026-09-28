@@ -139,6 +139,9 @@ export default function BootstrapProtocolPage() {
   const [seedsLocked, setSeedsLocked] = useState(true);
   const [seedSource, setSeedSource] = useState<"wallet" | "manual" | "none">("none");
   const [usableUtxoCount, setUsableUtxoCount] = useState<number | null>(null);
+  /** Raw provider count, so "none usable" can say WHICH of its two causes applies. */
+  const [walletUtxoTotal, setWalletUtxoTotal] = useState<number | null>(null);
+  const [queriedAddress, setQueriedAddress] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [seedNotice, setSeedNotice] = useState<string | null>(null);
   const [syncStart, setSyncStart] = useState<ReturnType<typeof buildSyncStart> | null>(null);
@@ -164,8 +167,14 @@ export default function BootstrapProtocolPage() {
     setSeedNotice(null);
     try {
       const changeAddress = await wallet.wallet.getChangeAddress();
-      const { seeds, usableCount } = await findWalletSeeds(network, wallet.rawApi, changeAddress);
+      const { seeds, usableCount, totalCount, queriedAddress } = await findWalletSeeds(
+        network,
+        wallet.rawApi,
+        changeAddress,
+      );
       setUsableUtxoCount(usableCount);
+      setWalletUtxoTotal(totalCount);
+      setQueriedAddress(queriedAddress);
       if (!seeds) {
         setSeedSource("none");
         return;
@@ -687,16 +696,26 @@ export default function BootstrapProtocolPage() {
         )}
         {wallet.connected && seedSource === "none" && (
           <div className="space-y-2 rounded border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-200">
-            <p>
-              This wallet has {usableUtxoCount ?? 0} UTxO(s) usable as a seed and needs three.
-              (A UTxO carrying native assets or a reference script cannot be one.) Splitting is
-              ordinary, repeatable housekeeping — it is kept out of the deployment proper so
-              that a failure here costs nothing.
-            </p>
+            {walletUtxoTotal === 0 ? (
+              <p>
+                The provider returned <strong>no UTxOs at all</strong> for{" "}
+                <code className="break-all">{queriedAddress ?? "this wallet"}</code>. Splitting
+                would not help — nothing here is a funding problem yet. Check that this is the
+                address you funded (a wallet&apos;s change address is often not the one you sent
+                to), and that the Blockfrost key baked into this build is for {network}.
+              </p>
+            ) : (
+              <p>
+                This wallet has {usableUtxoCount ?? 0} of {walletUtxoTotal ?? "?"} UTxO(s) usable
+                as a seed and needs three. (A UTxO carrying native assets or a reference script
+                cannot be one.) Splitting is ordinary, repeatable housekeeping — it is kept out of
+                the deployment proper so that a failure here costs nothing.
+              </p>
+            )}
             <button
               type="button"
               onClick={prepareSeeds}
-              disabled={preparing}
+              disabled={preparing || walletUtxoTotal === 0}
               className="rounded border border-amber-600 px-3 py-1.5 text-amber-100 disabled:opacity-40"
             >
               {preparing ? "Preparing…" : "Prepare seed UTxOs"}

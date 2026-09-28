@@ -41,6 +41,7 @@ import {
   type CeremonyStep,
   type CeremonyContext,
   selectSeedUtxos,
+  isPlainSeedCandidate,
   type ChainUtxo,
 } from "./ceremony";
 import { deriveCoreDeployment, type DeploymentSeeds } from "./derive";
@@ -131,6 +132,18 @@ export interface WalletSeeds {
   seeds: DeploymentSeeds | null;
   /** How many wallet UTxOs could serve as a seed. Below three, the wallet needs preparing. */
   usableCount: number;
+  /**
+   * How many UTxOs the PROVIDER returned, before any filtering.
+   *
+   * ⚑ REPORTED SEPARATELY BECAUSE "0 usable" HAD TWO CAUSES AND ONE MESSAGE. A wallet the
+   * provider cannot see at all and a wallet whose every UTxO carries an asset both rendered as
+   * "0 UTxO(s) usable", and the remedies are opposites: fix the address or the Blockfrost key in
+   * the first case, split the wallet in the second. Splitting a wallet the provider cannot see
+   * accomplishes nothing and costs a transaction.
+   */
+  totalCount: number;
+  /** Which address was queried, so a mismatch with the funded one is visible rather than inferred. */
+  queriedAddress: string;
 }
 
 /**
@@ -147,14 +160,13 @@ export async function findWalletSeeds(
   changeAddress: string,
 ): Promise<WalletSeeds> {
   const { client } = signingClient(network, rawWalletApi);
+  // Evolution UTxO objects, NOT the platform's record shape — see toChainUtxo.
   const utxos = (await client.getUtxos(
     EvoAddress.fromBech32(changeAddress) as never,
-  )) as unknown as ChainUtxo[];
+  )) as unknown as readonly unknown[];
   const seeds = selectSeedUtxos(utxos, changeAddress);
-  const usableCount = utxos.filter(
-    (u) => !u.scriptRef && !EvoAssets.getUnits(u.assets as never).some((x: string) => x !== "lovelace"),
-  ).length;
-  return { seeds, usableCount };
+  const usableCount = utxos.filter(isPlainSeedCandidate).length;
+  return { seeds, usableCount, totalCount: utxos.length, queriedAddress: changeAddress };
 }
 
 /**
@@ -182,7 +194,7 @@ export async function prepareSeedUtxos(
   }
   const built = await tx.build({
     changeAddress: addressObj,
-    availableUtxos: utxos.filter((u) => !u.scriptRef) as never,
+    availableUtxos: utxos.filter(isPlainSeedCandidate) as never,
     passAdditionalUtxos: true,
   });
   const cbor = EvoTransaction.toCBORHex((await built.toTransaction()) as never);

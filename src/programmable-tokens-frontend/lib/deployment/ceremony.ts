@@ -31,6 +31,7 @@
  * from `upgrade_cred`; the registrations must already have landed.
  */
 
+import { EvoAssets, EvoTransactionHash } from "@easy1staking/cip113-sdk-ts";
 import {
   planBootstrap,
   buildSeedTx,
@@ -63,8 +64,6 @@ import {
 export interface ChainUtxo {
   txHash: string;
   outputIndex: number;
-  scriptRef?: unknown;
-  assets?: unknown;
 }
 
 /**
@@ -76,13 +75,83 @@ export interface ChainUtxo {
  * it happens to read.
  */
 export function selectSeedUtxos(
-  utxos: readonly ChainUtxo[],
+  utxos: readonly unknown[],
   _changeAddress: string,
 ): { paramsSeed: ChainUtxo; issuanceSeed: ChainUtxo; multisigSeed: ChainUtxo } | null {
-  const plain = utxos.filter((u) => !u.scriptRef);
-  if (plain.length < 3) return null;
+  const plain = utxos.filter(isPlainSeedCandidate).map(toChainUtxo);
+  if (plain.length < BOOTSTRAP_SEED_COUNT) return null;
   const [a, b, c] = plain;
   return { paramsSeed: a, issuanceSeed: b, multisigSeed: c };
+}
+
+/**
+ * ⛔ THE WALLET UTxO DOES NOT USE `txHash`/`outputIndex`, AND READING THOSE IS WHY THE PAGE
+ * REPORTED AN EMPTY WALLET WITH 84 UTxOs IN IT.
+ *
+ * `client.getUtxos(address)` resolves to the PROVIDER's method — `ReadOnlyClientEffect extends
+ * Provider.ProviderEffect` — so it returns Evolution `UTxO` objects, whose reference fields are
+ * `transactionId` (a `TransactionHash`, not a hex string) and `index` (a **bigint**). The names
+ * `txHash` and `outputIndex` belong to the record format the platform WRITES, not to anything the
+ * chain hands back, and reading them off a provider UTxO yields `undefined` silently — no type
+ * error, because the values crossed an `as` boundary on the way in.
+ *
+ * ⚑ The wallet has a second, unrelated `getUtxos()` that takes NO argument and returns CBOR
+ * hex STRINGS. Either mistake produces "no usable UTxOs" from a funded wallet, which is why this
+ * conversion is one function with one home rather than a field access at each call site.
+ */
+export function toChainUtxo(utxo: unknown): ChainUtxo {
+  const u = utxo as { transactionId?: unknown; index?: unknown };
+  // ⚑ toHex THROWS a ParseError on anything that is not a TransactionHash — it does not return
+  // undefined — so the guard has to be a catch, not a value check. Measured: toHex(undefined),
+  // toHex(null), toHex("abc") and toHex({hash}) all throw "TransactionHash.FromHex", which names
+  // the SDK's internal schema and not the field the caller got wrong.
+  let txHash: string;
+  try {
+    txHash = EvoTransactionHash.toHex(u.transactionId as never).toLowerCase();
+  } catch {
+    throw new Error(
+      "A wallet UTxO carried no usable transaction id. Expected Evolution's `transactionId`; got " +
+        JSON.stringify(u.transactionId) + ". (`txHash` is the field the platform WRITES, not one " +
+        "the chain returns.)",
+    );
+  }
+  const outputIndex = Number(u.index);
+  if (!/^[0-9a-f]{64}$/.test(txHash)) {
+    throw new Error("A wallet UTxO produced a malformed transaction id: " + txHash + ".");
+  }
+  if (!Number.isSafeInteger(outputIndex) || outputIndex < 0) {
+    throw new Error(
+      "A wallet UTxO carried no usable output index. Expected Evolution's `index`; got " +
+        JSON.stringify(u.index) + ".",
+    );
+  }
+  return { txHash, outputIndex };
+}
+
+/**
+ * Whether a wallet UTxO can be spent as a one-shot seed.
+ *
+ * A seed must be PLAIN. A UTxO carrying a reference script or a native asset drags its payload
+ * into the transaction that consumes it — and spending a reference-script output destroys
+ * protocol infrastructure silently, which the SDK records as having already happened on preview.
+ *
+ * ⚑ ONE PREDICATE, USED BY BOTH THE SELECTION AND THE COUNT. They were separate and disagreed:
+ * the selection filtered on `scriptRef` alone while the count also excluded native assets, so a
+ * wallet could be told it had two usable UTxOs and then have a third selected anyway.
+ */
+export function isPlainSeedCandidate(utxo: unknown): boolean {
+  const u = utxo as { scriptRef?: unknown; assets?: unknown };
+  if (u.scriptRef) return false;
+  // ⛔ getUnits DOES NOT VALIDATE ITS ARGUMENT. Measured: getUnits("not-an-assets-object") and
+  // getUnits({}) both return ["lovelace"], so a wrong-shaped value reads as a clean ada-only
+  // UTxO — the reassuring direction. Only undefined and null throw. So the shape is checked here
+  // rather than relied upon, and anything unreadable counts as NOT plain.
+  if (typeof u.assets !== "object" || u.assets === null) return false;
+  try {
+    return !EvoAssets.getUnits(u.assets as never).some((unit: string) => unit !== "lovelace");
+  } catch {
+    return false;
+  }
 }
 
 export { BOOTSTRAP_SEED_COUNT };
