@@ -29,7 +29,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
-import { transactionHash, verifyWitnessSet } from "@/lib/tx/hash";
+import { asWitnessSetHex, transactionHash, verifyWitnessSet } from "@/lib/tx/hash";
 import { participantColour, confusablePairs } from "@/lib/deployment/participant-colour";
 
 export interface CosignatureState {
@@ -42,16 +42,46 @@ export function CosignaturePanel({
   unsignedCbor,
   memberKeyHashes,
   onChange,
+  signSelf,
 }: {
   unsignedCbor: string;
   memberKeyHashes: readonly string[];
   onChange: (state: CosignatureState) => void;
+  /**
+   * Sign with the CONNECTED wallet and return whatever it hands back.
+   *
+   * ⛔ THE WITNESS IS STILL VERIFIED. This is a shortcut past the copy-paste round trip, NOT past
+   * the check: the result is appended to the same list every pasted witness goes through, so the
+   * connected wallet proves key control exactly as a remote participant does. Skipping the proof
+   * because a wallet is connected would replace a verified signature with the wallet's own claim
+   * about which key it holds — and these are the keys that can upgrade the protocol forever.
+   *
+   * Optional: without it the panel behaves as before, which is what a participant on /sign gets.
+   */
+  signSelf?: () => Promise<string>;
 }) {
   const [text, setText] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
+  const [signingSelf, setSigningSelf] = useState(false);
+  const [selfError, setSelfError] = useState<string | null>(null);
 
   const witnesses = useMemo(
-    () => text.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean),
+    () =>
+      text
+        .split(/[\s,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        // ⛔ ACCEPT A WHOLE TRANSACTION TOO. A participant whose wallet returned one, or who
+        // copied from a wallet's UI rather than from /sign, is not making a mistake worth
+        // refusing — the witness set is element 1 and we already have the bytes. Anything
+        // genuinely unusable is left as-is so the per-witness check below names it.
+        .map((v) => {
+          try {
+            return asWitnessSetHex(v).hex;
+          } catch {
+            return v;
+          }
+        }),
     [text]
   );
 
@@ -109,6 +139,30 @@ export function CosignaturePanel({
     // `onChange` is the parent's setState; including it would loop on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [witnesses, status.complete]);
+
+  const addOwnSignature = async () => {
+    if (!signSelf) return;
+    setSigningSelf(true);
+    setSelfError(null);
+    try {
+      const returned = await signSelf();
+      // Tolerate a wallet that hands back a whole transaction — see asWitnessSetHex.
+      const { hex } = asWitnessSetHex(returned);
+      setText((current) => {
+        const already = current
+          .split(/[\s,]+/)
+          .map((t) => t.trim().toLowerCase())
+          .filter(Boolean);
+        // Signing twice is harmless but confusing; it would show as one member, two witnesses.
+        if (already.includes(hex.toLowerCase())) return current;
+        return current.trim().length === 0 ? hex : `${current.trim()}\n${hex}`;
+      });
+    } catch (e) {
+      setSelfError((e as Error).message);
+    } finally {
+      setSigningSelf(false);
+    }
+  };
 
   const copy = async (what: string, value: string) => {
     try {
@@ -177,9 +231,25 @@ export function CosignaturePanel({
       </div>
 
       <div className="space-y-1">
-        <p className="text-[10px] uppercase tracking-wider text-dark-400">
-          Witnesses received — one per line
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[10px] uppercase tracking-wider text-dark-400">
+            Witnesses received — one per line
+          </p>
+          {/*
+            A shortcut past the copy-paste round trip for whoever is driving, NOT past the check:
+            the witness lands in the same list as every other and is verified identically.
+          */}
+          {signSelf && (
+            <button
+              type="button"
+              onClick={addOwnSignature}
+              disabled={signingSelf}
+              className="rounded border border-dark-600 bg-dark-800 px-3 py-1.5 text-xs text-dark-100 transition-colors hover:border-primary-500/40 hover:text-primary-400 disabled:opacity-40"
+            >
+              {signingSelf ? "Waiting for your wallet…" : "Sign as me"}
+            </button>
+          )}
+        </div>
         <textarea
           id="cosign-witnesses"
           className="h-24 w-full rounded border border-dark-700 bg-dark-900 px-2 py-1 font-mono text-xs text-white focus:border-primary-500/50 focus:outline-none"
@@ -188,6 +258,14 @@ export function CosignaturePanel({
           onChange={(e) => setText(e.target.value)}
           spellCheck={false}
         />
+        {selfError && <p className="text-xs text-red-400">{selfError}</p>}
+        {signSelf && (
+          <p className="text-[10px] text-dark-500">
+            &ldquo;Sign as me&rdquo; uses the connected wallet and is verified like any other
+            witness — if your key is not a declared member, it will show as unrecognised rather
+            than be accepted.
+          </p>
+        )}
       </div>
 
       <ul className="space-y-1">

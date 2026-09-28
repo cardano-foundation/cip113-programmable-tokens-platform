@@ -164,7 +164,7 @@ wallet:
 programmable:
   token:
     default:
-      txHash: "8314e59f3e240ba89fb7f7037cf3094307132ede0ac3a1d2515a09a9cc333bc8"
+      txHash: "16602a2a5b72e7dbab67b66cd7db3babd90732f02d74ac820480e42cea866287"
 
 blockfrost:
   url: https://cardano-preview.blockfrost.io/api/v0/
@@ -206,8 +206,8 @@ store:
     # MAINNET sync start, and Spring merges it into every profile — so clearing these does not
     # mean "from genesis", it means "from a mainnet block hash under protocol magic 2", which
     # yaci-store's InitService rejects with "Shelley start point is not configured properly".
-    sync-start-blockhash: ${STORE_SYNC_START_BLOCKHASH:d5568035360998efe792f6415750096b6fdc02836747e6d16ceee7714c3f584a}
-    sync-start-slot: ${STORE_SYNC_START_SLOT:122504546}
+    sync-start-blockhash: ${STORE_SYNC_START_BLOCKHASH:e1c6816835185a1198b8455f890dcbc9a8ef3b64618215cbf624e687fe50fe6b}
+    sync-start-slot: ${STORE_SYNC_START_SLOT:123972707}
 
 ---
 spring:

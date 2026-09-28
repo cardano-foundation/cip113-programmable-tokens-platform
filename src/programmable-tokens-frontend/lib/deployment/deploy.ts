@@ -41,14 +41,32 @@ import {
   type CeremonyStep,
   type CeremonyContext,
   selectSeedUtxos,
+  isPlainSeedCandidate,
+  assertCeremonyContext,
+  resolveSeedUtxos,
+  providerEvaluatorWithAdditionalUtxos,
+  withoutRefs,
   type ChainUtxo,
 } from "./ceremony";
 import { deriveCoreDeployment, type DeploymentSeeds } from "./derive";
 import { verifyDeployment, verifyPlanScripts, type VerificationResult } from "./verify";
 import { EvoAddress, EvoAssets, EvoTransaction, outputAssets } from "@easy1staking/cip113-sdk-ts";
 
-/** Lovelace parked in each prepared seed. Enough to be a useful input, small enough to be cheap. */
-const SEED_PREP_LOVELACE = 5_000_000n;
+/**
+ * Lovelace parked in each prepared seed — 50, 10, 10. Ruled by Giovanni, 2026-09-28.
+ *
+ * ⛔ THEY ARE NOT EQUAL, AND THE ORDER MATTERS. Each seed part-funds the transaction that consumes
+ * it, and those transactions are not alike: protocol-genesis mints two assets, carries a withdraw-0
+ * and runs scripts, while multisig-genesis mints one NFT into a 2 ADA output. This was 5 ADA
+ * apiece, which was not enough.
+ *
+ * ⚑ THE BIGGEST GOES TO `protocolParams`, because selectSeedUtxos sorts candidates LARGEST FIRST
+ * and assigns them in order — paramsSeed, issuanceSeed, multisigSeed. So the amounts here line up
+ * with that assignment positionally, and reordering this array silently re-targets which seed gets
+ * the headroom. If it turns out `issuance` or `upgradeMultisig` needs it instead, move the 50 and
+ * nothing else has to change.
+ */
+const SEED_PREP_LOVELACE: readonly bigint[] = [50_000_000n, 10_000_000n, 10_000_000n];
 import type { UpstreamPin } from "./blueprint";
 import type { ResolvedMultisig } from "./multisig";
 import type { CardanoNetwork } from "../utils/network";
@@ -126,11 +144,40 @@ function signingClient(network: CardanoNetwork, rawWalletApi: unknown) {
   };
 }
 
+/**
+ * The wallet's current UTxOs, through the SAME client every other path uses.
+ *
+ * Exported so callers do not build their own client: one built with a different provider or chain
+ * reads a different UTxO set, and these functions hand each other outrefs.
+ */
+export async function readWalletUtxos(
+  network: CardanoNetwork,
+  rawWalletApi: unknown,
+  changeAddress: string,
+): Promise<readonly unknown[]> {
+  const { client } = signingClient(network, rawWalletApi);
+  return (await (
+    client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
+  ).getUtxos(EvoAddress.fromBech32(changeAddress))) as readonly unknown[];
+}
+
 export interface WalletSeeds {
   /** Three distinct UTxOs fit to be one-shot seeds, or null when the wallet has no three. */
   seeds: DeploymentSeeds | null;
   /** How many wallet UTxOs could serve as a seed. Below three, the wallet needs preparing. */
   usableCount: number;
+  /**
+   * How many UTxOs the PROVIDER returned, before any filtering.
+   *
+   * ⚑ REPORTED SEPARATELY BECAUSE "0 usable" HAD TWO CAUSES AND ONE MESSAGE. A wallet the
+   * provider cannot see at all and a wallet whose every UTxO carries an asset both rendered as
+   * "0 UTxO(s) usable", and the remedies are opposites: fix the address or the Blockfrost key in
+   * the first case, split the wallet in the second. Splitting a wallet the provider cannot see
+   * accomplishes nothing and costs a transaction.
+   */
+  totalCount: number;
+  /** Which address was queried, so a mismatch with the funded one is visible rather than inferred. */
+  queriedAddress: string;
 }
 
 /**
@@ -147,14 +194,13 @@ export async function findWalletSeeds(
   changeAddress: string,
 ): Promise<WalletSeeds> {
   const { client } = signingClient(network, rawWalletApi);
+  // Evolution UTxO objects, NOT the platform's record shape — see toChainUtxo.
   const utxos = (await client.getUtxos(
     EvoAddress.fromBech32(changeAddress) as never,
-  )) as unknown as ChainUtxo[];
+  )) as unknown as readonly unknown[];
   const seeds = selectSeedUtxos(utxos, changeAddress);
-  const usableCount = utxos.filter(
-    (u) => !u.scriptRef && !EvoAssets.getUnits(u.assets as never).some((x: string) => x !== "lovelace"),
-  ).length;
-  return { seeds, usableCount };
+  const usableCount = utxos.filter(isPlainSeedCandidate).length;
+  return { seeds, usableCount, totalCount: utxos.length, queriedAddress: changeAddress };
 }
 
 /**
@@ -177,13 +223,51 @@ export async function prepareSeedUtxos(
   const utxos = (await client.getUtxos(addressObj as never)) as unknown as ChainUtxo[];
 
   let tx = client.newTx();
-  for (let i = 0; i < 3; i++) {
-    tx = tx.payToAddress({ address: addressObj, assets: outputAssets(SEED_PREP_LOVELACE) });
+  // One output per seed, at its own size — see SEED_PREP_LOVELACE for why they differ.
+  for (const lovelace of SEED_PREP_LOVELACE) {
+    tx = tx.payToAddress({ address: addressObj, assets: outputAssets(lovelace) });
   }
+  /**
+   * ⛔ A FILTER CAN EMPTY THE POOL OF A RICH WALLET, and Evolution's advice for that is wrong.
+   * A seed candidate must be PLAIN — no reference script, no native assets — because whatever it
+   * carries is dragged into the transaction that consumes it. A wallet whose every output holds a
+   * token is therefore rich and unusable, and "add more funds" is exactly the wrong remedy. Only a
+   * message that counts the pool can tell that apart from genuinely being broke.
+   *
+   * ⚠ NOT to be confused with "Cannot create valid change … Available: 0 lovelace", which is a
+   * DIFFERENT failure: there the payment and fees are covered and the LEFTOVER is too small to
+   * become a change output. See onInsufficientChange below.
+   */
+  const candidates = utxos.filter(isPlainSeedCandidate);
+  if (candidates.length === 0) {
+    const total = utxos.length;
+    throw new Error(
+      `None of this wallet's ${total} UTxO(s) can seed a deployment. A seed must be PLAIN — no ` +
+        `native assets and no reference script — because whatever it carries would be dragged ` +
+        `into the transaction that consumes it.\n` +
+        `\n` +
+        `  This is not a funding problem: adding ADA to outputs that already carry tokens will ` +
+        `not help. Send yourself a few ada-only outputs, or consolidate, and try again.`,
+    );
+  }
+
   const built = await tx.build({
     changeAddress: addressObj,
-    availableUtxos: utxos.filter((u) => !u.scriptRef) as never,
+    availableUtxos: candidates as never,
     passAdditionalUtxos: true,
+    /**
+     * ⛔ "Cannot create valid change … Available: 0 lovelace. Required: At least 969750 lovelace
+     * for change output" — reported after seeding, and it is NOT a funding problem. The payment and
+     * fees are covered; what fails is the LEFTOVER, which lands below the min-UTxO a change output
+     * needs. Coin selection cannot always avoid it: the seeds are exact amounts, so whether the
+     * remainder clears ~0.97 ADA is luck.
+     *
+     * ⚑ 'burn' IS BOUNDED, WHICH IS WHY IT IS SAFE HERE. It only applies when the leftover is
+     * already below min-UTxO, so at most ~1 ADA becomes extra fee — and the alternative is a seed
+     * preparation that fails outright on a wallet holding thousands. Deliberately NOT applied to
+     * the ceremony transactions: this is repeatable housekeeping, and they are one-shot.
+     */
+    onInsufficientChange: "burn",
   });
   const cbor = EvoTransaction.toCBORHex((await built.toTransaction()) as never);
   return wallet.submitTx(await wallet.signTx(cbor, true));
@@ -203,7 +287,6 @@ export interface PlanDeploymentInput {
   /** Three existing wallet UTxOs, as chain references. */
   seeds?: DeploymentSeeds;
   /** The same three as resolved UTxO objects — the builders need the whole output, not a ref. */
-  seedUtxos?: { protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown };
   /**
    * Whether the dispatcher permits unfracking. Default: yes.
    *
@@ -266,6 +349,15 @@ export interface CeremonyPlan {
   phaseOne: CeremonyStep[];
   /** Carried into phase two so the same client and UTxO set build both halves. */
   ctx: CeremonyContext;
+  /**
+   * The three seed UTxOs as objects, resolved from the same UTxO set the plan was built against.
+   *
+   * ⚑ RETURNED RATHER THAN RE-DERIVED BY THE CALLER. The page kept its own `seedUtxos` state for
+   * this and never set it, so phase two passed `undefined` for both of protocol-genesis's seeds.
+   * Carrying them on the plan makes that state unnecessary and keeps the objects tied to the
+   * outrefs the plan is parameterised by.
+   */
+  seedUtxos: { protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown };
 }
 
 export async function planDeployment(input: PlanDeploymentInput): Promise<CeremonyPlan> {
@@ -277,12 +369,6 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
     client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
   ).getUtxos(EvoAddress.fromBech32(input.changeAddress))) as readonly never[];
 
-  const ctx: CeremonyContext = {
-    client: client as never,
-    changeAddress: EvoAddress.fromBech32(input.changeAddress) as never,
-    availableUtxos,
-  };
-
   if (!input.seeds) {
     throw new Error(
       "Three distinct seed UTxOs are required before planning. Use the seed-preparation step " +
@@ -290,6 +376,50 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
         "chain while everything after it is built and evaluated against them.",
     );
   }
+
+  const ctx: CeremonyContext = {
+    client: client as never,
+    // Reuses the provider's own evaluator and only changes one decision: it FORWARDS the
+    // transaction's selected UTxOs as Blockfrost's additionalUtxoSet, which Evolution's
+    // provider evaluator discards unless passAdditionalUtxos is set — and the SDK never sets it.
+    // See providerEvaluatorWithAdditionalUtxos.
+    evaluator: providerEvaluatorWithAdditionalUtxos(client) as never,
+    // A bech32 STRING. The SDK declares `Address = string` and parses it itself; the parsed
+    // object that used to be here satisfied `as never` and then failed the SDK's own guard at
+    // whichever step ran first — see assertCeremonyContext.
+    changeAddress: input.changeAddress,
+    // ⛔ THE FUNDING SET, WITH THE SEEDS REMOVED. Not the raw wallet read — see the block below.
+    availableUtxos: withoutRefs(availableUtxos, [
+      input.seeds.paramsSeed,
+      input.seeds.issuanceSeed,
+      input.seeds.multisigSeed,
+    ]) as never,
+  };
+  // Fail here, before the plan and before any seed is spent, rather than inside step 2.
+  assertCeremonyContext(ctx, "plan deployment");
+
+  // The builders SPEND these; the plan below is only parameterised by their outrefs. Resolved from
+  // the RAW read, because the funding set above deliberately no longer contains them.
+  const seedUtxos = resolveSeedUtxos(availableUtxos, input.seeds);
+
+  /**
+   * ⛔ WHY THE SEEDS ARE OUT OF THE FUNDING SET ABOVE.
+   *
+   * Phase one builds BOTH its transactions from one available set before either is submitted, so
+   * whatever coin selection picks for stake-registrations is chosen in ignorance of what
+   * multisig-genesis already claims. Measured on preview 2026-09-28: multisig-genesis consumed the
+   * 50 ADA multisig seed and landed; stake-registrations, funded from the same set, was rejected at
+   * submission — one transaction on chain, its partner unspendable, and the plan dead, because the
+   * one-shot policy is a function of a seed that is now spent.
+   *
+   * ⚑ AND MAKING THE SEEDS THE LARGEST UTxOs MADE THIS LIKELIER, which is my own doing: seeds are
+   * now the biggest outputs in the wallet and coin selection prefers big inputs. Both changes are
+   * individually right and they collide.
+   *
+   * This adds NO requirement on the wallet. The seeds are handed to the builders that consume them
+   * explicitly, so taking them out of the FUNDING pool only stops them being spent twice — it is
+   * not the "reserve more UTxOs up front" constraint that was ruled out.
+   */
 
   const plan = buildPlan({
     blueprint: input.blueprint,
@@ -321,20 +451,22 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
         ctx,
         plan,
         needsSeedTx: false,
-        seedUtxo: input.seedUtxos?.upgradeMultisig as never,
+        seedUtxo: seedUtxos.upgradeMultisig as never,
         upgradeMultisigTree: input.multisig.tree as never,
         ownerAddress: ctx.changeAddress,
         seedLovelace: DEFAULT_SEED_LOVELACE,
       })
     : [];
 
-  return { plan, verification, phaseOne, ctx };
+  return { plan, verification, phaseOne, ctx, seedUtxos };
 }
 
 /** Lovelace per seed output. Each seed funds part of the transaction that consumes it. */
-export const DEFAULT_SEED_LOVELACE = 10_000_000n;
+export const DEFAULT_SEED_LOVELACE = 50_000_000n;
 
+export { buildWithFreshUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos, awaitUtxosOf } from "./ceremony";
 export { awaitMultisigConfigUtxo, buildProtocolGenesis, buildReferenceScripts, selectBootstrapSeeds, assembleDeploymentParams };
+export type { MultisigConfigLocation } from "./ceremony";
 
 /**
  * The block an indexer should intersect at: the one IMMEDIATELY BEFORE the genesis
@@ -344,6 +476,43 @@ export { awaitMultisigConfigUtxo, buildProtocolGenesis, buildReferenceScripts, s
  * indexed, no deployment resolves, and every operation fails with a message that points at
  * configuration rather than at the sync window.
  */
+/**
+ * How many blocks deep a transaction is — 1 means "in the tip block".
+ *
+ * ⛔ DEPTH, NOT ELAPSED SECONDS, and the unit is the point. Blockfrost's evaluation endpoint can
+ * work from an older ledger snapshot than its query endpoints, so a UTxO created a block or two
+ * ago is invisible to `/utils/txs/evaluate/utxos` while `/addresses/.../utxos` already lists it.
+ * That gap is measured in BLOCKS. A wall-clock countdown guesses at someone else's infrastructure
+ * and silently under-waits whenever the chain is slow; preview alone varies enough for that to
+ * matter. Counting blocks self-adjusts.
+ *
+ * Returns `null` while Blockfrost does not know the transaction at all, which is a different
+ * state from "known but shallow" and the caller should say so rather than showing a depth of 0.
+ */
+export async function confirmationDepth(
+  network: CardanoNetwork,
+  txHash: string,
+): Promise<{ depth: number; txBlockHeight: number; tipHeight: number } | null> {
+  const projectId = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
+  const headers = { project_id: projectId };
+  const base = blockfrostBaseUrl(network);
+
+  const txRes = await fetch(`${base}/txs/${txHash}`, { headers });
+  if (txRes.status === 404) return null; // not indexed yet — not an error
+  if (!txRes.ok) {
+    throw new Error(`Could not read transaction ${txHash} from Blockfrost (${txRes.status}).`);
+  }
+  const { block_height: txBlockHeight } = (await txRes.json()) as { block_height: number };
+
+  const tipRes = await fetch(`${base}/blocks/latest`, { headers });
+  if (!tipRes.ok) {
+    throw new Error(`Could not read the chain tip from Blockfrost (${tipRes.status}).`);
+  }
+  const { height: tipHeight } = (await tipRes.json()) as { height: number };
+
+  return { depth: Math.max(0, tipHeight - txBlockHeight + 1), txBlockHeight, tipHeight };
+}
+
 export async function previousBlockOf(
   network: CardanoNetwork,
   txHash: string,

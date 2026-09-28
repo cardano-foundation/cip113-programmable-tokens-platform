@@ -64,3 +64,4 @@ frontend.log
 .hash-build/
 .sdkrec-build/
 .colour-build/
+.seeds-build/

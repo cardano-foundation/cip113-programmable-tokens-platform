@@ -23,6 +23,7 @@ import { resolveMultisig, type ResolvedMultisig } from "@/lib/deployment/multisi
 import { verifyBlueprintBytes, type UpstreamPin } from "@/lib/deployment/blueprint";
 import { buildCoreCip171Record } from "@/lib/deployment/provenance";
 import { buildBootstrapRecord } from "@/lib/deployment/record";
+import { describeError } from "@/lib/deployment/describe-error";
 import { useWallet } from "@/contexts/wallet-context";
 import {
   planDeployment,
@@ -32,6 +33,12 @@ import {
   findWalletSeeds,
   prepareSeedUtxos,
   awaitMultisigConfigUtxo,
+  awaitUtxosOf,
+  readWalletUtxos,
+  buildWithFreshUtxos,
+  confirmationDepth,
+  withoutOutputsOf,
+  type MultisigConfigLocation,
   buildProtocolGenesis,
   buildReferenceScripts,
   type CeremonyPlan,
@@ -139,6 +146,9 @@ export default function BootstrapProtocolPage() {
   const [seedsLocked, setSeedsLocked] = useState(true);
   const [seedSource, setSeedSource] = useState<"wallet" | "manual" | "none">("none");
   const [usableUtxoCount, setUsableUtxoCount] = useState<number | null>(null);
+  /** Raw provider count, so "none usable" can say WHICH of its two causes applies. */
+  const [walletUtxoTotal, setWalletUtxoTotal] = useState<number | null>(null);
+  const [queriedAddress, setQueriedAddress] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [seedNotice, setSeedNotice] = useState<string | null>(null);
   const [syncStart, setSyncStart] = useState<ReturnType<typeof buildSyncStart> | null>(null);
@@ -164,8 +174,14 @@ export default function BootstrapProtocolPage() {
     setSeedNotice(null);
     try {
       const changeAddress = await wallet.wallet.getChangeAddress();
-      const { seeds, usableCount } = await findWalletSeeds(network, wallet.rawApi, changeAddress);
+      const { seeds, usableCount, totalCount, queriedAddress } = await findWalletSeeds(
+        network,
+        wallet.rawApi,
+        changeAddress,
+      );
       setUsableUtxoCount(usableCount);
+      setWalletUtxoTotal(totalCount);
+      setQueriedAddress(queriedAddress);
       if (!seeds) {
         setSeedSource("none");
         return;
@@ -199,6 +215,23 @@ export default function BootstrapProtocolPage() {
           `the three seeds below fill in by themselves.`,
       );
       await waitForTxConfirmation(txHash);
+      // ⛔ CONFIRMED IS NOT VISIBLE. waitForTxConfirmation polls /txs/{hash}; the wallet read uses
+      // /addresses/.../utxos, a different index that can still be serving the previous set. Waiting
+      // only for the transaction is why this appeared not to wait at all: the seeds were on chain,
+      // confirmed, and missing from the read used to find them. Poll for the three outputs.
+      setSeedNotice(
+        `Seed transaction ${txHash.slice(0, 16)}… confirmed. Waiting for its outputs to appear in ` +
+          `the wallet…`,
+      );
+      await awaitUtxosOf(
+        txHash,
+        () => readWalletUtxos(network, wallet.rawApi, changeAddress),
+        {
+          expected: 3,
+          onAttempt: (n: number, found: number) =>
+            setSeedNotice(`Waiting for the seeds to appear in the wallet — ${found} of 3 (check ${n})…`),
+        },
+      );
       await loadSeedsFromWallet();
       setSeedNotice(null);
     } catch (e) {
@@ -447,13 +480,22 @@ export default function BootstrapProtocolPage() {
   // Phase one is the deployer alone and SPENDS THE ONE-SHOT SEEDS. Phase two needs every
   // declared participant and happens with people waiting.
 
-  /** The three seed UTxOs as objects, resolved when the operator supplied them. */
-  const [seedUtxos, setSeedUtxos] = useState<{
-    protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown;
-  } | null>(null);
+  /**
+   * Set once phase one lands. Read back off the chain and vetted, never reconstructed.
+   *
+   * ⚑ TYPED, not `unknown`. It holds BOTH halves the SDK returns — `.utxo` for the
+   * protocol-genesis builder and `.ref` for the deployment record — and `unknown` is precisely
+   * what let the wrapper reach both call sites unconverted.
+   */
+  const [configUtxo, setConfigUtxo] = useState<MultisigConfigLocation | null>(null);
 
-  /** Set once phase one lands. Read back off the chain and vetted, never reconstructed. */
-  const [configUtxo, setConfigUtxo] = useState<unknown | null>(null);
+  /** Phase one's LAST transaction, whose depth gates building the genesis. */
+  const [anchorTxHash, setAnchorTxHash] = useState<string | null>(null);
+  /** Blocks deep, or null while Blockfrost does not know the transaction yet. */
+  const [anchorDepth, setAnchorDepth] = useState<number | null>(null);
+  const [preparingGenesis, setPreparingGenesis] = useState(false);
+  /** What the retry learned, kept visible so the cause is recorded rather than guessed at. */
+  const [gateNote, setGateNote] = useState<string | null>(null);
   /** The genesis, frozen. Built only after the config UTxO exists; this is what gets signed. */
   const [genesisStep, setGenesisStep] = useState<{ label: string; unsignedCbor: string } | null>(
     null,
@@ -471,6 +513,9 @@ export default function BootstrapProtocolPage() {
       });
       setSubmitted(result.submitted);
       setPhaseOneDone(result.submitted.length === planned.phaseOne.length);
+      // The LAST phase-one transaction is the one the genesis chains from, so its depth is what
+      // the gate measures.
+      setAnchorTxHash(result.submitted[result.submitted.length - 1]?.txHash ?? null);
 
       // ⚑ POLLS FOR THE UTXO, NOT THE TRANSACTION. We must wait either way; querying the
       // multisig address and filtering by the config NFT's policy answers both "has it
@@ -488,26 +533,155 @@ export default function BootstrapProtocolPage() {
       });
       setConfigUtxo(utxo);
 
-      setProgress("Building the protocol genesis…");
-      const genesis = await buildProtocolGenesis({
-        ctx: planned.ctx,
-        plan: planned.plan,
-        protocolParamsSeedUtxo: seedUtxos?.protocolParams as never,
-        issuanceSeedUtxo: seedUtxos?.issuance as never,
-        upgradeMultisigConfigUtxo: utxo as never,
-        upgradeAuthoritySigners: (multisig?.members ?? []).map((m) => m.keyHash) as never,
-      });
-      setGenesisStep(genesis);
+      // ⛔ STOPS HERE. The genesis is NOT built as part of this click. Building it needs the
+      // config UTxO to be visible to Blockfrost's EVALUATION endpoint, which lags its query
+      // endpoints, and the operator has to be able to see that gap rather than have a machine
+      // retry through it — each failed attempt strands 6 x 2 ADA in stake deposits. The
+      // "Proceed to phase two" button below unlocks at GENESIS_GATE_DEPTH blocks.
       setProgress(null);
     } catch (e) {
       setProgress(null);
       setPlanError(
         e instanceof MultiTxError
           ? e.message
-          : `Phase one failed: ${(e as Error).message}`,
+          : // Not "Phase one failed": by the time we get here phase one's transactions may be
+            // submitted and confirmed, and what remains is reading the config UTxO back. Saying
+            // "phase one" sends the operator to look at transactions that already landed.
+            `Phase one submitted; reading the config UTxO back failed: ${describeError(e)}`,
       );
     }
-  }, [planned, wallet, phaseOneDone, multisig, seedUtxos]);
+  }, [planned, wallet, phaseOneDone, multisig]);
+
+  /**
+   * How deep phase one's last transaction must be before the genesis may be built.
+   *
+   * ⛔ BLOCKS, NOT SECONDS. Blockfrost's evaluation endpoint works from an older ledger snapshot
+   * than its query endpoints, so the config UTxO can be listed by `/addresses/.../utxos` and
+   * still be invisible to `/utils/txs/evaluate/utxos` — which fails as "Unknown transaction input
+   * (missing from UTxO set)" naming an input that demonstrably exists. A wall-clock countdown
+   * guesses at that lag and under-waits whenever the chain is slow; depth self-adjusts.
+   * Ruled by Giovanni, 2026-09-28: three blocks.
+   */
+  const GENESIS_GATE_DEPTH = 3;
+
+  /** Poll the depth of phase one's last transaction while the gate is closed. */
+  useEffect(() => {
+    if (!phaseOneDone || genesisStep || !anchorTxHash) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const d = await confirmationDepth(network, anchorTxHash);
+        if (!cancelled) setAnchorDepth(d?.depth ?? null);
+      } catch {
+        /* transient; the next tick tries again rather than failing the ceremony */
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [phaseOneDone, genesisStep, anchorTxHash, network]);
+
+  const gateOpen = (anchorDepth ?? 0) >= GENESIS_GATE_DEPTH;
+
+  /**
+   * Build the protocol genesis — the operator's explicit second act.
+   *
+   * Separate from submitting phase one so the wait is VISIBLE and the operator decides when to
+   * spend it, rather than a retry loop burning attempts inside one click.
+   */
+  const preparePhaseTwo = useCallback(async () => {
+    if (!planned || !configUtxo || genesisStep) return;
+    setPlanError(null);
+    setPreparingGenesis(true);
+    try {
+      // The re-read is still mandatory: the gate covers the evaluator lagging, NOT the context's
+      // UTxO set having gone stale while phase one spent some of it. Different causes, and only
+      // one of them is about waiting.
+      setProgress("Re-reading the wallet, then building the protocol genesis…");
+      // ⛔ EXCLUDE PHASE ONE'S OWN OUTPUTS. Blockfrost evaluates against its own ledger view and
+      // the SDK cannot pass it an additionalUtxoSet (see withoutOutputsOf), so funding the genesis
+      // from the change phase one just created is reported as "Unknown transaction input (missing
+      // from UTxO set)" for an output that is demonstrably on chain. Coin selection reaches for
+      // settled UTxOs instead; the seeds are unaffected, being passed explicitly.
+      const phaseOneTxHashes = (submitted ?? []).map((t) => t.txHash);
+
+      // ⚑ MEASURED ON PREVIEW 2026-09-28: ATTEMPT 1 SUCCEEDS. Blockfrost honours
+      // `additionalUtxoSet`, so with the injected evaluator forwarding the selected inputs, the
+      // genesis funds happily from phase one's change — an output two blocks old that the same
+      // endpoint had previously called "Unknown transaction input (missing from UTxO set)".
+      // Chaining across the phase boundary is therefore legitimate.
+      //
+      // ⛔ THE FILTERED FALLBACK STAYS ANYWAY, and deliberately so. One green run justifies
+      // PREFERRING the unfiltered path, not deleting the safety net behind it — and it costs
+      // nothing, because building the genesis submits nothing: it is a local build plus one
+      // evaluate call, so a wasted attempt costs only the wait. Attempt 1 takes the correct path;
+      // attempts 2+ exclude phase one's outputs and still get there. The note says which ran, so
+      // a future regression reports itself instead of being rediscovered.
+      let attemptNo = 0;
+      const genesis = await buildWithFreshUtxos(
+        planned.ctx,
+        async (address) => {
+          attemptNo += 1;
+          const all = (await (
+            planned.ctx.client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
+          ).getUtxos(EvoAddress.fromBech32(address))) as readonly unknown[];
+          if (attemptNo === 1) {
+            setGateNote(
+              "Attempt 1: funded from every wallet UTxO, phase one's change included. This is the " +
+                "expected path — the injected evaluator hands Blockfrost the selected inputs, so " +
+                "an output created moments ago is evaluable.",
+            );
+            return all;
+          }
+          const filtered = withoutOutputsOf(all, phaseOneTxHashes);
+          setGateNote(
+            `Attempt ${attemptNo}: excluding phase one's own outputs ` +
+              `(${all.length} UTxOs → ${filtered.length}). Blockfrost would not evaluate against ` +
+              `them even when supplied, so chaining across the phase boundary is not viable.`,
+          );
+          return filtered;
+        },
+        (ctx) =>
+          buildProtocolGenesis({
+            ctx,
+            plan: planned.plan,
+            protocolParamsSeedUtxo: planned.seedUtxos.protocolParams as never,
+            issuanceSeedUtxo: planned.seedUtxos.issuance as never,
+            // `.utxo`, not the wrapper: awaitMultisigConfigUtxo returns { utxo, ref }.
+            upgradeMultisigConfigUtxo: configUtxo.utxo as never,
+            upgradeAuthoritySigners: (multisig?.members ?? []).map((m) => m.keyHash) as never,
+          }),
+        {
+          // A safety net behind the gate, not the primary mechanism. It should rarely fire now.
+          attempts: 3,
+          delayMs: 10_000,
+          onAttempt: (n, why) =>
+            setProgress(`Evaluation could not resolve ${why} — retrying (${n} of 3, 10s apart)…`),
+          // Recorded so a success SAYS WHY it succeeded: a changed UTxO set means the previous
+          // attempt was funded from an output that no longer existed; an unchanged one means
+          // nothing but time was needed, which is the evaluator lagging.
+          onRetryInfo: (info) =>
+            setGateNote(
+              info.utxoSetChanged
+                ? `Retry ${info.attempt}: the wallet's UTxO set CHANGED (${info.utxoCount} now) — ` +
+                  `the earlier attempt was funded from an output that no longer existed.`
+                : `Retry ${info.attempt}: the UTxO set was UNCHANGED (${info.utxoCount}) — ` +
+                  `the inputs were real and the evaluator was behind.`,
+            ),
+        },
+      );
+      setGenesisStep(genesis);
+      setProgress(null);
+    } catch (e) {
+      setProgress(null);
+      setPlanError(`Preparing phase two failed: ${describeError(e)}`);
+    } finally {
+      setPreparingGenesis(false);
+    }
+  }, [planned, configUtxo, genesisStep, multisig, submitted]);
 
   const submitPhaseTwo = useCallback(async () => {
     if (!planned || !genesisStep || !cosign.complete) return;
@@ -521,21 +695,60 @@ export default function BootstrapProtocolPage() {
         ...genesisStep,
         unsignedCbor: assembleUpgradeTx(genesisStep.unsignedCbor, cosign.witnesses),
       };
-      setProgress("Building the reference-script transaction…");
-      const refScripts = await buildReferenceScripts({
-        ctx: planned.ctx,
-        plan: planned.plan,
-        referenceScriptAddress: planned.ctx.changeAddress,
-        referenceScriptLovelace: 20_000_000n as never,
-      });
-
-      const result = await signAndSubmitSequence(wallet.wallet, [signedGenesis, refScripts], {
+      /**
+       * ⛔ THE GENESIS GOES FIRST, ALONE. These two used to be built together and submitted as one
+       * sequence, which cost a deployment: reference-scripts was built from the PLAN-TIME UTxO set,
+       * by then three transactions stale, and — worse — built before the genesis was submitted, so
+       * coin selection could pick inputs the genesis itself was about to spend. Measured on preview
+       * 2026-09-28: multisig-genesis, stake-registrations and protocol-genesis all landed, and
+       * reference-scripts never reached the chain.
+       *
+       * ⚑ Reference-scripts is deliberately LAST precisely because its hash can move without
+       * invalidating anything, so there is no reason to build it early. Submitting the genesis
+       * first, waiting, then building from a FRESH read removes both faults at once — and it can
+       * legitimately fund from the genesis's own change, which the injected evaluator makes
+       * evaluable.
+       */
+      const genesisResult = await signAndSubmitSequence(wallet.wallet, [signedGenesis], {
         onPhase: (p: MultiTxPhase) =>
           setProgress(p.phase === "signing" ? "Waiting for your signature…" : `${p.phase} ${p.label}`),
         waitForConfirmation: (txHash) => waitForTxConfirmation(txHash),
       });
-      const all = [...(submitted ?? []), ...result.submitted];
-      setSubmitted(all);
+      setSubmitted([...(submitted ?? []), ...genesisResult.submitted]);
+
+      setProgress("Genesis is on chain. Re-reading the wallet, then publishing the reference scripts…");
+      const refScripts = await buildWithFreshUtxos(
+        planned.ctx,
+        () => readWalletUtxos(network, wallet.rawApi, planned.ctx.changeAddress),
+        (ctx) =>
+          buildReferenceScripts({
+            ctx,
+            plan: planned.plan,
+            referenceScriptAddress: planned.ctx.changeAddress,
+            // ⚠ PER OUTPUT, not in total: seven scripts at 20 ADA each locks ~140 ADA.
+            referenceScriptLovelace: 20_000_000n as never,
+          }),
+        {
+          attempts: 3,
+          delayMs: 10_000,
+          onAttempt: (n, why) =>
+            setProgress(`Evaluation could not resolve ${why} — retrying (${n} of 3, 10s apart)…`),
+          onRetryInfo: (info) =>
+            setGateNote(
+              info.utxoSetChanged
+                ? `Reference scripts, retry ${info.attempt}: the wallet's UTxO set CHANGED (${info.utxoCount}).`
+                : `Reference scripts, retry ${info.attempt}: the UTxO set was UNCHANGED (${info.utxoCount}).`,
+            ),
+        },
+      );
+
+      const refResult = await signAndSubmitSequence(wallet.wallet, [refScripts], {
+        onPhase: (p: MultiTxPhase) =>
+          setProgress(p.phase === "signing" ? "Waiting for your signature…" : `${p.phase} ${p.label}`),
+        waitForConfirmation: (txHash) => waitForTxConfirmation(txHash),
+      });
+      const result = { submitted: [...genesisResult.submitted, ...refResult.submitted] };
+      setSubmitted([...(submitted ?? []), ...result.submitted]);
       setDeployComplete(result.submitted.length === 2);
       setProgress(null);
 
@@ -546,7 +759,10 @@ export default function BootstrapProtocolPage() {
           assembleDeploymentParams(planned.plan, {
             protocolGenesisTxHash: genesisHash,
             referenceScriptsTxHash: refHash,
-            multisigConfigUtxo: configUtxo,
+            // `.ref`, not the wrapper and not `.utxo`: BootstrapObservations wants a TxInput
+            // ({txHash, outputIndex}). The template download below already uses that shape;
+            // this live path was the one that did not.
+            multisigConfigUtxo: configUtxo.ref,
           } as never) as unknown as Record<string, unknown>,
         );
       }
@@ -687,16 +903,29 @@ export default function BootstrapProtocolPage() {
         )}
         {wallet.connected && seedSource === "none" && (
           <div className="space-y-2 rounded border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-200">
-            <p>
-              This wallet has {usableUtxoCount ?? 0} UTxO(s) usable as a seed and needs three.
-              (A UTxO carrying native assets or a reference script cannot be one.) Splitting is
-              ordinary, repeatable housekeeping — it is kept out of the deployment proper so
-              that a failure here costs nothing.
-            </p>
+            {walletUtxoTotal === 0 ? (
+              <p>
+                The provider returned <strong>no UTxOs at all</strong> for{" "}
+                <code className="break-all">{queriedAddress ?? "this wallet"}</code>. Splitting
+                would not help — nothing here is a funding problem yet. Check that this is the
+                address you funded (a wallet&apos;s change address is often not the one you sent
+                to), and that the Blockfrost key baked into this build is for {network}.
+              </p>
+            ) : (
+              <p>
+                This wallet has {usableUtxoCount ?? 0} of {walletUtxoTotal ?? "?"} UTxO(s) usable
+                as a seed and needs three. (A UTxO carrying native assets or a reference script
+                cannot be one.) Splitting makes them <strong>50, 10 and 10 ADA</strong> — unequal
+                because each seed part-funds the transaction that consumes it, and the protocol
+                genesis mints two assets and runs scripts where the multisig genesis mints one
+                NFT. Splitting is ordinary, repeatable housekeeping — it is kept out of the
+                deployment proper so that a failure here costs nothing.
+              </p>
+            )}
             <button
               type="button"
               onClick={prepareSeeds}
-              disabled={preparing}
+              disabled={preparing || walletUtxoTotal === 0}
               className="rounded border border-amber-600 px-3 py-1.5 text-amber-100 disabled:opacity-40"
             >
               {preparing ? "Preparing…" : "Prepare seed UTxOs"}
@@ -1099,12 +1328,54 @@ export default function BootstrapProtocolPage() {
               </p>
             )}
 
-            {/* ---- BETWEEN: waiting for the config UTxO, then the frozen genesis ---- */}
+            {/* ---- BETWEEN: the gate, then the operator's explicit second act ---- */}
             {phaseOneDone && !genesisStep && (
-              <p className="text-xs text-amber-200">
-                Phase one is on chain. Building the genesis once the upgrade-multisig config
-                UTxO is visible — it is a reference input, so it must exist before the genesis
-                can be built or submitted.
+              <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3 text-xs">
+                <p className="text-amber-200">
+                  Phase one is on chain. The genesis takes the upgrade-multisig config UTxO as a
+                  reference input, and Blockfrost&apos;s script evaluator runs a little behind its
+                  own query endpoints — so the UTxO can be listed and still not be usable yet.
+                  This waits {GENESIS_GATE_DEPTH} blocks rather than a fixed number of seconds,
+                  because that lag is measured in blocks and a timer under-waits whenever the
+                  chain is slow.
+                </p>
+
+                <p className={gateOpen ? "text-green-300" : "text-dark-300"}>
+                  {!configUtxo
+                    ? "Waiting for the upgrade-multisig config UTxO to appear…"
+                    : anchorDepth === null
+                      ? "Waiting for Blockfrost to index phase one's last transaction…"
+                      : gateOpen
+                        ? `Ready — phase one is ${anchorDepth} blocks deep.`
+                        : `Phase one is ${anchorDepth} of ${GENESIS_GATE_DEPTH} blocks deep…`}
+                </p>
+
+                <button
+                  type="button"
+                  onClick={preparePhaseTwo}
+                  disabled={!configUtxo || !gateOpen || preparingGenesis}
+                  className={`rounded px-3 py-1.5 ${
+                    gateOpen && configUtxo && !preparingGenesis
+                      ? "border border-green-600 text-green-100 hover:bg-green-950"
+                      : "border border-dark-700 text-dark-500"
+                  }`}
+                >
+                  {preparingGenesis ? "Building the genesis…" : "Proceed to phase two"}
+                </button>
+
+              </div>
+            )}
+
+            {/*
+              ⛔ OUTSIDE THE GATE BLOCK ON PURPOSE. This note says WHICH funding strategy built
+              the genesis, and it used to live inside the `!genesisStep` block — so it unmounted
+              the moment the build succeeded, destroying the answer exactly when it became one.
+              The operator was left asking which attempt had worked, which is the whole question
+              the note exists to settle. It now survives into phase two.
+            */}
+            {gateNote && (
+              <p className="rounded border border-dark-700 bg-dark-950 p-2 text-xs text-dark-300">
+                {gateNote}
               </p>
             )}
 
@@ -1115,6 +1386,13 @@ export default function BootstrapProtocolPage() {
                   unsignedCbor={genesisStep.unsignedCbor}
                   memberKeyHashes={multisig.members.map((m) => m.keyHash)}
                   onChange={setCosign}
+                  // partialSign = true, exactly as /sign does: one signature among several, so the
+                  // wallet must not refuse for the keys it does not hold.
+                  signSelf={
+                    wallet.connected
+                      ? () => wallet.wallet.signTx(genesisStep.unsignedCbor, true)
+                      : undefined
+                  }
                 />
                 <button
                   type="button"

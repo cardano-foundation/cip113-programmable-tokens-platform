@@ -70,6 +70,54 @@ export function transactionBodyBytes(txHex: string): Uint8Array {
 }
 
 /**
+ * Whatever a wallet or a human handed us, reduced to a witness set.
+ *
+ * ⛔ BE LIBERAL HERE, BECAUSE WALLETS ARE NOT. CIP-30 says `signTx` returns
+ * `cbor<transaction_witness_set>`, and some wallets return the whole signed transaction instead —
+ * and an operator copying out of a wallet's UI has no way to tell the two apart, because both are
+ * just long hex. Refusing the transaction form buys nothing: the witness set is element 1 of it,
+ * sitting there in the bytes we were given. Extracting it is strictly better than telling somebody
+ * their paste was wrong when it was not.
+ *
+ * ⚑ EXTRACTED BY BYTE SPAN, NOT RE-ENCODED. The witness set is sliced out exactly as it arrived,
+ * so a signature over the body stays valid — re-encoding could normalise a map or a set tag and
+ * produce witnesses that verify against nothing.
+ *
+ * Returns the hex plus whether it came out of a transaction, so a caller can say so rather than
+ * silently accepting a different shape from the one it asked for.
+ */
+export function asWitnessSetHex(value: string): { hex: string; fromTransaction: boolean } {
+  const clean = value.replace(/\s+/g, "");
+  if (clean.length === 0) throw new Error("nothing was pasted");
+  if (!/^[0-9a-fA-F]+$/.test(clean)) {
+    throw new Error("this is not hex — check for stray characters or a truncated copy");
+  }
+  const bytes = hexToBytes(clean);
+  const major = (bytes[0] as number) >> 5;
+
+  if (major === 5) return { hex: clean.toLowerCase(), fromTransaction: false };
+
+  if (bytes[0] === 0x84) {
+    // [body, witnessSet, isValid, auxiliaryData] — take element 1 by span.
+    const afterBody = EvoCBOR.decodeItemWithOffset(bytes, 1).newOffset;
+    const afterWitnesses = EvoCBOR.decodeItemWithOffset(bytes, afterBody).newOffset;
+    const ws = bytes.subarray(afterBody, afterWitnesses);
+    if (ws.length === 0 || (ws[0] as number) >> 5 !== 5) {
+      throw new Error(
+        "this is a transaction, but its second element is not a witness set — it may be " +
+          "unsigned, or not a transaction at all.",
+      );
+    }
+    return { hex: bytesToHex(ws), fromTransaction: true };
+  }
+
+  throw new Error(
+    `a witness set is a CBOR map (major type 5) and a transaction is an array starting 0x84; ` +
+      `this is major type ${major}, which is neither.`,
+  );
+}
+
+/**
  * The transaction hash: blake2b-256 of the body bytes.
  *
  * This is the identity the chain knows the transaction by, the value an explorer
@@ -133,10 +181,18 @@ export function verifyWitnessSet(
   try {
     key0 = vkeyWitnessValue(ws);
   } catch (e) {
+    // ⛔ LEAD WITH THE CAUSE WHEN THERE IS ONE. This used to open with "check the whole value was
+    // copied, with no line breaks or truncation" and append the real diagnosis in parentheses —
+    // so an operator who had pasted a whole transaction was first told to check their clipboard,
+    // and the sentence that said what was actually wrong arrived after the advice that was not.
+    // Truncation is the common cause, not the only one, and the generic remedy belongs LAST.
+    const detail = e instanceof Error ? e.message : String(e);
+    const diagnosed = /TRANSACTION|major type/i.test(detail);
     throw new Error(
-      "this does not parse as a witness set — check the whole value was copied, " +
-        "with no line breaks or truncation " +
-        `(${e instanceof Error ? e.message : String(e)})`
+      diagnosed
+        ? detail
+        : "this does not parse as a witness set — check the whole value was copied, " +
+          `with no line breaks or truncation (${detail})`,
     );
   }
   if (key0 === null) return [];
@@ -189,7 +245,26 @@ export function verifyWitnessSet(
 function vkeyWitnessValue(ws: Uint8Array): Uint8Array | null {
   const initial = ws[0];
   if (initial === undefined || initial >> 5 !== 5) {
-    throw new Error(`witness set is not a CBOR map (major type ${initial === undefined ? "?" : initial >> 5})`);
+    // ⛔ THE OLD MESSAGE PRINTED THE MAJOR TYPE IT FOUND, next to the word "map", which reads as
+    // though a map WERE that type. It cost an operator a round of confusion mid-ceremony: told
+    // "not a CBOR map (major type 4)", the natural reading is that the value is fine and something
+    // else is wrong. A map is major type 5; 4 is an array, and a Cardano transaction IS an array —
+    // so by far the likeliest cause is a whole signed transaction pasted where a witness belongs.
+    const major = initial === undefined ? undefined : initial >> 5;
+    if (major === 4) {
+      throw new Error(
+        "This is a whole TRANSACTION, not a witness set — it decodes as a CBOR array (major " +
+          "type 4), and a witness set is a map (major type 5).\n" +
+          "\n" +
+          "  A co-signer must not sign-and-submit. Send them the unsigned CBOR, have them open " +
+          "/sign, and paste back the WITNESS that page returns — it calls signTx(tx, true), so " +
+          "the wallet yields one signature instead of a finished transaction.",
+      );
+    }
+    throw new Error(
+      "This does not decode as a witness set: a witness set is a CBOR map (major type 5), and " +
+        `this is major type ${major === undefined ? "nothing — the value is empty" : major}.`,
+    );
   }
   const header = EvoCBOR.decodeItemWithOffset(ws, 0);
   // decodeItemWithOffset returns the whole map; walk it manually to keep the raw

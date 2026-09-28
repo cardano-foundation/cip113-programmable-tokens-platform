@@ -31,6 +31,7 @@
  * from `upgrade_cred`; the registrations must already have landed.
  */
 
+import { EvoAssets, EvoTransactionHash } from "@easy1staking/cip113-sdk-ts";
 import {
   planBootstrap,
   buildSeedTx,
@@ -63,8 +64,6 @@ import {
 export interface ChainUtxo {
   txHash: string;
   outputIndex: number;
-  scriptRef?: unknown;
-  assets?: unknown;
 }
 
 /**
@@ -76,13 +75,472 @@ export interface ChainUtxo {
  * it happens to read.
  */
 export function selectSeedUtxos(
-  utxos: readonly ChainUtxo[],
+  utxos: readonly unknown[],
   _changeAddress: string,
 ): { paramsSeed: ChainUtxo; issuanceSeed: ChainUtxo; multisigSeed: ChainUtxo } | null {
-  const plain = utxos.filter((u) => !u.scriptRef);
-  if (plain.length < 3) return null;
+  // ⚑ LARGEST FIRST, NOT FIRST-ENCOUNTERED. Selection used to take whichever three plain UTxOs
+  // the provider happened to list first, and a wallet that has been used for a while holds dust:
+  // the preview wallet offered a 2 ADA output as a seed while 40 ADA outputs sat further down the
+  // list. Each seed part-funds the transaction that consumes it, so a dust seed forces coin
+  // selection to make up the difference and can leave the funded output below its min-UTxO.
+  // Ties break on the outref so the choice is reproducible across calls and machines.
+  const plain = utxos
+    .filter(isPlainSeedCandidate)
+    .map((u) => ({ ref: toChainUtxo(u), lovelace: lovelaceOfUtxo(u) }))
+    .sort(
+      (x, y) =>
+        (y.lovelace > x.lovelace ? 1 : y.lovelace < x.lovelace ? -1 : 0) ||
+        `${x.ref.txHash}#${x.ref.outputIndex}`.localeCompare(`${y.ref.txHash}#${y.ref.outputIndex}`),
+    )
+    .map((e) => e.ref);
+  if (plain.length < BOOTSTRAP_SEED_COUNT) return null;
   const [a, b, c] = plain;
   return { paramsSeed: a, issuanceSeed: b, multisigSeed: c };
+}
+
+/**
+ * ⛔ THE WALLET UTxO DOES NOT USE `txHash`/`outputIndex`, AND READING THOSE IS WHY THE PAGE
+ * REPORTED AN EMPTY WALLET WITH 84 UTxOs IN IT.
+ *
+ * `client.getUtxos(address)` resolves to the PROVIDER's method — `ReadOnlyClientEffect extends
+ * Provider.ProviderEffect` — so it returns Evolution `UTxO` objects, whose reference fields are
+ * `transactionId` (a `TransactionHash`, not a hex string) and `index` (a **bigint**). The names
+ * `txHash` and `outputIndex` belong to the record format the platform WRITES, not to anything the
+ * chain hands back, and reading them off a provider UTxO yields `undefined` silently — no type
+ * error, because the values crossed an `as` boundary on the way in.
+ *
+ * ⚑ The wallet has a second, unrelated `getUtxos()` that takes NO argument and returns CBOR
+ * hex STRINGS. Either mistake produces "no usable UTxOs" from a funded wallet, which is why this
+ * conversion is one function with one home rather than a field access at each call site.
+ */
+export function toChainUtxo(utxo: unknown): ChainUtxo {
+  const u = utxo as { transactionId?: unknown; index?: unknown };
+  // ⚑ toHex THROWS a ParseError on anything that is not a TransactionHash — it does not return
+  // undefined — so the guard has to be a catch, not a value check. Measured: toHex(undefined),
+  // toHex(null), toHex("abc") and toHex({hash}) all throw "TransactionHash.FromHex", which names
+  // the SDK's internal schema and not the field the caller got wrong.
+  let txHash: string;
+  try {
+    txHash = EvoTransactionHash.toHex(u.transactionId as never).toLowerCase();
+  } catch {
+    throw new Error(
+      "A wallet UTxO carried no usable transaction id. Expected Evolution's `transactionId`; got " +
+        JSON.stringify(u.transactionId) + ". (`txHash` is the field the platform WRITES, not one " +
+        "the chain returns.)",
+    );
+  }
+  const outputIndex = Number(u.index);
+  if (!/^[0-9a-f]{64}$/.test(txHash)) {
+    throw new Error("A wallet UTxO produced a malformed transaction id: " + txHash + ".");
+  }
+  if (!Number.isSafeInteger(outputIndex) || outputIndex < 0) {
+    throw new Error(
+      "A wallet UTxO carried no usable output index. Expected Evolution's `index`; got " +
+        JSON.stringify(u.index) + ".",
+    );
+  }
+  return { txHash, outputIndex };
+}
+
+/**
+ * Whether a wallet UTxO can be spent as a one-shot seed.
+ *
+ * A seed must be PLAIN. A UTxO carrying a reference script or a native asset drags its payload
+ * into the transaction that consumes it — and spending a reference-script output destroys
+ * protocol infrastructure silently, which the SDK records as having already happened on preview.
+ *
+ * ⚑ ONE PREDICATE, USED BY BOTH THE SELECTION AND THE COUNT. They were separate and disagreed:
+ * the selection filtered on `scriptRef` alone while the count also excluded native assets, so a
+ * wallet could be told it had two usable UTxOs and then have a third selected anyway.
+ */
+export function isPlainSeedCandidate(utxo: unknown): boolean {
+  const u = utxo as { scriptRef?: unknown; assets?: unknown };
+  if (u.scriptRef) return false;
+  // ⛔ getUnits DOES NOT VALIDATE ITS ARGUMENT. Measured: getUnits("not-an-assets-object") and
+  // getUnits({}) both return ["lovelace"], so a wrong-shaped value reads as a clean ada-only
+  // UTxO — the reassuring direction. Only undefined and null throw. So the shape is checked here
+  // rather than relied upon, and anything unreadable counts as NOT plain.
+  if (typeof u.assets !== "object" || u.assets === null) return false;
+  try {
+    return !EvoAssets.getUnits(u.assets as never).some((unit: string) => unit !== "lovelace");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate a ceremony context BEFORE anything is planned or built.
+ *
+ * ⛔ THE SDK ALREADY CHECKS ALL OF THIS — and that is the problem, because it checks it inside
+ * each build step. A context that is wrong in one field therefore fails at whichever step happens
+ * to run first, and in a two-phase ceremony that can be AFTER the seed transaction is submitted:
+ * the operator sees "bootstrap multisig-genesis: changeAddress is required (bech32)" with three
+ * one-shot seeds already spent, and nothing about the message says the context was malformed from
+ * the start.
+ *
+ * ⚑ `Address` IS A BECH32 STRING IN THIS SDK (`export type Address = string`), not an Evolution
+ * `Address` object. Passing the object satisfies `as never` and fails this check — measured on
+ * preview, where the context was built with `EvoAddress.fromBech32(...) as never`. The SDK calls
+ * `EvoAddress.fromBech32(ctx.changeAddress)` itself; handing it an already-parsed object is one
+ * conversion too many.
+ */
+/** Lovelace in a wallet UTxO, or 0n when its assets cannot be read. */
+export function lovelaceOfUtxo(utxo: unknown): bigint {
+  const u = utxo as { assets?: unknown };
+  try {
+    // ⛔ lovelaceOf RETURNS undefined FOR A WRONG-SHAPED VALUE — measured: lovelaceOf("garbage")
+    // and lovelaceOf({}) are both undefined, and only undefined/null throw. An undefined here
+    // would make every comparison in the seed sort false and silently un-sort it, so the coercion
+    // is the guard.
+    const v = EvoAssets.lovelaceOf(u.assets as never);
+    return typeof v === "bigint" ? v : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+/**
+ * The three seed UTxOs as OBJECTS, resolved from the wallet by the outrefs already chosen.
+ *
+ * ⛔ THE PLAN TAKES OUTREFS; THE BUILDERS TAKE UTxOs. `planBootstrap` is parameterised by
+ * `TxInput` — `{ txHash, outputIndex }` — but `buildMultisigGenesisTx` and
+ * `buildProtocolGenesisTx` have to SPEND the outputs, so they need the real thing. Those two
+ * requirements were satisfied from different places: the outrefs from selection, the objects from
+ * a `seedUtxos` field nobody ever populated. It was permanently `undefined`, so the SDK refused at
+ * multisig-genesis with the outref it expected, which reads as a missing UTxO on chain rather than
+ * as a parameter never passed.
+ *
+ * ⚑ Resolving them HERE, from the same `availableUtxos` the context carries, means the objects and
+ * the outrefs cannot disagree — the failure mode where a deployment is parameterised by one UTxO
+ * and spends another.
+ */
+export function resolveSeedUtxos(
+  available: readonly unknown[],
+  seeds: { paramsSeed: ChainUtxo; issuanceSeed: ChainUtxo; multisigSeed: ChainUtxo },
+): { protocolParams: unknown; issuance: unknown; upgradeMultisig: unknown } {
+  const key = (r: ChainUtxo) => `${r.txHash}#${r.outputIndex}`;
+  const byRef = new Map<string, unknown>();
+  for (const u of available) {
+    try {
+      byRef.set(key(toChainUtxo(u)), u);
+    } catch {
+      // Not a wallet UTxO shape; nothing here can be a seed.
+    }
+  }
+  const find = (ref: ChainUtxo, role: string): unknown => {
+    const hit = byRef.get(key(ref));
+    if (!hit) {
+      throw new Error(
+        `The ${role} seed ${key(ref)} is not among the wallet's spendable UTxOs. It was chosen as ` +
+          `a seed, so either it has been spent since (re-read the wallet and plan again) or the ` +
+          `UTxO set was filtered after selection.`,
+      );
+    }
+    return hit;
+  };
+  return {
+    protocolParams: find(seeds.paramsSeed, "protocolParams"),
+    issuance: find(seeds.issuanceSeed, "issuance"),
+    upgradeMultisig: find(seeds.multisigSeed, "upgradeMultisig"),
+  };
+}
+
+/**
+ * Build a step, re-reading the wallet first and retrying a "missing from UTxO set" evaluation.
+ *
+ * ⛔ TWO DIFFERENT CAUSES WEAR THE SAME ERROR, and only one of them is a waiting problem:
+ *
+ *   CannotCreateEvaluationContext: Unknown transaction input (missing from UTxO set): <ref>
+ *
+ * (a) STALE — the context's `availableUtxos` was captured when the plan was made, and phase one
+ *     has spent some of them since. Coin selection then funds this transaction from an output
+ *     that no longer exists. No amount of waiting fixes it; the set has to be re-read.
+ * (b) LAGGING — the input is genuinely still unspent, but Blockfrost's evaluation endpoint is
+ *     working from a slightly older ledger snapshot than its query endpoints, so a UTxO created
+ *     one or two blocks ago is invisible to `/utils/txs/evaluate/utxos` while
+ *     `/addresses/.../utxos` already lists it. Here waiting IS the fix.
+ *
+ * Distinguishing them after the fact is unreliable — a UTxO that was unspent at build time may be
+ * spent by the time anyone looks, especially across repeated attempts — so this handles both: it
+ * re-reads before every try (covering a) and retries with a pause (covering b). A failure that is
+ * neither is rethrown immediately rather than retried, because repeating a transaction the
+ * validator rejected only wastes the operator's time.
+ */
+export async function buildWithFreshUtxos<T>(
+  ctx: CeremonyContext,
+  readUtxos: (address: string) => Promise<readonly unknown[]>,
+  build: (ctx: CeremonyContext) => Promise<T>,
+  opts: {
+    attempts?: number;
+    delayMs?: number;
+    onAttempt?: (n: number, why: string) => void;
+    /** Reports what changed between attempts, so a success says WHY it succeeded. */
+    onRetryInfo?: (info: { attempt: number; utxoSetChanged: boolean; utxoCount: number }) => void;
+  } = {},
+): Promise<T> {
+  const attempts = opts.attempts ?? 4;
+  const delay = opts.delayMs ?? 10_000;
+  let last: unknown;
+  let previousSet: string | null = null;
+
+  for (let n = 1; n <= attempts; n += 1) {
+    // Re-read EVERY time: between two attempts the wallet may have changed again.
+    const fresh = await readUtxos(ctx.changeAddress);
+
+    // ⚑ INSTRUMENTED ON PURPOSE. This retries for two different reasons and, having succeeded,
+    // could not previously say which one applied — the re-read and the pause happen together, so
+    // a success on attempt 2 was equally consistent with a stale UTxO set and with Blockfrost's
+    // evaluator lagging. Recording whether the set actually CHANGED separates them: changed means
+    // the earlier attempt was funded from an output that no longer existed; unchanged means the
+    // same inputs became acceptable with nothing but time, which is the lag.
+    const signature = fingerprintUtxos(fresh);
+    const changed = previousSet !== null && signature !== previousSet;
+    if (n > 1) opts.onRetryInfo?.({ attempt: n, utxoSetChanged: changed, utxoCount: fresh.length });
+    previousSet = signature;
+
+    const attemptCtx: CeremonyContext = { ...ctx, availableUtxos: fresh as CeremonyContext["availableUtxos"] };
+    assertCeremonyContext(attemptCtx, "build step");
+    try {
+      return await build(attemptCtx);
+    } catch (e) {
+      last = e;
+      if (!isMissingUtxoEvaluation(e) || n === attempts) throw e;
+      opts.onAttempt?.(n, missingInputOf(e) ?? "an input was missing from the UTxO set");
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw last;
+}
+
+/**
+ * A stable signature of a UTxO set, for telling "the wallet changed" from "time passed".
+ *
+ * Sorted, so provider ordering does not read as a change. Entries it cannot convert are counted
+ * rather than dropped — a set that became unreadable is not the same as one that stayed put.
+ */
+export function fingerprintUtxos(utxos: readonly unknown[]): string {
+  const refs: string[] = [];
+  let unreadable = 0;
+  for (const u of utxos) {
+    try {
+      const r = toChainUtxo(u);
+      refs.push(`${r.txHash}#${r.outputIndex}`);
+    } catch {
+      unreadable += 1;
+    }
+  }
+  return `${refs.sort().join(",")}|${unreadable}`;
+}
+
+/**
+ * An evaluator that TELLS the provider about the UTxOs the transaction selected.
+ *
+ * ⛔ THIS IS THE ONE LEVER THE SDK ALREADY LEAVES OPEN, and it took five wrong turns to find.
+ * Evolution assembles `selectedUtxos + referenceInputs` and hands them to whatever evaluator is in
+ * play — `Evaluation.js` says "Always pass additionalUtxos … Custom evaluators use them". Its
+ * PROVIDER-based evaluator then throws them away unless `passAdditionalUtxos: true` is set in
+ * BuildOptions, which the cip113 SDK's `buildOptions(ctx)` never sets and callers cannot reach.
+ *
+ * ⚑ BUT `resolveEvaluator` CHECKS `options.evaluator` FIRST and returns it outright, and the SDK
+ * DOES forward `ctx.evaluator`. So a custom evaluator receives the selected UTxOs regardless of
+ * that flag — no upstream change needed. All this one does is forward them, which is the single
+ * decision Evolution's provider evaluator makes differently.
+ *
+ * Why it should matter: Blockfrost evaluates against its own ledger snapshot, and
+ * `/utils/txs/evaluate/utxos` takes an `additionalUtxoSet` for inputs it has not indexed. An output
+ * created two blocks ago is reported as "Unknown transaction input (missing from UTxO set)" while
+ * being demonstrably on chain — supplying it explicitly is what the endpoint is for.
+ *
+ * ⚑ PROVEN ON PREVIEW, 2026-09-28. With this evaluator injected, the protocol genesis built while
+ * funding from phase one's change — the very output the same Blockfrost endpoint had refused as
+ * "Unknown transaction input (missing from UTxO set)" two blocks earlier. So the endpoint honours
+ * `additionalUtxoSet`, and the fix is forwarding, not waiting: the 3-block gate and the
+ * exclusion filter both became belt-and-braces rather than load-bearing.
+ */
+export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
+  const c = client as {
+    effect?: { evaluateTx?: (tx: unknown, additional?: unknown[]) => unknown };
+  };
+  if (typeof c?.effect?.evaluateTx !== "function") {
+    throw new Error(
+      "This client exposes no effect.evaluateTx, so the provider's evaluator cannot be reused. " +
+        "Expected an Evolution ReadOnlyClient or SigningClient.",
+    );
+  }
+  return {
+    // The signature Evolution calls: (tx, additionalUtxos, context). The context is unused — we
+    // delegate to the provider, which derives everything else itself.
+    evaluate: (tx: unknown, additionalUtxos: readonly unknown[] | undefined) =>
+      c.effect!.evaluateTx!(tx, additionalUtxos ? [...additionalUtxos] : undefined),
+  };
+}
+
+/**
+ * Wait until a transaction's outputs actually APPEAR in a wallet read.
+ *
+ * ⛔ A CONFIRMED TRANSACTION IS NOT A REFRESHED WALLET, and conflating the two is why seeding
+ * looked like it did not wait. `waitForTxConfirmation` polls `/txs/{hash}`, which answers as soon
+ * as Blockfrost has indexed the transaction — but `/addresses/.../utxos` is a different index and
+ * can still be serving the previous set. So the seeds were genuinely on chain, confirmed, and
+ * absent from the very read used to find them.
+ *
+ * ⚑ SO POLL FOR THE CONDITION, NOT THE EVENT. The same lesson as the 3-block gate: waiting for a
+ * proxy of readiness is guesswork, waiting for the thing you need is not. Returns the read that
+ * contained them, so the caller does not immediately re-fetch and risk a different answer.
+ */
+export async function awaitUtxosOf(
+  txHash: string,
+  readUtxos: () => Promise<readonly unknown[]>,
+  opts: { expected?: number; intervalMs?: number; timeoutMs?: number; onAttempt?: (n: number, found: number) => void } = {},
+): Promise<readonly unknown[]> {
+  const want = opts.expected ?? 1;
+  const interval = opts.intervalMs ?? 3_000;
+  const timeout = opts.timeoutMs ?? 120_000;
+  const target = txHash.toLowerCase();
+  const started = Date.now();
+  let attempt = 0;
+  let lastFound = 0;
+
+  for (;;) {
+    attempt += 1;
+    const utxos = await readUtxos();
+    lastFound = utxos.filter((u) => {
+      try {
+        return toChainUtxo(u).txHash === target;
+      } catch {
+        return false;
+      }
+    }).length;
+    opts.onAttempt?.(attempt, lastFound);
+    if (lastFound >= want) return utxos;
+
+    if (Date.now() - started > timeout) {
+      throw new Error(
+        `The seed transaction ${txHash.slice(0, 16)}… is confirmed, but only ${lastFound} of ` +
+          `${want} of its outputs appear in the wallet after ` +
+          `${Math.round(timeout / 1000)}s. Nothing is lost — the outputs exist on chain. The ` +
+          `provider's address index is behind its transaction index; reload and they will be there.`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, interval));
+  }
+}
+
+/**
+ * Drop specific UTxOs by outref — the seeds, so coin selection cannot spend them as funding.
+ *
+ * Sibling of {@link withoutOutputsOf}, which excludes by TRANSACTION. This excludes exact outputs,
+ * because a seed is one output of a transaction whose other outputs are ordinary wallet money.
+ */
+export function withoutRefs(
+  utxos: readonly unknown[],
+  refs: readonly ChainUtxo[],
+): readonly unknown[] {
+  const exclude = new Set(refs.map((r) => `${r.txHash.toLowerCase()}#${r.outputIndex}`));
+  if (exclude.size === 0) return utxos;
+  return utxos.filter((u) => {
+    try {
+      const r = toChainUtxo(u);
+      return !exclude.has(`${r.txHash}#${r.outputIndex}`);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * Drop wallet UTxOs produced by the transactions named, so coin selection cannot fund from them.
+ *
+ * ⛔ THIS IS THE REAL FIX FOR "Unknown transaction input (missing from UTxO set)", and waiting is
+ * not. Blockfrost evaluates a transaction against its OWN view of the ledger: Evolution assembles
+ * the selected inputs and reference inputs and would happily hand them over as
+ * `additionalUtxoSet`, but it only forwards them when `passAdditionalUtxos: true` is set in
+ * BuildOptions (Evolution `resolve.js`, and `Evaluation.js` says so in as many words), and the
+ * cip113 SDK's own `buildOptions(ctx)` never sets it. So an input Blockfrost has not indexed into
+ * its evaluation snapshot cannot be explained to it at all.
+ *
+ * The protocol genesis was being funded from phase one's change — the stake-registration
+ * transaction's single output, created two or three blocks earlier — and reported as missing while
+ * being demonstrably on chain. Excluding phase one's outputs makes coin selection reach for
+ * settled UTxOs instead, which Blockfrost has certainly seen.
+ *
+ * ⚑ THE SEEDS ARE NOT AFFECTED. protocolParams and issuance are passed to the builder explicitly
+ * rather than found by coin selection, and they predate the ceremony, so they are settled too.
+ * This only removes the *change* that phase one produced.
+ */
+export function withoutOutputsOf(
+  utxos: readonly unknown[],
+  txHashes: readonly string[],
+): readonly unknown[] {
+  const exclude = new Set(txHashes.map((h) => h.toLowerCase()));
+  if (exclude.size === 0) return utxos;
+  return utxos.filter((u) => {
+    try {
+      return !exclude.has(toChainUtxo(u).txHash);
+    } catch {
+      return false; // unreadable: not something to fund from
+    }
+  });
+}
+
+/** Only this failure is worth retrying; anything else is rethrown at once. */
+export function isMissingUtxoEvaluation(err: unknown): boolean {
+  return /missing from UTxO set|CannotCreateEvaluationContext|Unknown transaction input/i.test(
+    serialiseError(err),
+  );
+}
+
+/** The outref the evaluator could not resolve, for a message that names it. */
+export function missingInputOf(err: unknown): string | null {
+  const m = serialiseError(err).match(/([0-9a-f]{64})#(\d+)/i);
+  return m ? `${m[1]}#${m[2]}` : null;
+}
+
+function serialiseError(err: unknown): string {
+  const seen = new Set<unknown>();
+  const parts: string[] = [];
+  let cur: unknown = err;
+  for (let i = 0; i < 6 && cur != null && !seen.has(cur); i += 1) {
+    seen.add(cur);
+    const e = cur as { message?: unknown; response?: { body?: unknown } };
+    if (typeof e.message === "string") parts.push(e.message);
+    if (e.response?.body !== undefined) {
+      try {
+        parts.push(typeof e.response.body === "string" ? e.response.body : JSON.stringify(e.response.body));
+      } catch {
+        /* unserialisable body; the message above still counts */
+      }
+    }
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return parts.join(" ");
+}
+
+export function assertCeremonyContext(ctx: CeremonyContext, where = "ceremony"): void {
+  if (!ctx || typeof ctx !== "object") throw new Error(`${where}: a build context is required.`);
+  const c = ctx as { client?: { newTx?: unknown }; changeAddress?: unknown; availableUtxos?: unknown };
+  if (!c.client || typeof c.client.newTx !== "function") {
+    throw new Error(`${where}: client must be an Evolution ReadOnlyClient or SigningClient.`);
+  }
+  if (typeof c.changeAddress !== "string" || c.changeAddress.length === 0) {
+    throw new Error(
+      `${where}: changeAddress must be a bech32 STRING, not a parsed Address object — this SDK ` +
+        `declares \`Address = string\` and parses it itself. Got ` +
+        `${typeof c.changeAddress}${typeof c.changeAddress === "object" ? " (an object)" : ""}.`,
+    );
+  }
+  if (!Array.isArray(c.availableUtxos)) {
+    throw new Error(
+      `${where}: availableUtxos must be an array — exactly the UTxOs these transactions may ` +
+        `spend. Without it coin selection is free to spend reference-script and seed UTxOs.`,
+    );
+  }
+  if (c.availableUtxos.length === 0) {
+    throw new Error(
+      `${where}: availableUtxos is empty, so nothing can fund the ceremony. If a wallet view was ` +
+        `filtered, check the filter before checking the wallet.`,
+    );
+  }
 }
 
 export { BOOTSTRAP_SEED_COUNT };
@@ -123,6 +581,14 @@ export function buildPlan(config: BootstrapConfig): BootstrapPlan {
 export { selectBootstrapSeeds, assertMultisigConfigUtxo, assembleDeploymentParams };
 
 /**
+ * Where the upgrade-multisig config UTxO is, in the two shapes the ceremony needs.
+ *
+ * Taken from the SDK's own return type rather than restated, so a change there is a compile
+ * error here instead of a runtime refusal five steps into a ceremony.
+ */
+export type MultisigConfigLocation = ReturnType<typeof assertMultisigConfigUtxo>;
+
+/**
  * Phase one: the three transactions the deployer submits alone.
  *
  * Built together and submitted in order. They chain — the seed transaction's outputs
@@ -149,7 +615,7 @@ export async function buildPhaseOne(params: {
       ownerAddress: params.ownerAddress,
       seedLovelace: params.seedLovelace,
     };
-    steps.push({ label: "seed UTxOs", unsignedCbor: await cborOf(await buildSeedTx(seedParams)) });
+    steps.push({ label: "seed UTxOs", unsignedCbor: cborOf(await buildSeedTx(seedParams)) });
   }
 
   const multisigParams: MultisigGenesisTxParams = {
@@ -160,13 +626,13 @@ export async function buildPhaseOne(params: {
   };
   steps.push({
     label: "upgrade multisig",
-    unsignedCbor: await cborOf(await buildMultisigGenesisTx(multisigParams)),
+    unsignedCbor: cborOf(await buildMultisigGenesisTx(multisigParams)),
   });
 
   const regParams: StakeRegistrationTxParams = { ...params.ctx, plan: params.plan };
   steps.push({
     label: "register credentials",
-    unsignedCbor: await cborOf(await buildStakeRegistrationTx(regParams)),
+    unsignedCbor: cborOf(await buildStakeRegistrationTx(regParams)),
   });
   return steps;
 }
@@ -205,7 +671,7 @@ export async function buildProtocolGenesis(params: {
   };
   return {
     label: "protocol genesis",
-    unsignedCbor: await cborOf(await buildProtocolGenesisTx(genesisParams)),
+    unsignedCbor: cborOf(await buildProtocolGenesisTx(genesisParams)),
   };
 }
 
@@ -233,7 +699,7 @@ export async function buildReferenceScripts(params: {
   };
   return {
     label: "reference scripts",
-    unsignedCbor: await cborOf(await buildReferenceScriptsTx(refParams)),
+    unsignedCbor: cborOf(await buildReferenceScriptsTx(refParams)),
   };
 }
 
@@ -249,6 +715,14 @@ export async function buildReferenceScripts(params: {
  * There is no cross-deployment collision to worry about: `upgrade_multisig` is parameterised
  * by the one-shot seed, so every deployment has a different script address AND a different
  * config NFT policy.
+ *
+ * ⛔ RETURNS BOTH HALVES, AND THE TYPE SAYS SO. `assertMultisigConfigUtxo` does not return a
+ * UTxO — it returns `{ utxo, ref }` — and this function used to declare `Promise<unknown>` and
+ * hand the wrapper straight back. Two callers each want a DIFFERENT half and both got the
+ * wrapper: the protocol-genesis builder needs `utxo` (a `UTxO`, and it refused with
+ * "upgradeMultisigConfigUtxo is required" because the wrapper carries no `transactionId`), while
+ * the deployment record needs `ref` (a `TxInput`, `{txHash, outputIndex}`). `unknown` plus an
+ * `as never` at each call site meant neither mismatch reached the compiler.
  */
 export async function awaitMultisigConfigUtxo(params: {
   plan: BootstrapPlan;
@@ -260,7 +734,7 @@ export async function awaitMultisigConfigUtxo(params: {
   /** Gives up rather than polling forever — the operator is watching. */
   timeoutMs?: number;
   onAttempt?: (attempt: number) => void;
-}): Promise<unknown> {
+}): Promise<MultisigConfigLocation> {
   const interval = params.intervalMs ?? 5_000;
   const timeout = params.timeoutMs ?? 10 * 60_000;
   const address = (params.plan as { addresses: { upgradeMultisig: string } }).addresses
@@ -298,9 +772,31 @@ export async function awaitMultisigConfigUtxo(params: {
   }
 }
 
-/** Every builder returns a signable transaction; this is how it becomes hex. */
-async function cborOf(built: unknown): Promise<string> {
-  const tx = await (built as { toTransaction: () => Promise<unknown> }).toTransaction();
-  const { EvoTransaction } = await import("@easy1staking/cip113-sdk-ts");
-  return (EvoTransaction as { toCBORHex: (t: never) => string }).toCBORHex(tx as never);
+/**
+ * The CBOR of a built ceremony step.
+ *
+ * ⛔ THE SDK'S BUILDERS RETURN `UnsignedTx`, WHICH ALREADY CARRIES `cbor` AS HEX. They do not
+ * return an Evolution build result, so there is no `toTransaction()` on them and never was — this
+ * wrapper used to call it and every one of the five steps failed with "built.toTransaction is not
+ * a function" the moment it was reached. `buildPhaseOne` runs with `needsSeedTx: false`, so
+ * multisig-genesis was the first step to get here and the first to fail.
+ *
+ * ⚑ DO NOT "RESTORE" THE CONVERSION. Two different objects are in play and only one needs it:
+ * an Evolution `tx.build()` result (SignBuilder or TransactionResultBase) does expose
+ * `toTransaction()`, and `prepareSeedUtxos` calls it correctly because it drives the Evolution
+ * builder directly. The SDK's `finish()` does the conversion internally and hands back the hex.
+ */
+export function cborOf(built: unknown): string {
+  const u = built as { cbor?: unknown };
+  if (typeof u?.cbor !== "string" || u.cbor.length === 0) {
+    throw new Error(
+      "A ceremony builder returned no CBOR. Expected the SDK's UnsignedTx with a `cbor` hex " +
+        "string; got " +
+        (built === null || built === undefined
+          ? String(built)
+          : `${typeof built} with keys [${Object.keys(u).join(", ")}]`) +
+        ".",
+    );
+  }
+  return u.cbor;
 }
