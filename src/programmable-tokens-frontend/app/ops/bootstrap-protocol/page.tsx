@@ -695,21 +695,60 @@ export default function BootstrapProtocolPage() {
         ...genesisStep,
         unsignedCbor: assembleUpgradeTx(genesisStep.unsignedCbor, cosign.witnesses),
       };
-      setProgress("Building the reference-script transaction…");
-      const refScripts = await buildReferenceScripts({
-        ctx: planned.ctx,
-        plan: planned.plan,
-        referenceScriptAddress: planned.ctx.changeAddress,
-        referenceScriptLovelace: 20_000_000n as never,
-      });
-
-      const result = await signAndSubmitSequence(wallet.wallet, [signedGenesis, refScripts], {
+      /**
+       * ⛔ THE GENESIS GOES FIRST, ALONE. These two used to be built together and submitted as one
+       * sequence, which cost a deployment: reference-scripts was built from the PLAN-TIME UTxO set,
+       * by then three transactions stale, and — worse — built before the genesis was submitted, so
+       * coin selection could pick inputs the genesis itself was about to spend. Measured on preview
+       * 2026-09-28: multisig-genesis, stake-registrations and protocol-genesis all landed, and
+       * reference-scripts never reached the chain.
+       *
+       * ⚑ Reference-scripts is deliberately LAST precisely because its hash can move without
+       * invalidating anything, so there is no reason to build it early. Submitting the genesis
+       * first, waiting, then building from a FRESH read removes both faults at once — and it can
+       * legitimately fund from the genesis's own change, which the injected evaluator makes
+       * evaluable.
+       */
+      const genesisResult = await signAndSubmitSequence(wallet.wallet, [signedGenesis], {
         onPhase: (p: MultiTxPhase) =>
           setProgress(p.phase === "signing" ? "Waiting for your signature…" : `${p.phase} ${p.label}`),
         waitForConfirmation: (txHash) => waitForTxConfirmation(txHash),
       });
-      const all = [...(submitted ?? []), ...result.submitted];
-      setSubmitted(all);
+      setSubmitted([...(submitted ?? []), ...genesisResult.submitted]);
+
+      setProgress("Genesis is on chain. Re-reading the wallet, then publishing the reference scripts…");
+      const refScripts = await buildWithFreshUtxos(
+        planned.ctx,
+        () => readWalletUtxos(network, wallet.rawApi, planned.ctx.changeAddress),
+        (ctx) =>
+          buildReferenceScripts({
+            ctx,
+            plan: planned.plan,
+            referenceScriptAddress: planned.ctx.changeAddress,
+            // ⚠ PER OUTPUT, not in total: seven scripts at 20 ADA each locks ~140 ADA.
+            referenceScriptLovelace: 20_000_000n as never,
+          }),
+        {
+          attempts: 3,
+          delayMs: 10_000,
+          onAttempt: (n, why) =>
+            setProgress(`Evaluation could not resolve ${why} — retrying (${n} of 3, 10s apart)…`),
+          onRetryInfo: (info) =>
+            setGateNote(
+              info.utxoSetChanged
+                ? `Reference scripts, retry ${info.attempt}: the wallet's UTxO set CHANGED (${info.utxoCount}).`
+                : `Reference scripts, retry ${info.attempt}: the UTxO set was UNCHANGED (${info.utxoCount}).`,
+            ),
+        },
+      );
+
+      const refResult = await signAndSubmitSequence(wallet.wallet, [refScripts], {
+        onPhase: (p: MultiTxPhase) =>
+          setProgress(p.phase === "signing" ? "Waiting for your signature…" : `${p.phase} ${p.label}`),
+        waitForConfirmation: (txHash) => waitForTxConfirmation(txHash),
+      });
+      const result = { submitted: [...genesisResult.submitted, ...refResult.submitted] };
+      setSubmitted([...(submitted ?? []), ...result.submitted]);
       setDeployComplete(result.submitted.length === 2);
       setProgress(null);
 
