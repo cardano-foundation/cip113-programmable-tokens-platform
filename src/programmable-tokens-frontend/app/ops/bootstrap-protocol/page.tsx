@@ -35,6 +35,7 @@ import {
   awaitMultisigConfigUtxo,
   buildWithFreshUtxos,
   confirmationDepth,
+  withoutOutputsOf,
   type MultisigConfigLocation,
   buildProtocolGenesis,
   buildReferenceScripts,
@@ -581,12 +582,21 @@ export default function BootstrapProtocolPage() {
       // UTxO set having gone stale while phase one spent some of it. Different causes, and only
       // one of them is about waiting.
       setProgress("Re-reading the wallet, then building the protocol genesis…");
+      // ⛔ EXCLUDE PHASE ONE'S OWN OUTPUTS. Blockfrost evaluates against its own ledger view and
+      // the SDK cannot pass it an additionalUtxoSet (see withoutOutputsOf), so funding the genesis
+      // from the change phase one just created is reported as "Unknown transaction input (missing
+      // from UTxO set)" for an output that is demonstrably on chain. Coin selection reaches for
+      // settled UTxOs instead; the seeds are unaffected, being passed explicitly.
+      const phaseOneTxHashes = (submitted ?? []).map((t) => t.txHash);
       const genesis = await buildWithFreshUtxos(
         planned.ctx,
         async (address) =>
-          (await (
-            planned.ctx.client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
-          ).getUtxos(EvoAddress.fromBech32(address))) as readonly unknown[],
+          withoutOutputsOf(
+            (await (
+              planned.ctx.client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
+            ).getUtxos(EvoAddress.fromBech32(address))) as readonly unknown[],
+            phaseOneTxHashes,
+          ),
         (ctx) =>
           buildProtocolGenesis({
             ctx,
@@ -624,7 +634,7 @@ export default function BootstrapProtocolPage() {
     } finally {
       setPreparingGenesis(false);
     }
-  }, [planned, configUtxo, genesisStep, multisig]);
+  }, [planned, configUtxo, genesisStep, multisig, submitted]);
 
   const submitPhaseTwo = useCallback(async () => {
     if (!planned || !genesisStep || !cosign.complete) return;

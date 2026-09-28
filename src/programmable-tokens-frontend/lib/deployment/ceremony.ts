@@ -332,6 +332,41 @@ export function fingerprintUtxos(utxos: readonly unknown[]): string {
   return `${refs.sort().join(",")}|${unreadable}`;
 }
 
+/**
+ * Drop wallet UTxOs produced by the transactions named, so coin selection cannot fund from them.
+ *
+ * ⛔ THIS IS THE REAL FIX FOR "Unknown transaction input (missing from UTxO set)", and waiting is
+ * not. Blockfrost evaluates a transaction against its OWN view of the ledger: Evolution assembles
+ * the selected inputs and reference inputs and would happily hand them over as
+ * `additionalUtxoSet`, but it only forwards them when `passAdditionalUtxos: true` is set in
+ * BuildOptions (Evolution `resolve.js`, and `Evaluation.js` says so in as many words), and the
+ * cip113 SDK's own `buildOptions(ctx)` never sets it. So an input Blockfrost has not indexed into
+ * its evaluation snapshot cannot be explained to it at all.
+ *
+ * The protocol genesis was being funded from phase one's change — the stake-registration
+ * transaction's single output, created two or three blocks earlier — and reported as missing while
+ * being demonstrably on chain. Excluding phase one's outputs makes coin selection reach for
+ * settled UTxOs instead, which Blockfrost has certainly seen.
+ *
+ * ⚑ THE SEEDS ARE NOT AFFECTED. protocolParams and issuance are passed to the builder explicitly
+ * rather than found by coin selection, and they predate the ceremony, so they are settled too.
+ * This only removes the *change* that phase one produced.
+ */
+export function withoutOutputsOf(
+  utxos: readonly unknown[],
+  txHashes: readonly string[],
+): readonly unknown[] {
+  const exclude = new Set(txHashes.map((h) => h.toLowerCase()));
+  if (exclude.size === 0) return utxos;
+  return utxos.filter((u) => {
+    try {
+      return !exclude.has(toChainUtxo(u).txHash);
+    } catch {
+      return false; // unreadable: not something to fund from
+    }
+  });
+}
+
 /** Only this failure is worth retrying; anything else is rethrown at once. */
 export function isMissingUtxoEvaluation(err: unknown): boolean {
   return /missing from UTxO set|CannotCreateEvaluationContext|Unknown transaction input/i.test(

@@ -29,7 +29,7 @@ const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
 const {
   selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
   resolveSeedUtxos, lovelaceOfUtxo, cborOf,
-  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos,
+  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf,
 } = await import("./.seeds-build/ceremony.js");
 
 const HASHES = [
@@ -311,6 +311,27 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
   ok(fingerprintUtxos([]) === fingerprintUtxos([]), "empty is stable");
   ok(fingerprintUtxos([a, { junk: true }]) !== fingerprintUtxos([a]),
     "an unreadable entry is counted, not dropped — a set that became unreadable is not unchanged");
+}
+
+// ── withoutOutputsOf ─────────────────────────────────────────────────────────
+// ⛔ The genesis was funded from phase one's change, which Blockfrost's evaluator had not
+// indexed — and the SDK cannot pass it an additionalUtxoSet, so it could not be explained.
+{
+  const settled = providerUtxo(HASHES[0], 0);
+  const phaseOneChange = providerUtxo(HASHES[1], 0);
+  const all = [settled, phaseOneChange, providerUtxo(HASHES[1], 1)];
+
+  const kept = withoutOutputsOf(all, [HASHES[1]]);
+  ok(kept.length === 1, "every output of a named transaction is dropped, not just the first");
+  ok(toChainUtxo(kept[0]).txHash === HASHES[0], "the settled UTxO survives");
+
+  ok(withoutOutputsOf(all, []).length === 3, "an empty exclusion list changes nothing");
+  ok(withoutOutputsOf(all, [HASHES[1].toUpperCase()]).length === 1,
+    "hash comparison is case-insensitive — a wallet that upper-cases would else fund from it");
+  ok(withoutOutputsOf([settled, { junk: true }], []).length === 2,
+    "with nothing to exclude the list is returned untouched, unreadable entries included");
+  ok(withoutOutputsOf([settled, { junk: true }], [HASHES[1]]).length === 1,
+    "when filtering, an unreadable entry is dropped rather than funded from");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
