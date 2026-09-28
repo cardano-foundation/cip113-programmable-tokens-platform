@@ -29,7 +29,7 @@ const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
 const {
   selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
   resolveSeedUtxos, lovelaceOfUtxo, cborOf,
-  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos,
+  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos, awaitUtxosOf,
 } = await import("./.seeds-build/ceremony.js");
 
 const HASHES = [
@@ -383,6 +383,39 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
   ok(withoutRefs(all, []).length === 4, "no refs to exclude changes nothing");
   ok(withoutRefs(all, [{ txHash: HASHES[0].toUpperCase(), outputIndex: 0 }]).length === 3,
     "outref comparison is case-insensitive on the hash");
+}
+
+// ── awaitUtxosOf: confirmed is not visible ───────────────────────────────────
+// ⛔ waitForTxConfirmation polls /txs/{hash}; the wallet read uses /addresses/.../utxos, a
+// DIFFERENT index that can still serve the previous set. Seeding appeared not to wait at all
+// because it waited for the transaction and then read a stale wallet.
+{
+  const SEED_TX = HASHES[3];
+  const seedOuts = [0, 1, 2].map((i) => providerUtxo(SEED_TX, i));
+  const older = [providerUtxo(HASHES[0], 0)];
+
+  // The index catches up on the third read; it must keep polling until all THREE appear.
+  let reads = 0;
+  const progress = [];
+  const got = await awaitUtxosOf(SEED_TX, async () => {
+    reads += 1;
+    if (reads === 1) return older;                          // none yet
+    if (reads === 2) return [...older, seedOuts[0]];         // partial — must NOT satisfy
+    return [...older, ...seedOuts];
+  }, { expected: 3, intervalMs: 1, onAttempt: (n, found) => progress.push(found) });
+
+  ok(reads === 3, "polls until the outputs appear, rather than accepting the first read");
+  ok(JSON.stringify(progress) === JSON.stringify([0, 1, 3]), "reports how many are visible each time");
+  ok(got.length === 4, "returns the read that CONTAINED them, so the caller need not re-fetch");
+
+  // A partial set must never be treated as ready — two seeds is not three.
+  let timedOut = "";
+  try {
+    await awaitUtxosOf(SEED_TX, async () => [...older, seedOuts[0], seedOuts[1]],
+      { expected: 3, intervalMs: 1, timeoutMs: 20 });
+  } catch (e) { timedOut = e.message; }
+  ok(/only 2 of 3/.test(timedOut), "times out naming how many of how many were visible");
+  ok(/Nothing is lost/.test(timedOut), "and says the outputs exist on chain, so nobody re-sends");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

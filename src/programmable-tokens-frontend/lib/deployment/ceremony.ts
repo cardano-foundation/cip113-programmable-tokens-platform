@@ -376,6 +376,57 @@ export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
 }
 
 /**
+ * Wait until a transaction's outputs actually APPEAR in a wallet read.
+ *
+ * ⛔ A CONFIRMED TRANSACTION IS NOT A REFRESHED WALLET, and conflating the two is why seeding
+ * looked like it did not wait. `waitForTxConfirmation` polls `/txs/{hash}`, which answers as soon
+ * as Blockfrost has indexed the transaction — but `/addresses/.../utxos` is a different index and
+ * can still be serving the previous set. So the seeds were genuinely on chain, confirmed, and
+ * absent from the very read used to find them.
+ *
+ * ⚑ SO POLL FOR THE CONDITION, NOT THE EVENT. The same lesson as the 3-block gate: waiting for a
+ * proxy of readiness is guesswork, waiting for the thing you need is not. Returns the read that
+ * contained them, so the caller does not immediately re-fetch and risk a different answer.
+ */
+export async function awaitUtxosOf(
+  txHash: string,
+  readUtxos: () => Promise<readonly unknown[]>,
+  opts: { expected?: number; intervalMs?: number; timeoutMs?: number; onAttempt?: (n: number, found: number) => void } = {},
+): Promise<readonly unknown[]> {
+  const want = opts.expected ?? 1;
+  const interval = opts.intervalMs ?? 3_000;
+  const timeout = opts.timeoutMs ?? 120_000;
+  const target = txHash.toLowerCase();
+  const started = Date.now();
+  let attempt = 0;
+  let lastFound = 0;
+
+  for (;;) {
+    attempt += 1;
+    const utxos = await readUtxos();
+    lastFound = utxos.filter((u) => {
+      try {
+        return toChainUtxo(u).txHash === target;
+      } catch {
+        return false;
+      }
+    }).length;
+    opts.onAttempt?.(attempt, lastFound);
+    if (lastFound >= want) return utxos;
+
+    if (Date.now() - started > timeout) {
+      throw new Error(
+        `The seed transaction ${txHash.slice(0, 16)}… is confirmed, but only ${lastFound} of ` +
+          `${want} of its outputs appear in the wallet after ` +
+          `${Math.round(timeout / 1000)}s. Nothing is lost — the outputs exist on chain. The ` +
+          `provider's address index is behind its transaction index; reload and they will be there.`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, interval));
+  }
+}
+
+/**
  * Drop specific UTxOs by outref — the seeds, so coin selection cannot spend them as funding.
  *
  * Sibling of {@link withoutOutputsOf}, which excludes by TRANSACTION. This excludes exact outputs,

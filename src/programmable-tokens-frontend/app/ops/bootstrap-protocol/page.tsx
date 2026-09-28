@@ -33,6 +33,8 @@ import {
   findWalletSeeds,
   prepareSeedUtxos,
   awaitMultisigConfigUtxo,
+  awaitUtxosOf,
+  readWalletUtxos,
   buildWithFreshUtxos,
   confirmationDepth,
   withoutOutputsOf,
@@ -213,6 +215,23 @@ export default function BootstrapProtocolPage() {
           `the three seeds below fill in by themselves.`,
       );
       await waitForTxConfirmation(txHash);
+      // ⛔ CONFIRMED IS NOT VISIBLE. waitForTxConfirmation polls /txs/{hash}; the wallet read uses
+      // /addresses/.../utxos, a different index that can still be serving the previous set. Waiting
+      // only for the transaction is why this appeared not to wait at all: the seeds were on chain,
+      // confirmed, and missing from the read used to find them. Poll for the three outputs.
+      setSeedNotice(
+        `Seed transaction ${txHash.slice(0, 16)}… confirmed. Waiting for its outputs to appear in ` +
+          `the wallet…`,
+      );
+      await awaitUtxosOf(
+        txHash,
+        () => readWalletUtxos(network, wallet.rawApi, changeAddress),
+        {
+          expected: 3,
+          onAttempt: (n: number, found: number) =>
+            setSeedNotice(`Waiting for the seeds to appear in the wallet — ${found} of 3 (check ${n})…`),
+        },
+      );
       await loadSeedsFromWallet();
       setSeedNotice(null);
     } catch (e) {

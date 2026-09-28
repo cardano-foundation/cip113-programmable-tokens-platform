@@ -144,6 +144,23 @@ function signingClient(network: CardanoNetwork, rawWalletApi: unknown) {
   };
 }
 
+/**
+ * The wallet's current UTxOs, through the SAME client every other path uses.
+ *
+ * Exported so callers do not build their own client: one built with a different provider or chain
+ * reads a different UTxO set, and these functions hand each other outrefs.
+ */
+export async function readWalletUtxos(
+  network: CardanoNetwork,
+  rawWalletApi: unknown,
+  changeAddress: string,
+): Promise<readonly unknown[]> {
+  const { client } = signingClient(network, rawWalletApi);
+  return (await (
+    client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
+  ).getUtxos(EvoAddress.fromBech32(changeAddress))) as readonly unknown[];
+}
+
 export interface WalletSeeds {
   /** Three distinct UTxOs fit to be one-shot seeds, or null when the wallet has no three. */
   seeds: DeploymentSeeds | null;
@@ -410,7 +427,7 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
 /** Lovelace per seed output. Each seed funds part of the transaction that consumes it. */
 export const DEFAULT_SEED_LOVELACE = 50_000_000n;
 
-export { buildWithFreshUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos } from "./ceremony";
+export { buildWithFreshUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos, awaitUtxosOf } from "./ceremony";
 export { awaitMultisigConfigUtxo, buildProtocolGenesis, buildReferenceScripts, selectBootstrapSeeds, assembleDeploymentParams };
 export type { MultisigConfigLocation } from "./ceremony";
 
