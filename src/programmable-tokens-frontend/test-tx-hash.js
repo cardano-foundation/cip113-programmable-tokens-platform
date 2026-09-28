@@ -28,7 +28,7 @@ const assert = require("node:assert");
 const { readFileSync } = require("node:fs");
 
 async function main() {
-  const { transactionHash, transactionBodyBytes, verifyWitnessSet } =
+  const { transactionHash, transactionBodyBytes, verifyWitnessSet, asWitnessSetHex } =
     await import("./.hash-build/tx/hash.js");
   const { blake2b } = await import("@noble/hashes/blake2");
   const { ed25519 } = await import("@noble/curves/ed25519.js");
@@ -197,6 +197,46 @@ async function main() {
     }
     assert.match(empty, /empty|major type/i, "an empty value says so rather than printing 'undefined'");
     console.log("  OK   an empty witness value is named rather than rendered as undefined");
+  }
+
+
+  // ── asWitnessSetHex: be liberal about what a wallet hands back ─────────────
+  // ⛔ CIP-30 says signTx returns cbor<transaction_witness_set>; wallets differ, and some
+  // return the whole signed transaction. The witness set is element 1 — extract it rather
+  // than tell the operator their paste was wrong when it was not.
+  {
+    // A witness set passes straight through, lower-cased and whitespace-stripped.
+    const wsHex = "a1008182582000112233445566778899aabbccddeeff00112233445566778899aabbccddeeff5840" + "11".repeat(64);
+    const direct = asWitnessSetHex("  " + wsHex.toUpperCase() + "\n");
+    assert.equal(direct.fromTransaction, false, "a witness set is not reported as extracted");
+    assert.equal(direct.hex, wsHex.toLowerCase(), "whitespace and case are normalised");
+    console.log("  OK   a witness set passes through, normalised");
+
+    // ⛔ THE CASE THAT MATTERS: a real signed transaction from the chain. Its witness set must be
+    // extracted, and the extracted bytes must still verify against the body — proving the slice is
+    // by span and not re-encoded, which would invalidate every signature in it.
+    for (const tx of fixture.transactions) {
+      const extracted = asWitnessSetHex(tx.cbor);
+      assert.equal(extracted.fromTransaction, true, "a transaction is reported as extracted from");
+      const checks = verifyWitnessSet(tx.cbor, extracted.hex);
+      assert.ok(checks.length > 0, "the extracted witness set carries witnesses");
+      assert.ok(checks.every((c) => c.valid), "and every one still verifies against the body");
+    }
+    console.log(`  OK   witness sets extracted from ${fixture.transactions.length} real transaction(s) still verify`);
+
+    // Neither-shape input is named as neither.
+    let msg = "";
+    try { asWitnessSetHex("00"); } catch (e) { msg = e.message; }
+    assert.match(msg, /neither/, "a value that is neither shape says so");
+
+    let empty = "";
+    try { asWitnessSetHex("   "); } catch (e) { empty = e.message; }
+    assert.match(empty, /nothing was pasted/, "empty input is named");
+
+    let notHex = "";
+    try { asWitnessSetHex("zzzz"); } catch (e) { notHex = e.message; }
+    assert.match(notHex, /not hex/, "non-hex is named as such");
+    console.log("  OK   junk, empty and non-hex inputs are each named");
   }
 
 console.log(`\n${ran} checks passed`);

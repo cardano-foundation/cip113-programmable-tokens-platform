@@ -70,6 +70,54 @@ export function transactionBodyBytes(txHex: string): Uint8Array {
 }
 
 /**
+ * Whatever a wallet or a human handed us, reduced to a witness set.
+ *
+ * ⛔ BE LIBERAL HERE, BECAUSE WALLETS ARE NOT. CIP-30 says `signTx` returns
+ * `cbor<transaction_witness_set>`, and some wallets return the whole signed transaction instead —
+ * and an operator copying out of a wallet's UI has no way to tell the two apart, because both are
+ * just long hex. Refusing the transaction form buys nothing: the witness set is element 1 of it,
+ * sitting there in the bytes we were given. Extracting it is strictly better than telling somebody
+ * their paste was wrong when it was not.
+ *
+ * ⚑ EXTRACTED BY BYTE SPAN, NOT RE-ENCODED. The witness set is sliced out exactly as it arrived,
+ * so a signature over the body stays valid — re-encoding could normalise a map or a set tag and
+ * produce witnesses that verify against nothing.
+ *
+ * Returns the hex plus whether it came out of a transaction, so a caller can say so rather than
+ * silently accepting a different shape from the one it asked for.
+ */
+export function asWitnessSetHex(value: string): { hex: string; fromTransaction: boolean } {
+  const clean = value.replace(/\s+/g, "");
+  if (clean.length === 0) throw new Error("nothing was pasted");
+  if (!/^[0-9a-fA-F]+$/.test(clean)) {
+    throw new Error("this is not hex — check for stray characters or a truncated copy");
+  }
+  const bytes = hexToBytes(clean);
+  const major = (bytes[0] as number) >> 5;
+
+  if (major === 5) return { hex: clean.toLowerCase(), fromTransaction: false };
+
+  if (bytes[0] === 0x84) {
+    // [body, witnessSet, isValid, auxiliaryData] — take element 1 by span.
+    const afterBody = EvoCBOR.decodeItemWithOffset(bytes, 1).newOffset;
+    const afterWitnesses = EvoCBOR.decodeItemWithOffset(bytes, afterBody).newOffset;
+    const ws = bytes.subarray(afterBody, afterWitnesses);
+    if (ws.length === 0 || (ws[0] as number) >> 5 !== 5) {
+      throw new Error(
+        "this is a transaction, but its second element is not a witness set — it may be " +
+          "unsigned, or not a transaction at all.",
+      );
+    }
+    return { hex: bytesToHex(ws), fromTransaction: true };
+  }
+
+  throw new Error(
+    `a witness set is a CBOR map (major type 5) and a transaction is an array starting 0x84; ` +
+      `this is major type ${major}, which is neither.`,
+  );
+}
+
+/**
  * The transaction hash: blake2b-256 of the body bytes.
  *
  * This is the identity the chain knows the transaction by, the value an explorer

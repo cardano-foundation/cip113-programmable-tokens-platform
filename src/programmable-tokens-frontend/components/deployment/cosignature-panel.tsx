@@ -29,7 +29,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
-import { transactionHash, verifyWitnessSet } from "@/lib/tx/hash";
+import { asWitnessSetHex, transactionHash, verifyWitnessSet } from "@/lib/tx/hash";
 import { participantColour, confusablePairs } from "@/lib/deployment/participant-colour";
 
 export interface CosignatureState {
@@ -51,7 +51,22 @@ export function CosignaturePanel({
   const [copied, setCopied] = useState<string | null>(null);
 
   const witnesses = useMemo(
-    () => text.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean),
+    () =>
+      text
+        .split(/[\s,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        // ⛔ ACCEPT A WHOLE TRANSACTION TOO. A participant whose wallet returned one, or who
+        // copied from a wallet's UI rather than from /sign, is not making a mistake worth
+        // refusing — the witness set is element 1 and we already have the bytes. Anything
+        // genuinely unusable is left as-is so the per-witness check below names it.
+        .map((v) => {
+          try {
+            return asWitnessSetHex(v).hex;
+          } catch {
+            return v;
+          }
+        }),
     [text]
   );
 

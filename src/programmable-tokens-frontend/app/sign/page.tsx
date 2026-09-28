@@ -33,6 +33,7 @@ import { useWallet } from "@/hooks/use-wallet";
 import { getCardanoNetwork } from "@/lib/utils/network";
 import { transactionHash, verifyWitnessSet, type VerifiedWitness } from "@/lib/tx/hash";
 import { summariseTransaction, type TxSummary } from "@/lib/tx/summary";
+import { asWitnessSetHex } from "@/lib/tx/hash";
 
 export default function SignPage() {
   const network = getCardanoNetwork();
@@ -40,6 +41,8 @@ export default function SignPage() {
 
   const [txHex, setTxHex] = useState("");
   const [witness, setWitness] = useState<string | null>(null);
+  /** Noted when the wallet returned more than a witness set, for wallet-compatibility notes. */
+  const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -90,7 +93,13 @@ export default function SignPage() {
       // partialSign = true: this is one signature among several, so the wallet
       // must NOT refuse for the keys it cannot provide. It returns a witness
       // SET, not a transaction — which is exactly what the assembler merges.
-      const ws = await wallet.signTx(clean, true);
+      const returned = await wallet.signTx(clean, true);
+      // ⛔ NOT EVERY WALLET RETURNS A WITNESS SET. CIP-30 says signTx yields
+      // cbor<transaction_witness_set>, and some wallets hand back the whole signed transaction.
+      // The witness set is element 1 of it, so take it rather than refuse — and say so, because
+      // "your wallet returned more than asked" is worth knowing when comparing wallets.
+      const { hex: ws, fromTransaction } = asWitnessSetHex(returned);
+      if (fromTransaction) setNote(`${name} returned a whole transaction; the witness was extracted from it.`);
       const verified = verifyWitnessSet(clean, ws);
       if (verified.length === 0) {
         throw new Error(
@@ -224,6 +233,8 @@ export default function SignPage() {
               {busy ? "Waiting for your wallet…" : "Sign this transaction"}
             </button>
             {error && <p className="text-xs text-red-400">{error}</p>}
+            {/* Wallets differ on what signTx returns; say when one returned more than a witness. */}
+            {note && <p className="text-xs text-amber-200">{note}</p>}
           </section>
         </>
       )}
