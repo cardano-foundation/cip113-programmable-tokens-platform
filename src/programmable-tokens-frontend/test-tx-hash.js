@@ -168,7 +168,38 @@ async function main() {
   console.log("  OK   resolveTxHash (the user-visible hash) matches the chain, and \"\" on junk");
   ran++;
 
-  console.log(`\n${ran} checks passed`);
+  
+  // ── pasting the wrong thing ───────────────────────────────────────────────
+  // ⛔ Measured mid-ceremony: an operator pasted a whole signed transaction where a witness
+  // belongs and was told "not a CBOR map (major type 4)" — which reads as though a map were
+  // type 4 and the value were fine. A transaction is a CBOR ARRAY; a witness set is a MAP.
+  {
+    // A minimal well-formed transaction to verify AGAINST — arg 1 is the tx, arg 2 the witness.
+    const TX4 = "84a0a0f5f6";
+    const wholeTx = "84a300d9010281"; // 0x84 = array(4): the shape of a Cardano transaction
+    let msg = "";
+    try {
+      verifyWitnessSet(TX4, wholeTx);
+    } catch (e) {
+      msg = e.message;
+    }
+    assert.match(msg, /whole TRANSACTION/i, "a pasted transaction must be named as such");
+    assert.match(msg, /\/sign/, "and must point at the page that yields a witness");
+    assert.ok(!/check the whole value was copied/.test(msg),
+      "and must NOT lead with clipboard advice when the cause is known");
+    console.log("  OK   a pasted TRANSACTION is diagnosed as one, pointing at /sign");
+
+    let empty = "";
+    try {
+      verifyWitnessSet(TX4, "");
+    } catch (e) {
+      empty = e.message;
+    }
+    assert.match(empty, /empty|major type/i, "an empty value says so rather than printing 'undefined'");
+    console.log("  OK   an empty witness value is named rather than rendered as undefined");
+  }
+
+console.log(`\n${ran} checks passed`);
 }
 
 /** A minimal CIP-30 witness set: {0: [[vkey, signature]]}. */
