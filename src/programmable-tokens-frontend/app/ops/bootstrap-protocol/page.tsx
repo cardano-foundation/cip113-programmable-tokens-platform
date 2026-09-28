@@ -857,8 +857,11 @@ export default function BootstrapProtocolPage() {
               <p>
                 This wallet has {usableUtxoCount ?? 0} of {walletUtxoTotal ?? "?"} UTxO(s) usable
                 as a seed and needs three. (A UTxO carrying native assets or a reference script
-                cannot be one.) Splitting is ordinary, repeatable housekeeping — it is kept out of
-                the deployment proper so that a failure here costs nothing.
+                cannot be one.) Splitting makes them <strong>50, 10 and 10 ADA</strong> — unequal
+                because each seed part-funds the transaction that consumes it, and the protocol
+                genesis mints two assets and runs scripts where the multisig genesis mints one
+                NFT. Splitting is ordinary, repeatable housekeeping — it is kept out of the
+                deployment proper so that a failure here costs nothing.
               </p>
             )}
             <button

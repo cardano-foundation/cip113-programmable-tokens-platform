@@ -52,8 +52,21 @@ import { deriveCoreDeployment, type DeploymentSeeds } from "./derive";
 import { verifyDeployment, verifyPlanScripts, type VerificationResult } from "./verify";
 import { EvoAddress, EvoAssets, EvoTransaction, outputAssets } from "@easy1staking/cip113-sdk-ts";
 
-/** Lovelace parked in each prepared seed. Enough to be a useful input, small enough to be cheap. */
-const SEED_PREP_LOVELACE = 5_000_000n;
+/**
+ * Lovelace parked in each prepared seed — 50, 10, 10. Ruled by Giovanni, 2026-09-28.
+ *
+ * ⛔ THEY ARE NOT EQUAL, AND THE ORDER MATTERS. Each seed part-funds the transaction that consumes
+ * it, and those transactions are not alike: protocol-genesis mints two assets, carries a withdraw-0
+ * and runs scripts, while multisig-genesis mints one NFT into a 2 ADA output. This was 5 ADA
+ * apiece, which was not enough.
+ *
+ * ⚑ THE BIGGEST GOES TO `protocolParams`, because selectSeedUtxos sorts candidates LARGEST FIRST
+ * and assigns them in order — paramsSeed, issuanceSeed, multisigSeed. So the amounts here line up
+ * with that assignment positionally, and reordering this array silently re-targets which seed gets
+ * the headroom. If it turns out `issuance` or `upgradeMultisig` needs it instead, move the 50 and
+ * nothing else has to change.
+ */
+const SEED_PREP_LOVELACE: readonly bigint[] = [50_000_000n, 10_000_000n, 10_000_000n];
 import type { UpstreamPin } from "./blueprint";
 import type { ResolvedMultisig } from "./multisig";
 import type { CardanoNetwork } from "../utils/network";
@@ -193,8 +206,9 @@ export async function prepareSeedUtxos(
   const utxos = (await client.getUtxos(addressObj as never)) as unknown as ChainUtxo[];
 
   let tx = client.newTx();
-  for (let i = 0; i < 3; i++) {
-    tx = tx.payToAddress({ address: addressObj, assets: outputAssets(SEED_PREP_LOVELACE) });
+  // One output per seed, at its own size — see SEED_PREP_LOVELACE for why they differ.
+  for (const lovelace of SEED_PREP_LOVELACE) {
+    tx = tx.payToAddress({ address: addressObj, assets: outputAssets(lovelace) });
   }
   const built = await tx.build({
     changeAddress: addressObj,
@@ -394,7 +408,7 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
 }
 
 /** Lovelace per seed output. Each seed funds part of the transaction that consumes it. */
-export const DEFAULT_SEED_LOVELACE = 10_000_000n;
+export const DEFAULT_SEED_LOVELACE = 50_000_000n;
 
 export { buildWithFreshUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos } from "./ceremony";
 export { awaitMultisigConfigUtxo, buildProtocolGenesis, buildReferenceScripts, selectBootstrapSeeds, assembleDeploymentParams };
