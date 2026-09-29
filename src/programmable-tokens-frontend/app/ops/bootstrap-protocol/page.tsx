@@ -46,6 +46,7 @@ import {
 import { EvoAddress } from "@easy1staking/cip113-sdk-ts";
 import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
 import { CosignaturePanel, type CosignatureState } from "@/components/deployment/cosignature-panel";
+import { CeremonyStep } from "@/components/deployment/ceremony-step";
 import { SdkRecordDownload } from "@/components/deployment/sdk-record-download";
 import { assembleUpgradeTx } from "@/lib/upgrade/witness";
 import { waitForTxConfirmation } from "@/lib/utils/tx-confirmation";
@@ -733,8 +734,18 @@ export default function BootstrapProtocolPage() {
     URL.revokeObjectURL(a.href);
   }, [derived, paramsSeed, issuanceSeed, multisigSeed, maxInline, network]);
 
+  /**
+   * Which steps are satisfied, and the one line each is worth when folded.
+   *
+   * ⚑ "SATISFIED" IS NOT "CORRECT". A step folds when it holds a usable value, not when anything
+   * has been checked — three seeds being present says nothing about them being the right three.
+   * What verifies is `derived` and `planned.verification`, and those are steps of their own.
+   */
+  const seedsReady = !!paramsSeed.txHash && !!issuanceSeed.txHash && !!multisigSeed.txHash;
+  const paramsReady = !!nonce.trim() && Number(maxInline) > 0;
+
   return (
-    <main className="mx-auto max-w-4xl px-4 py-10 space-y-8">
+    <main className="mx-auto max-w-4xl px-4 py-10 space-y-6">
       <header className="space-y-2">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold text-white">Bootstrap a CIP-113 protocol</h1>
@@ -762,9 +773,19 @@ export default function BootstrapProtocolPage() {
         </p>
       </section>
 
-      <section className="space-y-4">
+      <CeremonyStep
+        label="1"
+        title="One-shot seeds"
+        done={seedsReady}
+        summary={
+          !seedsReady
+            ? undefined
+            : seedSource === "wallet"
+              ? "3 UTxOs from the wallet"
+              : "3 UTxOs, entered by hand"
+        }
+      >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-lg font-semibold text-white">1. One-shot seeds</h2>
           <label className="flex items-center gap-2 text-xs text-dark-300">
             <input
               type="checkbox"
@@ -840,10 +861,14 @@ export default function BootstrapProtocolPage() {
             />
           </div>
         ))}
-      </section>
+      </CeremonyStep>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-semibold text-white">2. Upgrade multisig</h2>
+      <CeremonyStep
+        label="2"
+        title="Upgrade multisig"
+        done={!!multisig}
+        summary={multisig ? `${multisig.required}-of-${multisig.members.length}` : undefined}
+      >
         <label className="block text-xs font-medium text-dark-200" htmlFor="multisig-members">
           Members — one per line
         </label>
@@ -874,10 +899,18 @@ export default function BootstrapProtocolPage() {
           />
           <span className="text-xs text-dark-400">of {memberEntries.length || "—"}</span>
         </div>
-      </section>
+      </CeremonyStep>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-semibold text-white">3. Parameters</h2>
+      <CeremonyStep
+        label="3"
+        title="Parameters"
+        done={paramsReady}
+        summary={
+          paramsReady
+            ? `${maxInline} datum bytes, unfracking ${unfrackingEnabled ? "on" : "off"}`
+            : undefined
+        }
+      >
         <p className="text-xs text-dark-400">
           Keep the nonce: the record stores always_fail&apos;s hash, not the nonce.
         </p>
@@ -940,26 +973,35 @@ export default function BootstrapProtocolPage() {
             </p>
           )}
         </div>
-      </section>
 
-      <button
-        type="button"
-        onClick={derive}
-        disabled={stage === "deriving"}
-        className="rounded bg-accent-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-      >
-        {stage === "deriving" ? "Deriving…" : "Derive deployment"}
-      </button>
-
-      {error && (
-        <div className="rounded border border-red-700 bg-red-950/40 p-3 text-sm text-red-200">
-          {error}
+        {/* The action that consumes steps 1-3 sits WITH them, not floating above step 4. */}
+        <div className="flex flex-wrap items-center gap-3 border-t border-dark-800 pt-3">
+          <button
+            type="button"
+            onClick={derive}
+            disabled={stage === "deriving"}
+            className="rounded bg-accent-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {stage === "deriving" ? "Deriving…" : "Derive deployment"}
+          </button>
+          {!seedsReady && (
+            <span className="text-xs text-dark-400">Needs three seeds from step 1.</span>
+          )}
         </div>
-      )}
+        {error && (
+          <div className="rounded border border-red-700 bg-red-950/40 p-3 text-sm text-red-200">
+            {error}
+          </div>
+        )}
+      </CeremonyStep>
 
       {derived && (
-        <section className="space-y-4">
-          <h2 className="text-lg font-semibold text-white">4. What would be deployed</h2>
+        <CeremonyStep
+          label="4"
+          title="What would be deployed"
+          done={!!planned}
+          summary={planned ? "superseded by the plan below" : undefined}
+        >
           {blueprintSha && pin && (
             <p className="text-xs text-dark-400">
               Blueprint {pin.declares.title} {pin.declares.version}, {pin.declares.compiler},{" "}
@@ -1018,12 +1060,20 @@ export default function BootstrapProtocolPage() {
           <p className="text-xs text-dark-400">
             Derived from the step 1 seeds, so these are the hashes the deployment produces.
           </p>
-        </section>
+        </CeremonyStep>
       )}
 
 
-      <section className="space-y-3 border-t border-dark-800 pt-6">
-        <h2 className="text-lg font-semibold text-white">Deploy</h2>
+      <CeremonyStep
+        label="5"
+        title="Build and verify"
+        done={!!planned}
+        summary={
+          planned?.verification.ok
+            ? `4 transactions, ${planned.verification.checks.length} hashes verified`
+            : undefined
+        }
+      >
         <p className="text-xs text-dark-400">
           Builds and evaluates all four transactions — real execution units, against outputs the
           earlier steps will create — then verifies the result against the pinned blueprint.{" "}
@@ -1052,7 +1102,7 @@ export default function BootstrapProtocolPage() {
         )}
 
         {planned && (
-          <div className="space-y-3">
+          <>
             <p className="text-xs text-dark-400">
               Phase one is yours alone. Phase two needs every declared participant, and is built
               only after phase one confirms — the genesis references a UTxO that does not exist
@@ -1110,6 +1160,18 @@ export default function BootstrapProtocolPage() {
               </div>
             )}
 
+          </>
+        )}
+      </CeremonyStep>
+
+      {planned && (
+        <CeremonyStep
+          label="Phase one"
+          title="Yours alone"
+          done={phaseOneDone}
+          summary={phaseOneDone ? "2 transactions on chain" : undefined}
+        >
+          {/* Progress sits beside the button that starts it, not in a banner above. */}
             {progress && <p className="text-xs text-amber-200">{progress}</p>}
 
             {/* ---- PHASE ONE: the deployer alone ---- */}
@@ -1144,6 +1206,16 @@ export default function BootstrapProtocolPage() {
               </p>
             )}
 
+        </CeremonyStep>
+      )}
+
+      {planned && phaseOneDone && (
+        <CeremonyStep
+          label="Phase two"
+          title="Every participant signs"
+          done={deployComplete}
+          summary={deployComplete ? "genesis and reference scripts on chain" : undefined}
+        >
             {/* ---- BETWEEN: the gate, then the operator's explicit second act ---- */}
             {phaseOneDone && !genesisStep && (
               <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3 text-xs">
@@ -1223,9 +1295,10 @@ export default function BootstrapProtocolPage() {
                 )}
               </>
             )}
-          </div>
-        )}
+        </CeremonyStep>
+      )}
 
+      <section className="space-y-3 border-t border-dark-800 pt-6">
         {submitted && submitted.length > 0 && (
           <div className="space-y-2">
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-mono text-xs">
