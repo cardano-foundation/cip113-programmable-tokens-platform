@@ -62,6 +62,10 @@ export function CosignaturePanel({
 }) {
   const [text, setText] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
+  /** The hand-off: what was pushed, and when. `null` until the driver pushes. */
+  const [pushed, setPushed] = useState<{ id: string; at: number; alreadyHeld: boolean } | null>(null);
+  const [pushing, setPushing] = useState(false);
+  const [pushError, setPushError] = useState<string | null>(null);
   const [signingSelf, setSigningSelf] = useState(false);
   const [selfError, setSelfError] = useState<string | null>(null);
 
@@ -164,6 +168,42 @@ export function CosignaturePanel({
     }
   };
 
+  /**
+   * Hand the transaction to the relay so participants fetch it instead of pasting 15 KB.
+   *
+   * ⛔ IDEMPOTENT BY CONSTRUCTION. The relay keys entries by the transaction id it derives from
+   * the bytes, so pushing the same transaction twice returns the same id and displaces nothing.
+   * That is why this button stays enabled: if a participant reports "not found" because the
+   * service restarted, pressing it again is always the right move and can never fork the ceremony.
+   */
+  const push = async () => {
+    setPushing(true);
+    setPushError(null);
+    try {
+      const res = await fetch("/api/deployment/relay", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tx: unsignedCbor }),
+      });
+      const body = (await res.json()) as { id?: string; alreadyHeld?: boolean; error?: string };
+      if (!res.ok || !body.id) throw new Error(body.error ?? `relay returned ${res.status}`);
+      // ⚑ CHECK THE RELAY AGREES WITH US. The id it returns must be the hash this panel already
+      // displays; if it is not, the relay is deriving keys differently and participants would be
+      // told to fetch under an id that is not the one being compared on the call.
+      if (txHash && body.id !== txHash) {
+        throw new Error(
+          `The relay stored this under ${body.id}, but this transaction's hash is ${txHash}. ` +
+            "Not circulating a mismatched id — use the paste path.",
+        );
+      }
+      setPushed({ id: body.id, at: Date.now(), alreadyHeld: body.alreadyHeld === true });
+    } catch (e) {
+      setPushError((e as Error).message);
+    } finally {
+      setPushing(false);
+    }
+  };
+
   const copy = async (what: string, value: string) => {
     try {
       await navigator.clipboard.writeText(value);
@@ -226,6 +266,45 @@ export function CosignaturePanel({
           plan after sending: a rebuilt transaction has a new hash and every signature already
           collected stops verifying.
         </p>
+
+        {/*
+          The alternative to pasting 15 KB into a chat client that will wrap or truncate it. What
+          travels in the chat is the id; the bytes travel over HTTP.
+        */}
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={push}
+            disabled={pushing}
+            className="rounded border border-dark-600 bg-dark-800 px-3 py-1.5 text-xs text-dark-100 transition-colors hover:border-primary-500/40 hover:text-primary-400 disabled:opacity-40"
+          >
+            {pushing ? "Pushing…" : pushed ? "Push again" : "Push to server"}
+          </button>
+          {pushed && (
+            <button
+              type="button"
+              onClick={() => copy("link", `${window.location.origin}/sign?tx=${pushed.id}`)}
+              className="rounded border border-dark-600 px-2 py-1 text-[10px] text-dark-200 hover:text-primary-400"
+            >
+              {copied === "link" ? "Copied" : "Copy /sign link"}
+            </button>
+          )}
+        </div>
+        {pushError && <p className="text-xs text-red-400">{pushError}</p>}
+        {pushed && (
+          <p className="text-[11px] text-dark-400">
+            Held since {new Date(pushed.at).toLocaleTimeString()}
+            {pushed.alreadyHeld && " (already held — nothing was replaced)"}. Participants fetch it
+            on <span className="text-primary-400">/sign</span> with the hash above.{" "}
+            <strong className="text-dark-300">
+              Read that hash out on the call anyway.
+            </strong>{" "}
+            It is how they find the transaction, not proof of which one they got — a link carries
+            both halves, so only a channel the transaction did not arrive on can confirm it. If
+            anyone reports it missing, push again; the id is derived from the bytes, so a second
+            push replaces nothing.
+          </p>
+        )}
       </div>
 
       <div className="space-y-1">

@@ -18,6 +18,24 @@
  * is the value participants should compare over a channel the transaction did
  * NOT arrive on. Everything else here is context; the hash is the check.
  *
+ * ## Why fetching is a BUTTON and never happens on render
+ *
+ * This page must issue no request when it loads, so a participant on a laptop with no route to
+ * the server still gets a working page — signing is local. Fetching from the hand-off is
+ * therefore something the participant DOES, never something the page does on mount: `?tx=` only
+ * prefills the field. And the id is a LOOKUP KEY, not proof: the server derived it by hashing
+ * the bytes, so recomputing it here can only catch a broken server, never a substitution. The
+ * hash still has to be confirmed on the call, which is what section 2 is for.
+ *
+ * ## Why "is your key required" is answered mechanically
+ *
+ * The transaction declares its required signers, and the wallet knows which credentials it
+ * holds, so the page can answer the question instead of printing a 56-character hash for a human
+ * to compare — which is the failure mode it would exist to prevent. It checks EVERY address the
+ * wallet reports, not just the change address: a participant who sent the driver an address from
+ * their wallet's Receive tab sent an external one, whose payment key hash differs from the change
+ * address's in any HD wallet.
+ *
  * ## Why the witness is verified before it leaves
  *
  * A wallet can sign with a key that is not the one expected, or decline to sign
@@ -27,13 +45,14 @@
  * against this body hash — turns that into an immediate, local answer.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { useWallet } from "@/hooks/use-wallet";
 import { getCardanoNetwork } from "@/lib/utils/network";
 import { transactionHash, verifyWitnessSet, type VerifiedWitness } from "@/lib/tx/hash";
 import { summariseTransaction, type TxSummary } from "@/lib/tx/summary";
 import { asWitnessSetHex } from "@/lib/tx/hash";
+import { paymentCredentialHash } from "@easy1staking/cip113-sdk-ts";
 
 export default function SignPage() {
   const network = getCardanoNetwork();
@@ -46,6 +65,20 @@ export default function SignPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  /**
+   * Prefilled from `?tx=` so a driver's link saves typing 64 characters — read once, from
+   * `window`, deliberately: `useSearchParams` would pull this page into Suspense for no gain,
+   * and nothing here should fetch on mount.
+   */
+  const [relayId, setRelayId] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return new URLSearchParams(window.location.search).get("tx")?.trim().toLowerCase() ?? "";
+  });
+  const [fetching, setFetching] = useState(false);
+  const [relayError, setRelayError] = useState<string | null>(null);
+  /** Every payment credential this wallet reports holding, for the required-signer check. */
+  const [myKeyHashes, setMyKeyHashes] = useState<string[]>([]);
+  const [myAddress, setMyAddress] = useState<{ address: string; kind: string } | null>(null);
 
   const clean = txHex.replace(/\s+/g, "").toLowerCase();
 
@@ -75,6 +108,113 @@ export default function SignPage() {
       return [];
     }
   }, [witness, clean, parsed]);
+
+  /**
+   * Pull the transaction out of the hand-off.
+   *
+   * ⛔ RECOMPUTE, THEN REFUSE — but be honest about what that proves. The id the server keyed
+   * this under was derived from these same bytes, so a mismatch means the server is broken, not
+   * that someone swapped the transaction. It is a transport check. The control that catches
+   * substitution is a human reading the hash aloud on a channel the transaction did not arrive
+   * on, which is why this does not mark the transaction "confirmed" in any way.
+   */
+  const fetchFromRelay = async () => {
+    const id = relayId.trim().toLowerCase();
+    setRelayError(null);
+    setFetching(true);
+    try {
+      const res = await fetch(`/api/deployment/relay?id=${encodeURIComponent(id)}`);
+      const body = (await res.json()) as { tx?: string; reason?: string; error?: string };
+      if (!res.ok || !body.tx) {
+        throw new Error(
+          body.reason === "expired"
+            ? "That transaction was held but has expired — ask whoever sent it to push it again."
+            : body.reason === "unknown"
+              ? "Nothing is held under that id. It may never have been pushed, the server may have " +
+                "restarted, or the id is not the one you were given. Ask for it to be pushed again, " +
+                "or paste the transaction instead."
+              : (body.error ?? `The server returned ${res.status}.`),
+        );
+      }
+      const got = body.tx.trim().toLowerCase();
+      const recomputed = transactionHash(got);
+      if (recomputed !== id) {
+        throw new Error(
+          `The server returned a transaction whose id is ${recomputed}, not the ${id} you asked ` +
+            "for. Nothing has been filled in. Do not sign anything from this source — paste the " +
+            "transaction you were sent directly.",
+        );
+      }
+      setTxHex(got);
+    } catch (e) {
+      setRelayError(
+        (e as Error).message.includes("fetch")
+          ? "Could not reach the server. If you are offline this is expected — paste the " +
+            "transaction instead; signing itself needs no network."
+          : (e as Error).message,
+      );
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  /**
+   * Which credentials does this wallet hold?
+   *
+   * ⛔ RE-READ ON FOCUS AND VISIBILITY. CIP-30 has no account-change event, so a value captured
+   * once at connect silently describes an account the participant may have switched away from —
+   * and this page would then put its own authority behind the wrong key hash. Re-reading when the
+   * tab comes back is the cheapest approximation of an event that does not exist.
+   */
+  useEffect(() => {
+    if (!connected) {
+      setMyKeyHashes([]);
+      setMyAddress(null);
+      return;
+    }
+    let live = true;
+    const read = async () => {
+      try {
+        const [change, used] = await Promise.all([
+          wallet.getChangeAddress(),
+          wallet.getUsedAddresses().catch(() => [] as string[]),
+        ]);
+        if (!live) return;
+        const all = [change, ...used].filter(Boolean);
+        const hashes = new Set<string>();
+        for (const a of all) {
+          try { hashes.add(paymentCredentialHash(a).toLowerCase()); } catch { /* not a payment address */ }
+        }
+        setMyKeyHashes([...hashes]);
+        setMyAddress({ address: change, kind: "change address" });
+      } catch {
+        if (live) { setMyKeyHashes([]); setMyAddress(null); }
+      }
+    };
+    read();
+    const onWake = () => { if (document.visibilityState === "visible") read(); };
+    window.addEventListener("focus", onWake);
+    document.addEventListener("visibilitychange", onWake);
+    return () => {
+      live = false;
+      window.removeEventListener("focus", onWake);
+      document.removeEventListener("visibilitychange", onWake);
+    };
+  }, [connected, wallet]);
+
+  /**
+   * Is this wallet one of the keys this transaction requires?
+   *
+   * `null` when the question cannot be answered — no wallet, or a transaction that declares no
+   * required signers at all — because "no" and "cannot tell" must not look the same.
+   */
+  const amRequired = useMemo(() => {
+    const required = parsed?.summary?.requiredSigners;
+    if (!required || required.length === 0 || myKeyHashes.length === 0) return null;
+    const wanted = required.map((r) => r.toLowerCase());
+    const mine = myKeyHashes.find((h) => wanted.includes(h));
+    return { required: mine !== undefined, matched: mine ?? null };
+  }, [parsed, myKeyHashes]);
 
   const sign = async () => {
     setError(null);
@@ -149,6 +289,29 @@ export default function SignPage() {
 
       <section className="space-y-2">
         <h2 className="text-lg font-semibold text-white">1. The transaction</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            id="relay-id"
+            className="min-w-[22rem] flex-1 rounded border border-dark-700 bg-dark-900 px-2 py-1.5 font-mono text-xs text-white placeholder:text-dark-500 focus:border-primary-500/50 focus:outline-none"
+            placeholder="transaction id, if you were given one (64 hex)"
+            value={relayId}
+            onChange={(e) => setRelayId(e.target.value)}
+            spellCheck={false}
+          />
+          <button
+            type="button"
+            onClick={fetchFromRelay}
+            disabled={fetching || !/^[0-9a-f]{64}$/.test(relayId.trim().toLowerCase())}
+            className="rounded border border-dark-600 bg-dark-800 px-3 py-1.5 text-xs text-dark-100 transition-colors hover:border-primary-500/40 hover:text-primary-400 disabled:opacity-40"
+          >
+            {fetching ? "Fetching…" : "Fetch from server"}
+          </button>
+        </div>
+        <p className="text-[11px] text-dark-500">
+          The id is how you FIND the transaction, not proof of which one you got — confirm the hash
+          below on the call. Or paste the transaction directly; signing needs no network either way.
+        </p>
+        {relayError && <p className="text-xs text-red-400">{relayError}</p>}
         <textarea
           id="sign-tx-hex"
           className="h-28 w-full rounded bg-dark-900 px-3 py-2 font-mono text-xs text-white border border-dark-700 focus:border-primary-500/50 focus:outline-none"
@@ -193,9 +356,49 @@ export default function SignPage() {
                 </p>
                 <ul className="mt-1 space-y-0.5">
                   {parsed.summary.requiredSigners.map((s) => (
-                    <li key={s} className="break-all font-mono text-[11px] text-dark-300">{s}</li>
+                    <li
+                      key={s}
+                      className={`break-all font-mono text-[11px] ${
+                        myKeyHashes.includes(s.toLowerCase()) ? "text-green-300" : "text-dark-300"
+                      }`}
+                    >
+                      {s}
+                      {myKeyHashes.includes(s.toLowerCase()) && " ← you"}
+                    </li>
                   ))}
                 </ul>
+                {/*
+                  The answer, not the evidence. Printing a key hash for a participant to compare
+                  by eye is the mistake this replaces.
+                */}
+                {amRequired === null ? (
+                  <p className="mt-2 text-[11px] text-dark-500">
+                    {connected
+                      ? "Connect a wallet that holds one of these keys to check whether yours is among them."
+                      : "Connect your wallet and this page will tell you whether your key is one of them."}
+                  </p>
+                ) : amRequired.required ? (
+                  <p className="mt-2 text-xs text-green-300">
+                    Your wallet holds one of the keys this transaction requires. Signing here is
+                    what was asked of you.
+                  </p>
+                ) : (
+                  <p className="mt-2 text-xs text-accent-300">
+                    <strong>None of your wallet&apos;s keys is among the required signers.</strong>{" "}
+                    Either this is not the transaction meant for you, or you are on a different
+                    account than the one whose address you gave — check the wallet&apos;s account
+                    selector. Signing anyway produces a witness that will be reported as coming
+                    from an undeclared key.
+                  </p>
+                )}
+                {myAddress && (
+                  <p className="mt-1 text-[10px] text-dark-500">
+                    Checked against {myKeyHashes.length} credential
+                    {myKeyHashes.length === 1 ? "" : "s"} from this wallet. Its {myAddress.kind} is{" "}
+                    <span className="break-all font-mono">{myAddress.address}</span> — re-read when
+                    this tab regains focus, because CIP-30 has no account-change event.
+                  </p>
+                )}
               </div>
             )}
 

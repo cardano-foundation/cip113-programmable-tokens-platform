@@ -64,3 +64,4 @@ frontend.log
 .sdkrec-build/
 .colour-build/
 .seeds-build/
+.relay-build/
