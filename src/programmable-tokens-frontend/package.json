@@ -27,7 +27,8 @@
     "test:signoffline": "node test-sign-offline.js",
     "test:colour": "tsc lib/deployment/participant-colour.ts --outDir .colour-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .colour-build && node test-participant-colour.js",
     "test:noanalytics": "node test-no-analytics.js",
-    "test:seeds": "tsc lib/deployment/ceremony.ts --outDir .seeds-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .seeds-build && node test-seed-selection.js"
+    "test:seeds": "tsc lib/deployment/ceremony.ts --outDir .seeds-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .seeds-build && node test-seed-selection.js",
+    "test:mint-confirmation": "tsc lib/rwa/mint-confirmation.ts --outDir .hash-build/mint-confirmation --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .hash-build/mint-confirmation && node test-mint-confirmation.js"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.13.0",

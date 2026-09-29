@@ -158,10 +158,10 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
       const isDenylist = selectedToken?.moduleId === "rwa-token";
       const listName = isDenylist ? "Denylist" : "Blacklist";
       showToast({
-        title: `${action === "add" ? "Added to" : "Removed from"} ${listName}`,
+        title: `${listName} transaction submitted`,
         description: action === "add"
-          ? `Recipient added — future transfers to this ${isDenylist ? "stake credential" : "address"} will be rejected on-chain.`
-          : `Recipient removed — transfers to this ${isDenylist ? "stake credential" : "address"} will be allowed again.`,
+          ? `Adding this ${isDenylist ? "stake credential" : "address"} is pending on-chain confirmation.`
+          : `Removing this ${isDenylist ? "stake credential" : "address"} is pending on-chain confirmation.`,
         variant: "success",
       });
     } catch (error) {
@@ -217,10 +217,10 @@ export function BlacklistSection({ tokens, adminAddress }: BlacklistSectionProps
           <CheckCircle className="h-8 w-8 text-green-500" />
         </div>
         <h3 className="text-lg font-semibold text-white mb-2">
-          {action === "add" ? "Address Blacklisted" : "Address Removed"}
+          {action === "add" ? "Add submitted" : "Removal submitted"}
         </h3>
         <p className="text-sm text-dark-400 text-center mb-4">
-          Successfully {action === "add" ? "added to" : "removed from"} the blacklist
+          {action === "add" ? "Adding to" : "Removing from"} the {selectedToken?.moduleId === "rwa-token" ? "denylist" : "blacklist"} is pending confirmation.
         </p>
 
         <div className="w-full px-4 py-3 bg-dark-900 rounded-lg mb-4">

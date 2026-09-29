@@ -22,6 +22,7 @@ import org.mockito.Mockito;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /**
  * Offline build + real phase-2 evaluation of the CIP-68 registration paths, driving the
@@ -672,6 +673,71 @@ public class OfflineCip68EvalTest {
                 "transfer exceeds the 16384-byte ledger limit");
     }
 
+    /** A valid MPF inclusion proof cannot override a live denylist node. This
+     *  must fail before script evaluation, with the affected party identified. */
+    @Test
+    public void rwaTokenTransferNamesDenylistedRecipientDespiteMembership() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ALICE.baseAddress(), true, true);
+        var chain = st.chain();
+        var policyId = st.built().programmableTokenPolicyId();
+        var reg = st.registrations().get(policyId);
+        byte[] aliceStake = HexUtil.decodeHexString(stakeCredHex(BootstrapFixture.ALICE.baseAddress()));
+        var membership = st.allowlist().inclusionProof(policyId, aliceStake, (short) 0,
+                System.currentTimeMillis()).orElseThrow();
+        String proof = HexUtil.encodeHexString(membership.proofCbor());
+
+        var add = st.handler().buildAddToBlacklistTransaction(
+                new org.cardanofoundation.cip113.service.module.capabilities
+                        .BlacklistManageable.AddToBlacklistRequest(
+                        policyId, reg.getSecurityAssetNameHex(),
+                        BootstrapFixture.ALICE.baseAddress(), BootstrapFixture.ADMIN.baseAddress()),
+                st.boot().params());
+        Assertions.assertTrue(add.isSuccessful(), "denylist add failed: " + add.error());
+        chain.submit(Transaction.deserialize(HexUtil.decodeHexString(add.unsignedCborTx())));
+        chain.seedAda("offline-denylisted-transfer-funding", BootstrapFixture.ALICE.baseAddress(), 7, 100);
+
+        var deniedRecipient = st.handler().buildTransferTransaction(
+                new org.cardanofoundation.cip113.model.TransferTokenRequest(
+                        BootstrapFixture.ALICE.baseAddress(), policyId + reg.getSecurityAssetNameHex(),
+                        "400", BootstrapFixture.ALICE.baseAddress(), null, null, null,
+                        proof, membership.validUntilMs(), proof, membership.validUntilMs()),
+                st.boot().params());
+        Assertions.assertFalse(deniedRecipient.isSuccessful());
+        Assertions.assertTrue(String.valueOf(deniedRecipient.error()).contains("Recipient is on this token's denylist"),
+                "expected recipient denylist error before KYC or evaluation: " + deniedRecipient.error());
+
+    }
+
+    /** The denylist remains effective when both KYC gates are disabled. */
+    @Test
+    public void rwaTokenTransferNamesDenylistedSenderWithoutKyc() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ALICE.baseAddress(), true);
+        var chain = st.chain();
+        var policyId = st.built().programmableTokenPolicyId();
+        var reg = st.registrations().get(policyId);
+        var add = st.handler().buildAddToBlacklistTransaction(
+                new org.cardanofoundation.cip113.service.module.capabilities
+                        .BlacklistManageable.AddToBlacklistRequest(
+                        policyId, reg.getSecurityAssetNameHex(),
+                        BootstrapFixture.ALICE.baseAddress(), BootstrapFixture.ADMIN.baseAddress()),
+                st.boot().params());
+        Assertions.assertTrue(add.isSuccessful(), "denylist add failed: " + add.error());
+        chain.submit(Transaction.deserialize(HexUtil.decodeHexString(add.unsignedCborTx())));
+        chain.seedAda("offline-denylisted-sender-funding", BootstrapFixture.ALICE.baseAddress(), 7, 100);
+
+        var deniedSender = st.handler().buildTransferTransaction(
+                new org.cardanofoundation.cip113.model.TransferTokenRequest(
+                        BootstrapFixture.ALICE.baseAddress(), policyId + reg.getSecurityAssetNameHex(),
+                        "400", BootstrapFixture.ADMIN.baseAddress(), null, null, null,
+                        null, null, null, null),
+                st.boot().params());
+        Assertions.assertFalse(deniedSender.isSuccessful());
+        Assertions.assertTrue(String.valueOf(deniedSender.error()).contains("Sender is on this token's denylist"),
+                "expected sender denylist error with receiver KYC off: " + deniedSender.error());
+    }
+
     /**
      * Adding and removing a denylist entry both validate.
      *
@@ -706,14 +772,6 @@ public class OfflineCip68EvalTest {
         Assertions.assertTrue(chain.reportAndCheckRedeemers(label + "/denylist-add", addTx) > 0,
                 "no redeemer was evaluated on the denylist add");
 
-        // REMOVE IS NOT IMPLEMENTED, and this pins that rather than papering over it.
-        //
-        // The endpoint and the capability exist — BlacklistManageable declares it and the
-        // controller routes to it — so from outside the platform it looks available. The
-        // builder refuses explicitly instead: removing an element from the denylist linked
-        // list means finding the node AND its predecessor anchor, and that walk was never
-        // written. Asserting the refusal keeps the gap visible; the day someone implements
-        // it, this test fails and tells them to replace it with a real evaluation.
         chain.submit(addTx);
 
         var remove = handler.buildRemoveFromBlacklistTransaction(
@@ -724,14 +782,175 @@ public class OfflineCip68EvalTest {
                         BootstrapFixture.ALICE.baseAddress(),
                         BootstrapFixture.ADMIN.baseAddress()),
                 boot.params());
-        Assertions.assertFalse(remove.isSuccessful(),
-                "denylist remove is a stub — if it now builds, implement a real evaluation "
-                + "assertion here instead of this one");
-        Assertions.assertTrue(String.valueOf(remove.error()).contains("not yet implemented"),
-                "the refusal must say the path is unimplemented rather than fail obscurely; "
-                + "got: " + remove.error());
-        log.info("[{}/denylist-remove] correctly refused as unimplemented: {}",
-                label, remove.error());
+        Assertions.assertTrue(remove.isSuccessful(), "denylist remove build failed: " + remove.error());
+        var removeTx = Transaction.deserialize(HexUtil.decodeHexString(remove.unsignedCborTx()));
+        Assertions.assertTrue(chain.reportAndCheckRedeemers(label + "/denylist-remove", removeTx) > 0,
+                "no redeemer was evaluated on denylist remove");
+        chain.submit(removeTx);
+        Assertions.assertTrue(chain.findUtxoByUnit(st.registrations().get(policyId).getDenylistPolicyId()
+                + HexUtil.encodeHexString("Node".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                + targetStake).isEmpty(), "removed denylist NFT remains unspent");
+    }
+
+    /** Exercise insertion and removal at every list position with the real scripts. */
+    @Test
+    public void rwaTokenDenylistMaintainsSortedLinksAcrossMutations() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var chain = st.chain();
+        var policyId = st.built().programmableTokenPolicyId();
+        var reg = st.registrations().get(policyId);
+        var donatedAddress = chain.findUtxoByUnit(reg.getDenylistPolicyId()).orElseThrow().getAddress();
+        chain.seedUtxo(com.bloxbean.cardano.client.api.model.Utxo.builder()
+                .txHash("ab".repeat(32)).outputIndex(7).address(donatedAddress)
+                .amount(List.of(com.bloxbean.cardano.client.api.model.Amount.lovelace(
+                        BigInteger.valueOf(2_000_000))))
+                .inlineDatum("deadbeef").build());
+        var entries = new java.util.ArrayList<java.util.Map.Entry<String, String>>();
+        for (int account = 1; account <= 4; account++) {
+            String address = com.bloxbean.cardano.client.account.Account.createFromMnemonic(
+                    BootstrapFixture.NETWORK, BootstrapFixture.OFFLINE_DERIVATION_MNEMONIC,
+                    account, 0).baseAddress();
+            entries.add(java.util.Map.entry(stakeCredHex(address), address));
+        }
+        entries.sort(java.util.Map.Entry.comparingByKey());
+        var unauthorized = st.handler().buildAddToBlacklistTransaction(
+                new org.cardanofoundation.cip113.service.module.capabilities
+                        .BlacklistManageable.AddToBlacklistRequest(policyId, reg.getSecurityAssetNameHex(),
+                        entries.get(0).getValue(), BootstrapFixture.ALICE.baseAddress()), st.boot().params());
+        Assertions.assertFalse(unauthorized.isSuccessful());
+        Assertions.assertTrue(String.valueOf(unauthorized.error()).contains("ADMIN capability"));
+        var presentKeys = new java.util.TreeSet<String>();
+        int[] addOrder = {1, 3, 0, 2}; // first, tail, before first, between nodes
+        for (int index : addOrder) {
+            var entry = entries.get(index);
+            var result = st.handler().buildAddToBlacklistTransaction(
+                    new org.cardanofoundation.cip113.service.module.capabilities
+                            .BlacklistManageable.AddToBlacklistRequest(policyId,
+                            reg.getSecurityAssetNameHex(), entry.getValue(), BootstrapFixture.ADMIN.baseAddress()),
+                    st.boot().params());
+            Assertions.assertTrue(result.isSuccessful(), "add " + index + ": " + result.error());
+            var tx = Transaction.deserialize(HexUtil.decodeHexString(result.unsignedCborTx()));
+            Assertions.assertTrue(chain.reportAndCheckRedeemers("denylist/add-" + index, tx) > 0);
+            chain.submit(tx);
+            presentKeys.add(entry.getKey());
+            assertDenylistLinks(chain, reg.getDenylistPolicyId(), List.copyOf(presentKeys));
+        }
+
+        var duplicate = st.handler().buildAddToBlacklistTransaction(
+                new org.cardanofoundation.cip113.service.module.capabilities
+                        .BlacklistManageable.AddToBlacklistRequest(policyId, reg.getSecurityAssetNameHex(),
+                        entries.get(1).getValue(), BootstrapFixture.ADMIN.baseAddress()), st.boot().params());
+        Assertions.assertFalse(duplicate.isSuccessful());
+        Assertions.assertTrue(String.valueOf(duplicate.error()).contains("already on this token's denylist"));
+
+        int[] removeOrder = {2, 0, 3, 1}; // middle, first, tail, final
+        for (int index : removeOrder) {
+            var entry = entries.get(index);
+            var result = st.handler().buildRemoveFromBlacklistTransaction(
+                    new org.cardanofoundation.cip113.service.module.capabilities
+                            .BlacklistManageable.RemoveFromBlacklistRequest(policyId,
+                            reg.getSecurityAssetNameHex(), entry.getValue(), BootstrapFixture.ADMIN.baseAddress()),
+                    st.boot().params());
+            Assertions.assertTrue(result.isSuccessful(), "remove " + index + ": " + result.error());
+            var tx = Transaction.deserialize(HexUtil.decodeHexString(result.unsignedCborTx()));
+            Assertions.assertTrue(chain.reportAndCheckRedeemers("denylist/remove-" + index, tx) > 0);
+            chain.submit(tx);
+            presentKeys.remove(entry.getKey());
+            assertDenylistLinks(chain, reg.getDenylistPolicyId(), List.copyOf(presentKeys));
+            Assertions.assertTrue(chain.findUtxoByUnit(reg.getDenylistPolicyId()
+                    + HexUtil.encodeHexString("Node".getBytes(StandardCharsets.UTF_8))
+                    + entry.getKey()).isEmpty(), "removed NFT remains unspent");
+        }
+
+        var absent = st.handler().buildRemoveFromBlacklistTransaction(
+                new org.cardanofoundation.cip113.service.module.capabilities
+                        .BlacklistManageable.RemoveFromBlacklistRequest(policyId, reg.getSecurityAssetNameHex(),
+                        entries.get(0).getValue(), BootstrapFixture.ADMIN.baseAddress()), st.boot().params());
+        Assertions.assertFalse(absent.isSuccessful());
+        Assertions.assertTrue(String.valueOf(absent.error()).contains("not on this token's denylist"));
+    }
+
+    private static void assertDenylistLinks(OfflineChain chain, String policyId, List<String> expectedKeys)
+            throws Exception {
+        String nodePrefix = HexUtil.encodeHexString("Node".getBytes(StandardCharsets.UTF_8));
+        for (int i = 0; i <= expectedKeys.size(); i++) {
+            String unit = policyId + (i == 0 ? "" : nodePrefix + expectedKeys.get(i - 1));
+            var utxo = chain.findUtxoByUnit(unit).orElseThrow();
+            var element = (com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData)
+                    com.bloxbean.cardano.client.plutus.spec.PlutusData.deserialize(
+                            HexUtil.decodeHexString(utxo.getInlineDatum()));
+            var link = (com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData)
+                    element.getData().getPlutusDataList().get(1);
+            String expectedNext = i == expectedKeys.size() ? null : expectedKeys.get(i);
+            if (expectedNext == null) {
+                Assertions.assertEquals(1, link.getAlternative(), "tail must have no link");
+            } else {
+                Assertions.assertEquals(0, link.getAlternative(), "predecessor must have a link");
+                var next = (com.bloxbean.cardano.client.plutus.spec.BytesPlutusData)
+                        link.getData().getPlutusDataList().getFirst();
+                Assertions.assertEquals(expectedNext, HexUtil.encodeHexString(next.getValue()));
+            }
+        }
+    }
+
+    @Test
+    public void rwaTokenTransferAfterDenylistRemovalUsesSeparateCoveringNodes() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ALICE.baseAddress(), true);
+        var chain = st.chain();
+        var policyId = st.built().programmableTokenPolicyId();
+        var reg = st.registrations().get(policyId);
+        String alice = stakeCredHex(BootstrapFixture.ALICE.baseAddress());
+        String admin = stakeCredHex(BootstrapFixture.ADMIN.baseAddress());
+        String lower = alice.compareTo(admin) < 0 ? alice : admin;
+        String upper = alice.compareTo(admin) < 0 ? admin : alice;
+        java.util.Map.Entry<String, String> beforeBoth = null;
+        java.util.Map.Entry<String, String> between = null;
+        java.util.Map.Entry<String, String> toRemove = null;
+        for (int account = 2; account < 100; account++) {
+            String address = com.bloxbean.cardano.client.account.Account.createFromMnemonic(
+                    BootstrapFixture.NETWORK, BootstrapFixture.OFFLINE_DERIVATION_MNEMONIC,
+                    account, 0).baseAddress();
+            String key = stakeCredHex(address);
+            if (beforeBoth == null && key.compareTo(lower) < 0) beforeBoth = java.util.Map.entry(key, address);
+            else if (between == null && key.compareTo(lower) > 0 && key.compareTo(upper) < 0)
+                between = java.util.Map.entry(key, address);
+            else if (toRemove == null && !key.equals(alice) && !key.equals(admin))
+                toRemove = java.util.Map.entry(key, address);
+            if (beforeBoth != null && between != null && toRemove != null) break;
+        }
+        Assertions.assertNotNull(beforeBoth);
+        Assertions.assertNotNull(between);
+        Assertions.assertNotNull(toRemove);
+        for (var entry : List.of(beforeBoth, between, toRemove)) {
+            var add = st.handler().buildAddToBlacklistTransaction(
+                    new org.cardanofoundation.cip113.service.module.capabilities
+                            .BlacklistManageable.AddToBlacklistRequest(policyId, reg.getSecurityAssetNameHex(),
+                            entry.getValue(), BootstrapFixture.ADMIN.baseAddress()), st.boot().params());
+            Assertions.assertTrue(add.isSuccessful(), "add failed: " + add.error());
+            var tx = Transaction.deserialize(HexUtil.decodeHexString(add.unsignedCborTx()));
+            Assertions.assertTrue(chain.reportAndCheckRedeemers("denylist/transfer-setup-add", tx) > 0);
+            chain.submit(tx);
+        }
+        var remove = st.handler().buildRemoveFromBlacklistTransaction(
+                new org.cardanofoundation.cip113.service.module.capabilities
+                        .BlacklistManageable.RemoveFromBlacklistRequest(policyId, reg.getSecurityAssetNameHex(),
+                        toRemove.getValue(), BootstrapFixture.ADMIN.baseAddress()), st.boot().params());
+        Assertions.assertTrue(remove.isSuccessful(), "remove failed: " + remove.error());
+        var removeTx = Transaction.deserialize(HexUtil.decodeHexString(remove.unsignedCborTx()));
+        Assertions.assertTrue(chain.reportAndCheckRedeemers("denylist/transfer-setup-remove", removeTx) > 0);
+        chain.submit(removeTx);
+
+        chain.seedAda("offline-transfer-populated-denylist", BootstrapFixture.ALICE.baseAddress(), 8, 100);
+        var transfer = st.handler().buildTransferTransaction(
+                new org.cardanofoundation.cip113.model.TransferTokenRequest(
+                        BootstrapFixture.ALICE.baseAddress(), policyId + reg.getSecurityAssetNameHex(),
+                        "400", BootstrapFixture.ADMIN.baseAddress(), null, null, null,
+                        null, null, null, null), st.boot().params());
+        Assertions.assertTrue(transfer.isSuccessful(), "allowed transfer failed: " + transfer.error());
+        var transferTx = Transaction.deserialize(HexUtil.decodeHexString(transfer.unsignedCborTx()));
+        Assertions.assertTrue(chain.reportAndCheckRedeemers("denylist/transfer-after-removal", transferTx) > 0);
     }
 
     /**

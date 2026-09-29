@@ -47,15 +47,16 @@ import {
   type MintAttestationRequest,
   type MintAttestationView,
   type MintAttestationConfig,
-  type MintAttestationChain,
 } from "@/lib/api/mint-attestation";
 import { bytesHex, hexBytes } from "@/lib/rwa/member-root";
 import { payerAddressHex } from "@/lib/rwa/creation-auth";
 import { mintRecoveryStorage } from "@/lib/rwa/mint-recovery-storage";
+import { confirmSavedMint, validateSavedMint, awaitCurrentMint, type SavedMintChain } from "@/lib/rwa/mint-confirmation";
 import {
   getRwaTokenGlobalState,
   buildGlobalStateUpdateChain,
   submitTokenChain,
+  getTokenChainStatus,
   parseSubmitChainFailure,
   type RwaTokenGlobalState,
 } from "@/lib/api/rwa-token";
@@ -77,7 +78,9 @@ function getSessionId(): string {
   return id;
 }
 
-function savedRecoveryForPayer(payer: string): string | null {
+type DiscoveredMintRecovery = { intentId: string; record: SavedMintChain };
+
+function savedRecoveryForPayer(payer: string): DiscoveredMintRecovery | null {
   if (!payer || typeof window === 'undefined') return null;
   const payerKey = payerAddressHex(payer);
   const pointerKey = `mint-keri-recovery-id-${payerKey}`;
@@ -87,15 +90,23 @@ function savedRecoveryForPayer(payer: string): string | null {
   const raw = mintRecoveryStorage.getItem(`mint-keri-recovery-${id}`);
   if (!raw) return null;
   try {
-    const saved = JSON.parse(raw) as { payer?: string };
+    const saved = JSON.parse(raw) as SavedMintChain;
     if (!saved.payer || payerAddressHex(saved.payer) !== payerKey) return null;
     mintRecoveryStorage.setItem(pointerKey, id);
-    return id;
+    return { intentId: id, record: saved };
   } catch { return null; }
 }
 
 export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const { wallet, rawApi } = useWallet();
+  const mintWalletRef = useRef({ feePayerAddress, rawApi });
+  if (mintWalletRef.current.feePayerAddress !== feePayerAddress || mintWalletRef.current.rawApi !== rawApi)
+    mintWalletRef.current = { feePayerAddress, rawApi };
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const { toast: showToast } = useToast();
   const { selectedVersion } = useProtocolVersion();
   const { getProtocol, ensureModule, available: sdkAvailable, sdkUnavailableReason } = useCIP113();
@@ -140,6 +151,11 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const [recipientAddress, setRecipientAddress] = useState(feePayerAddress);
   const [enableAttestation, setEnableAttestation] = useState(false);
 
+  const mintFormKey = JSON.stringify([selectedToken?.policyId, selectedToken?.assetName,
+    quantity, recipientAddress, selectedVersion?.txHash]);
+  const mintFormRef = useRef(mintFormKey);
+  mintFormRef.current = mintFormKey;
+
   // Receiver-KYC control on the minting step.
   //
   // This is a SEPARATE transaction, not a field of the mint, and it cannot be
@@ -172,12 +188,18 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   const [mintIntentRequest, setMintIntentRequest] = useState<MintAttestationRequest | null>(null);
   const [pendingIntentId, setPendingIntentId] = useState<string | null>(null);
   const [recoveryId, setRecoveryId] = useState<string | null>(null);
+  const recoverySnapshotRef = useRef<DiscoveredMintRecovery | null>(null);
   const [recoveryLoaded, setRecoveryLoaded] = useState(false);
+  const [confirmationMessage, setConfirmationMessage] = useState("Checking mint and CIP-170 confirmation…");
+  const [confirmationHashes, setConfirmationHashes] = useState<string[]>([]);
+  const [confirmedAttestationHash, setConfirmedAttestationHash] = useState<string | null>(null);
   const sessionIdRef = useRef(getSessionId());
 
   useEffect(() => {
     setPendingIntentId(sessionStorage.getItem('mint-keri-intent-id'));
-    setRecoveryId(savedRecoveryForPayer(feePayerAddress));
+    const recovery = savedRecoveryForPayer(feePayerAddress);
+    recoverySnapshotRef.current = recovery;
+    setRecoveryId(recovery?.intentId ?? null);
     setRecoveryLoaded(true);
   }, [feePayerAddress]);
 
@@ -208,7 +230,6 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     sessionStorage.removeItem("mint-keri-intent-id");
     sessionIdRef.current = getSessionId();
     setPendingIntentId(null);
-    setRecoveryId(savedRecoveryForPayer(feePayerAddress));
     setMintIntent(null);
     setMintIntentRequest(null);
     setMintIntentConfig(null);
@@ -223,6 +244,9 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     setConnectError(null);
     setPresentError(null);
     setEnableAttestation(false);
+    setConfirmedAttestationHash(null);
+    setIsBuilding(false);
+    setIsSigning(false);
     setSelectedToken(null);
     setStep("form");
   }, [feePayerAddress]);
@@ -257,7 +281,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   }, [feePayerAddress]);
 
   useEffect(() => {
-    if (!pendingIntentId || mintIntent || !feePayerAddress || tokens.length === 0) return;
+    if (!recoveryLoaded || recoveryId || !pendingIntentId || mintIntent || !feePayerAddress || tokens.length === 0) return;
     let cancelled = false;
     Promise.all([
       getSession(sessionIdRef.current),
@@ -287,7 +311,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       setAttestError(err instanceof Error ? err.message : "Saved mint intent could not be restored");
     });
     return () => { cancelled = true; };
-  }, [pendingIntentId, mintIntent, feePayerAddress, tokens]);
+  }, [pendingIntentId, mintIntent, feePayerAddress, tokens, recoveryId, recoveryLoaded]);
 
   const [errors, setErrors] = useState({
     token: "",
@@ -360,6 +384,73 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
   }, [isRwaToken, selectedToken]);
 
   useEffect(() => { void refreshRwaTokenGs(); }, [refreshRwaTokenGs]);
+
+  // This effect is the only owner of a saved chain. Reloads and wallet changes
+  // use the same reconciler; cleanup prevents stale results reaching a new wallet.
+  useEffect(() => {
+    if (!recoveryLoaded || !recoveryId || !feePayerAddress) return;
+    const controller = new AbortController();
+    const intentId = recoveryId;
+    const payer = payerAddressHex(feePayerAddress);
+    const recordKey = `mint-keri-recovery-${intentId}`;
+    const pointerKey = `mint-keri-recovery-id-${payer}`;
+    setMintFailure(null);
+    setConfirmationHashes([]);
+    setConfirmationMessage("Checking mint and CIP-170 confirmation…");
+    const load = (): SavedMintChain | null => {
+      const raw = mintRecoveryStorage.getItem(recordKey);
+      if (!raw) return null;
+      const record = JSON.parse(raw) as SavedMintChain;
+      if (!record.payer || payerAddressHex(record.payer) !== payer)
+        throw new Error("Saved signed mint belongs to another wallet");
+      return record;
+    };
+    void confirmSavedMint(`${payer}-${intentId}`, {
+      knownRecord: recoverySnapshotRef.current?.intentId === intentId &&
+        payerAddressHex(recoverySnapshotRef.current.record.payer) === payer
+          ? recoverySnapshotRef.current.record : undefined,
+      signal: controller.signal,
+      load,
+      save: record => mintRecoveryStorage.setItem(recordKey, JSON.stringify(record)),
+      clear: record => {
+        const current = load();
+        if (!current || current.signed.join() !== record.signed.join() ||
+            current.chain.mintTxHash !== record.chain.mintTxHash ||
+            current.chain.attestationTxHash !== record.chain.attestationTxHash)
+          throw new Error("Saved mint chain changed while checking confirmation");
+        mintRecoveryStorage.removeItem(recordKey);
+        if (mintRecoveryStorage.getItem(pointerKey) === intentId) mintRecoveryStorage.removeItem(pointerKey);
+        if (mintRecoveryStorage.getItem('mint-keri-recovery-id') === intentId)
+          mintRecoveryStorage.removeItem('mint-keri-recovery-id');
+      },
+      check: getTokenChainStatus,
+      submit: submitTokenChain,
+      submissionFailure: parseSubmitChainFailure,
+      progress: (message, hashes) => {
+        setConfirmationMessage(message);
+        setConfirmationHashes(hashes);
+      },
+    }).then(record => {
+      if (controller.signal.aborted) return;
+      setTxHash(record.chain.mintTxHash);
+      setConfirmedAttestationHash(record.chain.attestationTxHash);
+      setMintConfirmed(true);
+      setRecoveryId(null);
+      setStep("success");
+      if (record.quantity) setQuantity(record.quantity);
+      if (sessionStorage.getItem('mint-keri-intent-id') === intentId) {
+        sessionStorage.removeItem('mint-keri-intent-id');
+        sessionStorage.removeItem('mint-keri-request-id');
+      }
+      setPendingIntentId(null);
+      showToast({ title: "Mint Complete", description: "The mint and CIP-170 attestation are confirmed.", variant: "success" });
+      void refreshRwaTokenGs();
+    }).catch(error => {
+      if (controller.signal.aborted) return;
+      setMintFailure(error instanceof Error ? error.message : "Could not verify mint confirmation");
+    });
+    return () => controller.abort();
+  }, [recoveryLoaded, recoveryId, feePayerAddress, rawApi, refreshRwaTokenGs, showToast]);
 
   /** Poll the GS datum until `mintable_amount` moves off `before`, i.e. until the
    *  mint is actually in a block.
@@ -528,57 +619,12 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
   // ── Direct mint flow ─────────────────────────────────────────────────────
 
-  const submitSavedMint = async (intentId: string): Promise<string> => {
-    const raw = mintRecoveryStorage.getItem(`mint-keri-recovery-${intentId}`);
-    if (!raw) throw new Error("Saved signed mint chain is unavailable");
-    const saved = JSON.parse(raw) as { payer: string; chain: MintAttestationChain; signed: string[] };
-    if (payerAddressHex(saved.payer) !== payerAddressHex(feePayerAddress))
-      throw new Error("Reconnect the wallet that signed this mint to resume submission");
-    if (!Array.isArray(saved.signed) || saved.signed.length !== 2 ||
-        !saved.chain?.mintTxHash || !saved.chain?.attestationTxHash)
-      throw new Error("Saved mint chain is invalid");
-    try {
-      const response = await submitTokenChain(saved.signed);
-      if (response.error || response.txHashes.length !== 2 ||
-          response.txHashes[0]?.toLowerCase() !== saved.chain.mintTxHash.toLowerCase() ||
-          response.txHashes[1]?.toLowerCase() !== saved.chain.attestationTxHash.toLowerCase())
-        throw new Error("Submission returned mismatched transaction hashes; inspect the saved mint before retrying");
-      if (response.confirmed !== true)
-        throw new Error("The mint and its CIP-170 transaction were accepted but are not both confirmed yet. The signed chain is saved; check again after confirmation");
-      mintRecoveryStorage.removeItem(`mint-keri-recovery-${intentId}`);
-      mintRecoveryStorage.removeItem(`mint-keri-recovery-id-${payerAddressHex(feePayerAddress)}`);
-      if (mintRecoveryStorage.getItem('mint-keri-recovery-id') === intentId)
-        mintRecoveryStorage.removeItem('mint-keri-recovery-id');
-      setRecoveryId(null);
-      return saved.chain.mintTxHash;
-    } catch (error) {
-      const failure = parseSubmitChainFailure(error);
-      if (failure.txHashes.length &&
-          failure.txHashes.some((hash, index) => hash.toLowerCase() !==
-            [saved.chain.mintTxHash, saved.chain.attestationTxHash][index]?.toLowerCase()))
-        throw new Error("Submission returned unexpected transaction hashes; reconcile the saved chain before retrying");
-      throw new Error(`${failure.error}. The exact signed mint and attestation are saved. Resume after the chain confirms any pending transaction.`);
-    }
-  };
-
-  const resumeSavedMint = async () => {
-    if (!recoveryId) return;
-    setIsBuilding(true); setMintFailure(null);
-    try {
-      const hash = await submitSavedMint(recoveryId);
-      setTxHash(hash); setStep("success");
-      sessionStorage.removeItem("mint-keri-intent-id");
-      setPendingIntentId(null);
-      if (isRwaToken) void refreshRwaTokenGs();
-    } catch (error) {
-      setMintFailure(error instanceof Error ? error.message : "Could not resume signed mint chain");
-    } finally { setIsBuilding(false); }
-  };
-
   const buildAndSignMint = async (
     intent: MintAttestationView | null
   ) => {
     if (!selectedToken) return;
+    const mintWallet = mintWalletRef.current;
+    const currentWallet = () => mountedRef.current && mintWalletRef.current === mintWallet;
 
     // Snapshot what the chain said before we touched it, so the post-mint poll
     // has something to compare against.
@@ -589,6 +635,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       setStep("signing");
       setMintFailure(null);
       setMintConfirmed(false);
+      setConfirmedAttestationHash(null);
       setPreMintMintable(mintableBefore);
 
       let submittedTxHash: string;
@@ -613,19 +660,31 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         submittedTxHash = await wallet.submitTx(signedTx);
       } else if (intent) {
         const saved = mintRecoveryStorage.getItem(`mint-keri-recovery-${intent.intentId}`);
+        let recoveryRecord: SavedMintChain;
         if (!saved) {
           const config = mintIntentConfig ?? await getMintAttestationConfig();
+          if (!currentWallet()) return;
           const chain = await buildMintAttestationChain(rawApi, intent.intentId, intent.fields, config);
+          if (!currentWallet()) return;
           setIsBuilding(false);
           setIsSigning(true);
           const signedCbors = await wallet.signTxs([chain.mintCborHex, chain.attestationCborHex], true);
+          if (!currentWallet()) return;
           if (signedCbors.length !== 2) throw new Error("Wallet did not sign both mint transactions");
+          recoveryRecord = { payer: feePayerAddress, chain, signed: signedCbors,
+            quantity, assetName: selectedToken.assetName,
+            confirmation: { phase: 'signed', submissions: 0 } };
+          validateSavedMint(recoveryRecord);
           mintRecoveryStorage.setItem(`mint-keri-recovery-${intent.intentId}`,
-            JSON.stringify({ payer: feePayerAddress, chain, signed: signedCbors }));
+            JSON.stringify(recoveryRecord));
           mintRecoveryStorage.setItem(`mint-keri-recovery-id-${payerAddressHex(feePayerAddress)}`, intent.intentId);
-          setRecoveryId(intent.intentId);
+        } else {
+          recoveryRecord = JSON.parse(saved) as SavedMintChain;
         }
-        submittedTxHash = await submitSavedMint(intent.intentId);
+        recoverySnapshotRef.current = { intentId: intent.intentId, record: recoveryRecord };
+        setRecoveryId(intent.intentId);
+        // The recovery effect owns submission and exact-hash confirmation from here.
+        return;
       } else {
         const request: MintTokenRequest = {
           feePayerAddress,
@@ -664,6 +723,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         }
       }
     } catch (error) {
+      if (intent && !currentWallet()) return;
       console.error("Mint error:", error);
 
       let errorMessage = "Failed to mint tokens";
@@ -690,8 +750,10 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       setStep(intent ? "attestation" : "form");
       if (isRwaToken) void refreshRwaTokenGs();
     } finally {
-      setIsBuilding(false);
-      setIsSigning(false);
+      if (currentWallet()) {
+        setIsBuilding(false);
+        setIsSigning(false);
+      }
     }
   };
 
@@ -773,12 +835,18 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
   const handleAttestation = async () => {
     if (!selectedToken) return;
+    const attemptWallet = mintWalletRef.current;
+    const attemptForm = mintFormRef.current;
+    const attemptSession = sessionIdRef.current;
+    const currentAttempt = () => mountedRef.current && mintWalletRef.current === attemptWallet
+      && mintFormRef.current === attemptForm && sessionIdRef.current === attemptSession;
 
     try {
       setIsBuilding(true);
       setAttestError(null);
 
-      const config = mintIntentConfig ?? await getMintAttestationConfig();
+      const config = await awaitCurrentMint(currentAttempt,
+        () => mintIntentConfig ? Promise.resolve(mintIntentConfig) : getMintAttestationConfig());
       setMintIntentConfig(config);
       const input: MintAttestationRequest = mintIntentRequest ?? {
         requestId: sessionStorage.getItem("mint-keri-request-id") ?? crypto.randomUUID(),
@@ -793,14 +861,16 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         programmableRecipientAddress: null,
       };
       if (input.requestId) sessionStorage.setItem("mint-keri-request-id", input.requestId);
-      const prepared = mintIntent ?? await prepareMintAttestation(rawApi, input, config);
+      const prepared = await awaitCurrentMint(currentAttempt,
+        () => mintIntent ? Promise.resolve(mintIntent) : prepareMintAttestation(rawApi, input, config));
       setMintIntent(prepared);
       setMintIntentRequest(prepared.fields);
       sessionStorage.setItem("mint-keri-intent-id", prepared.intentId);
       setPendingIntentId(prepared.intentId);
-      const anchored = prepared.status === "ANCHORED" || prepared.status === "BUILT"
-        ? prepared
-        : await anchorMintAttestation(rawApi, prepared.intentId, prepared.fields, config);
+      const anchored = await awaitCurrentMint(currentAttempt,
+        () => prepared.status === "ANCHORED" || prepared.status === "BUILT"
+          ? Promise.resolve(prepared)
+          : anchorMintAttestation(rawApi, prepared.intentId, prepared.fields, config));
       setMintIntent(anchored);
 
       showToast({
@@ -810,8 +880,9 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       });
 
       // Proceed to build and sign mint tx with attestation
-      await buildAndSignMint(anchored);
+      await awaitCurrentMint(currentAttempt, () => buildAndSignMint(anchored));
     } catch (error) {
+      if (!currentAttempt()) return;
       console.error("Attestation error:", error);
       let errorMessage = "Failed to anchor attestation";
       if (error instanceof Error) {
@@ -819,7 +890,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       }
       setAttestError(errorMessage);
     } finally {
-      setIsBuilding(false);
+      if (currentAttempt()) setIsBuilding(false);
     }
   };
 
@@ -837,6 +908,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     setMintFailure(null);
     setMintConfirmed(false);
     setPreMintMintable(null);
+    setConfirmedAttestationHash(null);
     if (isRwaToken) void refreshRwaTokenGs();
     setEnableAttestation(false);
     setMintIntent(null);
@@ -866,22 +938,28 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
   if (recoveryId) {
     return (
-      <Card className="p-5 space-y-3">
-        <h3 className="text-lg font-semibold text-white">Resume signed mint attestation</h3>
-        <p className="text-sm text-dark-300">
-          Your exact signed mint and CIP-170 transaction are saved in this browser. Resume checks their
-          hashes on chain before resubmitting the same transactions. A pending transaction may need to
-          confirm before the next attempt succeeds.
+      <Card className="p-5 space-y-3" role={mintFailure ? "alert" : "status"} aria-live="polite">
+        <div className="flex items-center gap-3">
+          {!mintFailure && <div className="h-5 w-5 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />}
+          <h3 className="text-lg font-semibold text-white">
+            {mintFailure ? "Mint confirmation needs attention" : "Waiting for confirmation"}
+          </h3>
+        </div>
+        <p className={`text-sm ${mintFailure ? "text-red-300" : "text-dark-300"}`}>
+          {mintFailure ?? confirmationMessage}
         </p>
-        <p className="text-xs font-mono break-all text-dark-400">Intent: {recoveryId}</p>
-        {mintFailure && <p role="alert" className="text-sm text-red-300">{mintFailure}</p>}
-        <Button variant="primary" onClick={resumeSavedMint} isLoading={isBuilding}
-          disabled={isBuilding}>Resume saved signed chain</Button>
+        {!mintFailure && <p className="text-xs text-dark-400">This updates automatically. You can return to this page while confirmation is pending.</p>}
+        {confirmationHashes.map((hash, index) => (
+          <a key={hash} href={getExplorerTxUrl(hash)} target="_blank" rel="noopener noreferrer"
+            className="block text-xs text-primary-400 break-all">
+            {index === 0 ? "Mint" : "CIP-170 attestation"}: {hash}
+          </a>
+        ))}
       </Card>
     );
   }
 
-  if (mintableTokens.length === 0) {
+  if (mintableTokens.length === 0 && step !== "success") {
     return (
       <div className="flex flex-col items-center py-12 px-6">
         <Coins className="h-16 w-16 text-dark-600 mb-4" />
@@ -907,10 +985,10 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           {isRwaToken && !mintConfirmed ? "Mint Submitted" : "Mint Complete!"}
         </h3>
         <p className="text-sm text-dark-400 text-center mb-4">
-          {isRwaToken && !mintConfirmed ? "Submitted a mint of " : "Successfully minted "}
-          {quantity}{" "}
-          {selectedToken ? decodeAssetNameDisplay(selectedToken.assetName) : ""}{" "}
-          tokens
+          {confirmedAttestationHash
+            ? "The mint and its CIP-170 attestation are confirmed on chain."
+            : <>{isRwaToken && !mintConfirmed ? "Submitted a mint of " : "Successfully minted "}
+              {quantity}{" "}{selectedToken ? decodeAssetNameDisplay(selectedToken.assetName) : ""} tokens</>}
         </p>
 
         <div className="w-full px-4 py-3 bg-dark-900 rounded-lg mb-4">
@@ -922,7 +1000,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
         {/* D8 — submitting is not the same as landing. Report which one we have
             observed, by watching mintable_amount rather than assuming. */}
-        {isRwaToken && (
+        {isRwaToken && !confirmedAttestationHash && (
           <div className={`w-full px-4 py-3 rounded-lg mb-4 border ${
             mintConfirmed
               ? "bg-green-500/5 border-green-500/40"

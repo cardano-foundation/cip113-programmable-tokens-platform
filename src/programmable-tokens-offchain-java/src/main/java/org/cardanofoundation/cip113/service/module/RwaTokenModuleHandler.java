@@ -95,7 +95,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /** Handler for the "rwa-token" module.
  *
@@ -1911,6 +1915,45 @@ public class RwaTokenModuleHandler
                 return TransactionContext.typedError(
                         "could not parse GS datum to read requires_receiver_kyc: " + e.getMessage());
             }
+            // Merkle membership and trusted-entity signatures do not override the
+            // denylist. Read the current unspent list directly: the local index and
+            // the denylist DB mirror may lag an admin's on-chain insertion.
+            if (!(gsFields.get(GS_IDX_DENYLIST_LL_POLICY) instanceof BytesPlutusData denylistPolicyBytes)
+                    || denylistPolicyBytes.getValue().length != 28) {
+                return TransactionContext.typedError("live GS has no valid denylist policy");
+            }
+            String liveDenylistPolicy = HexUtil.encodeHexString(denylistPolicyBytes.getValue());
+            if (!liveDenylistPolicy.equalsIgnoreCase(reg.getDenylistPolicyId())) {
+                return TransactionContext.typedError(
+                        "live GS denylist policy differs from this token's registration; refusing transfer");
+            }
+            PlutusScript denylistSpendScript = scriptBuilder.buildDenylistSpendScript(liveDenylistPolicy);
+            String denylistAddress = AddressProvider.getEntAddress(
+                    denylistSpendScript, network.getCardanoNetwork()).getAddress();
+            List<Utxo> liveDenylist;
+            try {
+                liveDenylist = utxoProvider.findAllCurrentUtxosFromBlockfrost(denylistAddress);
+            } catch (Exception e) {
+                return TransactionContext.typedError(
+                        "Unable to verify this token's denylist on chain; try again after the chain service recovers");
+            }
+            List<DenylistElement> orderedDenylist;
+            try {
+                orderedDenylist = parseDenylist(liveDenylistPolicy, denylistAddress, liveDenylist);
+            } catch (Exception e) {
+                return TransactionContext.typedError(
+                        "Unable to verify this token's denylist on chain: " + e.getMessage());
+            }
+            Utxo recipientDenylistCover = coveringDenylistNode(orderedDenylist, recipientStakeHash);
+            Utxo senderDenylistCover = coveringDenylistNode(orderedDenylist, senderStakeHash);
+            if (recipientDenylistCover == null) {
+                return TransactionContext.typedError(
+                        "Recipient is on this token's denylist. Merkle membership or a trusted-entity attestation does not permit this transfer.");
+            }
+            if (senderDenylistCover == null) {
+                return TransactionContext.typedError(
+                        "Sender is on this token's denylist. Merkle membership or a trusted-entity attestation does not permit this transfer.");
+            }
             // The source gate and destination gate are independent. Token change
             // returns to the sender as a destination, so receiver KYC may require
             // a sender proof even when sender KYC itself is disabled.
@@ -1946,17 +1989,6 @@ public class RwaTokenModuleHandler
                         policyId, gsNetworkId, trustedVkeys);
             }
 
-            // Denylist root node (ref input) — for an empty denylist (v1 happy
-            // path), the root node covers all possible sender + recipient pkhs.
-            // For populated denylists we'd need to find the specific covering
-            // node per pkh, but that's deferred until denylist add/remove ships
-            // on-chain.
-            List<Utxo> denylistUtxos = utxoProvider.findUtxosByPolicy(reg.getDenylistPolicyId());
-            if (denylistUtxos.isEmpty()) {
-                return TransactionContext.typedError("denylist root node not found on chain");
-            }
-            Utxo denylistRootUtxo = denylistUtxos.getFirst();
-
             // Directory entry for this prog-token (ref input). The registry
             // node's asset name doesn't follow the LL "NodeKey || pkh" pattern
             // here — node keys ARE the prog-token policy ids stored in the
@@ -1987,7 +2019,8 @@ public class RwaTokenModuleHandler
             // ── 5. Compute ref-input indices (lex-sorted by txHash:idx) ───
             TransactionInput tiGs = txInputOf(gsUtxo);
             TransactionInput tiDirectory = txInputOf(directoryEntry);
-            TransactionInput tiDenylistRoot = txInputOf(denylistRootUtxo);
+            TransactionInput tiSenderDenylist = txInputOf(senderDenylistCover);
+            TransactionInput tiRecipientDenylist = txInputOf(recipientDenylistCover);
             TransactionInput tiProtocolParams = txInputOf(protocolParamsUtxoOpt.get());
             TransactionInput tiIssuance = txInputOf(issuanceUtxoOpt.get());
             TransactionInput tiProgBaseRef = TransactionInput.builder()
@@ -2008,7 +2041,8 @@ public class RwaTokenModuleHandler
             CoreLayout layout = CoreLayout.builder()
                     .referenceInput(tiGs)
                     .referenceInput(tiDirectory)
-                    .referenceInput(tiDenylistRoot)
+                    .referenceInput(tiSenderDenylist)
+                    .referenceInput(tiRecipientDenylist)
                     .referenceInput(tiProtocolParams)
                     .referenceInput(tiIssuance)
                     .referenceInput(tiProgBaseRef)
@@ -2022,14 +2056,15 @@ public class RwaTokenModuleHandler
             int paramsIdx = layout.referenceInputIndex(tiProtocolParams);
             int gsRefIdx = layout.referenceInputIndex(tiGs);
             int directoryRefIdx = layout.referenceInputIndex(tiDirectory);
-            int denylistRefIdx = layout.referenceInputIndex(tiDenylistRoot);
+            int senderDenylistRefIdx = layout.referenceInputIndex(tiSenderDenylist);
+            int recipientDenylistRefIdx = layout.referenceInputIndex(tiRecipientDenylist);
 
             // ── 6. Build redeemers ─────────────────────────────────────────
             // One source action per UNIQUE sender stake credential among token
             // inputs. v1: all token inputs are from the same wallet => 1 action.
             PlutusData sourceAction = ConstrPlutusData.of(0,
                     senderProof.data(),
-                    BigIntPlutusData.of(BigInteger.valueOf(denylistRefIdx)));
+                    BigIntPlutusData.of(BigInteger.valueOf(senderDenylistRefIdx)));
             ListPlutusData sourceActions = ListPlutusData.of(sourceAction);
 
             // One destination action per UNIQUE destination stake credential
@@ -2058,7 +2093,7 @@ public class RwaTokenModuleHandler
             // head_list on the empty tail throws EmptyList.
             ListPlutusData destinationActions = buildTransferDestinationActions(
                     recipientProof.data(), senderProof.data(), changeAmount,
-                    sameStakeCredential, denylistRefIdx);
+                    sameStakeCredential, recipientDenylistRefIdx, senderDenylistRefIdx);
 
             // TransferLogicScriptWithdrawRedeemer { registry_node_ref_input_index,
             //   global_state_location, actions_for_each_input, destination_actions }.
@@ -2309,15 +2344,15 @@ public class RwaTokenModuleHandler
 
     static ListPlutusData buildTransferDestinationActions(PlutusData recipientProof,
             PlutusData senderProof, BigInteger tokenChange, boolean sameCredential,
-            int denylistRefIdx) {
+            int recipientDenylistRefIdx, int senderDenylistRefIdx) {
         var actions = ListPlutusData.of();
         actions.add(ConstrPlutusData.of(0, recipientProof,
-                BigIntPlutusData.of(BigInteger.valueOf(denylistRefIdx))));
+                BigIntPlutusData.of(BigInteger.valueOf(recipientDenylistRefIdx))));
         // Every transfer has a recipient output, including same-credential sends.
         // A distinct sender change credential adds a second destination.
         if (tokenChange.signum() > 0 && !sameCredential)
             actions.add(ConstrPlutusData.of(0, senderProof,
-                    BigIntPlutusData.of(BigInteger.valueOf(denylistRefIdx))));
+                    BigIntPlutusData.of(BigInteger.valueOf(senderDenylistRefIdx))));
         return actions;
     }
 
@@ -2959,6 +2994,25 @@ public class RwaTokenModuleHandler
      *  {@code NODE_KEY_PREFIX ++ user_pkh}. */
     private static final byte[] LL_NODE_KEY_PREFIX = "Node".getBytes(java.nio.charset.StandardCharsets.UTF_8);
 
+    /** Match only the live denylist's exact NFT, never a DB row or an NFT from
+     *  another policy. A root asset has an empty name; a member node is
+     *  "Node" followed by the 28-byte stake credential hash. */
+    static long countDenylistNft(List<Utxo> utxos, String policyId, String assetNameHex) {
+        String expectedUnit = policyId + assetNameHex;
+        return utxos.stream().filter(utxo -> utxo.getAmount() != null
+                && utxo.getAmount().stream().anyMatch(amount -> {
+                    String unit = amount.getUnit();
+                    return unit != null && (expectedUnit.equalsIgnoreCase(unit)
+                            || ("0x" + expectedUnit).equalsIgnoreCase(unit))
+                            && BigInteger.ONE.equals(amount.getQuantity());
+                })).count();
+    }
+
+    static boolean hasDenylistNode(List<Utxo> utxos, String policyId, byte[] stakeHash) {
+        String nodeName = HexUtil.encodeHexString(concat(LL_NODE_KEY_PREFIX, stakeHash));
+        return countDenylistNft(utxos, policyId, nodeName) > 0;
+    }
+
     /** Minimum lovelace placed on a script-locked UTxO that carries an NFT. */
     private static final long SCRIPT_UTXO_LOVELACE = 2_000_000L;
 
@@ -3198,6 +3252,198 @@ public class RwaTokenModuleHandler
 
     private static ConstrPlutusData optionNone() {
         return ConstrPlutusData.of(1);
+    }
+
+    record DenylistElement(Utxo utxo, String keyHex, PlutusData payload,
+                                   PlutusData link, String nextKeyHex) {
+        boolean isRoot() { return keyHex.isEmpty(); }
+    }
+
+    /** Read the authenticated list, not the local mirror or an arbitrary policy UTxO.
+     *  Unrelated donations to the script address are ignored; every output carrying
+     *  this policy must be a canonical linked-list element. */
+    private List<DenylistElement> readDenylist(String policyId, String listAddress) {
+        List<Utxo> utxos = utxoProvider.findAllCurrentUtxosFromBlockfrost(listAddress);
+        if (utxos == null) throw new BuildPreconditionException("denylist lookup returned no result");
+        return parseDenylist(policyId, listAddress, utxos);
+    }
+
+    static List<DenylistElement> parseDenylist(String policyId, String listAddress, List<Utxo> utxos) {
+        Map<String, DenylistElement> byKey = new HashMap<>();
+        String nodePrefix = HexUtil.encodeHexString(LL_NODE_KEY_PREFIX);
+        for (Utxo utxo : utxos) {
+            List<Amount> amounts = utxo.getAmount();
+            if (amounts == null) continue;
+            List<Amount> policyAssets = amounts.stream()
+                    .filter(a -> a.getUnit() != null
+                            && a.getUnit().replaceFirst("(?i)^0x", "")
+                                    .toLowerCase(java.util.Locale.ROOT).startsWith(policyId.toLowerCase(java.util.Locale.ROOT)))
+                    .toList();
+            if (policyAssets.isEmpty()) continue;
+            if (policyAssets.size() != 1 || amounts.size() != 2
+                    || amounts.stream().filter(a -> "lovelace".equalsIgnoreCase(a.getUnit())).count() != 1
+                    || !BigInteger.ONE.equals(policyAssets.getFirst().getQuantity())
+                    || utxo.getReferenceScriptHash() != null
+                    || !listAddress.equals(utxo.getAddress())) {
+                throw new BuildPreconditionException("malformed on-chain denylist element at "
+                        + utxo.getTxHash() + "#" + utxo.getOutputIndex());
+            }
+            String assetName = policyAssets.getFirst().getUnit().replaceFirst("(?i)^0x", "")
+                    .substring(policyId.length()).toLowerCase(java.util.Locale.ROOT);
+            String key = assetName.isEmpty() ? "" : assetName.startsWith(nodePrefix)
+                    ? assetName.substring(nodePrefix.length()) : "invalid";
+            if (!assetName.isEmpty() && (key.length() != 56 || !assetName.equals(nodePrefix + key))) {
+                throw new BuildPreconditionException("invalid on-chain denylist node NFT at "
+                        + utxo.getTxHash() + "#" + utxo.getOutputIndex());
+            }
+            try {
+                if (utxo.getInlineDatum() == null) throw new IllegalArgumentException("missing inline datum");
+                PlutusData datum = PlutusData.deserialize(HexUtil.decodeHexString(utxo.getInlineDatum()));
+                if (!(datum instanceof ConstrPlutusData element) || element.getAlternative() != 0
+                        || element.getData().getPlutusDataList().size() != 2) {
+                    throw new IllegalArgumentException("invalid Element datum");
+                }
+                List<PlutusData> fields = element.getData().getPlutusDataList();
+                if (!(fields.get(0) instanceof ConstrPlutusData data)
+                        || data.getAlternative() != (key.isEmpty() ? 0 : 1)
+                        || data.getData().getPlutusDataList().size() != 1) {
+                    throw new IllegalArgumentException("NFT and ElementData type differ");
+                }
+                if (!key.isEmpty() && (!(data.getData().getPlutusDataList().getFirst() instanceof ConstrPlutusData payload)
+                        || payload.getAlternative() != 0 || payload.getData().getPlutusDataList().size() != 1)) {
+                    throw new IllegalArgumentException("invalid Denylist payload");
+                }
+                if (!(fields.get(1) instanceof ConstrPlutusData link)) {
+                    throw new IllegalArgumentException("invalid link");
+                }
+                List<PlutusData> linkFields = link.getData().getPlutusDataList();
+                String next;
+                if (link.getAlternative() == 1 && linkFields.isEmpty()) {
+                    next = null;
+                } else if (link.getAlternative() == 0 && linkFields.size() == 1
+                        && linkFields.getFirst() instanceof BytesPlutusData bytes
+                        && bytes.getValue().length == 28) {
+                    next = HexUtil.encodeHexString(bytes.getValue());
+                } else {
+                    throw new IllegalArgumentException("invalid link option");
+                }
+                if (byKey.putIfAbsent(key, new DenylistElement(utxo, key, fields.get(0), link, next)) != null) {
+                    throw new BuildPreconditionException("duplicate on-chain denylist node " + key);
+                }
+            } catch (BuildPreconditionException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new BuildPreconditionException("malformed on-chain denylist datum at "
+                        + utxo.getTxHash() + "#" + utxo.getOutputIndex() + ": " + e.getMessage());
+            }
+        }
+        DenylistElement root = byKey.get("");
+        if (root == null) throw new BuildPreconditionException("denylist root NFT not found on chain");
+        List<DenylistElement> ordered = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+        DenylistElement current = root;
+        while (current != null) {
+            if (!visited.add(current.keyHex())) {
+                throw new BuildPreconditionException("cycle in on-chain denylist");
+            }
+            ordered.add(current);
+            String next = current.nextKeyHex();
+            if (next != null && !current.isRoot()
+                    && compareUnsigned(HexUtil.decodeHexString(current.keyHex()),
+                            HexUtil.decodeHexString(next)) >= 0) {
+                throw new BuildPreconditionException("on-chain denylist nodes are not sorted");
+            }
+            current = next == null ? null : byKey.get(next);
+            if (next != null && current == null) {
+                throw new BuildPreconditionException("on-chain denylist link points to missing node " + next);
+            }
+        }
+        if (ordered.size() != byKey.size()) {
+            throw new BuildPreconditionException("on-chain denylist has unreachable nodes");
+        }
+        return ordered;
+    }
+
+    /** Return the predecessor whose authenticated interval excludes this key.
+     *  A null result means the key itself is present in the denylist. */
+    static Utxo coveringDenylistNode(List<DenylistElement> ordered, byte[] key) {
+        DenylistElement covering = ordered.getFirst();
+        for (int i = 1; i < ordered.size(); i++) {
+            DenylistElement node = ordered.get(i);
+            int cmp = compareUnsigned(HexUtil.decodeHexString(node.keyHex()), key);
+            if (cmp == 0) return null;
+            if (cmp > 0) break;
+            covering = node;
+        }
+        return covering.utxo();
+    }
+
+    private static String verifyDenylistMutationTransaction(Transaction tx, boolean isAdd,
+            Utxo anchor, Utxo removing, Utxo funding, Utxo gs, Utxo powerUser,
+            int anchorOutputIndex, int newNodeOutputIndex, String policyId,
+            String targetAssetNameHex, PlutusData continuedDatum, PlutusData newNodeDatum) {
+        List<TransactionInput> inputs = new ArrayList<>(tx.getBody().getInputs());
+        inputs.sort(new TransactionInputComparator());
+        if (!inputs.contains(txInputOf(anchor)) || !inputs.contains(txInputOf(funding))) {
+            return "predecessor or fee input missing after balancing";
+        }
+        if (!isAdd && (removing == null || !inputs.contains(txInputOf(removing)))) {
+            return "removed node input missing after balancing";
+        }
+        if (isAdd && removing != null) return "add unexpectedly spends a removed node";
+        if (!isAdd && inputs.indexOf(txInputOf(anchor))
+                != lexIndex(List.of(anchor, removing, funding), anchor)) {
+            return "predecessor input index changed after balancing";
+        }
+        List<TransactionInput> refs = new ArrayList<>(
+                tx.getBody().getReferenceInputs() == null ? List.of() : tx.getBody().getReferenceInputs());
+        refs.sort(new TransactionInputComparator());
+        if (refs.indexOf(txInputOf(gs)) != lexIndex(List.of(gs, powerUser), gs)
+                || refs.indexOf(txInputOf(powerUser)) != lexIndex(List.of(gs, powerUser), powerUser)) {
+            return "Global State or ADMIN reference input index changed after balancing";
+        }
+        List<TransactionOutput> outputs = tx.getBody().getOutputs();
+        if (outputs.size() <= anchorOutputIndex || (isAdd && outputs.size() <= newNodeOutputIndex)) {
+            return "linked-list output missing after balancing";
+        }
+        TransactionOutput continued = outputs.get(anchorOutputIndex);
+        if (!anchor.getAddress().equals(continued.getAddress())
+                || continued.getInlineDatum() == null
+                || !Arrays.equals(continuedDatum.serializeToBytes(), continued.getInlineDatum().serializeToBytes())
+                || !hasSameDenylistNft(continued, anchor, policyId)
+                || continued.getValue().getCoin().compareTo(utxoLovelace(anchor)) < 0) {
+            return "continued predecessor output changed after balancing";
+        }
+        if (isAdd) {
+            TransactionOutput added = outputs.get(newNodeOutputIndex);
+            if (!anchor.getAddress().equals(added.getAddress())
+                    || added.getInlineDatum() == null
+                    || !Arrays.equals(newNodeDatum.serializeToBytes(), added.getInlineDatum().serializeToBytes())
+                    || !hasUnit(ValueUtil.toAmountList(added.getValue()), policyId + targetAssetNameHex)) {
+                return "new denylist node output changed after balancing";
+            }
+        }
+        return null;
+    }
+
+    private static BigInteger utxoLovelace(Utxo utxo) {
+        return utxo.getAmount().stream()
+                .filter(a -> "lovelace".equalsIgnoreCase(a.getUnit()))
+                .map(Amount::getQuantity).findFirst().orElse(BigInteger.ZERO);
+    }
+
+    private static boolean hasSameDenylistNft(TransactionOutput output, Utxo original, String policyId) {
+        String unit = original.getAmount().stream().map(Amount::getUnit)
+                .filter(u -> u != null && u.replaceFirst("(?i)^0x", "")
+                        .toLowerCase(java.util.Locale.ROOT).startsWith(policyId.toLowerCase(java.util.Locale.ROOT)))
+                .findFirst().orElse(null);
+        return unit != null && hasUnit(ValueUtil.toAmountList(output.getValue()), unit);
+    }
+
+    private static boolean hasUnit(List<Amount> amounts, String unit) {
+        return amounts.stream().anyMatch(a -> a.getUnit() != null
+                && a.getUnit().replaceFirst("(?i)^0x", "").equalsIgnoreCase(unit.replaceFirst("(?i)^0x", ""))
+                && BigInteger.ONE.equals(a.getQuantity()));
     }
 
     /** Encode a {@code PowerUser} record per {@code lib/types/power_users.ak}:
@@ -3483,20 +3729,13 @@ public class RwaTokenModuleHandler
     //
     // The BaFin denylist mint script's MintRedeemer is structurally identical
     // to the power_users mint script's MintRedeemer (Init / Deinit / Add /
-    // Remove with the same field shape). So buildAddToBlacklistTransaction
-    // and buildRemoveFromBlacklistTransaction mirror the AddPowerUser /
-    // RemovePowerUser logic verbatim — only the scripts, policy id, node
-    // datum, and required-signer differ.
+    // Remove with the same field shape). Both operations walk the authenticated
+    // live list so a populated denylist can be changed at any position.
     //
     // The blacklist init is performed at genesis (see
     // buildGlobalStateInitTransaction); calling it again would mint a second
     // root NFT, so we reject that as unsupported.
     //
-    // v1 limitation (same as AddPowerUser): only handles the first insertion
-    // (anchor = root). Subsequent insertions need to walk the chain to find
-    // the correct anchor by lex-ordered key — TODO once a populated denylist
-    // motivates implementation.
-
     @Override
     public TransactionContext<TransactionContext.MintingResult> buildBlacklistInitTransaction(
             org.cardanofoundation.cip113.service.module.capabilities.BlacklistManageable.BlacklistInitRequest request,
@@ -3522,16 +3761,9 @@ public class RwaTokenModuleHandler
                 request.targetAddress(), request.feePayerAddress(), /*isAdd=*/ false);
     }
 
-    /** Shared implementation for AddToDenylist / RemoveFromDenylist — the on-chain
-     *  MintRedeemer shapes are nearly identical. Modelled on
-     *  {@link #buildAddPowerUserTransaction}.
-     *
-     *  <p>Both variants lost a field at the current pin: {@code anchor_node_input_index}
-     *  from the add, and {@code removed_node_input_index} as well from the remove. The
-     *  validators resolve those from the inputs they already spend rather than trusting
-     *  a caller-named index. Only the add path builds a redeemer here — the remove path
-     *  refuses below, before any encoding happens — so there is nothing on the remove
-     *  side carrying a stale shape. */
+    /** Build a linked-list mutation using the currently unspent authenticated nodes.
+     *  The pinned remove redeemer names the predecessor input, but the validator
+     *  finds the removed input among the two list elements spent by the transaction. */
     private TransactionContext<Void> buildDenylistMutation(
             String policyId, String targetAddress, String feePayerAddress, boolean isAdd) {
         try {
@@ -3575,18 +3807,26 @@ public class RwaTokenModuleHandler
             Address denylistSpendAddress = AddressProvider.getEntAddress(
                     denylistSpendScript, network.getCardanoNetwork());
 
-            // v1: only first insertion (anchor = root).
-            Utxo anchorNode = pollForFirstUtxoByPolicy(reg.getDenylistPolicyId(),
-                    "denylist linked-list root NFT", java.time.Duration.ofSeconds(30));
-            if (anchorNode == null) {
-                return TransactionContext.typedError("denylist root NFT not found on chain");
+            List<DenylistElement> elements = readDenylist(reg.getDenylistPolicyId(),
+                    denylistSpendAddress.getAddress());
+            String targetKeyHex = HexUtil.encodeHexString(targetStakeHash);
+            DenylistElement anchor = elements.getFirst();
+            DenylistElement removing = null;
+            for (int i = 1; i < elements.size(); i++) {
+                DenylistElement candidate = elements.get(i);
+                int cmp = compareUnsigned(HexUtil.decodeHexString(candidate.keyHex()), targetStakeHash);
+                if (cmp == 0) {
+                    removing = candidate;
+                    break;
+                }
+                if (cmp > 0) break;
+                anchor = candidate;
             }
-            // For Remove we additionally need the node-to-remove as an input;
-            // not supported in v1 (would require walking the LL).
-            if (!isAdd) {
-                return TransactionContext.typedError(
-                        "rwa-token denylist remove not yet implemented (v1 needs to walk "
-                        + "the LL to find the node-to-remove + its predecessor anchor)");
+            if (isAdd && removing != null) {
+                return TransactionContext.typedError("Address is already on this token's denylist");
+            }
+            if (!isAdd && removing == null) {
+                return TransactionContext.typedError("Address is not on this token's denylist");
             }
 
             // GS UTxO as ref input — the denylist mint validator reads
@@ -3598,6 +3838,13 @@ public class RwaTokenModuleHandler
             ).orElse(null);
             if (gsUtxo == null) {
                 return TransactionContext.typedError("global-state NFT not found on chain");
+            }
+            List<PlutusData> gsFields = parseGsFields(gsUtxo);
+            if (!(gsFields.get(GS_IDX_DENYLIST_LL_POLICY) instanceof BytesPlutusData livePolicy)
+                    || !reg.getDenylistPolicyId().equalsIgnoreCase(HexUtil.encodeHexString(livePolicy.getValue()))
+                    || !reg.getDenylistPolicyId().equalsIgnoreCase(
+                            HexUtil.encodeHexString(denylistMintScript.getScriptHash()))) {
+                return TransactionContext.typedError("live GS and registration disagree on denylist policy");
             }
 
             // Power-user node as a SECOND ref input. Upstream @7ae4ce3 moved the
@@ -3635,10 +3882,8 @@ public class RwaTokenModuleHandler
             }
             Utxo funding = fundingUtxos.getFirst();
 
-            // Lex-sorted input position of the anchor (spend inputs sorted by
-            // (txHash, idx) at eval time).
-            int anchorOutIdx = 0;   // updated root → output 0
-            int newNodeOutIdx = 1;  // new node      → output 1
+            int anchorOutIdx = 0;
+            int newNodeOutIdx = 1;
             // Reference inputs appear in the script context sorted by
             // (txHash, outputIndex), NOT in the order they were added — so both
             // indices must be derived from the sorted pair, not hardcoded.
@@ -3646,63 +3891,51 @@ public class RwaTokenModuleHandler
             int gsRefIdx = lexIndex(denylistRefInputs, gsUtxo);
             int puNodeRefIdx = lexIndex(denylistRefInputs, powerUserNode);
 
-            // Mint redeemer: AddToDenylist = variant 2 of MintRedeemer (same index as
-            // AddPowerUser — see types/denylist.ak vs types/power_users.ak). Upstream
-            // @7ae4ce3 appended power_user_node_ref_input_index as the last field.
-            //
-            // FIVE fields at the current pin, not six: `anchor_node_input_index` was
-            // removed, exactly as in AddPowerUser above and for the same reason — the
-            // validator resolves the anchor from the input it is already spending rather
-            // than from a caller-named index.
-            ConstrPlutusData addToDenylistRedeemer = ConstrPlutusData.of(2,
-                    BytesPlutusData.of(targetStakeHash),
-                    BigIntPlutusData.of(BigInteger.valueOf(anchorOutIdx)),
-                    BigIntPlutusData.of(BigInteger.valueOf(newNodeOutIdx)),
-                    BigIntPlutusData.of(BigInteger.valueOf(gsRefIdx)),
-                    BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)));
+            // The library finds the spent list elements itself. Remove's only
+            // input index identifies which of its two list inputs is predecessor.
+            int anchorInputIdx = isAdd ? -1
+                    : lexIndex(List.of(anchor.utxo(), removing.utxo(), funding), anchor.utxo());
+            ConstrPlutusData mintRedeemer = isAdd
+                    ? ConstrPlutusData.of(2,
+                            BytesPlutusData.of(targetStakeHash),
+                            BigIntPlutusData.of(BigInteger.valueOf(anchorOutIdx)),
+                            BigIntPlutusData.of(BigInteger.valueOf(newNodeOutIdx)),
+                            BigIntPlutusData.of(BigInteger.valueOf(gsRefIdx)),
+                            BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)))
+                    : ConstrPlutusData.of(3,
+                            BytesPlutusData.of(targetStakeHash),
+                            BigIntPlutusData.of(BigInteger.valueOf(anchorInputIdx)),
+                            BigIntPlutusData.of(BigInteger.valueOf(anchorOutIdx)),
+                            BigIntPlutusData.of(BigInteger.valueOf(gsRefIdx)),
+                            BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)));
+            PlutusData continuedLink = isAdd
+                    ? optionSome(BytesPlutusData.of(targetStakeHash)) : removing.link();
+            ConstrPlutusData continuedDatum = ConstrPlutusData.of(0, anchor.payload(), continuedLink);
+            Asset nodeNft = Asset.builder().name("0x" + newNodeAssetNameHex)
+                    .value(isAdd ? BigInteger.ONE : BigInteger.ONE.negate()).build();
+            ConstrPlutusData newNodeDatum = null;
 
-            // Spend redeemer on the root: StateTransition (Constr 0).
-            ConstrPlutusData rootSpendRedeemer = ConstrPlutusData.of(0);
-
-            // Updated root datum: link now points at new node's key (stake hash).
-            ConstrPlutusData updatedRootDatum = linkedListElement(
-                    ConstrPlutusData.of(0),                    // Root payload
-                    optionSome(BytesPlutusData.of(targetStakeHash)),
-                    /*isRoot=*/ true);
-
-            // New node datum: Node(Denylist { metadata: () }), link = None.
-            // BaFin's on-chain validators don't read the metadata, so unit is fine.
-            PlutusData denylistData = ConstrPlutusData.of(0, ConstrPlutusData.of(0));
-            ConstrPlutusData newNodeDatum = linkedListElement(
-                    denylistData,
-                    optionNone(),
-                    /*isRoot=*/ false);
-
-            Asset newNodeNft = Asset.builder()
-                    .name("0x" + newNodeAssetNameHex)
-                    .value(BigInteger.ONE).build();
-            Value rootOutputValue = oneNftValue(reg.getDenylistPolicyId(),
-                    Asset.builder().name("0x").value(BigInteger.ONE).build());
-
-            // Required signer = the power user whose node is referenced above.
-            // The validator checks `must_be_signed_by_credential(self,
-            // power_user_credential_hash)`, where the credential comes from the
-            // referenced node's key — NOT from the GS datum's admin_credential_hash
-            // (that gate moved in upstream @7ae4ce3).
             Tx tx = new Tx()
-                    .collectFrom(anchorNode, rootSpendRedeemer)
+                    .collectFrom(anchor.utxo(), ConstrPlutusData.of(0))
                     .collectFrom(List.of(funding))
                     .attachSpendingValidator(denylistSpendScript)
-                    .payToContract(denylistSpendAddress.getAddress(),
-                            ValueUtil.toAmountList(rootOutputValue), updatedRootDatum)
-                    .mintAsset(denylistMintScript, List.of(newNodeNft), addToDenylistRedeemer,
-                            denylistSpendAddress.getAddress(), newNodeDatum)
-                    .readFrom(TransactionInput.builder()
-                                    .transactionId(gsUtxo.getTxHash())
-                                    .index(gsUtxo.getOutputIndex()).build(),
-                            TransactionInput.builder()
-                                    .transactionId(powerUserNode.getTxHash())
-                                    .index(powerUserNode.getOutputIndex()).build())
+                    .payToContract(anchor.utxo().getAddress(), anchor.utxo().getAmount(), continuedDatum);
+            if (isAdd) {
+                PlutusData denylistData = ConstrPlutusData.of(0, ConstrPlutusData.of(0));
+                newNodeDatum = linkedListElement(
+                        denylistData, anchor.link(), /*isRoot=*/ false);
+                tx.mintAsset(denylistMintScript, List.of(nodeNft), mintRedeemer,
+                        denylistSpendAddress.getAddress(), newNodeDatum);
+            } else {
+                tx.collectFrom(removing.utxo(), ConstrPlutusData.of(0))
+                        .mintAsset(denylistMintScript, nodeNft, mintRedeemer);
+            }
+            tx.readFrom(TransactionInput.builder()
+                            .transactionId(gsUtxo.getTxHash())
+                            .index(gsUtxo.getOutputIndex()).build(),
+                    TransactionInput.builder()
+                            .transactionId(powerUserNode.getTxHash())
+                            .index(powerUserNode.getOutputIndex()).build())
                     .withChangeAddress(feePayerAddress);
 
             Transaction transaction = quickTxBuilder.compose(tx)
@@ -3714,8 +3947,15 @@ public class RwaTokenModuleHandler
                             .index(funding.getOutputIndex()).build())
                     .build();
 
-            log.info("rwa-token AddToDenylist built: policy={} target_stake={} power_user={}",
-                    policyId, HexUtil.encodeHexString(targetStakeHash), signerPkhHex);
+            String mismatch = verifyDenylistMutationTransaction(transaction, isAdd,
+                    anchor.utxo(), removing == null ? null : removing.utxo(), funding,
+                    gsUtxo, powerUserNode, anchorOutIdx, newNodeOutIdx,
+                    reg.getDenylistPolicyId(), newNodeAssetNameHex, continuedDatum, newNodeDatum);
+            if (mismatch != null) {
+                return TransactionContext.typedError("denylist transaction verification failed: " + mismatch);
+            }
+            log.info("rwa-token {}ToDenylist built: policy={} target_stake={} power_user={}",
+                    isAdd ? "Add" : "Remove", policyId, targetKeyHex, signerPkhHex);
             return TransactionContext.ok(transaction.serializeToHex());
         } catch (Exception e) {
             log.error("rwa-token denylist {} failed for policy={} target={}",
@@ -7307,14 +7547,9 @@ public class RwaTokenModuleHandler
      *  once anything is denylisted the root's link stops being {@code None} and the
      *  root only covers keys below the first entry.
      *
-     *  <p>CAVEAT, deliberately not papered over: for a NON-root covering node the
-     *  vendored {@code aiken-design-patterns} linked-list appears to strip the
-     *  {@code "Node"} prefix from the link twice ({@code linked-list.ak} writes the
-     *  unprefixed key on insert, then {@code get_element_info} drops 4 more bytes),
-     *  so the on-chain upper-bound comparison would see a truncated successor key.
-     *  Untested — the module's own fixtures only ever use root/tail elements
-     *  with {@code link: None}. Verify against a populated denylist before relying on
-     *  a mid-list covering node. */
+     *  <p>This older helper uses the local index and infers the covering interval
+     *  from NFT order. Transfer mutations use the complete live linked-list view
+     *  instead, so a stale index cannot choose the wrong witness there. */
     private Utxo findDenylistCoveringNode(RwaTokenRegistrationEntity reg, byte[] targetPkh) {
         String denylistPolicy = reg.getDenylistPolicyId();
         if (denylistPolicy == null || denylistPolicy.isBlank()) {

@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const cbor = require("cbor");
+const { readFileSync } = require("node:fs");
 const { reviewMemberRootTransaction } = require("./.root-build/rwa/review-root-tx.js");
 const { computeMemberRoot } = require("./.root-build/rwa/member-root.js");
 
@@ -81,7 +82,9 @@ function withPlainOutputs(change, collateralReturn) {
 
 process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY = "fixture-key";
 process.env.NEXT_PUBLIC_CMTA_REGISTRY_POLICY_ID = registryPolicy;
+let missingPath = null;
 global.fetch = async (url) => {
+  if (missingPath && url.endsWith(missingPath)) return { ok: false, status: 404 };
   if (url.endsWith(`/assets/${registryPolicy}${policy}/utxos`))
     return { ok: true, json: async () => [{ tx_hash: registryTx, output_index: 0 }] };
   if (url.endsWith(`/txs/${registryTx}/cbor`))
@@ -94,7 +97,32 @@ global.fetch = async (url) => {
 };
 
 async function main() {
+  // The Preview fallback must remain the trusted policy from the checked-in deployment.
+  const bootstrap = JSON.parse(readFileSync("../programmable-tokens-offchain-java/src/main/resources/protocol-bootstraps-preview.json", "utf8"));
+  const deployedRegistry = bootstrap[0].registry.scriptHash;
+  delete process.env.NEXT_PUBLIC_CMTA_REGISTRY_POLICY_ID;
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    assert.ok(url.endsWith(`/assets/${deployedRegistry}${policy}/utxos`), `Unexpected Preview registry asset lookup: ${url}`);
+    return { ok: false, status: 404 };
+  };
+  await assert.rejects(() => reviewMemberRootTransaction(candidate),
+    /Registry NFT asset lookup failed on preview: Blockfrost 404/);
+  global.fetch = originalFetch;
+  process.env.NEXT_PUBLIC_CMTA_REGISTRY_POLICY_ID = registryPolicy;
+
   await reviewMemberRootTransaction(candidate);
+  for (const [path, stage] of [
+    [`/assets/${registryPolicy}${policy}/utxos`, "Registry NFT asset lookup"],
+    [`/txs/${registryTx}/cbor`, "Registry NFT transaction CBOR lookup"],
+    [`/assets/${gsPolicy}${assetName}/utxos`, "Global State NFT asset lookup"],
+    [`/txs/${gsTx}/cbor`, "Global State NFT transaction CBOR lookup"],
+  ]) {
+    missingPath = path;
+    await assert.rejects(() => reviewMemberRootTransaction(candidate), (error) =>
+      error.message.includes(`${stage} failed on preview: Blockfrost 404 for ${path}`));
+  }
+  missingPath = null;
   // Redeemer pointers address the lexically sorted ledger input set, not the
   // order in which the backend serialized the two inputs into CBOR.
   for (const gsFirst of [true, false]) {
