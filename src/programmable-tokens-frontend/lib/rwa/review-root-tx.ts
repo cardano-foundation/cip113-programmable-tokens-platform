@@ -59,22 +59,27 @@ function assetAmount(output: CborMap, policy: string, assetName: string): number
   return asInt(value[0], "NFT output lovelace");
 }
 
-async function blockfrostJson<T>(path: string): Promise<T> {
+async function blockfrostJson<T>(path: string, lookup: string): Promise<T> {
   const key = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY;
   if (!key) throw new Error("Direct chain verification needs NEXT_PUBLIC_BLOCKFROST_API_KEY");
   const network = getCardanoNetwork();
   const base = process.env.NEXT_PUBLIC_BLOCKFROST_URL || `https://cardano-${network}.blockfrost.io/api/v0`;
   const response = await fetch(`${base}${path}`, { headers: { project_id: key }, cache: "no-store" });
-  if (!response.ok) throw new Error(`Direct chain verification failed (${response.status})`);
+  if (!response.ok) {
+    const hint = response.status === 404
+      ? " Check the selected network and trusted registry policy for this token's deployment, or wait for chain indexing."
+      : " Check the Blockfrost connection for the selected network.";
+    throw new Error(`${lookup} failed on ${network}: Blockfrost ${response.status} for ${path}.${hint}`);
+  }
   return response.json() as Promise<T>;
 }
 
-async function uniqueAssetOutput(policyId: string, assetName: string): Promise<{ ref: string; output: CborMap }> {
+async function uniqueAssetOutput(policyId: string, assetName: string, lookup: string): Promise<{ ref: string; output: CborMap }> {
   const asset = `${policyId}${assetName}`;
-  const utxos = await blockfrostJson<Array<{ tx_hash: string; output_index: number }>>(`/assets/${asset}/utxos`);
+  const utxos = await blockfrostJson<Array<{ tx_hash: string; output_index: number }>>(`/assets/${asset}/utxos`, `${lookup} asset lookup`);
   if (utxos.length !== 1) throw new Error("Expected exactly one live registry or GS NFT UTxO");
   const ref = `${utxos[0].tx_hash}#${utxos[0].output_index}`;
-  const response = await blockfrostJson<{ cbor: string }>(`/txs/${utxos[0].tx_hash}/cbor`);
+  const response = await blockfrostJson<{ cbor: string }>(`/txs/${utxos[0].tx_hash}/cbor`, `${lookup} transaction CBOR lookup`);
   const output = outputFromTx(response.cbor, utxos[0].output_index);
   assetAmount(output, policyId, assetName);
   return { ref, output };
@@ -82,7 +87,9 @@ async function uniqueAssetOutput(policyId: string, assetName: string): Promise<{
 
 function trustedRegistryPolicy(): string {
   const configured = process.env.NEXT_PUBLIC_CMTA_REGISTRY_POLICY_ID;
-  const previewPinned = "12e2737454317f2ff77accd9f96aa74685bc8dd2a6f69bed0a08aec5";
+  // Keep this trust anchor in sync with the checked-in Preview deployment.
+  // Older deployments require an explicit build-time policy override.
+  const previewPinned = "2153801a53335a4d94cf5e7ea862282034d2f7ef813c11efc6759cb5";
   const policy = configured || (getCardanoNetwork() === "preview" ? previewPinned : "");
   if (!/^[0-9a-f]{56}$/i.test(policy))
     throw new Error("Configure a trusted CMTA registry policy for this network");
@@ -91,7 +98,7 @@ function trustedRegistryPolicy(): string {
 
 async function gsPolicyForToken(tokenPolicyId: string): Promise<string> {
   const registryPolicy = trustedRegistryPolicy();
-  const { output } = await uniqueAssetOutput(registryPolicy, tokenPolicyId);
+  const { output } = await uniqueAssetOutput(registryPolicy, tokenPolicyId, "Registry NFT");
   const fields = inlineDatumFields(output, 7);
   if (bytesHex(asBytes(fields[0], "registry token key")) !== tokenPolicyId.toLowerCase())
     throw new Error("Registry node does not belong to the selected token");
@@ -102,7 +109,7 @@ async function gsPolicyForToken(tokenPolicyId: string): Promise<string> {
 
 interface ChainGs { ref: string; output: CborMap; fields: unknown[]; root: string }
 async function chainGs(gsPolicyId: string): Promise<ChainGs> {
-  const { ref, output } = await uniqueAssetOutput(gsPolicyId, GS_ASSET_NAME);
+  const { ref, output } = await uniqueAssetOutput(gsPolicyId, GS_ASSET_NAME, "Global State NFT");
   const fields = datumFields(output);
   return { ref, output, fields, root: rootFromFields(fields) };
 }

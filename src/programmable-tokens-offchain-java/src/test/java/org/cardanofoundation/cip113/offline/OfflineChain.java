@@ -302,6 +302,11 @@ public class OfflineChain {
         return utxo;
     }
 
+    /** Add a deliberately shaped UTxO for malformed-list and donation tests. */
+    public void seedUtxo(Utxo utxo) {
+        utxoSupplier.add(utxo);
+    }
+
     /**
      * Virtually submit {@code transaction}: every output becomes a spendable UTxO keyed by the
      * transaction's real hash, and every input it consumed is retired from the set.

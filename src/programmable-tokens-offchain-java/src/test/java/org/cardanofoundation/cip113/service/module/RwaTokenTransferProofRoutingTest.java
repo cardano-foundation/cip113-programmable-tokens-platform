@@ -30,19 +30,23 @@ class RwaTokenTransferProofRoutingTest {
         var receiver = ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.valueOf(11)));
         var sender = ConstrPlutusData.of(1, BigIntPlutusData.of(BigInteger.valueOf(22)));
         var full = RwaTokenModuleHandler.buildTransferDestinationActions(
-                receiver, sender, BigInteger.ZERO, false, 3).getPlutusDataList();
+                receiver, sender, BigInteger.ZERO, false, 3, 7).getPlutusDataList();
         assertEquals(1, full.size());
         assertEquals(receiver.serializeToHex(), ((ConstrPlutusData) full.getFirst())
                 .getData().getPlutusDataList().getFirst().serializeToHex());
         var partial = RwaTokenModuleHandler.buildTransferDestinationActions(
-                receiver, sender, BigInteger.TEN, false, 3).getPlutusDataList();
+                receiver, sender, BigInteger.TEN, false, 3, 7).getPlutusDataList();
         assertEquals(2, partial.size());
         assertEquals(receiver.serializeToHex(), ((ConstrPlutusData) partial.getFirst())
                 .getData().getPlutusDataList().getFirst().serializeToHex());
         assertEquals(sender.serializeToHex(), ((ConstrPlutusData) partial.get(1))
                 .getData().getPlutusDataList().getFirst().serializeToHex());
+        assertEquals(BigInteger.valueOf(3), ((BigIntPlutusData) ((ConstrPlutusData) partial.getFirst())
+                .getData().getPlutusDataList().get(1)).getValue());
+        assertEquals(BigInteger.valueOf(7), ((BigIntPlutusData) ((ConstrPlutusData) partial.get(1))
+                .getData().getPlutusDataList().get(1)).getValue());
         var same = RwaTokenModuleHandler.buildTransferDestinationActions(
-                receiver, sender, BigInteger.TEN, true, 3).getPlutusDataList();
+                receiver, sender, BigInteger.TEN, true, 3, 7).getPlutusDataList();
         assertEquals(1, same.size(), "same full stake credential appears once, even with change");
     }
 }
