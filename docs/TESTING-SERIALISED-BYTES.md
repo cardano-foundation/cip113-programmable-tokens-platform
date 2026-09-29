@@ -69,7 +69,7 @@ Three instances of rule 1, in one file, on one afternoon:
 
 | Where | What |
 |---|---|
-| `lib/mining/locate.ts` | Written first against the Babbage map form. Every test from the spec would have passed; every transaction this application builds would have failed. Caught by testing against Evolution's output. |
+| `lib/mining/locate.ts` *(deleted 2026-09-29 with the mining feature — the finding stands, the file is gone)* | Written first against the Babbage map form. Every test from the spec would have passed; every transaction this application builds would have failed. Caught by testing against Evolution's output. |
 | `test-upgrade-witness.js` | Fixtures hand-built untagged, so the quorum path was green against an encoding half its callers never produce. The functions handled both; the coverage did not. |
 | The fix for the above | A baseline compared against hand-built hex rather than the encoder's output, reporting a body change that never happened — written *while actively hunting this exact failure mode*. |
 

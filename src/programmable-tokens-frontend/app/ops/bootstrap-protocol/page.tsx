@@ -44,8 +44,6 @@ import {
   type CeremonyPlan,
 } from "@/lib/deployment/deploy";
 import { EvoAddress } from "@easy1staking/cip113-sdk-ts";
-import { MiningPanel } from "@/components/mining/mining-panel";
-import { spliceMinedBody } from "@/lib/mining/locate";
 import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
 import { CosignaturePanel, type CosignatureState } from "@/components/deployment/cosignature-panel";
 import { SdkRecordDownload } from "@/components/deployment/sdk-record-download";
@@ -127,13 +125,6 @@ export default function BootstrapProtocolPage() {
   /** Set when the deploying wallet is NOT among the upgrade signers — see below. */
   const [cannotAuthorise, setCannotAuthorise] = useState(false);
   const [acceptedNoAuthority, setAcceptedNoAuthority] = useState(false);
-  /**
-   * Whether to add the ~1 ADA output a search needs. BUILD-TIME: the output has to exist before
-   * the body is built, so this cannot be turned on after planning.
-   */
-  const [mineable, setMineable] = useState(false);
-  const [mined, setMined] = useState<{ txHash: string; nonce: number } | null>(null);
-
   /**
    * Seeds are READ FROM THE WALLET and locked, not typed.
    *
@@ -445,9 +436,7 @@ export default function BootstrapProtocolPage() {
         maxInlineDatumBytes: Number(maxInline),
         alwaysFailNonce: nonce.trim(),
         unfrackingEnabled,
-        mineable,
       });
-      setMined(null);
       setPlanned(result);
     } catch (e) {
       setPlanError((e as Error).message);
@@ -466,7 +455,6 @@ export default function BootstrapProtocolPage() {
     issuanceSeed,
     multisigSeed,
     unfrackingEnabled,
-    mineable,
   ]);
 
   // ---- THE CEREMONY, IN TWO PHASES --------------------------------------------------
@@ -1185,30 +1173,6 @@ export default function BootstrapProtocolPage() {
           not the nonce, and it cannot be recovered from the record afterwards.
         </p>
 
-        <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
-          <label className="flex items-start gap-2 text-sm text-dark-200">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={mineable}
-              onChange={(e) => setMineable(e.target.checked)}
-              disabled={planning || !!planned}
-            />
-            <span>Mine a low hash for the reference-script transaction</span>
-          </label>
-          <p className="text-xs text-dark-400">
-            Its outputs are the seven published reference scripts, which every future protocol
-            operation reads — a low transaction hash makes them sort early in those transactions,
-            keeping the indices that point at them predictable. It is the last transaction of the
-            plan precisely so its hash can move without invalidating anything built after it.
-          </p>
-          <p className="text-xs text-dark-400">
-            Adds one extra output of about 1 ADA back to your own address, which a search
-            increments one lovelace at a time. That output has to exist before the transaction is
-            built, so this cannot be turned on after planning.
-          </p>
-        </div>
-
         <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
@@ -1287,11 +1251,6 @@ export default function BootstrapProtocolPage() {
                 </label>
               </div>
             )}
-
-            {/* The mining panel lived here. Mining is not wired into the ceremony (T-058
-                dropped): it was only ever safe on the LAST transaction, whose hash nothing is
-                chained onto, and where it belongs under alpha.5 is an open question upstream.
-                `lib/mining/` and /ops/mine-check are untouched and ready to re-wire. */}
 
             {progress && <p className="text-xs text-amber-200">{progress}</p>}
 

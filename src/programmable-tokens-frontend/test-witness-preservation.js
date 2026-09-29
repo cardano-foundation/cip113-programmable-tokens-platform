@@ -1,12 +1,19 @@
 /**
  * Does `assembleSignedTxPreservingBody` actually preserve the body?
  *
- * ⛔ THIS ASSERTION HAD NEVER BEEN MADE, and it is the one holding up the mining feature. The
- * claim that a mined transaction survives signing rests entirely on this function keeping the
- * body byte-identical while merging a wallet's witnesses — and a wrong slice here does NOT throw.
- * It produces a transaction that is still valid CBOR, still submittable, and carries a body that
- * is no longer the one that was mined. The user pays, the transaction lands, and the outputs
- * simply do not sort where they were meant to. The hash cannot catch it; only this can.
+ * ⛔ WHO DEPENDS ON THIS. Three real consumers, none of them the mining feature this test was
+ * originally written for (removed 2026-09-29 — the test outlived it because the property is
+ * general, not because anyone forgot):
+ *
+ *   - `contexts/wallet-context.tsx:137,175` — every wallet signature in the application.
+ *   - `lib/upgrade/witness.ts:184` — assembling a protocol upgrade from N partial signatures.
+ *   - the co-signature ceremony, transitively, which merges every declared participant's witness
+ *     into ONE genesis transaction. If the body moves, the transaction id moves, and every
+ *     signature already collected stops verifying — mid-ceremony, with the seeds already spent.
+ *
+ * A wrong slice here does NOT throw. It produces a transaction that is still valid CBOR, still
+ * submittable, and carries a body that is no longer the one that was signed. The hash cannot
+ * catch it; only this can.
  *
  * Fixtures are round-tripped through Evolution's OWN Transaction codec, so the bytes under test
  * are the encoding this application meets rather than one assembled from the CDDL. That
@@ -79,9 +86,9 @@ async function main() {
     const signed = assembleSignedTxPreservingBody(unsigned, walletWs("11"));
 
     assert.strictEqual(bodyOf(signed), bodyOf(unsigned),
-      "the body changed while merging witnesses — a mined hash would not survive this");
+      "the body changed while merging witnesses — every collected signature would be void");
     assert.strictEqual(txIdOf(signed), txIdOf(unsigned),
-      "the transaction id moved; everything mining relies on is void");
+      "the transaction id moved, so every signature collected against it no longer verifies");
   });
 
   check("⭐ and it holds for a transaction carrying metadata, as every CIP-171 one does", () => {
@@ -142,7 +149,7 @@ async function main() {
   });
 
   if (failures > 0) throw new Error(`${failures} witness-preservation check(s) failed`);
-  console.log("\n  the body survives signing — the seam mining depends on holds");
+  console.log("\n  the body survives signing — multi-party witness merging is sound");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

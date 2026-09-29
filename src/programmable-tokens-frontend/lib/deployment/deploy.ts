@@ -295,8 +295,6 @@ export interface PlanDeploymentInput {
    * dispatcher was compiled against differs, and the deployment records both.
    */
   unfrackingEnabled?: boolean;
-  /** Add the ~1 ADA self-output the miner needs to the last transaction. Build-time only. */
-  mineable?: boolean;
 }
 
 /**
@@ -326,20 +324,6 @@ export interface DeploymentPlan {
   /** Re-derived from the pinned blueprint. `ok === false` means nothing may be signed. */
   verification: VerificationResult;
 }
-
-/*
- * `applyMinedStep` lived here and has been REMOVED with the mining feature (T-058).
- *
- * It repointed every `*RefInput` to the mined transaction's hash, which was correct only
- * because the mined step was always the LAST one — the reference-script transaction, published
- * last precisely so its hash could move without invalidating anything chained onto it. Mining
- * the genesis instead, as was briefly proposed, would have repointed all seven reference
- * inputs at the genesis while the scripts themselves sat in a later transaction, and
- * verification would still have passed: it re-derives script hashes from parameters and knows
- * nothing about where outputs live. The mining code itself is untouched under `lib/mining/`
- * and `/ops/mine-check`, ready to be re-wired once upstream says which transaction should
- * carry a low hash and why.
- */
 
 export interface CeremonyPlan {
   plan: BootstrapPlan;
