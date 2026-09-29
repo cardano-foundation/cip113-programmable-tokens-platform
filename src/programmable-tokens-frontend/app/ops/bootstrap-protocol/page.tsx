@@ -379,12 +379,16 @@ export default function BootstrapProtocolPage() {
   }, [verifiedParams, verification, network]);
 
   /**
-   * Build all six transactions and verify the deployment they would produce.
+   * Build all four transactions and verify the deployment they would produce.
    *
-   * Deliberately does NOT reuse the seeds typed into step 1: a live deployment creates its own
-   * three seed UTxOs in its first transaction, so the outrefs every one-shot policy is
-   * parameterised by are only known once that transaction is built. The typed seeds preview a
-   * deployment whose seeds are already known; this plans a new one.
+   * USES the seeds from step 1 — `planDeployment` throws without them, because every one-shot
+   * policy is parameterised by their outrefs and the plan cannot be derived until they exist.
+   * Splitting a wallet UTxO into three seeds is a separate transaction, taken before this.
+   *
+   * ⚑ THIS COMMENT USED TO CLAIM THE OPPOSITE — that the seeds are deliberately not reused and
+   * a live deployment creates its own in a first transaction. That was true of an earlier design
+   * and contradicted by the call below, which passes them. It survived long enough to put "six
+   * transactions" in front of an operator.
    */
   const planDeploy = useCallback(async () => {
     setPlanning(true);

@@ -89,38 +89,6 @@ function blockfrostBaseUrl(network: CardanoNetwork): string {
 }
 
 /**
- * Is this reward address registered RIGHT NOW?
- *
- * Not "has it ever been seen": Blockfrost keeps returning an account after it is deregistered,
- * with `active: false`, and a deregistered credential must be registered again. Reading
- * presence as registration would build a delegate-only transaction for a credential that has
- * no registration to delegate — and that failure lands after four transactions have already
- * been submitted.
- *
- * Fails CLOSED: a network error throws rather than guessing, because both guesses are wrong in
- * a way that only surfaces mid-deployment.
- */
-async function isStakeRegisteredViaBlockfrost(
-  network: CardanoNetwork,
-  projectId: string,
-  rewardAddress: string,
-): Promise<boolean> {
-  const res = await fetch(`${blockfrostBaseUrl(network)}/accounts/${rewardAddress}`, {
-    headers: { project_id: projectId },
-  });
-  if (res.status === 404) return false;
-  if (!res.ok) {
-    throw new Error(
-      `Could not determine whether ${rewardAddress} is already registered (Blockfrost ` +
-        `returned ${res.status}). Refusing to guess: the wrong answer is only discovered ` +
-        `after four transactions have been submitted.`,
-    );
-  }
-  const body = (await res.json()) as { active?: boolean };
-  return body.active === true;
-}
-
-/**
  * An Evolution signing client over the connected CIP-30 wallet.
  *
  * Built the same way in every entry point below, because a client built with a different

@@ -546,18 +546,6 @@ export function assertCeremonyContext(ctx: CeremonyContext, where = "ceremony"):
 export { BOOTSTRAP_SEED_COUNT };
 export type { BootstrapPlan, DeploymentParams };
 
-/**
- * The five steps, named as the operator sees them, split by who has to act.
- *
- * ⛔ THE SPLIT IS THE POINT. Phase one is the deployer alone; phase two needs every
- * declared participant. Anything in phase one that could be deferred to phase two
- * SHOULD be, because phase two happens with people waiting on a call — and anything
- * in phase two that could be done in phase one must not be, because phase one spends
- * the one-shot seeds and there is no going back from it.
- */
-export const PHASE_ONE_STEPS = ["seed", "multisig-genesis", "stake-registrations"] as const;
-export const PHASE_TWO_STEPS = ["protocol-genesis", "reference-scripts"] as const;
-
 export interface CeremonyStep {
   /** Shown to the operator; also what an error names. */
   label: string;
@@ -589,10 +577,27 @@ export { selectBootstrapSeeds, assertMultisigConfigUtxo, assembleDeploymentParam
 export type MultisigConfigLocation = ReturnType<typeof assertMultisigConfigUtxo>;
 
 /**
- * Phase one: the three transactions the deployer submits alone.
+ * Phase one: the transactions the deployer submits alone.
  *
- * Built together and submitted in order. They chain — the seed transaction's outputs
- * fund the two that follow — so they are built in one pass against the same UTxO set.
+ * TWO of them in the live flow — `upgrade multisig` and `register credentials` — because
+ * `planDeployment` requires the three seeds to exist already and therefore passes
+ * `needsSeedTx: false`. The optional `seed UTxOs` step below is reached only by a caller that
+ * asks for it, which today is no one; splitting seeds is its own transaction on the page,
+ * deliberately outside the plan so a failure there costs nothing.
+ *
+ * Built together and submitted in order. They chain, so they are built in one pass against the
+ * same UTxO set.
+ *
+ * ⛔ THE SPLIT IS THE POINT. Phase one is the deployer alone; phase two needs every declared
+ * participant. Anything in phase one that could be deferred to phase two SHOULD be, because
+ * phase two happens with people waiting on a call — and anything in phase two that could be
+ * done in phase one must not be, because phase one spends the one-shot seeds and there is no
+ * going back from it.
+ *
+ * ⚑ A PREVIOUS `PHASE_ONE_STEPS` / `PHASE_TWO_STEPS` PAIR LIVED HERE and was deleted: nothing
+ * imported it, and its names ("seed", "multisig-genesis", "stake-registrations") were not the
+ * labels this function actually emits. A second, wrong naming of the steps is worse than none,
+ * because it reads like the authority.
  */
 export async function buildPhaseOne(params: {
   ctx: CeremonyContext;
