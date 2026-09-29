@@ -1,1 +1,96 @@
-[]
+[
+  {
+    "schemaVersion": 3,
+    "txHash": "bf929c1ea832e93fae781fad34c448d78c81012c68d6b159e2cafa80b0393398",
+    "protocolParams": {
+      "txInput": {
+        "txHash": "a9d55f675fc44df199dec48cfcc39c7bfdf0d64a211e05e4a7e4d82bd2c777be",
+        "outputIndex": 3
+      },
+      "policyId": "8c70c75e94de524e859dd0a407689862816101bc7037d7e516eabdbf",
+      "utxo": {
+        "txHash": "bf929c1ea832e93fae781fad34c448d78c81012c68d6b159e2cafa80b0393398",
+        "outputIndex": 0
+      }
+    },
+    "programmableLogicBase": {
+      "scriptHash": "feae586b49b345c78cf110cb24bd380c65e9f2f346017543d52ec9ae"
+    },
+    "transfer": {
+      "scriptHash": "15ae9259afd46cf1c180bd8ce6e1fe39473aadd8e7bd3fd03c3f2fec"
+    },
+    "thirdParty": {
+      "scriptHash": "d7702aa3d6cf9fb6369bddf0eb1f30ecdca200ac64df41136f619515"
+    },
+    "unfracking": {
+      "scriptHash": "eaa1d7f408f94d295ad15851813246a1502a08d867368585dcdd72e7"
+    },
+    "programmableLogicGlobal": {
+      "scriptHash": "1d99a420b8c58c20195f1f4b4225663b2901a968454b655079aaf62e",
+      "unfrackingParameter": "00000000000000000000000000000000000000000000000000000000"
+    },
+    "maxInlineDatumBytes": 1024,
+    "issuanceLogic": {
+      "scriptHash": "5571388737f93481a33a5d382f1bcb81fec8ea6ee93a657c56840bc1"
+    },
+    "upgradeMultisig": {
+      "scriptHash": "50e6ba70cfe3a82b77d968627d2774f1467374524e14f8e8c59ca022",
+      "txInput": {
+        "txHash": "a9d55f675fc44df199dec48cfcc39c7bfdf0d64a211e05e4a7e4d82bd2c777be",
+        "outputIndex": 1
+      },
+      "utxo": {
+        "txHash": "bd3e0a34329b9d211f56b58b820df52735a6fe0e2b21bfefa79323633e440b36",
+        "outputIndex": 0
+      }
+    },
+    "upgradeAuthority": {
+      "type": "script",
+      "hash": "50e6ba70cfe3a82b77d968627d2774f1467374524e14f8e8c59ca022"
+    },
+    "issuance": {
+      "txInput": {
+        "txHash": "a9d55f675fc44df199dec48cfcc39c7bfdf0d64a211e05e4a7e4d82bd2c777be",
+        "outputIndex": 0
+      },
+      "policyId": "f3cf7a90b4405e245250bfb8f3b16bdfa879e1b9744a7c79b64eebf8",
+      "alwaysFailScriptHash": "54814dd6b99ad3cb806d3bb096af8ce1e3805cc491921619b5ce6b5f"
+    },
+    "registry": {
+      "txInput": {
+        "txHash": "a9d55f675fc44df199dec48cfcc39c7bfdf0d64a211e05e4a7e4d82bd2c777be",
+        "outputIndex": 3
+      },
+      "issuanceScriptHash": "f3cf7a90b4405e245250bfb8f3b16bdfa879e1b9744a7c79b64eebf8",
+      "scriptHash": "a328d0aa567417c45c29811e335715a31bce2e17f54982324f714f83"
+    },
+    "programmableBaseRefInput": {
+      "txHash": "0090a8d643eabaa0c6696facf53012922740bb3384f531c415f0b3d62fbd98c4",
+      "outputIndex": 0
+    },
+    "programmableLogicGlobalRefInput": {
+      "txHash": "0090a8d643eabaa0c6696facf53012922740bb3384f531c415f0b3d62fbd98c4",
+      "outputIndex": 1
+    },
+    "transferRefInput": {
+      "txHash": "0090a8d643eabaa0c6696facf53012922740bb3384f531c415f0b3d62fbd98c4",
+      "outputIndex": 2
+    },
+    "thirdPartyRefInput": {
+      "txHash": "0090a8d643eabaa0c6696facf53012922740bb3384f531c415f0b3d62fbd98c4",
+      "outputIndex": 3
+    },
+    "unfrackingRefInput": {
+      "txHash": "0090a8d643eabaa0c6696facf53012922740bb3384f531c415f0b3d62fbd98c4",
+      "outputIndex": 4
+    },
+    "issuanceLogicRefInput": {
+      "txHash": "0090a8d643eabaa0c6696facf53012922740bb3384f531c415f0b3d62fbd98c4",
+      "outputIndex": 5
+    },
+    "upgradeMultisigRefInput": {
+      "txHash": "0090a8d643eabaa0c6696facf53012922740bb3384f531c415f0b3d62fbd98c4",
+      "outputIndex": 6
+    }
+  }
+]

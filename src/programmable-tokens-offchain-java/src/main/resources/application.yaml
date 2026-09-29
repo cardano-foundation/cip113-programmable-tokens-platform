@@ -121,11 +121,17 @@ spring:
       on-profile: preprod
 
 network: preprod
+
 uplc-link:
   base-url: ${UPLC_LINK_BASE_URL:https://preprod-api.uplc.link}
 
 wallet:
   mnemonic: ""
+
+programmable:
+  token:
+    default:
+      txHash: "bf929c1ea832e93fae781fad34c448d78c81012c68d6b159e2cafa80b0393398"
 
 blockfrost:
   url: https://cardano-preprod.blockfrost.io/api/v0/
@@ -135,11 +141,11 @@ koios:
 
 store:
   cardano:
-    host: ""
-    port: 0
+    host: ${STORE_CARDANO_HOST:preview-node.play.dev.cardano.org}
+    port: ${STORE_CARDANO_PORT:3001}
     protocol-magic: 1
-    sync-start-blockhash: ""
-    sync-start-slot: 0
+    sync-start-blockhash: ${STORE_SYNC_START_BLOCKHASH:f6ea3737e4a87385e1a210788a6d96539d5be3f25391ac3b75dbc20e3d8c02f8}
+    sync-start-slot: ${STORE_SYNC_START_SLOT:135009426}
 
 ---
 spring:
