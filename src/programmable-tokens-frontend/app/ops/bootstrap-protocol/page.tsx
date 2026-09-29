@@ -831,33 +831,24 @@ export default function BootstrapProtocolPage() {
           <Badge variant="warning" size="sm">{network}</Badge>
         </div>
         <p className="text-sm text-dark-400">
-          Unlisted operator page. Derives a complete core deployment from three one-shot seeds
-          and an upgrade multisig, and shows exactly what would go on chain — before anything is
-          signed. Works identically on every network; the badge says which one this build
-          targets, and nothing behaves differently because of it.
+          Derives a full core deployment from three one-shot seeds and an upgrade multisig, and
+          shows what goes on chain before anything is signed. The badge is the target network.
         </p>
       </header>
 
       <section className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
         <h2 className="text-sm font-semibold text-white">Before you start</h2>
         <p className="text-xs text-dark-400">
-          A bootstrap is <strong>six transactions</strong>, each signed separately: one to split
-          the funding into three seeds, then the multisig config, the protocol state, the seven
-          reference scripts, a stake registration (which of two forms depends on whether this
-          wallet&apos;s stake key is already registered), and the delegate script registrations.
-          They cannot be combined — a single transaction measured 21,816 bytes against a
-          16,384-byte limit, and a transaction cannot reference a script it is itself creating.
+          <strong>Four transactions</strong>, signed separately: the upgrade-multisig config, the
+          credential registrations, the protocol genesis, then the seven reference scripts. Five
+          if the wallet needs its seeds split first. They can&apos;t be combined — one transaction
+          exceeds the 16 KB limit, and a transaction cannot reference a script it is creating.
         </p>
         <p className="text-xs text-dark-400">
-          Explicit outputs come to about <strong>177 ADA</strong> before any fee — 140 for the
-          seven reference scripts at ~20 each, 20 for the protocol state, ~2 for the multisig
-          config, 15 for the three seeds. <strong>Fund the wallet with at least 400 ADA.</strong>{" "}
-          Running short does not fail as &ldquo;insufficient funds&rdquo;: coin selection runs out
-          partway and the error names whichever output it could not fund.
-        </p>
-        <p className="text-xs text-amber-300">
-          Once a transaction lands it cannot be unwound. Nothing here is submitted until every
-          step has been built and evaluated.
+          Commits <strong>140 ADA</strong> to the seven reference scripts (20 each, at your own
+          address) and <strong>12 ADA</strong> to six stake deposits. The protocol&apos;s own four
+          outputs are each sized to the ledger minimum for what they carry.{" "}
+          <strong>Fund the wallet with at least 400 ADA.</strong>
         </p>
       </section>
 
@@ -877,41 +868,26 @@ export default function BootstrapProtocolPage() {
           </label>
         </div>
         <p className="text-xs text-dark-400">
-          Three <strong>distinct</strong> UTxOs, not one. Sharing a seed across slots produces a
-          different, incompatible protocol — and it would deploy without complaint, because the
-          two same-typed outref fields in the record would then hold one value and the
-          derivation check could not fail. Read from the connected wallet and locked, because a
-          mistyped outref is still a valid parameter: it parameterises every one-shot policy
-          against a UTxO the transaction cannot consume, and the failure names a missing input
-          rather than a typo.
+          Three <strong>distinct</strong> ADA-only UTxOs, one per one-shot policy. Either the
+          wallet has them or we create them below. Read from the wallet and locked: a mistyped
+          outref is still valid input, and fails later as a missing UTxO.
         </p>
 
-        {wallet.connected && seedSource === "wallet" && (
-          <p className="text-xs text-green-300">
-            Filled from the wallet — three distinct UTxOs of the {usableUtxoCount} usable ones.
-            These are spent by the deployment, which is then <strong>five</strong> transactions
-            rather than six.
-          </p>
-        )}
         {wallet.connected && seedSource === "none" && (
           <div className="space-y-2 rounded border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-200">
             {walletUtxoTotal === 0 ? (
               <p>
-                The provider returned <strong>no UTxOs at all</strong> for{" "}
+                No UTxOs at all for{" "}
                 <code className="break-all">{queriedAddress ?? "this wallet"}</code>. Splitting
-                would not help — nothing here is a funding problem yet. Check that this is the
-                address you funded (a wallet&apos;s change address is often not the one you sent
-                to), and that the Blockfrost key baked into this build is for {network}.
+                won&apos;t help. Check this is the address you funded (a wallet&apos;s change
+                address often isn&apos;t), and that this build&apos;s Blockfrost key is for{" "}
+                {network}.
               </p>
             ) : (
               <p>
-                This wallet has {usableUtxoCount ?? 0} of {walletUtxoTotal ?? "?"} UTxO(s) usable
-                as a seed and needs three. (A UTxO carrying native assets or a reference script
-                cannot be one.) Splitting makes them <strong>50, 10 and 10 ADA</strong> — unequal
-                because each seed part-funds the transaction that consumes it, and the protocol
-                genesis mints two assets and runs scripts where the multisig genesis mints one
-                NFT. Splitting is ordinary, repeatable housekeeping — it is kept out of the
-                deployment proper so that a failure here costs nothing.
+                {usableUtxoCount ?? 0} of {walletUtxoTotal ?? "?"} UTxOs are usable as seeds —
+                native assets or a reference script disqualify one — and three are needed.
+                Splitting makes <strong>50, 10 and 10 ADA</strong>.
               </p>
             )}
             <button
@@ -962,15 +938,9 @@ export default function BootstrapProtocolPage() {
           Members — one per line
         </label>
         <p className="text-xs text-dark-400">
-          Payment key hashes or bech32 addresses, one per line. An address is reduced to its
-          payment credential; a script credential is refused, because a script cannot sign.
-        </p>
-        <p className="text-xs text-accent-300">
-          Ask participants for an ADDRESS, not a key hash. A bech32 address carries a checksum,
-          so a character mistyped or mangled on the way here is rejected the moment you paste
-          it. A key hash has none — every wrong one is 56 valid-looking characters, and the
-          mistake survives to the signing round, where the member list is already on chain and
-          the fix costs the whole ceremony.
+          One per line: an <strong>address</strong> (preferred) or a payment key hash. Addresses
+          are checksummed, so a mangled one is refused on paste; a wrong key hash looks valid and
+          survives to the signing round. Script credentials are refused — a script cannot sign.
         </p>
         <textarea
           id="multisig-members"
@@ -999,10 +969,7 @@ export default function BootstrapProtocolPage() {
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-white">3. Parameters</h2>
         <p className="text-xs text-dark-400">
-          Keep the nonce. The bootstrap record stores always_fail&apos;s HASH, not the nonce it
-          came from, so it cannot be recovered from the record afterwards. The inline-datum
-          bound is baked into four scripts at compile time and cannot be changed after
-          deployment.
+          Keep the nonce: the record stores always_fail&apos;s hash, not the nonce.
         </p>
         <div className="flex flex-wrap items-center gap-3 text-sm text-dark-300">
           <label className="flex items-center gap-2">
@@ -1028,18 +995,10 @@ export default function BootstrapProtocolPage() {
             />
           </label>
           <p className="text-xs text-dark-400">
-            Compiled into <code>transfer</code>, <code>third_party</code>, <code>unfracking</code>{" "}
-            and <code>issuance_logic</code>, so it is part of all four script hashes. Changing it
-            later means redeploying those four and upgrading the protocol — a deployment choice,
-            not a setting.
-          </p>
-          <p className="text-xs text-accent-300">
-            1024 is the agreed starting point, not a derived one. Upstream ships no guidance for
-            this parameter and the SDK&apos;s own constant calls 1024 &ldquo;what upstream&apos;s
-            test fixtures use&rdquo; and explicitly not a recommendation — so it is a deliberate
-            provisional choice rather than a cost model, and worth revisiting when one exists.
-            Change it here before deploying if you have a better number; it cannot be changed
-            afterwards.
+            Part of four script hashes (<code>transfer</code>, <code>third_party</code>,{" "}
+            <code>unfracking</code>, <code>issuance_logic</code>), so changing it later means
+            redeploying those four plus an upgrade. 1024 is an agreed starting point, not a
+            derived one — upstream ships no guidance. Set it before deploying.
           </p>
         </div>
 
@@ -1059,18 +1018,15 @@ export default function BootstrapProtocolPage() {
             </span>
           </label>
           <p className="text-xs text-dark-400">
-            The unfracking validator is built, deployed, registered and published either way. This
-            changes only the hash <code>programmable_logic_global</code> is compiled against: the
-            real script hash, or a 28-byte sentinel no script can hash to. With the sentinel the
-            dispatcher&apos;s unfracking arm can never be satisfied, and the deployment records
-            both values because neither implies the other.
+            The validator is deployed either way. This sets what{" "}
+            <code>programmable_logic_global</code> is compiled against: the real hash, or a
+            sentinel nothing can hash to — with the sentinel, unfracking can never be invoked.
+            Both are recorded.
           </p>
           {!unfrackingEnabled && (
             <p className="text-xs text-accent-300">
-              Baked into the dispatcher&apos;s hash and not changeable by configuration afterwards.
-              Enabling it later means compiling a replacement dispatcher, publishing it as a
-              reference script, and a protocol upgrade repointing <code>plg_cred</code> — no new
-              unfracking deployment and no token reissued, but an upgrade rather than a switch.
+              Enabling it later is a protocol upgrade, not a setting — a replacement dispatcher
+              published as a reference script, with <code>plg_cred</code> repointed.
             </p>
           )}
         </div>
@@ -1115,18 +1071,15 @@ export default function BootstrapProtocolPage() {
               duplicate until you know one is the script and the other is what the dispatcher was
               compiled against. */}
           <p className="text-xs text-dark-400">
-            <code>unfracking</code> is the validator this deployment publishes.{" "}
-            <code>unfrackingParameter</code> is the hash{" "}
-            <code>programmableLogicGlobal</code> was compiled against —{" "}
+            <code>unfracking</code> is the validator deployed.{" "}
+            <code>unfrackingParameter</code> is what <code>programmableLogicGlobal</code> was
+            compiled against —{" "}
             {derived.unfrackingParameter === derived.unfracking ? (
               <>the same value, so unfracking is permitted.</>
             ) : (
-              <>
-                the disabled sentinel, so unfracking can never be invoked. The validator is still
-                deployed, registered and published; only the dispatcher refuses it.
-              </>
+              <>the sentinel, so it can never be invoked.</>
             )}{" "}
-            Both are recorded because neither can be derived from the other.
+            Both recorded.
           </p>
 
           {multisig && (
@@ -1153,8 +1106,7 @@ export default function BootstrapProtocolPage() {
           </button>
 
           <p className="text-xs text-dark-400">
-            Derived from the seeds in step 1 — the same ones the deployment consumes, so these
-            are the hashes it produces.
+            Derived from the step 1 seeds, so these are the hashes the deployment produces.
           </p>
         </section>
       )}
@@ -1163,18 +1115,10 @@ export default function BootstrapProtocolPage() {
       <section className="space-y-3 border-t border-dark-800 pt-6">
         <h2 className="text-lg font-semibold text-white">Deploy</h2>
         <p className="text-xs text-dark-400">
-          Builds all six transactions and evaluates every one of them — with real execution
-          units, against the outputs the earlier steps will create — before the wallet is asked
-          for a single signature. The complete deployment, transaction hashes included, is known
-          at that point, so it is verified against the pinned blueprint here rather than
-          afterwards. <strong>Nothing is submitted until all of that passes.</strong> It is not
-          atomic and cannot be: six chained transactions cannot be unwound once the fourth lands.
-        </p>
-        <p className="text-xs text-dark-400">
-          Uses the seeds from step 1. With them the plan is <strong>five</strong> transactions;
-          without them it opens by creating three seed UTxOs and is six. Keep the{" "}
-          <strong>always_fail nonce</strong> you enter — the bootstrap record stores its hash,
-          not the nonce, and it cannot be recovered from the record afterwards.
+          Builds and evaluates all four transactions — real execution units, against outputs the
+          earlier steps will create — then verifies the result against the pinned blueprint.{" "}
+          <strong>Nothing is submitted until that passes.</strong> Not atomic: four chained
+          transactions cannot be unwound.
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -1184,7 +1128,7 @@ export default function BootstrapProtocolPage() {
             disabled={planning || !wallet.connected}
             className="rounded border border-dark-600 px-3 py-1.5 text-xs text-white disabled:opacity-40"
           >
-            {planning ? "Building all six…" : "Build and verify"}
+            {planning ? "Building all four…" : "Build and verify"}
           </button>
           {!wallet.connected && (
             <span className="text-xs text-dark-400">Connect the deploying wallet first.</span>
@@ -1200,9 +1144,9 @@ export default function BootstrapProtocolPage() {
         {planned && (
           <div className="space-y-3">
             <p className="text-xs text-dark-400">
-              Phase one is yours alone and spends the three one-shot seeds. Phase two needs a
-              signature from every declared participant and is built only once phase one has
-              confirmed on chain — the genesis references a UTxO that does not exist until then.
+              Phase one is yours alone. Phase two needs every declared participant, and is built
+              only after phase one confirms — the genesis references a UTxO that does not exist
+              until then.
             </p>
 
             <ol className="space-y-1 font-mono text-xs text-dark-300">
@@ -1271,11 +1215,11 @@ export default function BootstrapProtocolPage() {
                   }
                   className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
                 >
-                  Submit phase one (seed, multisig, registrations)
+                  Submit phase one (multisig, registrations)
                 </button>
                 <p className="text-xs text-dark-400">
-                  Three transactions, signed by you. They spend the seed UTxOs, so from here the
-                  deployment cannot be rebuilt from the same inputs.
+                  Two transactions, signed by you. They spend the seeds — the deployment
+                  can&apos;t be rebuilt from the same inputs afterwards.
                 </p>
               </>
             )}
@@ -1285,9 +1229,8 @@ export default function BootstrapProtocolPage() {
                 plan, which is the record both repositories need. */}
             {phaseOneDone && !deployComplete && (
               <p className="rounded border border-dark-700 bg-dark-950 p-2 text-xs text-dark-300">
-                Keep this tab open. The transactions already submitted cannot be undone and
-                their seed UTxOs are spent — and while the deployment record can be rebuilt from
-                the genesis hex you circulate, the plan behind it only lives here.
+                Keep this tab open. The genesis and witnesses survive by paste; the plan does
+                not.
               </p>
             )}
 
@@ -1295,12 +1238,9 @@ export default function BootstrapProtocolPage() {
             {phaseOneDone && !genesisStep && (
               <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3 text-xs">
                 <p className="text-amber-200">
-                  Phase one is on chain. The genesis takes the upgrade-multisig config UTxO as a
-                  reference input, and Blockfrost&apos;s script evaluator runs a little behind its
-                  own query endpoints — so the UTxO can be listed and still not be usable yet.
-                  This waits {GENESIS_GATE_DEPTH} blocks rather than a fixed number of seconds,
-                  because that lag is measured in blocks and a timer under-waits whenever the
-                  chain is slow.
+                  Phase one is on chain. Blockfrost&apos;s evaluator runs behind its query
+                  endpoints, so the config UTxO can be listed and not yet usable. Waits{" "}
+                  {GENESIS_GATE_DEPTH} blocks, not a timer.
                 </p>
 
                 <p className={gateOpen ? "text-green-300" : "text-dark-300"}>
@@ -1367,10 +1307,8 @@ export default function BootstrapProtocolPage() {
                 </button>
                 {!cosign.complete && (
                   <p className="text-xs text-dark-400">
-                    Waiting on participant signatures. Every declared member must sign the
-                    PROTOCOL GENESIS — it carries the withdraw-0 whose authority tree they are —
-                    and there is no override: an unproven key recorded as an authority is what
-                    this step exists to prevent.
+                    Every declared member must sign the protocol genesis — it carries the
+                    withdraw-0 whose authority tree they are. No override.
                   </p>
                 )}
               </>
@@ -1392,8 +1330,7 @@ export default function BootstrapProtocolPage() {
               <p className="text-xs text-dark-300">
                 Indexer sync start — <code>STORE_SYNC_START_BLOCKHASH</code>{" "}
                 {syncStart.blockHash}, <code>STORE_SYNC_START_SLOT</code> {syncStart.slot}. The
-                block immediately BEFORE the genesis; err earlier if in doubt, too early only
-                costs sync time.
+                block before the genesis; err earlier if unsure.
               </p>
             )}
             {deployComplete ? (
@@ -1411,10 +1348,9 @@ export default function BootstrapProtocolPage() {
               </>
             ) : (
               <p className="rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-200">
-                Partial deployment — no bootstrap record is offered. The record would name
-                reference inputs and a config UTxO belonging to transactions that were never
-                submitted, and it would still pass verification, because verification re-derives
-                from the blueprint and knows nothing about what reached the chain.
+                Partial deployment — no record offered. It would name UTxOs from transactions
+                that never landed and still verify, because verification re-derives from the
+                blueprint and knows nothing about the chain.
               </p>
             )}
           </div>
@@ -1426,13 +1362,11 @@ export default function BootstrapProtocolPage() {
           Verify a deployment made elsewhere
         </h2>
         <p className="text-xs text-dark-400">
-          Independent of the steps above. Paste the <code>DeploymentParams</code> produced by a
-          deployment made on another machine — or a one-entry{" "}
-          <code>protocol-bootstraps-{network}.json</code> — and every script hash in it is
-          re-derived from the pinned blueprint and compared. A record is only offered for
-          download once all of them match: the platform indexes against this file, so a hash
-          that was mistyped or copied from another network would point the indexer at scripts
-          that were never deployed.
+          Paste a <code>DeploymentParams</code> block, or a one-entry{" "}
+          <code>protocol-bootstraps-{network}.json</code>: every script hash is re-derived from
+          the pinned blueprint and compared. A record is offered only if all match — the platform
+          indexes against this file, so one wrong hash points the indexer at scripts that were
+          never deployed.
         </p>
         <textarea
           value={pastedDeployment}

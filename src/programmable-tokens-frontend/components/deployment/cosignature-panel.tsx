@@ -186,9 +186,8 @@ export function CosignaturePanel({
       </div>
 
       <p className="text-xs text-dark-400">
-        Every declared member signs this transaction, not just enough of them to meet the
-        threshold. The threshold governs later upgrades; this is the one moment each
-        participant proves they hold the key being recorded for them.
+        Every declared member signs, not just enough to meet the threshold — this is where each
+        proves they hold the key being recorded for them.
       </p>
 
       {txHash && (
@@ -223,9 +222,8 @@ export function CosignaturePanel({
           </button>
         </div>
         <p className="text-[11px] text-dark-500">
-          They can sign it at <span className="text-primary-400">/sign</span>, which stays
-          reachable while these operator tools are switched off. Do not rebuild the plan after
-          sending it: a rebuilt transaction has a different hash and every signature already
+          They sign at <span className="text-primary-400">/sign</span>. Don&apos;t rebuild the
+          plan after sending: a rebuilt transaction has a new hash and every signature already
           collected stops verifying.
         </p>
       </div>
@@ -259,13 +257,6 @@ export function CosignaturePanel({
           spellCheck={false}
         />
         {selfError && <p className="text-xs text-red-400">{selfError}</p>}
-        {signSelf && (
-          <p className="text-[10px] text-dark-500">
-            &ldquo;Sign as me&rdquo; uses the connected wallet and is verified like any other
-            witness — if your key is not a declared member, it will show as unrecognised rather
-            than be accepted.
-          </p>
-        )}
       </div>
 
       <ul className="space-y-1">
@@ -287,23 +278,21 @@ export function CosignaturePanel({
       {confusable.length > 0 && (
         <p className="text-[11px] text-dark-400">
           {confusable.length === 1 ? "Two participants have" : `${confusable.length} pairs have`}{" "}
-          similar colours. Read the hashes for those rather than the chips — the colour is a
-          shortcut, not the identity, and nothing is nudged to hide the clash.
+          similar colours. Read the hashes for those, not the chips.
         </p>
       )}
 
       {status.forged.size > 0 && (
         <p className="text-xs text-red-300">
-          A witness arrived for {status.forged.size} declared member
-          {status.forged.size === 1 ? "" : "s"} that does not verify against this transaction.
-          They signed a different draft, or it was altered in transit — ask them to sign the
-          hash above again.
+          A witness for {status.forged.size} declared member
+          {status.forged.size === 1 ? "" : "s"} does not verify — they signed a different draft.
+          Ask them to sign the hash above.
         </p>
       )}
       {status.strangers.length > 0 && (
         <p className="text-xs text-red-300">
           {status.strangers.length} witness
-          {status.strangers.length === 1 ? "" : "es"} came from a key that is not declared here:{" "}
+          {status.strangers.length === 1 ? "" : "es"} came from undeclared keys:{" "}
           {status.strangers.map((h) => h.slice(0, 12) + "…").join(", ")}.
         </p>
       )}
