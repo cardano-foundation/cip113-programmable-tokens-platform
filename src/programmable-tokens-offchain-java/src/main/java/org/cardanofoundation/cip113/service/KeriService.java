@@ -137,7 +137,11 @@ public class KeriService {
             QuickTxBuilder quickTxBuilder,
             List<TokenMembershipHook> hooks,
             @Value("${keri.identifier.name}") String identifierName,
-            @Value("${keri.identifier.registry-name:kyc-registry}") String registryName,
+            // ⛔ NO INLINE DEFAULT. This used to read `:kyc-registry` while application.yaml said
+            // `kyc-registry2` — two sources of truth that disagreed, so removing the yaml key
+            // would have silently pointed this at the OLD registry rather than failing. The key
+            // is declared in the yaml with an env placeholder; a missing one should be loud.
+            @Value("${keri.identifier.registry-name}") String registryName,
             @Value("${keri.signing-mnemonic:}") String signingMnemonic,
             @Value("${network:preview}") String network) {
         this.identifierConfig = identifierConfig;
