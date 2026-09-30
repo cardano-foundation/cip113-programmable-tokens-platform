@@ -2,7 +2,7 @@ name: Frontend
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "develop"]
     paths:
       - "src/programmable-tokens-frontend/**"
       - ".github/workflows/frontend.yml"
@@ -28,3 +28,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+      # Runs every `test:*` script in package.json via scripts/run-suites.mjs, which prints a
+      # per-suite PASS/FAIL table and the number of suites EXECUTED. Before this step CI ran
+      # none of the twenty-one suites, so a green tick said only that the app compiled.
+      # The runner exits non-zero if it discovers no suites, so a wiring mistake cannot pass.
+      - run: npm test

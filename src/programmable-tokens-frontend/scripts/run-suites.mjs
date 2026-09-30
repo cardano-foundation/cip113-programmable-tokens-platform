@@ -1,0 +1,126 @@
+#!/usr/bin/env node
+/**
+ * Runs every `test:*` suite in package.json and fails the process if any of them fails.
+ *
+ * ⛔ WHY A RUNNER AND NOT A LIST IN THE WORKFLOW. There are twenty-odd suites and they are
+ * added one per ticket. A hardcoded list in frontend.yml would be a second place to keep in
+ * step, and the failure mode of forgetting it is SILENT: CI stays green while the new suite
+ * never runs. Discovering the scripts from package.json means adding a `test:<name>` script is
+ * the whole of wiring it into CI.
+ *
+ * ⚑ THE RUNNER GUARDS ITSELF. If discovery finds no suites it exits NON-ZERO. A runner that
+ * matches nothing and reports success is the exact shape of the `aiken check` trap this repo
+ * already has on the on-chain side: two lines of output, no summary, zero tests run, exit 0.
+ * The count is printed so a human reading the CI log can see how many actually executed
+ * rather than inferring it from a green tick.
+ *
+ * There is no jest or vitest in this project (deliberately — verified: zero jest/vitest
+ * entries in package.json). Each suite is a `tsc` compile followed by plain `node`, and each
+ * prints its own `N checks passed` line, which this runner echoes and totals.
+ */
+import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+
+const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const suites = Object.keys(pkg.scripts ?? {})
+  .filter((k) => k.startsWith("test:"))
+  .sort();
+
+if (suites.length === 0) {
+  console.error(
+    "No `test:*` scripts found in package.json. Refusing to report success: a runner that " +
+      "discovers nothing and exits 0 is indistinguishable from a passing suite."
+  );
+  process.exit(1);
+}
+
+const inCI = Boolean(process.env.GITHUB_ACTIONS);
+
+/**
+ * ⚑ THE SUITES DO NOT AGREE ON A FORMAT, and pretending they do under-reports. Three totals
+ * are in use — "N checks passed", "N passed, M failed", "N script hashes verified" — and
+ * several suites print only per-assertion "OK" lines with no total at all. Counting just one
+ * format reported 0 for twelve of twenty-one suites, including one with 73 assertions, which
+ * would have made the CI log look like a harness that runs nothing.
+ */
+const EXPLICIT_TOTALS = [
+  /(\d+)\s+checks passed/g,
+  /(\d+)\s+script hashes verified/g,
+  /(\d+)\s+passed,\s*(\d+)\s+failed/g,
+];
+/** Fallback for suites with no total line: their own per-assertion markers. */
+const ASSERTION_LINE = /^\s*(?:OK|ok|PASS|\u2713)\b/gm;
+
+/** @returns {{checks:number, reportedFailures:number, from:string}} */
+function countChecks(output) {
+  let checks = 0;
+  let reportedFailures = 0;
+  let matched = false;
+  for (const re of EXPLICIT_TOTALS) {
+    for (const m of output.matchAll(re)) {
+      matched = true;
+      checks += Number(m[1]);
+      if (m[2] !== undefined) reportedFailures += Number(m[2]);
+    }
+  }
+  if (matched) return { checks, reportedFailures, from: "total" };
+  const lines = output.match(ASSERTION_LINE);
+  return { checks: lines ? lines.length : 0, reportedFailures: 0, from: "lines" };
+}
+
+const results = [];
+for (const suite of suites) {
+  if (inCI) console.log(`::group::${suite}`);
+  const started = Date.now();
+  const run = spawnSync("npm", ["run", "--silent", suite], {
+    encoding: "utf8",
+    env: process.env,
+  });
+  const output = `${run.stdout ?? ""}${run.stderr ?? ""}`;
+  process.stdout.write(output);
+  if (inCI) console.log("::endgroup::");
+
+  const { checks, reportedFailures, from } = countChecks(output);
+
+  // A suite that prints failures but exits 0 is a bug in the suite, and trusting the exit code
+  // alone would hide it. Either signal fails the run.
+  const ok = run.status === 0 && reportedFailures === 0;
+  results.push({ suite, ok, checks, from, ms: Date.now() - started });
+  if (!ok) {
+    const line =
+      run.status !== 0
+        ? `${suite} FAILED (exit ${run.status ?? "signal " + run.signal})`
+        : `${suite} reported ${reportedFailures} failed assertion(s) while exiting 0`;
+    console.log(inCI ? `::error title=${suite}::${line}` : line);
+  }
+}
+
+const failed = results.filter((r) => !r.ok);
+const totalChecks = results.reduce((n, r) => n + r.checks, 0);
+
+console.log("\n" + "=".repeat(72));
+console.log("FRONTEND SUITE SUMMARY");
+console.log("=".repeat(72));
+for (const r of results) {
+  console.log(
+    `  ${r.ok ? "PASS" : "FAIL"}  ${r.suite.padEnd(26)} ` +
+      `${String(r.checks).padStart(4)} checks (${r.from.padEnd(5)}) ${String(r.ms).padStart(6)} ms`
+  );
+}
+console.log("-".repeat(72));
+console.log(
+  `  ${results.length} suites EXECUTED, ${failed.length} failed, ${totalChecks} checks total`
+);
+console.log("=".repeat(72));
+
+// A suite that prints no recognisable count still counts as executed — it may legitimately
+// report differently — but zero checks across ALL of them means nothing asserted anything.
+if (totalChecks === 0) {
+  console.error(
+    "Every suite ran but not one reported a check count. Treating as failure: this is what a " +
+      "broken harness looks like from the outside."
+  );
+  process.exit(1);
+}
+
+process.exit(failed.length === 0 ? 0 : 1);

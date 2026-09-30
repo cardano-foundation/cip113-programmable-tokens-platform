@@ -30,7 +30,8 @@
     "test:mint-confirmation": "tsc lib/rwa/mint-confirmation.ts --outDir .hash-build/mint-confirmation --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .hash-build/mint-confirmation && node test-mint-confirmation.js",
     "test:relay": "tsc lib/deployment/relay-store.ts lib/tx/hash.ts lib/tx/witness-set.ts --outDir .relay-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .relay-build && node test-relay-store.js",
     "test:steps": "node test-ceremony-steps.js",
-    "test:resume": "tsc lib/deployment/ceremony-storage.ts lib/deployment/registration-status.ts lib/utils/network.ts --outDir .resume-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .resume-build && node test-ceremony-resume.js"
+    "test:resume": "tsc lib/deployment/ceremony-storage.ts lib/deployment/registration-status.ts lib/utils/network.ts --outDir .resume-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .resume-build && node test-ceremony-resume.js",
+    "test": "node scripts/run-suites.mjs"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.14.0",
