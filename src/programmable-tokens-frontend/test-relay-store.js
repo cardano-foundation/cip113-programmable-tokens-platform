@@ -55,6 +55,23 @@ async function main() {
   });
 
   relay.resetRelayStore();
+  check("a read does NOT consume the entry — every signer fetches the same id", () => {
+    // ⛔ THE PROPERTY THE WHOLE FEATURE RESTS ON, and it was untested until Giovanni asked whether
+    // the endpoint was once-only. A ceremony has four or five participants all fetching one id; a
+    // single-use handle would 404 for everyone after the first, and the driver could not tell that
+    // from a restarted pod.
+    const { id } = relay.putTransaction(real.cbor);
+    for (let signer = 1; signer <= 5; signer++) {
+      const got = relay.getTransaction(id);
+      assert.strictEqual(got.hex, real.cbor.toLowerCase(),
+        `signer ${signer} got different bytes — a read must not consume or mutate the entry`);
+      assert.strictEqual(got.id, id);
+    }
+    // And the entry is still there for a sixth, and a re-push still reports it held.
+    assert.strictEqual(relay.putTransaction(real.cbor).alreadyHeld, true);
+  });
+
+  relay.resetRelayStore();
   check("an unknown id and an expired one are DIFFERENT answers", () => {
     const { id } = relay.putTransaction(real.cbor, 0);
     let expired = null;

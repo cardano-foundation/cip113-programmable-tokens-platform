@@ -24,6 +24,14 @@
  * The real control is unchanged and lives outside this file: participants compare the hash over a
  * channel the transaction did NOT arrive on — voice, on the call. See `app/sign/page.tsx`.
  *
+ * ## ⛔ A READ DOES NOT CONSUME THE ENTRY
+ *
+ * Every declared participant fetches the SAME id, and a ceremony has four or five of them. So this
+ * is read-many by design and stays readable until its TTL: the only two deletions in this file are
+ * expiry. A hand-off is exactly the kind of thing someone later "tidies" into a single-use handle —
+ * and the failure would be the fourth signer getting a 404 mid-ceremony, with the driver unable to
+ * tell a consumed entry from a restarted pod. There is a test for this.
+ *
  * ## Why in-memory is acceptable here
  *
  * Ruled by Giovanni 2026-09-29: one pod, and — decisively — the paste path STAYS. A restart
