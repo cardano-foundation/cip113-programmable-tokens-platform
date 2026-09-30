@@ -274,20 +274,31 @@ async function main() {
     // nothing, which reads as a failed verification rather than an absent record.
     const list = /const STEPS_WITH_PROVENANCE[^\n]*\n/.exec(page);
     assert.ok(list, "STEPS_WITH_PROVENANCE is gone — the link is unconditional again");
-    for (const carries of ["protocol-genesis", "multisig-genesis"]) {
-      assert.ok(
-        new RegExp(`"${carries}"`).test(list[0]),
-        `${carries} must be in the list — it carries a CIP-171 record. multisig-genesis joined at ` +
-        "SDK 0.14.0, which added provenancePin to MultisigGenesisTxParams; before that it was " +
-        "unreachable without splicing aux data into a built transaction.",
-      );
-    }
-    for (const never of ["stake-registrations", "reference-scripts"]) {
+    assert.ok(/"protocol-genesis"/.test(list[0]),
+      "the protocol genesis must be in the list — it is the transaction that carries the record");
+    // ⚑ multisig-genesis IS EXCLUDED BY DECISION, not by limitation (Giovanni, 2026-09-30). SDK
+    // 0.14.0 made it possible and measurement made it pointless: the record it publishes is
+    // BYTE-IDENTICAL to the genesis's — 1170 bytes, sha256 80068189… — because both are built from
+    // the same plan and pin. Re-adding it publishes a duplicate whose verify page shows nothing,
+    // which is the confusion that produced the decision. If you are reversing this, the argument is
+    // TIMING (the multisig lands first), and it should be stated where the operator reads it.
+    // Each exclusion has its OWN reason, and they are not interchangeable — a shared message
+    // misattributes, and the next reader believes it. The multisig genesis DOES run a script; it is
+    // excluded for a different reason entirely.
+    for (const [never, why] of [
+      ["multisig-genesis",
+       "it CAN carry one (SDK 0.14.0) and publishing it is a byte-identical duplicate of the " +
+       "genesis's record — 1170 bytes, sha256 80068189… — because both come from the same plan and " +
+       "pin. Excluded by decision (Giovanni, 2026-09-30), not because it runs no scripts: it does"],
+      ["stake-registrations",
+       "it executes no scripts at all — six RegCerts introduce credentials and publish no code"],
+      ["reference-scripts",
+       "the genesis record already names those hashes; records are keyed by script hash, so a " +
+       "second one claims the same thing twice"],
+    ]) {
       assert.ok(
         !new RegExp(`"${never}"`).test(list[0]),
-        `${never} is listed as carrying provenance. It does not: registrations execute no scripts, ` +
-        "and the genesis record already names the reference scripts' hashes — records are keyed by " +
-        "script hash, so a second one claims the same thing twice.",
+        `${never} is listed as carrying provenance, and it should not be: ${why}.`,
       );
     }
     // And the link itself must be gated on that list, not rendered for every submitted step.

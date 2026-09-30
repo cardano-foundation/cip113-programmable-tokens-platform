@@ -132,10 +132,12 @@ function stepIdForLabel(label: string): string | null {
  *     provenance and is not: the genesis record already names those hashes, so a second record
  *     claims the same thing twice.
  *
- * ⚑ `multisig-genesis` JOINED THIS LIST AT SDK 0.14.0, which added `provenancePin` to
- * `MultisigGenesisTxParams`. Before that it was unreachable from here without splicing auxiliary
- * data into an already-built transaction, which docs/TESTING-SERIALISED-BYTES.md exists to warn
- * against.
+ * ⚑ `multisig-genesis` IS ABSENT BY DECISION, NOT BY LIMITATION — Giovanni, 2026-09-30. SDK 0.14.0
+ * made it possible, and measurement then made it pointless: the record it publishes is
+ * BYTE-IDENTICAL to the genesis's (both 1170 bytes, sha256 80068189…), because both come from the
+ * same plan and the same pin. The genesis is the transaction a reader looks at for a protocol's
+ * provenance, so the claim lives there alone. Two identical records mostly generate the question
+ * "why does this one show nothing?".
  *
  * ⚠ VERIFYING IT ON CHAIN NEEDS THE RAW HASH, NOT THE DEPLOYED ONE. A CIP-171 entry is keyed by the
  * UNPARAMETERISED script hash and carries the parameters that produce the deployed one — so
@@ -153,7 +155,7 @@ function stepIdForLabel(label: string): string | null {
  * of a given blueprint revision makes a byte-identical claim, and the registry credits the first
  * transaction to make it. Only the first deployment of a NEW revision gets its own entry.
  */
-const STEPS_WITH_PROVENANCE: readonly string[] = ["multisig-genesis", "protocol-genesis"];
+const STEPS_WITH_PROVENANCE: readonly string[] = ["protocol-genesis"];
 
 const FIELD =
   "rounded border border-dark-600 bg-dark-900 px-2 py-1.5 font-mono text-xs text-white placeholder:text-dark-500 focus:border-cyan-600 focus:outline-none focus:ring-1 focus:ring-cyan-600/40";
@@ -542,9 +544,6 @@ export default function BootstrapProtocolPage() {
         maxInlineDatumBytes: Number(maxInline),
         alwaysFailNonce: nonce.trim(),
         unfrackingEnabled,
-        // Reaches the MULTISIG GENESIS via buildPhaseOne (SDK 0.14.0). The protocol genesis gets
-        // its own copy later, in preparePhaseTwo, because it is built in a separate pass.
-        provenancePin: loadedPin,
       });
       setPlanned(result);
     } catch (e) {
