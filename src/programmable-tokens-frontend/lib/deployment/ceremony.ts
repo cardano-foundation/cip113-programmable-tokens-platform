@@ -33,6 +33,7 @@
 
 import { EvoAssets, EvoTransactionHash } from "@easy1staking/cip113-sdk-ts";
 import {
+  type BootstrapStepId,
   planBootstrap,
   buildSeedTx,
   buildMultisigGenesisTx,
@@ -549,6 +550,17 @@ export type { BootstrapPlan, DeploymentParams };
 export interface CeremonyStep {
   /** Shown to the operator; also what an error names. */
   label: string;
+  /**
+   * WHICH step this is, as the SDK names it — `BOOTSTRAP_STEPS`, not a string of ours.
+   *
+   * ⛔ CARRIED HERE RATHER THAN MAPPED FROM `label`, because a resume has to know what already
+   * landed and the display labels are not stable identifiers: "upgrade multisig" is prose, and a
+   * lookup table pairing prose to ids is a second source of truth that drifts the first time
+   * somebody improves the wording. The SDK's own list moved once already — `stake-registrations`
+   * went from last to third at 0.12.0 while every string stayed the same — so the id travels with
+   * the step that produced it.
+   */
+  step: BootstrapStepId;
   unsignedCbor: string;
 }
 
@@ -620,7 +632,7 @@ export async function buildPhaseOne(params: {
       ownerAddress: params.ownerAddress,
       seedLovelace: params.seedLovelace,
     };
-    steps.push({ label: "seed UTxOs", unsignedCbor: cborOf(await buildSeedTx(seedParams)) });
+    steps.push({ label: "seed UTxOs", step: "seed", unsignedCbor: cborOf(await buildSeedTx(seedParams)) });
   }
 
   const multisigParams: MultisigGenesisTxParams = {
@@ -631,12 +643,14 @@ export async function buildPhaseOne(params: {
   };
   steps.push({
     label: "upgrade multisig",
+    step: "multisig-genesis",
     unsignedCbor: cborOf(await buildMultisigGenesisTx(multisigParams)),
   });
 
   const regParams: StakeRegistrationTxParams = { ...params.ctx, plan: params.plan };
   steps.push({
     label: "register credentials",
+    step: "stake-registrations",
     unsignedCbor: cborOf(await buildStakeRegistrationTx(regParams)),
   });
   return steps;
@@ -676,6 +690,7 @@ export async function buildProtocolGenesis(params: {
   };
   return {
     label: "protocol genesis",
+    step: "protocol-genesis",
     unsignedCbor: cborOf(await buildProtocolGenesisTx(genesisParams)),
   };
 }
@@ -704,6 +719,7 @@ export async function buildReferenceScripts(params: {
   };
   return {
     label: "reference scripts",
+    step: "reference-scripts",
     unsignedCbor: cborOf(await buildReferenceScriptsTx(refParams)),
   };
 }

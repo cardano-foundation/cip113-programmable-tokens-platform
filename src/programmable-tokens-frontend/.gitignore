@@ -65,3 +65,4 @@ frontend.log
 .colour-build/
 .seeds-build/
 .relay-build/
+.resume-build/

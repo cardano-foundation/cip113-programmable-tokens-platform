@@ -47,6 +47,19 @@ import { EvoAddress } from "@easy1staking/cip113-sdk-ts";
 import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
 import { CosignaturePanel, type CosignatureState } from "@/components/deployment/cosignature-panel";
 import { CeremonyStep } from "@/components/deployment/ceremony-step";
+import {
+  loadCeremony,
+  saveCeremony,
+  clearCeremony,
+  type StoredCeremony,
+} from "@/lib/deployment/ceremony-storage";
+import {
+  probeRegistrations,
+  registrationsComplete,
+  type RegistrationProbe,
+} from "@/lib/deployment/registration-status";
+import { apiGet } from "@/lib/api/client";
+import { STAKE_REGISTRATION_ORDER } from "@easy1staking/cip113-sdk-ts";
 import { SdkRecordDownload } from "@/components/deployment/sdk-record-download";
 import { assembleUpgradeTx } from "@/lib/upgrade/witness";
 import { waitForTxConfirmation } from "@/lib/utils/tx-confirmation";
@@ -70,6 +83,31 @@ const EMPTY: TxInputForm = { txHash: "", outputIndex: "" };
  * a while to realise the members box was a text area at all. A border and a focus ring are what
  * distinguish a field from a panel here.
  */
+/** Every seed present. Not "correct" — see the note on `seedsReady`. */
+function seedsReadyFor(a: TxInputForm, b: TxInputForm, c: TxInputForm): boolean {
+  return !!a.txHash && !!b.txHash && !!c.txHash;
+}
+
+/**
+ * The step id behind a submitted step's display label.
+ *
+ * ⛔ ONE TABLE, DERIVED FROM THE LABELS `ceremony.ts` ACTUALLY EMITS, and it returns null rather
+ * than a guess. `submitted` entries come back through the generic multi-tx runner, which is shared
+ * with the upgrade flow and has no business knowing about bootstrap steps — so the label is all
+ * that survives the round trip. An unrecognised label is NOT persisted: a resume that mistook one
+ * step for another would skip a transaction that never landed.
+ */
+function stepIdForLabel(label: string): string | null {
+  switch (label) {
+    case "seed UTxOs": return "seed";
+    case "upgrade multisig": return "multisig-genesis";
+    case "register credentials": return "stake-registrations";
+    case "protocol genesis": return "protocol-genesis";
+    case "reference scripts": return "reference-scripts";
+    default: return null;
+  }
+}
+
 const FIELD =
   "rounded border border-dark-600 bg-dark-900 px-2 py-1.5 font-mono text-xs text-white placeholder:text-dark-500 focus:border-cyan-600 focus:outline-none focus:ring-1 focus:ring-cyan-600/40";
 
@@ -109,6 +147,17 @@ export default function BootstrapProtocolPage() {
   const [planError, setPlanError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<{ label: string; txHash: string }[] | null>(null);
+  /**
+   * A ceremony found in this browser from a previous visit, offered rather than applied.
+   *
+   * ⛔ OFFERED, NEVER AUTO-APPLIED. Silently repopulating six fields from storage would leave an
+   * operator unable to tell a restored ceremony from a fresh one — and restoring the wrong one is
+   * how you point a deployment at seeds that are already spent. So it is a banner with a button.
+   */
+  const [found, setFound] = useState<StoredCeremony | null>(null);
+  const [restored, setRestored] = useState<StoredCeremony | null>(null);
+  const [probe, setProbe] = useState<RegistrationProbe | null>(null);
+  const [probing, setProbing] = useState(false);
   /**
    * Whether the whole sequence landed. Tracked separately because `submitted` cannot answer it:
    * a failure at step 1 sets it to `[]`, and `!![]` is `true` — which previously disabled the
@@ -262,6 +311,63 @@ export default function BootstrapProtocolPage() {
       document.removeEventListener("visibilitychange", onWake);
     };
   }, [wallet.connected, wallet.wallet]);
+
+  // Look once, on mount. Nothing is applied and nothing is cleared by looking.
+  useEffect(() => {
+    setFound(loadCeremony(network));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * Persist the INPUTS as they change, plus whatever has been submitted.
+   *
+   * The plan is a pure function of these, so this is everything a resume needs — and deliberately
+   * not the built transactions, which would be a cache of something reproducible that can go stale
+   * against the chain while still looking usable.
+   */
+  useEffect(() => {
+    if (!seedsReadyFor(paramsSeed, issuanceSeed, multisigSeed) && !submitted) return;
+    saveCeremony({
+      network,
+      changeAddress: planned?.ctx.changeAddress ?? liveAddress ?? null,
+      inputs: {
+        paramsSeed, issuanceSeed, multisigSeed,
+        nonce, maxInlineDatumBytes: maxInline, unfrackingEnabled,
+        membersText, threshold,
+      },
+      submitted: (submitted ?? []).flatMap((s) => {
+        // The id travels with the step that produced it — see CeremonyStep.step. A submitted
+        // entry with no matching built step is not persisted rather than guessed at.
+        const step = stepIdForLabel(s.label);
+        return step ? [{ step, txHash: s.txHash }] : [];
+      }),
+    });
+  }, [
+    network, planned, liveAddress, paramsSeed, issuanceSeed, multisigSeed,
+    nonce, maxInline, unfrackingEnabled, membersText, threshold, submitted,
+  ]);
+
+  /** Ask the backend which of the six credentials are already registered. Never guesses. */
+  const runProbe = useCallback(async () => {
+    if (!planned) return;
+    setProbing(true);
+    try {
+      setProbe(
+        await probeRegistrations(
+          (planned.plan as unknown as { stakeCredentialScripts: readonly { hash: string }[] })
+            .stakeCredentialScripts,
+          STAKE_REGISTRATION_ORDER as unknown as readonly string[],
+          (stakeAddress) =>
+            apiGet<{ stakeAddress: string; isRegistered: boolean }>(
+              `/script-registration/check?stakeAddress=${encodeURIComponent(stakeAddress)}`,
+            ),
+          network,
+        ),
+      );
+    } finally {
+      setProbing(false);
+    }
+  }, [planned, network]);
 
   const derive = useCallback(async () => {
     setStage("deriving");
@@ -837,6 +943,83 @@ export default function BootstrapProtocolPage() {
         </p>
       </header>
 
+      {found && !restored && (
+        <section className="space-y-2 rounded border border-primary-500/40 bg-primary-500/5 p-4">
+          {/*
+            ⛔ A COMPLETED CEREMONY IS KEPT, NOT CLEARED. Clearing on success would destroy the only
+            thing that can rebuild the bootstrap record after a reload — the inputs re-derive the
+            plan and the stored hashes supply what derivation cannot. Same mistake as unmounting a
+            finished step: throwing the answer away at the moment it becomes useful.
+          */}
+          <h2 className="text-sm font-semibold text-white">
+            {found.submitted.length >= 4
+              ? "A completed ceremony is saved in this browser"
+              : "An unfinished ceremony is saved in this browser"}
+          </h2>
+          <p className="text-xs text-dark-300">
+            Saved {new Date(found.savedAt).toLocaleString()}
+            {found.submitted.length > 0 && (
+              <>
+                {" "}— <strong>{found.submitted.map((x) => x.step).join(", ")}</strong> already
+                submitted
+              </>
+            )}
+            . Restoring re-enters the inputs and re-derives the same plan; it does not re-run
+            anything.{" "}
+            {found.submitted.length >= 4
+              ? "All four transactions are on chain, so this is kept only so the bootstrap record can be rebuilt."
+              : "Signatures are not saved and have to be collected again — a witness commits to one transaction body, and phase two is rebuilt against a fresh UTxO set on resume."}
+          </p>
+          {found.changeAddress && (
+            <p className="break-all font-mono text-[10px] text-dark-400">
+              built for {found.changeAddress}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setParamsSeed(found.inputs.paramsSeed);
+                setIssuanceSeed(found.inputs.issuanceSeed);
+                setMultisigSeed(found.inputs.multisigSeed);
+                setNonce(found.inputs.nonce);
+                setMaxInline(found.inputs.maxInlineDatumBytes);
+                setUnfrackingEnabled(found.inputs.unfrackingEnabled);
+                setMembersText(found.inputs.membersText);
+                setThreshold(found.inputs.threshold);
+                // The seeds come from storage, so they must not be overwritten by a wallet read.
+                setSeedsLocked(false);
+                setSeedSource("manual");
+                setRestored(found);
+              }}
+              className="rounded border border-primary-500/50 px-3 py-1.5 text-xs text-primary-200 hover:bg-primary-500/10"
+            >
+              Restore these inputs
+            </button>
+            <button
+              type="button"
+              onClick={() => { clearCeremony(network); setFound(null); }}
+              className="rounded border border-dark-600 px-3 py-1.5 text-xs text-dark-300 hover:text-red-300"
+            >
+              Discard it
+            </button>
+          </div>
+          <p className="text-[10px] text-dark-500">
+            ⚠ If phase one already landed, its seed UTxO is spent and phase one must NOT be
+            re-submitted. Derive, then check the registrations below to see what is already on chain.
+          </p>
+        </section>
+      )}
+
+      {restored && (
+        <section className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3 text-xs text-dark-300">
+          <p>
+            Restored a ceremony saved {new Date(restored.savedAt).toLocaleString()}. The seeds are
+            unlocked for editing because they came from storage rather than the wallet.
+          </p>
+        </section>
+      )}
+
       <section className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
         <h2 className="text-sm font-semibold text-white">Before you start</h2>
         <p className="text-xs text-dark-400">
@@ -1267,6 +1450,80 @@ export default function BootstrapProtocolPage() {
               Warn, keep, block. Placed with the plan because it is the plan this invalidates
               submitting — nothing here is lost, and reselecting the original account resumes.
             */}
+            {/*
+              The resume question: which of the six credentials are already registered? Offered
+              whenever a plan exists, because an interrupted ceremony looks exactly like a fresh one
+              until somebody asks the chain.
+            */}
+            <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[10px] uppercase tracking-wider text-dark-400">
+                  Credential registrations
+                </p>
+                <button
+                  type="button"
+                  onClick={runProbe}
+                  disabled={probing}
+                  className="rounded border border-dark-600 px-2 py-0.5 text-[10px] text-dark-200 hover:text-primary-400 disabled:opacity-40"
+                >
+                  {probing ? "Checking…" : probe ? "Check again" : "Check what is already registered"}
+                </button>
+              </div>
+              {!probe ? (
+                <p className="text-[11px] text-dark-500">
+                  Only worth asking when resuming. A fresh deployment has none of them registered,
+                  and phase one registers all six in one transaction.
+                </p>
+              ) : (
+                <>
+                  <ul className="space-y-0.5">
+                    {probe.credentials.map((c) => (
+                      <li key={c.name} className="flex flex-wrap items-center gap-2 text-[11px]">
+                        <span
+                          className={
+                            c.state === "registered"
+                              ? "text-green-300"
+                              : c.state === "unregistered"
+                                ? "text-dark-300"
+                                : "text-accent-300"
+                          }
+                        >
+                          {c.state === "registered"
+                            ? "registered"
+                            : c.state === "unregistered"
+                              ? "not registered"
+                              : "cannot tell"}
+                        </span>
+                        <span className="text-dark-400">{c.name}</span>
+                        {c.detail && <span className="text-dark-500">— {c.detail}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                  {registrationsComplete(probe) ? (
+                    <p className="text-xs text-green-300">
+                      All six are registered, so phase one&apos;s registration transaction has
+                      already landed. Re-submitting phase one would be refused by the ledger as
+                      StakeKeyAlreadyRegisteredDELEG — resume at phase two.
+                    </p>
+                  ) : probe.unknown > 0 ? (
+                    <p className="text-xs text-accent-300">
+                      {probe.unknown} of {probe.credentials.length} could not be determined, so
+                      nothing is assumed. Both guesses are expensive: re-registering an existing
+                      credential fails the whole transaction, and skipping a missing one fails later
+                      inside the genesis. On a network with no deployment recorded the indexer will
+                      not start at all unless <code>CIP113_ALLOW_NO_DEPLOYMENT=true</code>, which
+                      reads as exactly this.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-dark-300">
+                      {probe.registered} of {probe.credentials.length} registered — phase one still
+                      has work to do.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+
             {accountMoved && (
               <div className="space-y-2 rounded border border-amber-600 bg-amber-950/40 p-3 text-xs text-amber-100">
                 <p>
