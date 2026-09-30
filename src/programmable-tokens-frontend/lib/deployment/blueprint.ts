@@ -96,3 +96,31 @@ export async function verifyBlueprintBytes(raw: Uint8Array, pin: UpstreamPin): P
 
   return { blueprint, pin, sha256 };
 }
+
+/**
+ * Fetch the bundled blueprint and its pin, and verify one against the other.
+ *
+ * ⛔ ONE LOADER because there are THREE callers — derivation, the deploy-time verification, and
+ * the standalone verifier page — and each had spelled the two fetches out for itself. Three
+ * copies of "fetch the bytes, fetch the pin, check them" is three chances for one of them to
+ * stop checking: the fetches are the cheap half, `verifyBlueprintBytes` is the half that
+ * matters, and a copy that forgets it still compiles and still returns a usable blueprint.
+ *
+ * Reads the Next route handlers, never the backend's `/protocol/blueprint` — see the note at
+ * the top of this file for why bootstrapping cannot depend on a service that fails closed on an
+ * unknown deployment.
+ */
+export async function loadPinnedBlueprint(): Promise<VerifiedBlueprint> {
+  const [rawRes, pinRes] = await Promise.all([
+    fetch("/api/deployment/blueprint"),
+    fetch("/api/deployment/pin"),
+  ]);
+  if (!rawRes.ok || !pinRes.ok) {
+    throw new Error(
+      "Could not load the bundled core blueprint. This does not use the backend blueprint " +
+        "endpoint, because a backend cannot start on a network with no deployed protocol.",
+    );
+  }
+  const raw = new Uint8Array(await rawRes.arrayBuffer());
+  return verifyBlueprintBytes(raw, (await pinRes.json()) as UpstreamPin);
+}

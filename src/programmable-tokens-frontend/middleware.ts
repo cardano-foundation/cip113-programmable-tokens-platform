@@ -4,7 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
  * The operator tools are off unless someone turned them on.
  *
  * `/ops/*` builds the transactions that stand up and govern a protocol
- * instance — bootstrap, upgrade assembly, hash mining. Giovanni wants them
+ * instance — bootstrap and upgrade assembly. Giovanni wants them
  * reachable for a deployment and gone afterwards, so the default is OFF and
  * enabling is a deliberate act.
  *

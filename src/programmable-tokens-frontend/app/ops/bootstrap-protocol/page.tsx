@@ -20,9 +20,9 @@ import { Badge } from "@/components/ui/badge";
 import { getCardanoNetwork } from "@/lib/utils/network";
 import { deriveCoreDeployment, type DerivedCoreDeployment } from "@/lib/deployment/derive";
 import { resolveMultisig, type ResolvedMultisig } from "@/lib/deployment/multisig";
-import { verifyBlueprintBytes, type UpstreamPin } from "@/lib/deployment/blueprint";
+import { loadPinnedBlueprint, type UpstreamPin } from "@/lib/deployment/blueprint";
 import { buildCoreCip171Record } from "@/lib/deployment/provenance";
-import { buildBootstrapRecord } from "@/lib/deployment/record";
+import { verifyTxUrl } from "@/lib/cip171/registry";
 import { describeError } from "@/lib/deployment/describe-error";
 import { useWallet } from "@/contexts/wallet-context";
 import {
@@ -44,19 +44,27 @@ import {
   type CeremonyPlan,
 } from "@/lib/deployment/deploy";
 import { EvoAddress } from "@easy1staking/cip113-sdk-ts";
-import { MiningPanel } from "@/components/mining/mining-panel";
-import { spliceMinedBody } from "@/lib/mining/locate";
 import { signAndSubmitSequence, MultiTxError, type MultiTxPhase } from "@/lib/tx/multi-tx";
 import { CosignaturePanel, type CosignatureState } from "@/components/deployment/cosignature-panel";
+import { CeremonyStep } from "@/components/deployment/ceremony-step";
+import {
+  loadCeremony,
+  saveCeremony,
+  clearCeremony,
+  type StoredCeremony,
+} from "@/lib/deployment/ceremony-storage";
+import {
+  probeRegistrations,
+  registrationsComplete,
+  type RegistrationProbe,
+} from "@/lib/deployment/registration-status";
+import { apiGet } from "@/lib/api/client";
+import { STAKE_REGISTRATION_ORDER } from "@easy1staking/cip113-sdk-ts";
 import { SdkRecordDownload } from "@/components/deployment/sdk-record-download";
 import { assembleUpgradeTx } from "@/lib/upgrade/witness";
 import { waitForTxConfirmation } from "@/lib/utils/tx-confirmation";
 import { buildSyncStart } from "@/lib/deployment/record";
-import {
-  verifyDeployment,
-  toBootstrapRecord,
-  type VerificationResult,
-} from "@/lib/deployment/verify";
+import { toBootstrapRecord } from "@/lib/deployment/verify";
 
 type Stage = "idle" | "deriving" | "derived" | "error";
 
@@ -75,6 +83,78 @@ const EMPTY: TxInputForm = { txHash: "", outputIndex: "" };
  * a while to realise the members box was a text area at all. A border and a focus ring are what
  * distinguish a field from a panel here.
  */
+/** Every seed present. Not "correct" — see the note on `seedsReady`. */
+function seedsReadyFor(a: TxInputForm, b: TxInputForm, c: TxInputForm): boolean {
+  return !!a.txHash && !!b.txHash && !!c.txHash;
+}
+
+/**
+ * The step id behind a submitted step's display label.
+ *
+ * ⛔ ONE TABLE, DERIVED FROM THE LABELS `ceremony.ts` ACTUALLY EMITS, and it returns null rather
+ * than a guess. `submitted` entries come back through the generic multi-tx runner, which is shared
+ * with the upgrade flow and has no business knowing about bootstrap steps — so the label is all
+ * that survives the round trip. An unrecognised label is NOT persisted: a resume that mistook one
+ * step for another would skip a transaction that never landed.
+ */
+function stepIdForLabel(label: string): string | null {
+  switch (label) {
+    case "seed UTxOs": return "seed";
+    case "upgrade multisig": return "multisig-genesis";
+    case "register credentials": return "stake-registrations";
+    case "protocol genesis": return "protocol-genesis";
+    case "reference scripts": return "reference-scripts";
+    default: return null;
+  }
+}
+
+/**
+ * Which steps carry a CIP-171 provenance record — and therefore which transactions are worth
+ * offering a uplc.link replay for.
+ *
+ * ⛔ MEASURED ON CHAIN, not assumed. Giovanni's preview run, checked with Koios: of the four
+ * transactions only the protocol genesis carries label 1984. The other three carry no metadata, so
+ * the `verify` link we offered on all four sent an operator to a page that finds nothing — which
+ * reads as a failed verification rather than as an absent record.
+ *
+ * Why these are the right two, once the SDK allows the second:
+ *
+ *   - `protocol-genesis` mints and runs scripts, and its record covers all TEN parameterised
+ *     scripts (everything but `issuance_mint`). Records are keyed by SCRIPT HASH, so one
+ *     transaction carrying it is enough for the registry to resolve every hash in it.
+ *   - `multisig-genesis` mints through the `upgrade_multisig` one-shot, and its hash is already in
+ *     the genesis record — so this is about TIMING, not coverage. The multisig lands first, and
+ *     between the two phases there is no provenance anywhere, which is precisely the window in
+ *     which a driver wants to check the upgrade authority.
+ *   - `stake-registrations` executes no scripts at all; six RegCerts introduce credentials and
+ *     publish no code.
+ *   - `reference-scripts` publishes the script BODIES, which sounds like the natural home for
+ *     provenance and is not: the genesis record already names those hashes, so a second record
+ *     claims the same thing twice.
+ *
+ * ⚑ `multisig-genesis` JOINED THIS LIST AT SDK 0.14.0, which added `provenancePin` to
+ * `MultisigGenesisTxParams`. Before that it was unreachable from here without splicing auxiliary
+ * data into an already-built transaction, which docs/TESTING-SERIALISED-BYTES.md exists to warn
+ * against.
+ *
+ * ⚠ VERIFYING IT ON CHAIN NEEDS THE RAW HASH, NOT THE DEPLOYED ONE. A CIP-171 entry is keyed by the
+ * UNPARAMETERISED script hash and carries the parameters that produce the deployed one — so
+ * `upgrade_multisig` appears in the record under its raw hash, not the hash that ends up in the
+ * deployment. Matching on the deployed hash makes a correct record look like a miss.
+ *
+ * ⛔ AND A VERIFY LINK SHOWING NOTHING IS OFTEN SUCCESS, NOT FAILURE. Measured 2026-09-30 on a
+ * preview genesis whose record was perfect: 1170 bytes, decoding cleanly, eleven raw hashes with
+ * their parameters. uplc.link had nothing to show for that TRANSACTION because it had already
+ * registered the identical claim against an earlier one — the SDK's own harness deployment two days
+ * before, and another from three weeks before that.
+ *
+ * The reason is structural and will keep happening: the record names the BLUEPRINT's unparameterised
+ * hashes plus its source and commit, none of which change between deployments. So every deployment
+ * of a given blueprint revision makes a byte-identical claim, and the registry credits the first
+ * transaction to make it. Only the first deployment of a NEW revision gets its own entry.
+ */
+const STEPS_WITH_PROVENANCE: readonly string[] = ["multisig-genesis", "protocol-genesis"];
+
 const FIELD =
   "rounded border border-dark-600 bg-dark-900 px-2 py-1.5 font-mono text-xs text-white placeholder:text-dark-500 focus:border-cyan-600 focus:outline-none focus:ring-1 focus:ring-cyan-600/40";
 
@@ -107,9 +187,6 @@ export default function BootstrapProtocolPage() {
   const [pin, setPin] = useState<UpstreamPin | null>(null);
   const [blueprintSha, setBlueprintSha] = useState<string | null>(null);
 
-  const [pastedDeployment, setPastedDeployment] = useState("");
-  const [verification, setVerification] = useState<VerificationResult | null>(null);
-  const [verifiedParams, setVerifiedParams] = useState<Record<string, unknown> | null>(null);
 
   const wallet = useWallet();
   const [planning, setPlanning] = useState(false);
@@ -117,6 +194,17 @@ export default function BootstrapProtocolPage() {
   const [planError, setPlanError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<{ label: string; txHash: string }[] | null>(null);
+  /**
+   * A ceremony found in this browser from a previous visit, offered rather than applied.
+   *
+   * ⛔ OFFERED, NEVER AUTO-APPLIED. Silently repopulating six fields from storage would leave an
+   * operator unable to tell a restored ceremony from a fresh one — and restoring the wrong one is
+   * how you point a deployment at seeds that are already spent. So it is a banner with a button.
+   */
+  const [found, setFound] = useState<StoredCeremony | null>(null);
+  const [restored, setRestored] = useState<StoredCeremony | null>(null);
+  const [probe, setProbe] = useState<RegistrationProbe | null>(null);
+  const [probing, setProbing] = useState(false);
   /**
    * Whether the whole sequence landed. Tracked separately because `submitted` cannot answer it:
    * a failure at step 1 sets it to `[]`, and `!![]` is `true` — which previously disabled the
@@ -127,13 +215,6 @@ export default function BootstrapProtocolPage() {
   /** Set when the deploying wallet is NOT among the upgrade signers — see below. */
   const [cannotAuthorise, setCannotAuthorise] = useState(false);
   const [acceptedNoAuthority, setAcceptedNoAuthority] = useState(false);
-  /**
-   * Whether to add the ~1 ADA output a search needs. BUILD-TIME: the output has to exist before
-   * the body is built, so this cannot be turned on after planning.
-   */
-  const [mineable, setMineable] = useState(false);
-  const [mined, setMined] = useState<{ txHash: string; nonce: number } | null>(null);
-
   /**
    * Seeds are READ FROM THE WALLET and locked, not typed.
    *
@@ -149,6 +230,18 @@ export default function BootstrapProtocolPage() {
   /** Raw provider count, so "none usable" can say WHICH of its two causes applies. */
   const [walletUtxoTotal, setWalletUtxoTotal] = useState<number | null>(null);
   const [queriedAddress, setQueriedAddress] = useState<string | null>(null);
+  /**
+   * The wallet account in front of us RIGHT NOW, re-read whenever the tab wakes.
+   *
+   * ⛔ CIP-30 HAS NO ACCOUNT-CHANGE EVENT, so a value captured at connect describes an account the
+   * driver may have switched away from minutes ago. That is not a hypothetical here: Giovanni's own
+   * setup has him as both a signer (an empty wallet holding an upgrade key) and the deployer (a
+   * small hot wallet), and switching between them mid-ceremony is the normal way to run it.
+   *
+   * Re-reading on focus and visibility is the cheapest approximation of the event that does not
+   * exist. See `officina:cip30-wallet-sync`.
+   */
+  const [liveAddress, setLiveAddress] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [seedNotice, setSeedNotice] = useState<string | null>(null);
   const [syncStart, setSyncStart] = useState<ReturnType<typeof buildSyncStart> | null>(null);
@@ -241,6 +334,88 @@ export default function BootstrapProtocolPage() {
     }
   }, [wallet, network, loadSeedsFromWallet]);
 
+  useEffect(() => {
+    if (!wallet.connected) {
+      setLiveAddress(null);
+      return;
+    }
+    let live = true;
+    const read = async () => {
+      try {
+        const a = await wallet.wallet.getChangeAddress();
+        if (live) setLiveAddress(a);
+      } catch {
+        /* a wallet that will not answer is not evidence of a change */
+      }
+    };
+    read();
+    const onWake = () => { if (document.visibilityState === "visible") read(); };
+    window.addEventListener("focus", onWake);
+    document.addEventListener("visibilitychange", onWake);
+    return () => {
+      live = false;
+      window.removeEventListener("focus", onWake);
+      document.removeEventListener("visibilitychange", onWake);
+    };
+  }, [wallet.connected, wallet.wallet]);
+
+  // Look once, on mount. Nothing is applied and nothing is cleared by looking.
+  useEffect(() => {
+    setFound(loadCeremony(network));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * Persist the INPUTS as they change, plus whatever has been submitted.
+   *
+   * The plan is a pure function of these, so this is everything a resume needs — and deliberately
+   * not the built transactions, which would be a cache of something reproducible that can go stale
+   * against the chain while still looking usable.
+   */
+  useEffect(() => {
+    if (!seedsReadyFor(paramsSeed, issuanceSeed, multisigSeed) && !submitted) return;
+    saveCeremony({
+      network,
+      changeAddress: planned?.ctx.changeAddress ?? liveAddress ?? null,
+      inputs: {
+        paramsSeed, issuanceSeed, multisigSeed,
+        nonce, maxInlineDatumBytes: maxInline, unfrackingEnabled,
+        membersText, threshold,
+      },
+      submitted: (submitted ?? []).flatMap((s) => {
+        // The id travels with the step that produced it — see CeremonyStep.step. A submitted
+        // entry with no matching built step is not persisted rather than guessed at.
+        const step = stepIdForLabel(s.label);
+        return step ? [{ step, txHash: s.txHash }] : [];
+      }),
+    });
+  }, [
+    network, planned, liveAddress, paramsSeed, issuanceSeed, multisigSeed,
+    nonce, maxInline, unfrackingEnabled, membersText, threshold, submitted,
+  ]);
+
+  /** Ask the backend which of the six credentials are already registered. Never guesses. */
+  const runProbe = useCallback(async () => {
+    if (!planned) return;
+    setProbing(true);
+    try {
+      setProbe(
+        await probeRegistrations(
+          (planned.plan as unknown as { stakeCredentialScripts: readonly { hash: string }[] })
+            .stakeCredentialScripts,
+          STAKE_REGISTRATION_ORDER as unknown as readonly string[],
+          (stakeAddress) =>
+            apiGet<{ stakeAddress: string; isRegistered: boolean }>(
+              `/script-registration/check?stakeAddress=${encodeURIComponent(stakeAddress)}`,
+            ),
+          network,
+        ),
+      );
+    } finally {
+      setProbing(false);
+    }
+  }, [planned, network]);
+
   const derive = useCallback(async () => {
     setStage("deriving");
     setError(null);
@@ -248,20 +423,7 @@ export default function BootstrapProtocolPage() {
     try {
       // The blueprint comes from the SDK bundle, not the backend — which cannot run on a
       // network with no deployed protocol. Its identity is verified before anything is derived.
-      const [rawRes, pinRes] = await Promise.all([
-        fetch("/api/deployment/blueprint"),
-        fetch("/api/deployment/pin"),
-      ]);
-      if (!rawRes.ok || !pinRes.ok) {
-        throw new Error(
-          "Could not load the bundled core blueprint. This page does not use the backend " +
-            "blueprint endpoint, because a backend cannot start on a network with no deployed " +
-            "protocol.",
-        );
-      }
-      const raw = new Uint8Array(await rawRes.arrayBuffer());
-      const loadedPin = (await pinRes.json()) as UpstreamPin;
-      const verified = await verifyBlueprintBytes(raw, loadedPin);
+      const verified = await loadPinnedBlueprint();
       setPin(verified.pin);
       setBlueprintSha(verified.sha256);
 
@@ -296,66 +458,7 @@ export default function BootstrapProtocolPage() {
     }
   }, [derived, pin]);
 
-  /**
-   * Loads and identity-checks the bundled blueprint. Shared by derivation and verification —
-   * verifying against an unpinned blueprint would only prove the paste is self-consistent with
-   * whatever happened to be on disk, which is the failure mode this whole page exists to avoid.
-   */
-  const loadBlueprint = useCallback(async () => {
-    const [rawRes, pinRes] = await Promise.all([
-      fetch("/api/deployment/blueprint"),
-      fetch("/api/deployment/pin"),
-    ]);
-    if (!rawRes.ok || !pinRes.ok) {
-      throw new Error("Could not load the bundled core blueprint.");
-    }
-    const raw = new Uint8Array(await rawRes.arrayBuffer());
-    return verifyBlueprintBytes(raw, (await pinRes.json()) as UpstreamPin);
-  }, []);
 
-  const runVerification = useCallback(async () => {
-    setVerification(null);
-    setVerifiedParams(null);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(pastedDeployment);
-    } catch (e) {
-      setVerification({ ok: false, checks: [], mismatches: [], error: `Not valid JSON: ${(e as Error).message}` });
-      return;
-    }
-    // Accept either a bare DeploymentParams or a one-entry bootstrap record file, because
-    // both are things an operator plausibly has in front of them.
-    if (Array.isArray(parsed)) {
-      if (parsed.length !== 1) {
-        setVerification({
-          ok: false, checks: [], mismatches: [],
-          error: `A bootstrap file with ${parsed.length} entries is ambiguous — paste the one deployment to verify.`,
-        });
-        return;
-      }
-      parsed = parsed[0];
-    }
-    const { schemaVersion: _ignored, ...params } = parsed as Record<string, unknown>;
-    try {
-      const { blueprint } = await loadBlueprint();
-      const result = verifyDeployment(blueprint, params);
-      setVerification(result);
-      if (result.ok) setVerifiedParams(params);
-    } catch (e) {
-      setVerification({ ok: false, checks: [], mismatches: [], error: (e as Error).message });
-    }
-  }, [pastedDeployment, loadBlueprint]);
-
-  // The SDK-shaped download is derived from the SAME record the platform download
-  // emits — one deployment must not be able to produce two artefacts that disagree.
-  const verifiedEntry = useMemo(() => {
-    if (!verifiedParams || !verification?.ok) return null;
-    try {
-      return toBootstrapRecord(verifiedParams, verification)[0] ?? null;
-    } catch {
-      return null;
-    }
-  }, [verifiedParams, verification]);
 
   /**
    * The assembled record — and it CANNOT exist before phase two.
@@ -376,24 +479,18 @@ export default function BootstrapProtocolPage() {
     }
   }, [planned, deployComplete, deployedParams]);
 
-  const downloadVerifiedRecord = useCallback(() => {
-    if (!verifiedParams || !verification) return;
-    const record = toBootstrapRecord(verifiedParams, verification);
-    const blob = new Blob([JSON.stringify(record, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `protocol-bootstraps-${network}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }, [verifiedParams, verification, network]);
 
   /**
-   * Build all six transactions and verify the deployment they would produce.
+   * Build all four transactions and verify the deployment they would produce.
    *
-   * Deliberately does NOT reuse the seeds typed into step 1: a live deployment creates its own
-   * three seed UTxOs in its first transaction, so the outrefs every one-shot policy is
-   * parameterised by are only known once that transaction is built. The typed seeds preview a
-   * deployment whose seeds are already known; this plans a new one.
+   * USES the seeds from step 1 — `planDeployment` throws without them, because every one-shot
+   * policy is parameterised by their outrefs and the plan cannot be derived until they exist.
+   * Splitting a wallet UTxO into three seeds is a separate transaction, taken before this.
+   *
+   * ⚑ THIS COMMENT USED TO CLAIM THE OPPOSITE — that the seeds are deliberately not reused and
+   * a live deployment creates its own in a first transaction. That was true of an earlier design
+   * and contradicted by the call below, which passes them. It survived long enough to put "six
+   * transactions" in front of an operator.
    */
   const planDeploy = useCallback(async () => {
     setPlanning(true);
@@ -413,7 +510,7 @@ export default function BootstrapProtocolPage() {
             "so keep whatever you enter here.",
         );
       }
-      const { blueprint, pin: loadedPin } = await loadBlueprint();
+      const { blueprint, pin: loadedPin } = await loadPinnedBlueprint();
       setPin(loadedPin);
       const ms = resolveMultisig(memberEntries, Number(threshold));
       setMultisig(ms);
@@ -445,9 +542,10 @@ export default function BootstrapProtocolPage() {
         maxInlineDatumBytes: Number(maxInline),
         alwaysFailNonce: nonce.trim(),
         unfrackingEnabled,
-        mineable,
+        // Reaches the MULTISIG GENESIS via buildPhaseOne (SDK 0.14.0). The protocol genesis gets
+        // its own copy later, in preparePhaseTwo, because it is built in a separate pass.
+        provenancePin: loadedPin,
       });
-      setMined(null);
       setPlanned(result);
     } catch (e) {
       setPlanError((e as Error).message);
@@ -457,7 +555,6 @@ export default function BootstrapProtocolPage() {
   }, [
     wallet,
     nonce,
-    loadBlueprint,
     memberEntries,
     threshold,
     maxInline,
@@ -466,7 +563,6 @@ export default function BootstrapProtocolPage() {
     issuanceSeed,
     multisigSeed,
     unfrackingEnabled,
-    mineable,
   ]);
 
   // ---- THE CEREMONY, IN TWO PHASES --------------------------------------------------
@@ -653,6 +749,18 @@ export default function BootstrapProtocolPage() {
             // `.utxo`, not the wrapper: awaitMultisigConfigUtxo returns { utxo, ref }.
             upgradeMultisigConfigUtxo: configUtxo.utxo as never,
             upgradeAuthoritySigners: (multisig?.members ?? []).map((m) => m.keyHash) as never,
+            /**
+             * ⛔ THE PAGE CLAIMED THIS AND DID NOT DO IT. Step 4 has always said "CIP-171
+             * provenance ready: N scripts … label 1984", and `ceremony.ts` has always plumbed
+             * `provenancePin` through — but this call site omitted it, so the genesis carried no
+             * metadata and the record existed only as text on screen. Found 2026-09-30 while
+             * answering Giovanni's ask for on-chain verification of the multisig.
+             *
+             * The SDK builds the record itself from the pin plus `plan.parameterizations`, which
+             * is what keeps its arity right: a wrong-arity record is DISCARDED SILENTLY by the
+             * registry, so assembling one by hand here would fail invisibly.
+             */
+            provenancePin: pin as never,
           }),
         {
           // A safety net behind the gate, not the primary mechanism. It should rarely fire now.
@@ -681,7 +789,11 @@ export default function BootstrapProtocolPage() {
     } finally {
       setPreparingGenesis(false);
     }
-  }, [planned, configUtxo, genesisStep, multisig, submitted]);
+    // `pin` is load-bearing, not incidental: it IS the CIP-171 record. Omitting it from the deps
+    // would let this callback close over a null pin from before `derive` ran, and the genesis would
+    // be built with `provenancePin: null` — no metadata, no error, and the page still claiming
+    // provenance was published. Exactly the silent-drop this ticket exists to fix.
+  }, [planned, configUtxo, genesisStep, multisig, submitted, pin]);
 
   const submitPhaseTwo = useCallback(async () => {
     if (!planned || !genesisStep || !cosign.complete) return;
@@ -724,7 +836,33 @@ export default function BootstrapProtocolPage() {
           buildReferenceScripts({
             ctx,
             plan: planned.plan,
-            referenceScriptAddress: planned.ctx.changeAddress,
+            /**
+             * ⛔ THE always_fail ADDRESS, NEVER THE DEPLOYER'S WALLET.
+             *
+             * `plan.addresses.issuanceCborHex` IS always_fail's address — the SDK names it after
+             * its first tenant, the issuance CBOR UTxO, but the script is `always_fail(nonce)` and
+             * nothing can ever be spent from it. That is the entire requirement here.
+             *
+             * This used to be `ctx.changeAddress`, which is exactly what `buildReferenceScripts`
+             * warns against in as many words: "on preview, a wallet holding them alongside
+             * ordinary funds had two of four consumed by a routine retry, and NOTHING ERRORED."
+             * Seven outputs holding the scripts every programmable transaction reads, sitting in
+             * a wallet that coin selection is free to spend from. Giovanni caught it 2026-09-30.
+             *
+             * Every other script address in the plan is the WRONG answer, and not by a little:
+             * protocolParams, registry and upgradeMultisig are each spendable by their own
+             * validator, so a reference script parked there could be consumed by an ordinary
+             * protocol operation. always_fail is the only address in the deployment where that
+             * cannot happen.
+             *
+             * Nothing enumerates this address expecting one UTxO — the issuance output is found by
+             * its NFT and recorded by outref — so the seven joining it there change nothing.
+             *
+             * ⚠ THE 140 ADA IS NOW GONE FOR GOOD, deliberately. Unspendable means unrecoverable:
+             * there is no key and no redeemer that can ever release it. That is the point, and it
+             * is a one-way door — the copy says "locked", not "committed".
+             */
+            referenceScriptAddress: planned.plan.addresses.issuanceCborHex as never,
             // ⚠ PER OUTPUT, not in total: seven scripts at 20 ADA each locks ~140 ADA.
             referenceScriptLovelace: 20_000_000n as never,
           }),
@@ -801,77 +939,167 @@ export default function BootstrapProtocolPage() {
     URL.revokeObjectURL(a.href);
   }, [planned, network, deployComplete, deployedParams]);
 
-  const downloadRecord = useCallback(() => {
-    if (!derived) return;
-    // Placeholders for the values only a submitted deployment can supply. The file is a
-    // TEMPLATE until the transactions exist; it is offered here so the shape can be reviewed
-    // before anything is signed, not so it can be used.
-    const record = buildBootstrapRecord({
-      derived,
-      seeds: {
-        paramsSeed: toTxInput(paramsSeed, "protocol-params seed"),
-        issuanceSeed: toTxInput(issuanceSeed, "issuance seed"),
-        multisigSeed: toTxInput(multisigSeed, "upgrade-multisig seed"),
-      },
-      bootstrapTxHash: "0".repeat(64),
-      paramsUtxoIndex: 0,
-      multisigUtxo: { txHash: "0".repeat(64), outputIndex: 0 },
-      refScripts: {
-        txHash: "0".repeat(64),
-        programmableBase: 0, programmableLogicGlobal: 1, transfer: 2,
-        thirdParty: 3, unfracking: 4, issuanceLogic: 5, upgradeMultisig: 6,
-      },
-      maxInlineDatumBytes: Number(maxInline),
-    });
-    const blob = new Blob([JSON.stringify([record], null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `protocol-bootstraps-${network}.TEMPLATE.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }, [derived, paramsSeed, issuanceSeed, multisigSeed, maxInline, network]);
+
+  /**
+   * Which steps are satisfied, and the one line each is worth when folded.
+   *
+   * ⚑ "SATISFIED" IS NOT "CORRECT". A step folds when it holds a usable value, not when anything
+   * has been checked — three seeds being present says nothing about them being the right three.
+   * What verifies is `derived` and `planned.verification`, and those are steps of their own.
+   */
+  const seedsReady = !!paramsSeed.txHash && !!issuanceSeed.txHash && !!multisigSeed.txHash;
+  const paramsReady = !!nonce.trim() && Number(maxInline) > 0;
+
+  /**
+   * Has the wallet moved away from the account this plan was BUILT for?
+   *
+   * ⚑ WARN, KEEP, BLOCK — Giovanni's ruling, 2026-09-30. Not an error: switching accounts is a
+   * legitimate thing for a driver who is also a signer to do, and losing a plan over it would be
+   * far worse than the inconvenience. But phase one's transactions are already built against the
+   * original change address, so submitting them from another account fails at the WALLET, with a
+   * wallet's error message instead of ours. Blocking the submit turns that into an explanation.
+   *
+   * Everything already collected — the plan, the witnesses, the submitted hashes — survives
+   * untouched, so selecting the original account again resumes exactly where it left off.
+   */
+  const accountMoved =
+    planned && liveAddress && liveAddress !== planned.ctx.changeAddress
+      ? { built: planned.ctx.changeAddress, now: liveAddress }
+      : null;
+
+  /** The threshold rule, applied where it is typed rather than where it is used. */
+  const thresholdProblem = (() => {
+    const n = Number(threshold);
+    if (memberEntries.length === 0) return null;
+    if (!Number.isInteger(n) || n < 1) return "The threshold must be a whole number, at least 1.";
+    if (n > memberEntries.length) {
+      return `The threshold cannot exceed the ${memberEntries.length} member${
+        memberEntries.length === 1 ? "" : "s"
+      } listed — ${n} signatures could never be collected, and the protocol would be unupgradeable.`;
+    }
+    return null;
+  })();
 
   return (
-    <main className="mx-auto max-w-4xl px-4 py-10 space-y-8">
+    <main className="mx-auto max-w-4xl px-4 py-10 space-y-6">
       <header className="space-y-2">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold text-white">Bootstrap a CIP-113 protocol</h1>
           <Badge variant="warning" size="sm">{network}</Badge>
         </div>
         <p className="text-sm text-dark-400">
-          Unlisted operator page. Derives a complete core deployment from three one-shot seeds
-          and an upgrade multisig, and shows exactly what would go on chain — before anything is
-          signed. Works identically on every network; the badge says which one this build
-          targets, and nothing behaves differently because of it.
+          Derives a full core deployment from three one-shot seeds and an upgrade multisig, and
+          shows what goes on chain before anything is signed. The badge is the target network.
         </p>
       </header>
+
+      {found && !restored && (
+        <section className="space-y-2 rounded border border-primary-500/40 bg-primary-500/5 p-4">
+          {/*
+            ⛔ A COMPLETED CEREMONY IS KEPT, NOT CLEARED. Clearing on success would destroy the only
+            thing that can rebuild the bootstrap record after a reload — the inputs re-derive the
+            plan and the stored hashes supply what derivation cannot. Same mistake as unmounting a
+            finished step: throwing the answer away at the moment it becomes useful.
+          */}
+          <h2 className="text-sm font-semibold text-white">
+            {found.submitted.length >= 4
+              ? "A completed ceremony is saved in this browser"
+              : "An unfinished ceremony is saved in this browser"}
+          </h2>
+          <p className="text-xs text-dark-300">
+            Saved {new Date(found.savedAt).toLocaleString()}
+            {found.submitted.length > 0 && (
+              <>
+                {" "}— <strong>{found.submitted.map((x) => x.step).join(", ")}</strong> already
+                submitted
+              </>
+            )}
+            . Restoring re-enters the inputs and re-derives the same plan; it does not re-run
+            anything.{" "}
+            {found.submitted.length >= 4
+              ? "All four transactions are on chain, so this is kept only so the bootstrap record can be rebuilt."
+              : "Signatures are not saved and have to be collected again — a witness commits to one transaction body, and phase two is rebuilt against a fresh UTxO set on resume."}
+          </p>
+          {found.changeAddress && (
+            <p className="break-all font-mono text-[10px] text-dark-400">
+              built for {found.changeAddress}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setParamsSeed(found.inputs.paramsSeed);
+                setIssuanceSeed(found.inputs.issuanceSeed);
+                setMultisigSeed(found.inputs.multisigSeed);
+                setNonce(found.inputs.nonce);
+                setMaxInline(found.inputs.maxInlineDatumBytes);
+                setUnfrackingEnabled(found.inputs.unfrackingEnabled);
+                setMembersText(found.inputs.membersText);
+                setThreshold(found.inputs.threshold);
+                // The seeds come from storage, so they must not be overwritten by a wallet read.
+                setSeedsLocked(false);
+                setSeedSource("manual");
+                setRestored(found);
+              }}
+              className="rounded border border-primary-500/50 px-3 py-1.5 text-xs text-primary-200 hover:bg-primary-500/10"
+            >
+              Restore these inputs
+            </button>
+            <button
+              type="button"
+              onClick={() => { clearCeremony(network); setFound(null); }}
+              className="rounded border border-dark-600 px-3 py-1.5 text-xs text-dark-300 hover:text-red-300"
+            >
+              Discard it
+            </button>
+          </div>
+          <p className="text-[10px] text-dark-500">
+            ⚠ If phase one already landed, its seed UTxO is spent and phase one must NOT be
+            re-submitted. Derive, then check the registrations below to see what is already on chain.
+          </p>
+        </section>
+      )}
+
+      {restored && (
+        <section className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3 text-xs text-dark-300">
+          <p>
+            Restored a ceremony saved {new Date(restored.savedAt).toLocaleString()}. The seeds are
+            unlocked for editing because they came from storage rather than the wallet.
+          </p>
+        </section>
+      )}
 
       <section className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
         <h2 className="text-sm font-semibold text-white">Before you start</h2>
         <p className="text-xs text-dark-400">
-          A bootstrap is <strong>six transactions</strong>, each signed separately: one to split
-          the funding into three seeds, then the multisig config, the protocol state, the seven
-          reference scripts, a stake registration (which of two forms depends on whether this
-          wallet&apos;s stake key is already registered), and the delegate script registrations.
-          They cannot be combined — a single transaction measured 21,816 bytes against a
-          16,384-byte limit, and a transaction cannot reference a script it is itself creating.
+          <strong>Four transactions</strong>, signed separately: the upgrade-multisig config, the
+          credential registrations, the protocol genesis, then the seven reference scripts. Five
+          if the wallet needs its seeds split first. They can&apos;t be combined — one transaction
+          exceeds the 16 KB limit, and a transaction cannot reference a script it is creating.
         </p>
         <p className="text-xs text-dark-400">
-          Explicit outputs come to about <strong>177 ADA</strong> before any fee — 140 for the
-          seven reference scripts at ~20 each, 20 for the protocol state, ~2 for the multisig
-          config, 15 for the three seeds. <strong>Fund the wallet with at least 400 ADA.</strong>{" "}
-          Running short does not fail as &ldquo;insufficient funds&rdquo;: coin selection runs out
-          partway and the error names whichever output it could not fund.
-        </p>
-        <p className="text-xs text-amber-300">
-          Once a transaction lands it cannot be unwound. Nothing here is submitted until every
-          step has been built and evaluated.
+          <strong>Locks 140 ADA permanently</strong> — the seven reference scripts, 20 each, at an
+          address nothing can spend from, so they cannot be consumed by accident and cannot be
+          recovered either. Another <strong>12 ADA</strong> goes to six stake deposits, and the
+          protocol&apos;s own four outputs are sized to the ledger minimum for what they carry.{" "}
+          <strong>Fund the wallet with at least 400 ADA.</strong>
         </p>
       </section>
 
-      <section className="space-y-4">
+      <CeremonyStep
+        label="1"
+        title="One-shot seeds"
+        done={seedsReady}
+        summary={
+          !seedsReady
+            ? undefined
+            : seedSource === "wallet"
+              ? "3 UTxOs from the wallet"
+              : "3 UTxOs, entered by hand"
+        }
+      >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-lg font-semibold text-white">1. One-shot seeds</h2>
           <label className="flex items-center gap-2 text-xs text-dark-300">
             <input
               type="checkbox"
@@ -885,41 +1113,32 @@ export default function BootstrapProtocolPage() {
           </label>
         </div>
         <p className="text-xs text-dark-400">
-          Three <strong>distinct</strong> UTxOs, not one. Sharing a seed across slots produces a
-          different, incompatible protocol — and it would deploy without complaint, because the
-          two same-typed outref fields in the record would then hold one value and the
-          derivation check could not fail. Read from the connected wallet and locked, because a
-          mistyped outref is still a valid parameter: it parameterises every one-shot policy
-          against a UTxO the transaction cannot consume, and the failure names a missing input
-          rather than a typo.
+          Three <strong>distinct</strong> ADA-only UTxOs. Each one is spent to parameterise a
+          minting policy, which is what makes that policy <strong>one-shot</strong>: it can only
+          ever run in the transaction consuming that exact UTxO, so the NFTs it mints cannot be
+          forged or minted twice. Three policies, three seeds — sharing one would produce a
+          different, incompatible protocol.
+        </p>
+        <p className="text-xs text-dark-400">
+          Either the wallet has them or we create them below. Read from the wallet and locked: a
+          mistyped outref is still valid input, and fails later as a missing UTxO.
         </p>
 
-        {wallet.connected && seedSource === "wallet" && (
-          <p className="text-xs text-green-300">
-            Filled from the wallet — three distinct UTxOs of the {usableUtxoCount} usable ones.
-            These are spent by the deployment, which is then <strong>five</strong> transactions
-            rather than six.
-          </p>
-        )}
         {wallet.connected && seedSource === "none" && (
           <div className="space-y-2 rounded border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-200">
             {walletUtxoTotal === 0 ? (
               <p>
-                The provider returned <strong>no UTxOs at all</strong> for{" "}
+                No UTxOs at all for{" "}
                 <code className="break-all">{queriedAddress ?? "this wallet"}</code>. Splitting
-                would not help — nothing here is a funding problem yet. Check that this is the
-                address you funded (a wallet&apos;s change address is often not the one you sent
-                to), and that the Blockfrost key baked into this build is for {network}.
+                won&apos;t help. Check this is the address you funded (a wallet&apos;s change
+                address often isn&apos;t), and that this build&apos;s Blockfrost key is for{" "}
+                {network}.
               </p>
             ) : (
               <p>
-                This wallet has {usableUtxoCount ?? 0} of {walletUtxoTotal ?? "?"} UTxO(s) usable
-                as a seed and needs three. (A UTxO carrying native assets or a reference script
-                cannot be one.) Splitting makes them <strong>50, 10 and 10 ADA</strong> — unequal
-                because each seed part-funds the transaction that consumes it, and the protocol
-                genesis mints two assets and runs scripts where the multisig genesis mints one
-                NFT. Splitting is ordinary, repeatable housekeeping — it is kept out of the
-                deployment proper so that a failure here costs nothing.
+                {usableUtxoCount ?? 0} of {walletUtxoTotal ?? "?"} UTxOs are usable as seeds —
+                native assets or a reference script disqualify one — and three are needed.
+                Splitting makes <strong>50, 10 and 10 ADA</strong>.
               </p>
             )}
             <button
@@ -962,23 +1181,23 @@ export default function BootstrapProtocolPage() {
             />
           </div>
         ))}
-      </section>
+      </CeremonyStep>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-semibold text-white">2. Upgrade multisig</h2>
+      <CeremonyStep
+        label="2"
+        title="Upgrade multisig"
+        done={!!multisig}
+        summary={multisig ? `${multisig.required}-of-${multisig.members.length}` : undefined}
+      >
         <label className="block text-xs font-medium text-dark-200" htmlFor="multisig-members">
           Members — one per line
         </label>
         <p className="text-xs text-dark-400">
-          Payment key hashes or bech32 addresses, one per line. An address is reduced to its
-          payment credential; a script credential is refused, because a script cannot sign.
-        </p>
-        <p className="text-xs text-accent-300">
-          Ask participants for an ADDRESS, not a key hash. A bech32 address carries a checksum,
-          so a character mistyped or mangled on the way here is rejected the moment you paste
-          it. A key hash has none — every wrong one is 56 valid-looking characters, and the
-          mistake survives to the signing round, where the member list is already on chain and
-          the fix costs the whole ceremony.
+          One per line: an <strong>address</strong> (preferred) or a payment key hash. Addresses
+          are checksummed, so a mangled one is refused on paste; a wrong key hash looks valid and
+          survives to the signing round. Script credentials are <strong>not currently
+          supported</strong> — the standard allows them, but every declared member signs at genesis
+          and a script cannot take part in that.
         </p>
         <textarea
           id="multisig-members"
@@ -1002,15 +1221,25 @@ export default function BootstrapProtocolPage() {
           />
           <span className="text-xs text-dark-400">of {memberEntries.length || "—"}</span>
         </div>
-      </section>
+        {/*
+          `max` on a number input stops neither typing nor pasting, and `resolveMultisig` only
+          throws at DERIVE time — several steps after the mistake was made. Said here instead.
+        */}
+        {thresholdProblem && <p className="text-xs text-red-400">{thresholdProblem}</p>}
+      </CeremonyStep>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-semibold text-white">3. Parameters</h2>
+      <CeremonyStep
+        label="3"
+        title="Parameters"
+        done={paramsReady}
+        summary={
+          paramsReady
+            ? `${maxInline} datum bytes, unfracking ${unfrackingEnabled ? "on" : "off"}`
+            : undefined
+        }
+      >
         <p className="text-xs text-dark-400">
-          Keep the nonce. The bootstrap record stores always_fail&apos;s HASH, not the nonce it
-          came from, so it cannot be recovered from the record afterwards. The inline-datum
-          bound is baked into four scripts at compile time and cannot be changed after
-          deployment.
+          Keep the nonce: the record stores always_fail&apos;s hash, not the nonce.
         </p>
         <div className="flex flex-wrap items-center gap-3 text-sm text-dark-300">
           <label className="flex items-center gap-2">
@@ -1022,6 +1251,23 @@ export default function BootstrapProtocolPage() {
               onChange={(e) => setNonce(e.target.value)}
             />
           </label>
+          {/*
+            28 bytes, the length of a script hash — not because anything requires that, but because
+            a nonce the same shape as the hashes around it is one an operator will not mistake for
+            a truncated value. Still editable: a deployer reproducing an earlier deployment must be
+            able to type the nonce they kept.
+          */}
+          <button
+            type="button"
+            onClick={() => {
+              const bytes = new Uint8Array(28);
+              crypto.getRandomValues(bytes);
+              setNonce([...bytes].map((b) => b.toString(16).padStart(2, "0")).join(""));
+            }}
+            className="rounded border border-dark-600 px-3 py-1.5 text-xs text-dark-100 hover:border-primary-500/40 hover:text-primary-400"
+          >
+            Generate
+          </button>
         </div>
 
         <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
@@ -1036,18 +1282,10 @@ export default function BootstrapProtocolPage() {
             />
           </label>
           <p className="text-xs text-dark-400">
-            Compiled into <code>transfer</code>, <code>third_party</code>, <code>unfracking</code>{" "}
-            and <code>issuance_logic</code>, so it is part of all four script hashes. Changing it
-            later means redeploying those four and upgrading the protocol — a deployment choice,
-            not a setting.
-          </p>
-          <p className="text-xs text-accent-300">
-            1024 is the agreed starting point, not a derived one. Upstream ships no guidance for
-            this parameter and the SDK&apos;s own constant calls 1024 &ldquo;what upstream&apos;s
-            test fixtures use&rdquo; and explicitly not a recommendation — so it is a deliberate
-            provisional choice rather than a cost model, and worth revisiting when one exists.
-            Change it here before deploying if you have a better number; it cannot be changed
-            afterwards.
+            Part of four script hashes (<code>transfer</code>, <code>third_party</code>,{" "}
+            <code>unfracking</code>, <code>issuance_logic</code>), so changing it later means
+            redeploying those four plus an upgrade. 1024 is an agreed starting point, not a
+            derived one — upstream ships no guidance. Set it before deploying.
           </p>
         </div>
 
@@ -1067,41 +1305,47 @@ export default function BootstrapProtocolPage() {
             </span>
           </label>
           <p className="text-xs text-dark-400">
-            The unfracking validator is built, deployed, registered and published either way. This
-            changes only the hash <code>programmable_logic_global</code> is compiled against: the
-            real script hash, or a 28-byte sentinel no script can hash to. With the sentinel the
-            dispatcher&apos;s unfracking arm can never be satisfied, and the deployment records
-            both values because neither implies the other.
+            The validator is deployed either way. This sets what{" "}
+            <code>programmable_logic_global</code> is compiled against: the real hash, or a
+            sentinel nothing can hash to — with the sentinel, unfracking can never be invoked.
+            Both are recorded.
           </p>
           {!unfrackingEnabled && (
             <p className="text-xs text-accent-300">
-              Baked into the dispatcher&apos;s hash and not changeable by configuration afterwards.
-              Enabling it later means compiling a replacement dispatcher, publishing it as a
-              reference script, and a protocol upgrade repointing <code>plg_cred</code> — no new
-              unfracking deployment and no token reissued, but an upgrade rather than a switch.
+              Enabling it later is a protocol upgrade, not a setting — a replacement dispatcher
+              published as a reference script, with <code>plg_cred</code> repointed.
             </p>
           )}
         </div>
-      </section>
 
-      <button
-        type="button"
-        onClick={derive}
-        disabled={stage === "deriving"}
-        className="rounded bg-accent-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-      >
-        {stage === "deriving" ? "Deriving…" : "Derive deployment"}
-      </button>
-
-      {error && (
-        <div className="rounded border border-red-700 bg-red-950/40 p-3 text-sm text-red-200">
-          {error}
+        {/* The action that consumes steps 1-3 sits WITH them, not floating above step 4. */}
+        <div className="flex flex-wrap items-center gap-3 border-t border-dark-800 pt-3">
+          <button
+            type="button"
+            onClick={derive}
+            disabled={stage === "deriving"}
+            className="rounded bg-accent-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {stage === "deriving" ? "Deriving…" : "Derive deployment"}
+          </button>
+          {!seedsReady && (
+            <span className="text-xs text-dark-400">Needs three seeds from step 1.</span>
+          )}
         </div>
-      )}
+        {error && (
+          <div className="rounded border border-red-700 bg-red-950/40 p-3 text-sm text-red-200">
+            {error}
+          </div>
+        )}
+      </CeremonyStep>
 
       {derived && (
-        <section className="space-y-4">
-          <h2 className="text-lg font-semibold text-white">4. What would be deployed</h2>
+        <CeremonyStep
+          label="4"
+          title="What would be deployed"
+          done={!!planned}
+          summary={planned ? "superseded by the plan below" : undefined}
+        >
           {blueprintSha && pin && (
             <p className="text-xs text-dark-400">
               Blueprint {pin.declares.title} {pin.declares.version}, {pin.declares.compiler},{" "}
@@ -1123,18 +1367,15 @@ export default function BootstrapProtocolPage() {
               duplicate until you know one is the script and the other is what the dispatcher was
               compiled against. */}
           <p className="text-xs text-dark-400">
-            <code>unfracking</code> is the validator this deployment publishes.{" "}
-            <code>unfrackingParameter</code> is the hash{" "}
-            <code>programmableLogicGlobal</code> was compiled against —{" "}
+            <code>unfracking</code> is the validator deployed.{" "}
+            <code>unfrackingParameter</code> is what <code>programmableLogicGlobal</code> was
+            compiled against —{" "}
             {derived.unfrackingParameter === derived.unfracking ? (
               <>the same value, so unfracking is permitted.</>
             ) : (
-              <>
-                the disabled sentinel, so unfracking can never be invoked. The validator is still
-                deployed, registered and published; only the dispatcher refuses it.
-              </>
+              <>the sentinel, so it can never be invoked.</>
             )}{" "}
-            Both are recorded because neither can be derived from the other.
+            Both recorded.
           </p>
 
           {multisig && (
@@ -1152,62 +1393,29 @@ export default function BootstrapProtocolPage() {
             </p>
           )}
 
-          <button
-            type="button"
-            onClick={downloadRecord}
-            className="rounded border border-dark-600 px-3 py-1.5 text-xs text-white"
-          >
-            Download bootstrap record template
-          </button>
-
           <p className="text-xs text-dark-400">
-            Derived from the seeds in step 1 — the same ones the deployment consumes, so these
-            are the hashes it produces.
+            Derived from the step 1 seeds, so these are the hashes the deployment produces.
           </p>
-        </section>
+        </CeremonyStep>
       )}
 
 
-      <section className="space-y-3 border-t border-dark-800 pt-6">
-        <h2 className="text-lg font-semibold text-white">Deploy</h2>
+      <CeremonyStep
+        label="5"
+        title="Build and verify"
+        done={!!planned}
+        summary={
+          planned?.verification.ok
+            ? `4 transactions, ${planned.verification.checks.length} hashes verified`
+            : undefined
+        }
+      >
         <p className="text-xs text-dark-400">
-          Builds all six transactions and evaluates every one of them — with real execution
-          units, against the outputs the earlier steps will create — before the wallet is asked
-          for a single signature. The complete deployment, transaction hashes included, is known
-          at that point, so it is verified against the pinned blueprint here rather than
-          afterwards. <strong>Nothing is submitted until all of that passes.</strong> It is not
-          atomic and cannot be: six chained transactions cannot be unwound once the fourth lands.
+          Builds and evaluates all four transactions — real execution units, against outputs the
+          earlier steps will create — then verifies the result against the pinned blueprint.{" "}
+          <strong>Nothing is submitted until that passes.</strong> Not atomic: four chained
+          transactions cannot be unwound.
         </p>
-        <p className="text-xs text-dark-400">
-          Uses the seeds from step 1. With them the plan is <strong>five</strong> transactions;
-          without them it opens by creating three seed UTxOs and is six. Keep the{" "}
-          <strong>always_fail nonce</strong> you enter — the bootstrap record stores its hash,
-          not the nonce, and it cannot be recovered from the record afterwards.
-        </p>
-
-        <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
-          <label className="flex items-start gap-2 text-sm text-dark-200">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={mineable}
-              onChange={(e) => setMineable(e.target.checked)}
-              disabled={planning || !!planned}
-            />
-            <span>Mine a low hash for the reference-script transaction</span>
-          </label>
-          <p className="text-xs text-dark-400">
-            Its outputs are the seven published reference scripts, which every future protocol
-            operation reads — a low transaction hash makes them sort early in those transactions,
-            keeping the indices that point at them predictable. It is the last transaction of the
-            plan precisely so its hash can move without invalidating anything built after it.
-          </p>
-          <p className="text-xs text-dark-400">
-            Adds one extra output of about 1 ADA back to your own address, which a search
-            increments one lovelace at a time. That output has to exist before the transaction is
-            built, so this cannot be turned on after planning.
-          </p>
-        </div>
 
         <div className="flex flex-wrap items-center gap-3">
           <button
@@ -1216,7 +1424,7 @@ export default function BootstrapProtocolPage() {
             disabled={planning || !wallet.connected}
             className="rounded border border-dark-600 px-3 py-1.5 text-xs text-white disabled:opacity-40"
           >
-            {planning ? "Building all six…" : "Build and verify"}
+            {planning ? "Building all four…" : "Build and verify"}
           </button>
           {!wallet.connected && (
             <span className="text-xs text-dark-400">Connect the deploying wallet first.</span>
@@ -1230,11 +1438,11 @@ export default function BootstrapProtocolPage() {
         )}
 
         {planned && (
-          <div className="space-y-3">
+          <>
             <p className="text-xs text-dark-400">
-              Phase one is yours alone and spends the three one-shot seeds. Phase two needs a
-              signature from every declared participant and is built only once phase one has
-              confirmed on chain — the genesis references a UTxO that does not exist until then.
+              Phase one is yours alone. Phase two needs every declared participant, and is built
+              only after phase one confirms — the genesis references a UTxO that does not exist
+              until then.
             </p>
 
             <ol className="space-y-1 font-mono text-xs text-dark-300">
@@ -1288,11 +1496,113 @@ export default function BootstrapProtocolPage() {
               </div>
             )}
 
-            {/* The mining panel lived here. Mining is not wired into the ceremony (T-058
-                dropped): it was only ever safe on the LAST transaction, whose hash nothing is
-                chained onto, and where it belongs under alpha.5 is an open question upstream.
-                `lib/mining/` and /ops/mine-check are untouched and ready to re-wire. */}
+            {/*
+              Warn, keep, block. Placed with the plan because it is the plan this invalidates
+              submitting — nothing here is lost, and reselecting the original account resumes.
+            */}
+            {/*
+              The resume question: which of the six credentials are already registered? Offered
+              whenever a plan exists, because an interrupted ceremony looks exactly like a fresh one
+              until somebody asks the chain.
+            */}
+            <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[10px] uppercase tracking-wider text-dark-400">
+                  Credential registrations
+                </p>
+                <button
+                  type="button"
+                  onClick={runProbe}
+                  disabled={probing}
+                  className="rounded border border-dark-600 px-2 py-0.5 text-[10px] text-dark-200 hover:text-primary-400 disabled:opacity-40"
+                >
+                  {probing ? "Checking…" : probe ? "Check again" : "Check what is already registered"}
+                </button>
+              </div>
+              {!probe ? (
+                <p className="text-[11px] text-dark-500">
+                  Only worth asking when resuming. A fresh deployment has none of them registered,
+                  and phase one registers all six in one transaction.
+                </p>
+              ) : (
+                <>
+                  <ul className="space-y-0.5">
+                    {probe.credentials.map((c) => (
+                      <li key={c.name} className="flex flex-wrap items-center gap-2 text-[11px]">
+                        <span
+                          className={
+                            c.state === "registered"
+                              ? "text-green-300"
+                              : c.state === "unregistered"
+                                ? "text-dark-300"
+                                : "text-accent-300"
+                          }
+                        >
+                          {c.state === "registered"
+                            ? "registered"
+                            : c.state === "unregistered"
+                              ? "not registered"
+                              : "cannot tell"}
+                        </span>
+                        <span className="text-dark-400">{c.name}</span>
+                        {c.detail && <span className="text-dark-500">— {c.detail}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                  {registrationsComplete(probe) ? (
+                    <p className="text-xs text-green-300">
+                      All six are registered, so phase one&apos;s registration transaction has
+                      already landed. Re-submitting phase one would be refused by the ledger as
+                      StakeKeyAlreadyRegisteredDELEG — resume at phase two.
+                    </p>
+                  ) : probe.unknown > 0 ? (
+                    <p className="text-xs text-accent-300">
+                      {probe.unknown} of {probe.credentials.length} could not be determined, so
+                      nothing is assumed. Both guesses are expensive: re-registering an existing
+                      credential fails the whole transaction, and skipping a missing one fails later
+                      inside the genesis. On a network with no deployment recorded the indexer will
+                      not start at all unless <code>CIP113_ALLOW_NO_DEPLOYMENT=true</code>, which
+                      reads as exactly this.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-dark-300">
+                      {probe.registered} of {probe.credentials.length} registered — phase one still
+                      has work to do.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
 
+            {accountMoved && (
+              <div className="space-y-2 rounded border border-amber-600 bg-amber-950/40 p-3 text-xs text-amber-100">
+                <p>
+                  <strong>The wallet has changed account since this plan was built.</strong>{" "}
+                  Nothing is lost — the plan, any signatures collected and every submitted
+                  transaction are all still here. But these transactions were built to be paid and
+                  signed by the original account, so submitting from this one would be refused by
+                  the wallet itself. Switch back and everything resumes.
+                </p>
+                <p className="break-all font-mono text-[10px] text-amber-200">
+                  built for {accountMoved.built}
+                  <br />
+                  now connected {accountMoved.now}
+                </p>
+              </div>
+            )}
+
+          </>
+        )}
+      </CeremonyStep>
+
+      {planned && (
+        <CeremonyStep
+          label="Phase one"
+          title="Yours alone"
+          done={phaseOneDone}
+          summary={phaseOneDone ? "2 transactions on chain" : undefined}
+        >
+          {/* Progress sits beside the button that starts it, not in a banner above. */}
             {progress && <p className="text-xs text-amber-200">{progress}</p>}
 
             {/* ---- PHASE ONE: the deployer alone ---- */}
@@ -1304,15 +1614,16 @@ export default function BootstrapProtocolPage() {
                   disabled={
                     !planned.verification.ok ||
                     !!progress ||
+                    !!accountMoved ||
                     (cannotAuthorise && !acceptedNoAuthority)
                   }
                   className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
                 >
-                  Submit phase one (seed, multisig, registrations)
+                  Submit phase one (multisig, registrations)
                 </button>
                 <p className="text-xs text-dark-400">
-                  Three transactions, signed by you. They spend the seed UTxOs, so from here the
-                  deployment cannot be rebuilt from the same inputs.
+                  Two transactions, signed by you. They spend the seeds — the deployment
+                  can&apos;t be rebuilt from the same inputs afterwards.
                 </p>
               </>
             )}
@@ -1322,23 +1633,44 @@ export default function BootstrapProtocolPage() {
                 plan, which is the record both repositories need. */}
             {phaseOneDone && !deployComplete && (
               <p className="rounded border border-dark-700 bg-dark-950 p-2 text-xs text-dark-300">
-                Keep this tab open. The transactions already submitted cannot be undone and
-                their seed UTxOs are spent — and while the deployment record can be rebuilt from
-                the genesis hex you circulate, the plan behind it only lives here.
+                Keep this tab open. The genesis and witnesses survive by paste; the plan does
+                not.
               </p>
             )}
 
+        </CeremonyStep>
+      )}
+
+      {planned && phaseOneDone && (
+        <CeremonyStep
+          label="Phase two"
+          title="Every participant signs"
+          done={deployComplete}
+          summary={deployComplete ? "genesis and reference scripts on chain" : undefined}
+        >
             {/* ---- BETWEEN: the gate, then the operator's explicit second act ---- */}
             {phaseOneDone && !genesisStep && (
               <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3 text-xs">
                 <p className="text-amber-200">
-                  Phase one is on chain. The genesis takes the upgrade-multisig config UTxO as a
-                  reference input, and Blockfrost&apos;s script evaluator runs a little behind its
-                  own query endpoints — so the UTxO can be listed and still not be usable yet.
-                  This waits {GENESIS_GATE_DEPTH} blocks rather than a fixed number of seconds,
-                  because that lag is measured in blocks and a timer under-waits whenever the
-                  chain is slow.
+                  Phase one is on chain. Blockfrost&apos;s evaluator runs behind its query
+                  endpoints, so the config UTxO can be listed and not yet usable. Waits{" "}
+                  {GENESIS_GATE_DEPTH} blocks, not a timer.
                 </p>
+
+                {/*
+                  ⚑ SAYING OUT LOUD WHAT WAS ALREADY PROVEN. `awaitMultisigConfigUtxo` passes the
+                  declared tree as `expectedTree` and `assertMultisigConfigUtxo` THROWS unless the
+                  datum on chain matches it — so by the time `configUtxo` is non-null, the member
+                  list has been verified against the chain. Giovanni asked to be able to verify the
+                  PKHs landed; the check existed and only the answer was missing.
+                */}
+                {configUtxo && multisig && (
+                  <p className="text-green-300">
+                    The config UTxO on chain carries the upgrade authority you declared —{" "}
+                    {multisig.required}-of-{multisig.members.length}, datum checked against all{" "}
+                    {multisig.members.length} key hashes, not just read back.
+                  </p>
+                )}
 
                 <p className={gateOpen ? "text-green-300" : "text-dark-300"}>
                   {!configUtxo
@@ -1353,7 +1685,7 @@ export default function BootstrapProtocolPage() {
                 <button
                   type="button"
                   onClick={preparePhaseTwo}
-                  disabled={!configUtxo || !gateOpen || preparingGenesis}
+                  disabled={!configUtxo || !gateOpen || preparingGenesis || !!accountMoved}
                   className={`rounded px-3 py-1.5 ${
                     gateOpen && configUtxo && !preparingGenesis
                       ? "border border-green-600 text-green-100 hover:bg-green-950"
@@ -1397,40 +1729,73 @@ export default function BootstrapProtocolPage() {
                 <button
                   type="button"
                   onClick={submitPhaseTwo}
-                  disabled={!!progress || deployComplete || !cosign.complete}
+                  disabled={!!progress || deployComplete || !cosign.complete || !!accountMoved}
                   className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
                 >
                   Submit the genesis and publish the reference scripts
                 </button>
                 {!cosign.complete && (
                   <p className="text-xs text-dark-400">
-                    Waiting on participant signatures. Every declared member must sign the
-                    PROTOCOL GENESIS — it carries the withdraw-0 whose authority tree they are —
-                    and there is no override: an unproven key recorded as an authority is what
-                    this step exists to prevent.
+                    Every declared member must sign the protocol genesis — it carries the
+                    withdraw-0 whose authority tree they are. No override.
                   </p>
                 )}
               </>
             )}
-          </div>
-        )}
+        </CeremonyStep>
+      )}
 
+      <section className="space-y-3 border-t border-dark-800 pt-6">
         {submitted && submitted.length > 0 && (
           <div className="space-y-2">
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-mono text-xs">
               {submitted.map((s) => (
                 <div key={s.txHash} className="contents">
                   <dt className="text-dark-400">{s.label}</dt>
-                  <dd className="break-all text-white">{s.txHash}</dd>
+                  <dd className="break-all text-white">
+                    {s.txHash}{" "}
+                    {/*
+                      Only transactions that actually CARRY a record get a link. Offering one on a
+                      transaction with no metadata sends the operator to a page that finds nothing,
+                      which reads as a failed verification.
+                    */}
+                    {STEPS_WITH_PROVENANCE.includes(stepIdForLabel(s.label) ?? "") && (
+                      <a
+                        href={verifyTxUrl(s.txHash)}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="whitespace-nowrap text-primary-400 underline"
+                      >
+                        verify ↗
+                      </a>
+                    )}
+                  </dd>
                 </div>
               ))}
             </dl>
+            {deployComplete && (
+              <>
+              <p className="text-xs text-dark-300">
+                The multisig config and the protocol genesis each carry the CIP-171 provenance
+                record, so their <span className="text-primary-400">verify</span> links replay the
+                build against the source it was compiled from — and because records are keyed by
+                script hash, those cover the reference scripts too. The other two transactions
+                publish no record and get no link.
+              </p>
+              <p className="text-xs text-dark-400">
+                A link that shows nothing is usually not a failure. The record names the
+                blueprint&apos;s unparameterised hashes and its source commit, which do not change
+                between deployments — so if this blueprint revision has been deployed before,
+                anywhere, the registry already credits that earlier transaction and has nothing to
+                add for this one. Indexing is also not instant.
+              </p>
+              </>
+            )}
             {syncStart && (
               <p className="text-xs text-dark-300">
                 Indexer sync start — <code>STORE_SYNC_START_BLOCKHASH</code>{" "}
                 {syncStart.blockHash}, <code>STORE_SYNC_START_SLOT</code> {syncStart.slot}. The
-                block immediately BEFORE the genesis; err earlier if in doubt, too early only
-                costs sync time.
+                block before the genesis; err earlier if unsure.
               </p>
             )}
             {deployComplete ? (
@@ -1448,93 +1813,24 @@ export default function BootstrapProtocolPage() {
               </>
             ) : (
               <p className="rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-200">
-                Partial deployment — no bootstrap record is offered. The record would name
-                reference inputs and a config UTxO belonging to transactions that were never
-                submitted, and it would still pass verification, because verification re-derives
-                from the blueprint and knows nothing about what reached the chain.
+                Partial deployment — no record offered. It would name UTxOs from transactions
+                that never landed and still verify, because verification re-derives from the
+                blueprint and knows nothing about the chain.
               </p>
             )}
           </div>
         )}
       </section>
 
-      <section className="space-y-3 border-t border-dark-800 pt-6">
-        <h2 className="text-lg font-semibold text-white">
-          Verify a deployment made elsewhere
-        </h2>
+      <section className="space-y-2 border-t border-dark-800 pt-6">
         <p className="text-xs text-dark-400">
-          Independent of the steps above. Paste the <code>DeploymentParams</code> produced by a
-          deployment made on another machine — or a one-entry{" "}
-          <code>protocol-bootstraps-{network}.json</code> — and every script hash in it is
-          re-derived from the pinned blueprint and compared. A record is only offered for
-          download once all of them match: the platform indexes against this file, so a hash
-          that was mistyped or copied from another network would point the indexer at scripts
-          that were never deployed.
+          Verifying a deployment made somewhere else is its own page:{" "}
+          <a href="/verify-deployment" className="text-primary-400 underline">
+            /verify-deployment
+          </a>
+          . It is not a step of a ceremony, and it stays reachable with these operator tools
+          switched off.
         </p>
-        <textarea
-          value={pastedDeployment}
-          onChange={(e) => setPastedDeployment(e.target.value)}
-          rows={8}
-          spellCheck={false}
-          placeholder='{ "protocolParams": { … }, "transfer": { … }, … }'
-          className={`w-full ${FIELD}`}
-        />
-        <button
-          type="button"
-          onClick={runVerification}
-          disabled={!pastedDeployment.trim()}
-          className="rounded border border-dark-600 px-3 py-1.5 text-xs text-white disabled:opacity-40"
-        >
-          Verify
-        </button>
-
-        {verification && (
-          <div className="space-y-2">
-            {verification.error && (
-              <p className="rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-200">
-                {verification.error}
-              </p>
-            )}
-            {verification.checks.length > 0 && (
-              <dl className="grid grid-cols-[auto_auto_1fr] gap-x-3 gap-y-1 font-mono text-xs">
-                {verification.checks.map((c) => (
-                  <div key={c.name} className="contents">
-                    <dt className={c.matches ? "text-green-400" : "text-red-400"}>
-                      {c.matches ? "match" : "MISMATCH"}
-                    </dt>
-                    <dd className="text-dark-400">{c.name}</dd>
-                    <dd className="break-all text-white">
-                      {c.matches ? c.deployed : `deployed ${c.deployed} — derives to ${c.derived}`}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-            )}
-            {verification.ok ? (
-              <>
-                <p className="text-xs text-green-300">
-                  All {verification.checks.length} hashes re-derived and matched.
-                </p>
-                <button
-                  type="button"
-                  onClick={downloadVerifiedRecord}
-                  className="rounded border border-green-700 px-3 py-1.5 text-xs text-green-200"
-                >
-                  Download bootstrap record
-                </button>
-                {verifiedEntry && (
-                  <SdkRecordDownload entry={verifiedEntry} network={network} />
-                )}
-              </>
-            ) : (
-              <p className="text-xs text-red-300">
-                Not verified — no bootstrap record is produced.
-                {verification.mismatches.length > 0 &&
-                  ` ${verification.mismatches.length} of ${verification.checks.length} hashes do not derive from this blueprint.`}
-              </p>
-            )}
-          </div>
-        )}
       </section>
     </main>
   );

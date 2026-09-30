@@ -89,38 +89,6 @@ function blockfrostBaseUrl(network: CardanoNetwork): string {
 }
 
 /**
- * Is this reward address registered RIGHT NOW?
- *
- * Not "has it ever been seen": Blockfrost keeps returning an account after it is deregistered,
- * with `active: false`, and a deregistered credential must be registered again. Reading
- * presence as registration would build a delegate-only transaction for a credential that has
- * no registration to delegate — and that failure lands after four transactions have already
- * been submitted.
- *
- * Fails CLOSED: a network error throws rather than guessing, because both guesses are wrong in
- * a way that only surfaces mid-deployment.
- */
-async function isStakeRegisteredViaBlockfrost(
-  network: CardanoNetwork,
-  projectId: string,
-  rewardAddress: string,
-): Promise<boolean> {
-  const res = await fetch(`${blockfrostBaseUrl(network)}/accounts/${rewardAddress}`, {
-    headers: { project_id: projectId },
-  });
-  if (res.status === 404) return false;
-  if (!res.ok) {
-    throw new Error(
-      `Could not determine whether ${rewardAddress} is already registered (Blockfrost ` +
-        `returned ${res.status}). Refusing to guess: the wrong answer is only discovered ` +
-        `after four transactions have been submitted.`,
-    );
-  }
-  const body = (await res.json()) as { active?: boolean };
-  return body.active === true;
-}
-
-/**
  * An Evolution signing client over the connected CIP-30 wallet.
  *
  * Built the same way in every entry point below, because a client built with a different
@@ -295,8 +263,19 @@ export interface PlanDeploymentInput {
    * dispatcher was compiled against differs, and the deployment records both.
    */
   unfrackingEnabled?: boolean;
-  /** Add the ~1 ADA self-output the miner needs to the last transaction. Build-time only. */
-  mineable?: boolean;
+  /**
+   * CIP-171 provenance, now attached to the MULTISIG GENESIS as well as the protocol genesis
+   * (SDK 0.14.0 added `provenancePin` to `MultisigGenesisTxParams`).
+   *
+   * ⚑ TIMING, NOT COVERAGE. Records are keyed by script hash and the genesis record already names
+   * `upgrade_multisig`, so this adds nothing to the registry's eventual knowledge. What it adds is
+   * a record that exists BETWEEN the phases: the multisig lands first and installs the upgrade
+   * authority, and until the genesis lands there is no provenance on chain at all — which is
+   * exactly when a driver wants to check the authority they just installed.
+   *
+   * Optional. Omitting it reproduces every deployment made before 0.14.0.
+   */
+  provenancePin?: unknown;
 }
 
 /**
@@ -326,20 +305,6 @@ export interface DeploymentPlan {
   /** Re-derived from the pinned blueprint. `ok === false` means nothing may be signed. */
   verification: VerificationResult;
 }
-
-/*
- * `applyMinedStep` lived here and has been REMOVED with the mining feature (T-058).
- *
- * It repointed every `*RefInput` to the mined transaction's hash, which was correct only
- * because the mined step was always the LAST one — the reference-script transaction, published
- * last precisely so its hash could move without invalidating anything chained onto it. Mining
- * the genesis instead, as was briefly proposed, would have repointed all seven reference
- * inputs at the genesis while the scripts themselves sat in a later transaction, and
- * verification would still have passed: it re-derives script hashes from parameters and knows
- * nothing about where outputs live. The mining code itself is untouched under `lib/mining/`
- * and `/ops/mine-check`, ready to be re-wired once upstream says which transaction should
- * carry a low hash and why.
- */
 
 export interface CeremonyPlan {
   plan: BootstrapPlan;
@@ -455,6 +420,7 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
         upgradeMultisigTree: input.multisig.tree as never,
         ownerAddress: ctx.changeAddress,
         seedLovelace: DEFAULT_SEED_LOVELACE,
+        provenancePin: input.provenancePin as never,
       })
     : [];
 

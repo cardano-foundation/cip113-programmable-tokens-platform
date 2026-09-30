@@ -33,6 +33,7 @@
 
 import { EvoAssets, EvoTransactionHash } from "@easy1staking/cip113-sdk-ts";
 import {
+  type BootstrapStepId,
   planBootstrap,
   buildSeedTx,
   buildMultisigGenesisTx,
@@ -546,21 +547,20 @@ export function assertCeremonyContext(ctx: CeremonyContext, where = "ceremony"):
 export { BOOTSTRAP_SEED_COUNT };
 export type { BootstrapPlan, DeploymentParams };
 
-/**
- * The five steps, named as the operator sees them, split by who has to act.
- *
- * ⛔ THE SPLIT IS THE POINT. Phase one is the deployer alone; phase two needs every
- * declared participant. Anything in phase one that could be deferred to phase two
- * SHOULD be, because phase two happens with people waiting on a call — and anything
- * in phase two that could be done in phase one must not be, because phase one spends
- * the one-shot seeds and there is no going back from it.
- */
-export const PHASE_ONE_STEPS = ["seed", "multisig-genesis", "stake-registrations"] as const;
-export const PHASE_TWO_STEPS = ["protocol-genesis", "reference-scripts"] as const;
-
 export interface CeremonyStep {
   /** Shown to the operator; also what an error names. */
   label: string;
+  /**
+   * WHICH step this is, as the SDK names it — `BOOTSTRAP_STEPS`, not a string of ours.
+   *
+   * ⛔ CARRIED HERE RATHER THAN MAPPED FROM `label`, because a resume has to know what already
+   * landed and the display labels are not stable identifiers: "upgrade multisig" is prose, and a
+   * lookup table pairing prose to ids is a second source of truth that drifts the first time
+   * somebody improves the wording. The SDK's own list moved once already — `stake-registrations`
+   * went from last to third at 0.12.0 while every string stayed the same — so the id travels with
+   * the step that produced it.
+   */
+  step: BootstrapStepId;
   unsignedCbor: string;
 }
 
@@ -589,10 +589,27 @@ export { selectBootstrapSeeds, assertMultisigConfigUtxo, assembleDeploymentParam
 export type MultisigConfigLocation = ReturnType<typeof assertMultisigConfigUtxo>;
 
 /**
- * Phase one: the three transactions the deployer submits alone.
+ * Phase one: the transactions the deployer submits alone.
  *
- * Built together and submitted in order. They chain — the seed transaction's outputs
- * fund the two that follow — so they are built in one pass against the same UTxO set.
+ * TWO of them in the live flow — `upgrade multisig` and `register credentials` — because
+ * `planDeployment` requires the three seeds to exist already and therefore passes
+ * `needsSeedTx: false`. The optional `seed UTxOs` step below is reached only by a caller that
+ * asks for it, which today is no one; splitting seeds is its own transaction on the page,
+ * deliberately outside the plan so a failure there costs nothing.
+ *
+ * Built together and submitted in order. They chain, so they are built in one pass against the
+ * same UTxO set.
+ *
+ * ⛔ THE SPLIT IS THE POINT. Phase one is the deployer alone; phase two needs every declared
+ * participant. Anything in phase one that could be deferred to phase two SHOULD be, because
+ * phase two happens with people waiting on a call — and anything in phase two that could be
+ * done in phase one must not be, because phase one spends the one-shot seeds and there is no
+ * going back from it.
+ *
+ * ⚑ A PREVIOUS `PHASE_ONE_STEPS` / `PHASE_TWO_STEPS` PAIR LIVED HERE and was deleted: nothing
+ * imported it, and its names ("seed", "multisig-genesis", "stake-registrations") were not the
+ * labels this function actually emits. A second, wrong naming of the steps is worse than none,
+ * because it reads like the authority.
  */
 export async function buildPhaseOne(params: {
   ctx: CeremonyContext;
@@ -606,6 +623,16 @@ export async function buildPhaseOne(params: {
   /** Lovelace per seed output. No default: each seed funds part of the transaction that
    *  consumes it, so the right figure depends on the chain and on what should be left over. */
   seedLovelace: SeedTxParams["seedLovelace"];
+  /**
+   * CIP-171 provenance for the MULTISIG GENESIS, new in SDK 0.14.0.
+   *
+   * ⚑ WHY THIS TRANSACTION AND NOT ONLY THE PROTOCOL GENESIS. Records are keyed by script hash, so
+   * the genesis record already resolves `upgrade_multisig` — this is about TIMING. The multisig
+   * lands first and installs the upgrade authority, and until the genesis lands there is no
+   * provenance anywhere on chain. That gap is the window in which a driver wants to verify the
+   * authority they just installed, which on preprod is an hour with people on a call.
+   */
+  provenancePin?: MultisigGenesisTxParams["provenancePin"];
 }): Promise<CeremonyStep[]> {
   const steps: CeremonyStep[] = [];
 
@@ -615,7 +642,7 @@ export async function buildPhaseOne(params: {
       ownerAddress: params.ownerAddress,
       seedLovelace: params.seedLovelace,
     };
-    steps.push({ label: "seed UTxOs", unsignedCbor: cborOf(await buildSeedTx(seedParams)) });
+    steps.push({ label: "seed UTxOs", step: "seed", unsignedCbor: cborOf(await buildSeedTx(seedParams)) });
   }
 
   const multisigParams: MultisigGenesisTxParams = {
@@ -623,15 +650,18 @@ export async function buildPhaseOne(params: {
     plan: params.plan,
     seedUtxo: params.seedUtxo,
     upgradeMultisigTree: params.upgradeMultisigTree,
+    provenancePin: params.provenancePin,
   };
   steps.push({
     label: "upgrade multisig",
+    step: "multisig-genesis",
     unsignedCbor: cborOf(await buildMultisigGenesisTx(multisigParams)),
   });
 
   const regParams: StakeRegistrationTxParams = { ...params.ctx, plan: params.plan };
   steps.push({
     label: "register credentials",
+    step: "stake-registrations",
     unsignedCbor: cborOf(await buildStakeRegistrationTx(regParams)),
   });
   return steps;
@@ -671,6 +701,7 @@ export async function buildProtocolGenesis(params: {
   };
   return {
     label: "protocol genesis",
+    step: "protocol-genesis",
     unsignedCbor: cborOf(await buildProtocolGenesisTx(genesisParams)),
   };
 }
@@ -699,6 +730,7 @@ export async function buildReferenceScripts(params: {
   };
   return {
     label: "reference scripts",
+    step: "reference-scripts",
     unsignedCbor: cborOf(await buildReferenceScriptsTx(refParams)),
   };
 }

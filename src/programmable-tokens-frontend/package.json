@@ -20,7 +20,6 @@
     "test:cmta-attestation": "tsc lib/rwa/attestation.ts --outDir .attestation-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-cmta-attestation.js",
     "test:mint-recovery": "tsc lib/rwa/mint-recovery-storage.ts lib/rwa/initial-mint-draft.ts lib/rwa/initial-mint-cap.ts lib/rwa/registration-run.ts lib/rwa/registration-chain-status.ts --outDir .mint-recovery-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-mint-recovery-storage.js && node test-initial-mint-draft.js && node test-initial-mint-cap.js && node test-initial-mint-scan.js && node test-registration-run.js && node test-registration-chain-status.js",
     "test:registry": "tsc lib/registry/walk.ts lib/registry/types.ts lib/registry/modules.ts --outDir .registry-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .registry-build && node test-registry-walk.js",
-    "test:mining": "tsc lib/mining/mine.ts lib/mining/target.ts lib/mining/locate.ts lib/mining/locate.ts --outDir .mine-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .mine-build && node test-mining.js && node test-mining-locate.js && node test-mining-splice.js && node test-mining-locate.js",
     "test:witness": "tsc lib/tx/witness-set.ts --outDir .witness-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .witness-build && node test-witness-preservation.js",
     "test:txhash": "tsc lib/tx/hash.ts lib/tx/witness-set.ts lib/utils/tx-hash.ts --outDir .hash-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .hash-build && node test-tx-hash.js",
     "test:sdkrecord": "tsc lib/deployment/sdk-record.ts --outDir .sdkrec-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .sdkrec-build && node test-sdk-record.js",
@@ -28,10 +27,13 @@
     "test:colour": "tsc lib/deployment/participant-colour.ts --outDir .colour-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .colour-build && node test-participant-colour.js",
     "test:noanalytics": "node test-no-analytics.js",
     "test:seeds": "tsc lib/deployment/ceremony.ts --outDir .seeds-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .seeds-build && node test-seed-selection.js",
-    "test:mint-confirmation": "tsc lib/rwa/mint-confirmation.ts --outDir .hash-build/mint-confirmation --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .hash-build/mint-confirmation && node test-mint-confirmation.js"
+    "test:mint-confirmation": "tsc lib/rwa/mint-confirmation.ts --outDir .hash-build/mint-confirmation --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .hash-build/mint-confirmation && node test-mint-confirmation.js",
+    "test:relay": "tsc lib/deployment/relay-store.ts lib/tx/hash.ts lib/tx/witness-set.ts --outDir .relay-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .relay-build && node test-relay-store.js",
+    "test:steps": "node test-ceremony-steps.js",
+    "test:resume": "tsc lib/deployment/ceremony-storage.ts lib/deployment/registration-status.ts lib/utils/network.ts --outDir .resume-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .resume-build && node test-ceremony-resume.js"
   },
   "dependencies": {
-    "@easy1staking/cip113-sdk-ts": "^0.13.0",
+    "@easy1staking/cip113-sdk-ts": "^0.14.0",
     "@hookform/resolvers": "^3.9.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^1.8.0",
