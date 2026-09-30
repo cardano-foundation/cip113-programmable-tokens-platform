@@ -359,6 +359,84 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
                         + "credentials. Re-run the blacklist init with the same CIP-68 setting.");
             }
 
+            // ⛔ THE SAME CROSS-CHECK FOR THE OTHER TWO PARAMETERS OF issuer_admin.
+            //
+            // The check above closes the LABEL dimension. `issuer_admin` is parameterised by
+            // (adminPkh, ASSET NAME), and BOTH can differ from what the init registered while the
+            // label agrees:
+            //
+            //   * a different ADMIN — reusing a blacklist created by another wallet. Measured on
+            //     preprod 2026-09-30: an init covered 438e0a0a…, this registration arrived with
+            //     7eb45c3e…, and the withdraw-0 pointed at a reward account nothing had ever
+            //     registered.
+            //   * a different ASSET NAME — a SECOND token against one blacklist. Already present
+            //     in that database: two registrations sharing one blacklist_node_policy_id.
+            //
+            // Either way the ledger rejects with 3141, whose message reads as a balance problem
+            // ("withdrawals must consume rewards in full") and mentions the real cause only in its
+            // last sentence — after the user has signed and paid for the init.
+            //
+            // ⚑ REFUSED HERE, BEFORE BUILDING, because registration CANNOT fix it: the ledger
+            // applies withdrawals before certificates, so this transaction cannot register the
+            // credential it withdraws from. Only a new init can.
+            //
+            // A null recorded address means the row pre-dates the column — no evidence, stay
+            // silent, same convention as cip68Enabled above.
+            var expectedIssuerAdmin = AddressProvider.getRewardAddress(
+                    fesScriptBuilder.buildIssuerAdminScript(adminPkh, userAssetNameHex),
+                    network.getCardanoNetwork()).getAddress();
+            if (initRowOpt.isPresent() && initRowOpt.get().getIssuerAdminStakeAddress() != null
+                && !initRowOpt.get().getIssuerAdminStakeAddress().equals(expectedIssuerAdmin)) {
+                return TransactionContext.typedError(
+                        "This registration's issuer_admin credential is not the one the blacklist "
+                        + "init registered, so the withdraw-0 it needs would target an unregistered "
+                        + "reward account and the ledger would reject it (code 3141).\n"
+                        + "\n"
+                        + "  init registered : " + initRowOpt.get().getIssuerAdminStakeAddress() + "\n"
+                        + "  this needs      : " + expectedIssuerAdmin + "\n"
+                        + "\n"
+                        + "  issuer_admin is parameterised by (admin key hash, asset name), so this "
+                        + "differs because the ADMIN differs (init covered "
+                        + initRowOpt.get().getAdminPkh() + ", this request carries "
+                        + HexUtil.encodeHexString(adminPkh.getBytes()) + ") or because the ASSET NAME "
+                        + "differs — a blacklist covers exactly one pair. Registration cannot repair "
+                        + "it: the ledger applies withdrawals before certificates, so only a new "
+                        + "blacklist init can register this credential. Run a blacklist init with "
+                        + "this admin and this asset name, and register against that blacklist.");
+            }
+
+            // ⛔ AND ASK THE CHAIN, because the comparison above cannot fire for every row.
+            //
+            // The recorded address is NULL on rows written before V33, and those are exactly the
+            // rows most likely to be wrong — they were written while nothing checked. This catches
+            // them, and one case the comparison never could: an init that SKIPPED the certificate
+            // because `isStakeAddressRegistered` answered true when the credential was not in fact
+            // registered. That function has no "unknown" state, so a wrong true silently omits a
+            // certificate and the failure surfaces here, on chain, after payment.
+            //
+            // ⚑ REFUSING ON "NOT REGISTERED" IS SAFE IN THIS DIRECTION. The opposite default —
+            // build anyway and let the ledger decide — is what produced 3141. A false refusal
+            // costs a retry; a false proceed costs the init deposit and leaves the operator reading
+            // a message about rewards balances.
+            if (!scriptRegistrationService.isStakeAddressRegistered(expectedIssuerAdmin)) {
+                return TransactionContext.typedError(
+                        "The issuer_admin reward account this registration must withdraw-0 from is "
+                        + "not registered on chain:\n"
+                        + "\n"
+                        + "  " + expectedIssuerAdmin + "\n"
+                        + "\n"
+                        + "  The blacklist init is the only place it gets registered — the ledger "
+                        + "applies withdrawals before certificates, so this transaction cannot "
+                        + "register the account it withdraws from. Submitting anyway is rejected as "
+                        + "code 3141, whose message describes a rewards-balance problem and mentions "
+                        + "the missing registration only in its last sentence.\n"
+                        + "\n"
+                        + "  issuer_admin is parameterised by (admin key hash, asset name), so a "
+                        + "blacklist covers exactly one pair. Run a blacklist init with THIS admin ("
+                        + HexUtil.encodeHexString(adminPkh.getBytes()) + ") and THIS asset name, and "
+                        + "register the token against that blacklist.");
+            }
+
             /// Getting Module Contracts and parameterize
             // Issuer to be used for minting/burning/sieze
             var moduleIssueContract = fesScriptBuilder.buildIssuerAdminScript(Credential.fromKey(request.getAdminPubKeyHash()), userAssetNameHex);
@@ -1494,6 +1572,15 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
                     // agree; recording it lets registration refuse BEFORE building rather than
                     // fail on chain after the user has paid for both transactions.
                     .cip68Enabled(request.cip68Metadata() != null)
+                    // ⛔ AND WHICH issuer_admin IT WAS, not merely whether it was labelled.
+                    // `adminPkh` above is only HALF the parameter set: issuer_admin is
+                    // (adminPkh, ASSET NAME), so this row could not previously answer whether a
+                    // later registration's issuer_admin was the one this init registered. A
+                    // registration with a different admin — or a second token with a different
+                    // asset name — withdraws-0 from a reward account nothing registered, and the
+                    // ledger rejects it as 3141 naming a balance problem. Recording the derived
+                    // address lets registration COMPARE. Measured on preprod 2026-09-30.
+                    .issuerAdminStakeAddress(moduleIssueAddress.getAddress())
                     .build());
 
             return TransactionContext.ok(transaction.serializeToHex(), new MintingResult(parameterisedBlacklistMintingScript.getPolicyId(), ""));

@@ -34,6 +34,22 @@ public class BlacklistInitEntity {
     private String adminPkh;
 
     /**
+     * Reward address of the {@code issuer_admin} credential THIS init registered.
+     *
+     * <p>⛔ {@code admin_pkh} CANNOT ANSWER THIS QUESTION. {@code issuer_admin} is parameterised by
+     * (adminPkh, ASSET NAME), and this table only ever held the first half — so nothing could tell
+     * whether a given registration's {@code issuer_admin} was the one this init covered. A
+     * registration with a different admin, or a second token with a different asset name, withdraws-0
+     * from a reward account nothing registered, and the ledger rejects it as 3141 in terms that name
+     * a balance problem.
+     *
+     * <p>NULL means the row pre-dates this column — no evidence, so the cross-check stays silent
+     * rather than blocking a registration that may be fine. Same convention as {@code cip68Enabled}.
+     */
+    @Column(name = "issuer_admin_stake_address", length = 128)
+    private String issuerAdminStakeAddress;
+
+    /**
      * Transaction hash where the blacklist was initialized.
      */
     @Column(name = "tx_hash", nullable = false, length = 64)

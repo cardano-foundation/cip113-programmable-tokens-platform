@@ -31,6 +31,9 @@ public class TokenContextController {
     private final FreezeAndSeizeTokenRegistrationRepository freezeAndSeizeTokenRegistrationRepository;
     private final BlacklistInitRepository blacklistInitRepository;
     private final org.cardanofoundation.cip113.service.Cip68MetadataService cip68MetadataService;
+    private final org.cardanofoundation.cip113.service.FreezeAndSeizeScriptBuilderService fesScriptBuilder;
+    private final org.cardanofoundation.cip113.service.ProtocolScriptBuilderService protocolScriptBuilderService;
+    private final org.cardanofoundation.cip113.service.ProtocolBootstrapService protocolBootstrapService;
 
     /** Optional — only present when the rwa-token module is enabled. */
     @Autowired(required = false)
@@ -183,6 +186,59 @@ public class TokenContextController {
 
         // 2. For FES: insert blacklist init (if not already present), then token registration
         if ("freeze-and-seize".equals(request.moduleId()) && request.blacklistNodePolicyId() != null) {
+            // ⛔ DERIVE BEFORE STORING. Everything below arrives from the CALLER — policyId,
+            // issuerAdminPkh, assetName — and until now was written on trust. A freeze-and-seize
+            // token's policy id IS the hash of issuance_mint parameterised by
+            // issuer_admin(adminPkh, assetName), so those three are not independent: either they
+            // reproduce each other or the row describes a token that does not exist.
+            //
+            // Two such rows were found on preprod 2026-09-30, and both cost real debugging time:
+            //   * one whose issuerAdminPkh derived a DIFFERENT policy than the token it was keyed
+            //     by, so every later operation was refused in terms that named the token;
+            //   * one for a policy that had NEVER BEEN MINTED — a registration recorded for an
+            //     attempt that failed, whose plausible-looking policy id then appeared in an error
+            //     message and sent the reader looking for a token that never existed.
+            //
+            // `01bbe84` established the rule for the read side — "offered as a candidate, never
+            // trusted as an answer" — and the write side kept trusting. This closes it: a row that
+            // cannot be derived is refused, loudly, at the moment it would have been stored.
+            try {
+                var protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
+                var issuerAdmin = fesScriptBuilder.buildIssuerAdminScript(
+                        com.bloxbean.cardano.client.address.Credential.fromKey(request.issuerAdminPkh()),
+                        request.assetName());
+                var derived = protocolScriptBuilderService
+                        .getParameterizedIssuanceMintScript(protocolParams, issuerAdmin)
+                        .getPolicyId();
+                if (!derived.equalsIgnoreCase(request.policyId())) {
+                    log.error("Refusing token registration: policyId {} is not derivable from the "
+                            + "supplied (issuerAdminPkh {}, assetName {}) — that pair derives {}",
+                            request.policyId(), request.issuerAdminPkh(), request.assetName(), derived);
+                    return ResponseEntity.badRequest().body(java.util.Map.of(
+                            "error", "the supplied policyId is not derivable from issuerAdminPkh and assetName",
+                            "policyId", request.policyId(),
+                            "derivedFromSuppliedPair", derived,
+                            "issuerAdminPkh", String.valueOf(request.issuerAdminPkh()),
+                            "assetName", String.valueOf(request.assetName()),
+                            "detail", "A freeze-and-seize token's policy id is the hash of "
+                                    + "issuance_mint parameterised by issuer_admin(adminPkh, assetName), "
+                                    + "so these three cannot disagree. Storing them would record a row "
+                                    + "describing a different token — or one that was never minted. "
+                                    + "For CIP-68 the assetName must be the LABELLED name as minted."));
+                }
+            } catch (Exception e) {
+                // ⚠ A DERIVATION THAT CANNOT RUN MUST NOT SILENTLY PASS. If the protocol params or
+                // the blueprint are unavailable, we cannot tell a good row from a bad one — and the
+                // whole point of this guard is that a bad row is expensive and invisible. Refuse and
+                // say why, rather than fall back to the trust this replaces.
+                log.error("Could not derive the policy id to validate a token registration", e);
+                return ResponseEntity.internalServerError().body(java.util.Map.of(
+                        "error", "could not verify the supplied policyId against issuerAdminPkh and assetName",
+                        "detail", String.valueOf(e.getMessage()),
+                        "why", "The registration is refused rather than stored unverified: a row whose "
+                                + "policy id is not derivable from its own fields describes a token that "
+                                + "does not exist, and every later operation fails naming the token."));
+            }
             // 2a. Insert blacklist init row if it doesn't exist yet (SDK-built registrations)
             var blacklistInitOpt = blacklistInitRepository
                     .findByBlacklistNodePolicyId(request.blacklistNodePolicyId());
