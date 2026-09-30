@@ -626,7 +626,33 @@ export default function BootstrapProtocolPage() {
           buildReferenceScripts({
             ctx,
             plan: planned.plan,
-            referenceScriptAddress: planned.ctx.changeAddress,
+            /**
+             * ⛔ THE always_fail ADDRESS, NEVER THE DEPLOYER'S WALLET.
+             *
+             * `plan.addresses.issuanceCborHex` IS always_fail's address — the SDK names it after
+             * its first tenant, the issuance CBOR UTxO, but the script is `always_fail(nonce)` and
+             * nothing can ever be spent from it. That is the entire requirement here.
+             *
+             * This used to be `ctx.changeAddress`, which is exactly what `buildReferenceScripts`
+             * warns against in as many words: "on preview, a wallet holding them alongside
+             * ordinary funds had two of four consumed by a routine retry, and NOTHING ERRORED."
+             * Seven outputs holding the scripts every programmable transaction reads, sitting in
+             * a wallet that coin selection is free to spend from. Giovanni caught it 2026-09-30.
+             *
+             * Every other script address in the plan is the WRONG answer, and not by a little:
+             * protocolParams, registry and upgradeMultisig are each spendable by their own
+             * validator, so a reference script parked there could be consumed by an ordinary
+             * protocol operation. always_fail is the only address in the deployment where that
+             * cannot happen.
+             *
+             * Nothing enumerates this address expecting one UTxO — the issuance output is found by
+             * its NFT and recorded by outref — so the seven joining it there change nothing.
+             *
+             * ⚠ THE 140 ADA IS NOW GONE FOR GOOD, deliberately. Unspendable means unrecoverable:
+             * there is no key and no redeemer that can ever release it. That is the point, and it
+             * is a one-way door — the copy says "locked", not "committed".
+             */
+            referenceScriptAddress: planned.plan.addresses.issuanceCborHex as never,
             // ⚠ PER OUTPUT, not in total: seven scripts at 20 ADA each locks ~140 ADA.
             referenceScriptLovelace: 20_000_000n as never,
           }),
@@ -749,9 +775,10 @@ export default function BootstrapProtocolPage() {
           exceeds the 16 KB limit, and a transaction cannot reference a script it is creating.
         </p>
         <p className="text-xs text-dark-400">
-          Commits <strong>140 ADA</strong> to the seven reference scripts (20 each, at your own
-          address) and <strong>12 ADA</strong> to six stake deposits. The protocol&apos;s own four
-          outputs are each sized to the ledger minimum for what they carry.{" "}
+          <strong>Locks 140 ADA permanently</strong> — the seven reference scripts, 20 each, at an
+          address nothing can spend from, so they cannot be consumed by accident and cannot be
+          recovered either. Another <strong>12 ADA</strong> goes to six stake deposits, and the
+          protocol&apos;s own four outputs are sized to the ledger minimum for what they carry.{" "}
           <strong>Fund the wallet with at least 400 ADA.</strong>
         </p>
       </section>

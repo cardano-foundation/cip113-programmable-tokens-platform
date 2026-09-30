@@ -105,4 +105,25 @@ assert.ok(
 console.log("  OK   the upgrade-authority acknowledgement sits with the plan it qualifies");
 ran++;
 
+// ---- 7. reference scripts NEVER go to a spendable address ----
+// The SDK's own warning, measured on preview: "a wallet holding them alongside ordinary funds had
+// two of four consumed by a routine retry, and NOTHING ERRORED." Seven outputs carrying the scripts
+// every programmable transaction reads must sit where nothing can spend them. `issuanceCborHex` is
+// always_fail's address; every other address in the plan is spendable by its own validator.
+const refAddr = /referenceScriptAddress:\s*([^,\n]+)/.exec(page);
+assert.ok(refAddr, "could not find referenceScriptAddress — this check is now blind");
+assert.ok(
+  /addresses\.issuanceCborHex/.test(refAddr[1]),
+  `reference scripts are being paid to \`${refAddr[1].trim()}\`. They must go to always_fail's ` +
+    "address (plan.addresses.issuanceCborHex). A wallet address lets coin selection eat the " +
+    "protocol's own infrastructure with no error; protocolParams, registry and upgradeMultisig " +
+    "are each spendable by their own validator.",
+);
+assert.ok(
+  !/referenceScriptAddress:\s*[^,\n]*changeAddress/.test(page),
+  "referenceScriptAddress is the deployer's change address again — the exact defect this guards",
+);
+console.log("  OK   reference scripts are paid to an address nothing can spend from");
+ran++;
+
 console.log(`\n${ran} checks passed`);
