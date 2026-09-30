@@ -76,9 +76,21 @@ export default function SignPage() {
   });
   const [fetching, setFetching] = useState(false);
   const [relayError, setRelayError] = useState<string | null>(null);
-  /** Every payment credential this wallet reports holding, for the required-signer check. */
-  const [myKeyHashes, setMyKeyHashes] = useState<string[]>([]);
-  const [myAddress, setMyAddress] = useState<{ address: string; kind: string } | null>(null);
+  /**
+   * Every payment credential this wallet reports, WITH the address it came from.
+   *
+   * ⚑ THE ADDRESS IS THE POINT, not just the hash. A participant is asked for an address before any
+   * transaction exists, and bech32 is checksummed where a bare key hash is 56 valid-looking
+   * characters — so what this page shows them to copy is the address, with the hash beside it for
+   * matching against a member list later.
+   */
+  const [myCredentials, setMyCredentials] = useState<
+    readonly { address: string; keyHash: string; kind: "change" | "used" }[]
+  >([]);
+  const myKeyHashes = useMemo(
+    () => [...new Set(myCredentials.map((c) => c.keyHash))],
+    [myCredentials],
+  );
 
   const clean = txHex.replace(/\s+/g, "").toLowerCase();
 
@@ -168,8 +180,7 @@ export default function SignPage() {
    */
   useEffect(() => {
     if (!connected) {
-      setMyKeyHashes([]);
-      setMyAddress(null);
+      setMyCredentials([]);
       return;
     }
     let live = true;
@@ -180,15 +191,23 @@ export default function SignPage() {
           wallet.getUsedAddresses().catch(() => [] as string[]),
         ]);
         if (!live) return;
-        const all = [change, ...used].filter(Boolean);
-        const hashes = new Set<string>();
-        for (const a of all) {
-          try { hashes.add(paymentCredentialHash(a).toLowerCase()); } catch { /* not a payment address */ }
+        const seen = new Set<string>();
+        const out: { address: string; keyHash: string; kind: "change" | "used" }[] = [];
+        for (const [address, kind] of [
+          [change, "change"] as const,
+          ...used.filter(Boolean).map((a) => [a, "used"] as const),
+        ]) {
+          if (!address || seen.has(address)) continue;
+          seen.add(address);
+          try {
+            out.push({ address, keyHash: paymentCredentialHash(address).toLowerCase(), kind });
+          } catch {
+            /* not a payment address — a reward address has no payment credential */
+          }
         }
-        setMyKeyHashes([...hashes]);
-        setMyAddress({ address: change, kind: "change address" });
+        setMyCredentials(out);
       } catch {
-        if (live) { setMyKeyHashes([]); setMyAddress(null); }
+        if (live) setMyCredentials([]);
       }
     };
     read();
@@ -262,6 +281,18 @@ export default function SignPage() {
     }
   };
 
+  /** A labelled copy, so more than one button can report "Copied" independently. */
+  const [copiedWhat, setCopiedWhat] = useState<string | null>(null);
+  const copyValue = async (what: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedWhat(what);
+      setTimeout(() => setCopiedWhat((c) => (c === what ? null : c)), 2000);
+    } catch {
+      setError("Could not copy — select the text and copy it manually.");
+    }
+  };
+
   const copy = async () => {
     if (!witness) return;
     try {
@@ -286,6 +317,54 @@ export default function SignPage() {
           witness is useful only for this one transaction.
         </p>
       </header>
+
+      {/*
+        ⛔ ABOVE THE TRANSACTION, AND NOT CONDITIONAL ON ONE. The previous round put this inside the
+        required-signers block, so it appeared only once a transaction had been pasted — which is
+        after the moment it is for. A participant is asked for their address BEFORE the transaction
+        that will require it exists.
+      */}
+      {connected && myCredentials.length > 0 && (
+        <section className="space-y-2 rounded border border-primary-500/30 bg-primary-500/5 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-white">Your wallet — send this to the driver</h2>
+            <button
+              type="button"
+              onClick={() => copyValue("addr", myCredentials[0].address)}
+              className="rounded border border-dark-600 px-2 py-0.5 text-[10px] text-dark-200 hover:text-primary-400"
+            >
+              {copiedWhat === "addr" ? "Copied" : "Copy address"}
+            </button>
+          </div>
+          <p className="text-[11px] text-dark-400">
+            Give the <strong>address</strong>, not the key hash — it carries a checksum, so a
+            mangled one is refused on sight where a wrong hash is 56 valid-looking characters. The
+            hash is shown so you can match it against a member list afterwards.
+          </p>
+          <ul className="space-y-1.5">
+            {myCredentials.map((c) => (
+              <li key={c.address} className="space-y-0.5">
+                <p className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-dark-400">
+                  {c.kind === "change" ? "change address" : "used address"}
+                  {c.kind === "change" && (
+                    <span className="normal-case tracking-normal text-dark-500">
+                      — the one a deployer checks
+                    </span>
+                  )}
+                </p>
+                <p className="break-all font-mono text-xs text-primary-400">{c.address}</p>
+                <p className="break-all font-mono text-[10px] text-dark-400">
+                  payment key hash {c.keyHash}
+                </p>
+              </li>
+            ))}
+          </ul>
+          <p className="text-[10px] text-dark-500">
+            Re-read whenever this tab regains focus: CIP-30 has no account-change event, so a value
+            captured once would quietly describe an account you had switched away from.
+          </p>
+        </section>
+      )}
 
       <section className="space-y-2">
         <h2 className="text-lg font-semibold text-white">1. The transaction</h2>
@@ -391,12 +470,11 @@ export default function SignPage() {
                     from an undeclared key.
                   </p>
                 )}
-                {myAddress && (
+                {myKeyHashes.length > 0 && (
                   <p className="mt-1 text-[10px] text-dark-500">
                     Checked against {myKeyHashes.length} credential
-                    {myKeyHashes.length === 1 ? "" : "s"} from this wallet. Its {myAddress.kind} is{" "}
-                    <span className="break-all font-mono">{myAddress.address}</span> — re-read when
-                    this tab regains focus, because CIP-30 has no account-change event.
+                    {myKeyHashes.length === 1 ? "" : "s"} from this wallet, listed at the top of
+                    this page.
                   </p>
                 )}
               </div>

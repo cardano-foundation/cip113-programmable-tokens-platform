@@ -22,7 +22,6 @@ import { deriveCoreDeployment, type DerivedCoreDeployment } from "@/lib/deployme
 import { resolveMultisig, type ResolvedMultisig } from "@/lib/deployment/multisig";
 import { loadPinnedBlueprint, type UpstreamPin } from "@/lib/deployment/blueprint";
 import { buildCoreCip171Record } from "@/lib/deployment/provenance";
-import { buildBootstrapRecord } from "@/lib/deployment/record";
 import { describeError } from "@/lib/deployment/describe-error";
 import { useWallet } from "@/contexts/wallet-context";
 import {
@@ -704,35 +703,6 @@ export default function BootstrapProtocolPage() {
     URL.revokeObjectURL(a.href);
   }, [planned, network, deployComplete, deployedParams]);
 
-  const downloadRecord = useCallback(() => {
-    if (!derived) return;
-    // Placeholders for the values only a submitted deployment can supply. The file is a
-    // TEMPLATE until the transactions exist; it is offered here so the shape can be reviewed
-    // before anything is signed, not so it can be used.
-    const record = buildBootstrapRecord({
-      derived,
-      seeds: {
-        paramsSeed: toTxInput(paramsSeed, "protocol-params seed"),
-        issuanceSeed: toTxInput(issuanceSeed, "issuance seed"),
-        multisigSeed: toTxInput(multisigSeed, "upgrade-multisig seed"),
-      },
-      bootstrapTxHash: "0".repeat(64),
-      paramsUtxoIndex: 0,
-      multisigUtxo: { txHash: "0".repeat(64), outputIndex: 0 },
-      refScripts: {
-        txHash: "0".repeat(64),
-        programmableBase: 0, programmableLogicGlobal: 1, transfer: 2,
-        thirdParty: 3, unfracking: 4, issuanceLogic: 5, upgradeMultisig: 6,
-      },
-      maxInlineDatumBytes: Number(maxInline),
-    });
-    const blob = new Blob([JSON.stringify([record], null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `protocol-bootstraps-${network}.TEMPLATE.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }, [derived, paramsSeed, issuanceSeed, multisigSeed, maxInline, network]);
 
   /**
    * Which steps are satisfied, and the one line each is worth when folded.
@@ -743,6 +713,19 @@ export default function BootstrapProtocolPage() {
    */
   const seedsReady = !!paramsSeed.txHash && !!issuanceSeed.txHash && !!multisigSeed.txHash;
   const paramsReady = !!nonce.trim() && Number(maxInline) > 0;
+
+  /** The threshold rule, applied where it is typed rather than where it is used. */
+  const thresholdProblem = (() => {
+    const n = Number(threshold);
+    if (memberEntries.length === 0) return null;
+    if (!Number.isInteger(n) || n < 1) return "The threshold must be a whole number, at least 1.";
+    if (n > memberEntries.length) {
+      return `The threshold cannot exceed the ${memberEntries.length} member${
+        memberEntries.length === 1 ? "" : "s"
+      } listed — ${n} signatures could never be collected, and the protocol would be unupgradeable.`;
+    }
+    return null;
+  })();
 
   return (
     <main className="mx-auto max-w-4xl px-4 py-10 space-y-6">
@@ -799,9 +782,15 @@ export default function BootstrapProtocolPage() {
           </label>
         </div>
         <p className="text-xs text-dark-400">
-          Three <strong>distinct</strong> ADA-only UTxOs, one per one-shot policy. Either the
-          wallet has them or we create them below. Read from the wallet and locked: a mistyped
-          outref is still valid input, and fails later as a missing UTxO.
+          Three <strong>distinct</strong> ADA-only UTxOs. Each one is spent to parameterise a
+          minting policy, which is what makes that policy <strong>one-shot</strong>: it can only
+          ever run in the transaction consuming that exact UTxO, so the NFTs it mints cannot be
+          forged or minted twice. Three policies, three seeds — sharing one would produce a
+          different, incompatible protocol.
+        </p>
+        <p className="text-xs text-dark-400">
+          Either the wallet has them or we create them below. Read from the wallet and locked: a
+          mistyped outref is still valid input, and fails later as a missing UTxO.
         </p>
 
         {wallet.connected && seedSource === "none" && (
@@ -875,7 +864,9 @@ export default function BootstrapProtocolPage() {
         <p className="text-xs text-dark-400">
           One per line: an <strong>address</strong> (preferred) or a payment key hash. Addresses
           are checksummed, so a mangled one is refused on paste; a wrong key hash looks valid and
-          survives to the signing round. Script credentials are refused — a script cannot sign.
+          survives to the signing round. Script credentials are <strong>not currently
+          supported</strong> — the standard allows them, but every declared member signs at genesis
+          and a script cannot take part in that.
         </p>
         <textarea
           id="multisig-members"
@@ -899,6 +890,11 @@ export default function BootstrapProtocolPage() {
           />
           <span className="text-xs text-dark-400">of {memberEntries.length || "—"}</span>
         </div>
+        {/*
+          `max` on a number input stops neither typing nor pasting, and `resolveMultisig` only
+          throws at DERIVE time — several steps after the mistake was made. Said here instead.
+        */}
+        {thresholdProblem && <p className="text-xs text-red-400">{thresholdProblem}</p>}
       </CeremonyStep>
 
       <CeremonyStep
@@ -924,6 +920,23 @@ export default function BootstrapProtocolPage() {
               onChange={(e) => setNonce(e.target.value)}
             />
           </label>
+          {/*
+            28 bytes, the length of a script hash — not because anything requires that, but because
+            a nonce the same shape as the hashes around it is one an operator will not mistake for
+            a truncated value. Still editable: a deployer reproducing an earlier deployment must be
+            able to type the nonce they kept.
+          */}
+          <button
+            type="button"
+            onClick={() => {
+              const bytes = new Uint8Array(28);
+              crypto.getRandomValues(bytes);
+              setNonce([...bytes].map((b) => b.toString(16).padStart(2, "0")).join(""));
+            }}
+            className="rounded border border-dark-600 px-3 py-1.5 text-xs text-dark-100 hover:border-primary-500/40 hover:text-primary-400"
+          >
+            Generate
+          </button>
         </div>
 
         <div className="space-y-2 rounded border border-dark-700 bg-dark-950 p-3">
@@ -1048,14 +1061,6 @@ export default function BootstrapProtocolPage() {
               {cip171.sourceUrl} @ {cip171.commitHash.slice(0, 8)} — label 1984.
             </p>
           )}
-
-          <button
-            type="button"
-            onClick={downloadRecord}
-            className="rounded border border-dark-600 px-3 py-1.5 text-xs text-white"
-          >
-            Download bootstrap record template
-          </button>
 
           <p className="text-xs text-dark-400">
             Derived from the step 1 seeds, so these are the hashes the deployment produces.

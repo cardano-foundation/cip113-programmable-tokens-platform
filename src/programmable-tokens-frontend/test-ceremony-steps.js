@@ -75,4 +75,34 @@ assert.ok(
 console.log("  OK   the genesis funding note still outlives the gate that produced it");
 ran++;
 
+// ---- 5. NOTHING FOLDS BY ITSELF ----
+// The regression this exists for: folding on `done` hid the verification result and the
+// cannotAuthorise acknowledgement, and that acknowledgement GATES the phase-one submit button —
+// so the operator faced a disabled button whose reason had just been hidden. A step's own
+// progress is not consent to stop showing it.
+assert.ok(
+  /const collapsed = closedByHand;/.test(code),
+  "CeremonyStep's collapsed state is no longer the operator's choice alone. It must not derive " +
+    "from `done`: folding a step because it succeeded hid the cannotAuthorise acknowledgement " +
+    "that gates phase one, leaving a disabled button with no visible reason.",
+);
+assert.ok(
+  !/collapsed\s*=\s*done|done\s*&&\s*!/.test(code),
+  "`collapsed` is being computed from `done` again — see above",
+);
+console.log("  OK   a step folds only when the operator folds it");
+ran++;
+
+// ---- 6. and the gate that blocks phase one is never inside a foldable-by-default region ----
+// Belt and braces on the same defect, from the page's side: the acknowledgement must sit in the
+// step whose own submit button it gates, so the two can never be separated.
+const stepFive = page.slice(page.indexOf('label="5"'), page.indexOf('label="Phase one"'));
+assert.ok(
+  stepFive.includes("cannotAuthorise") && stepFive.includes("acceptedNoAuthority"),
+  "the cannotAuthorise acknowledgement has moved out of the build-and-verify step; it must stay " +
+    "with the plan it qualifies, or it can be hidden while still gating the submit",
+);
+console.log("  OK   the upgrade-authority acknowledgement sits with the plan it qualifies");
+ran++;
+
 console.log(`\n${ran} checks passed`);

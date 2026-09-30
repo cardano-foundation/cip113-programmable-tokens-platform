@@ -60,8 +60,15 @@ export function resolveMember(raw: string): ResolvedMember {
    *    problem with the operator's input and is not.
    *  - reading `payment.type` returns `undefined` for EVERY address, so the script-credential
    *    guard below was dead code. A script address would have passed the check that exists to
-   *    reject it — and a script cannot sign, so it would have become a member of an authority
-   *    it can never satisfy.
+   *    reject it.
+   *
+   * ⚑ AND THE REFUSAL IS OURS, NOT THE STANDARD'S. `MultisigScriptTree` has a `script` variant —
+   * upstream's constructor 6, `Script { script_hash }` — so a script member is well-formed on
+   * chain. What it cannot do is take part in the genesis signing round, where EVERY declared
+   * member proves key control before the protocol exists; a script produces no vkey witness, so
+   * declaring one would record an authority nobody had demonstrated. Giovanni's ruling
+   * 2026-09-30: refuse, and say "not currently supported" rather than implying it is impossible.
+   * Allowing it later means deciding what the genesis proof means for a script arm.
    */
   const payment = (details as { paymentCredential?: { hash?: Uint8Array; _tag?: string } })
     ?.paymentCredential;
@@ -71,7 +78,9 @@ export function resolveMember(raw: string): ResolvedMember {
   if (payment._tag !== "KeyHash") {
     throw new MultisigInputError(
       `"${value}" has a ${payment._tag === "ScriptHash" ? "SCRIPT" : `"${payment._tag}"`} ` +
-        "payment credential. A multisig member must be a key that can sign; a script cannot.",
+        "payment credential. Script members are not currently supported: the standard allows " +
+        "them, but every declared member signs the protocol genesis to prove key control, and a " +
+        "script cannot produce a signature.",
     );
   }
   return { raw: value, keyHash: Bytes.toHex(payment.hash).toLowerCase(), source: "address" };

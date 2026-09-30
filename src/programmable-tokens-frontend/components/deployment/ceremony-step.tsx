@@ -8,8 +8,8 @@
  * The page is a long single column. By phase two the operator is acting at the BOTTOM — a gate
  * countdown, a signature panel, a submit button — while everything the page had to say sat at the
  * TOP: what the seeds were, what verified, what was submitted. Giovanni, 2026-09-29: having to
- * scroll up mid-ceremony to read the answer to the thing you just did. So a finished step collapses
- * to its own one-line answer and the live step is always the lowest thing on the page.
+ * scroll up mid-ceremony to read the answer to the thing you just did. So each step carries its own
+ * one-line answer and can be folded away, to bring the live step closer.
  *
  * ## ⛔ COLLAPSE IS CSS, NEVER CONDITIONAL RENDERING
  *
@@ -23,11 +23,23 @@
  * A collapsed step therefore keeps every input value, every fetched result and every message. The
  * summary is an additional line, not a replacement for the contents.
  *
- * ## No auto-scroll
+ * ## ⛔ NOTHING FOLDS BY ITSELF
  *
- * Giovanni's choice between collapse-only and collapse-plus-auto-scroll. A page that scrolls
- * itself fights a reader who has deliberately opened a finished step to check something, and the
- * collapsing already removes the distance that made scrolling necessary.
+ * The first version folded a step the moment it was satisfied, and that was wrong in a way worth
+ * recording, because it looked exactly like the feature that had been asked for. Step 5 folded on
+ * `planned` — which hid the verification result AND the `cannotAuthorise` acknowledgement. That
+ * acknowledgement GATES the phase-one submit button, so the operator was left facing a disabled
+ * button whose reason had just been hidden from them.
+ *
+ * A step's own progress is not consent to stop showing it. `done` earns a ✓ and a summary line and
+ * nothing else; folding is the operator's act, for when THEY want the focus (Giovanni, 2026-09-30:
+ * "leave it open and driver can close sections if they wanted to keep the focus"). The whole
+ * process stays visible until someone decides otherwise.
+ *
+ * ## No auto-scroll either
+ *
+ * Same principle, same ruling. A page that scrolls itself fights a reader who has deliberately
+ * opened a finished step to check something.
  */
 
 import { useState, type ReactNode } from "react";
@@ -42,7 +54,7 @@ export function CeremonyStep({
   /** "1", "2", "Phase one" — whatever the operator calls this step. */
   label: string;
   title: string;
-  /** Satisfied: fold to one line unless the operator opens it. */
+  /** Satisfied — earns a ✓ and shows the summary. Does NOT fold the step; see above. */
   done: boolean;
   /**
    * The step's ANSWER, in a few words — "3 UTxOs from wallet", "2-of-2", "34 hashes verified".
@@ -51,8 +63,9 @@ export function CeremonyStep({
   summary?: ReactNode;
   children: ReactNode;
 }) {
-  const [openedByHand, setOpenedByHand] = useState(false);
-  const collapsed = done && !openedByHand;
+  // Starts OPEN, always. See "NOTHING FOLDS BY ITSELF" above: `done` is not permission to hide.
+  const [closedByHand, setClosedByHand] = useState(false);
+  const collapsed = closedByHand;
 
   return (
     <section
@@ -70,19 +83,15 @@ export function CeremonyStep({
           <span className={done ? "text-dark-300" : undefined}>
             {label}. {title}
           </span>
-          {collapsed && summary && (
-            <span className="font-normal text-dark-400">— {summary}</span>
-          )}
+          {summary && <span className="font-normal text-dark-400">— {summary}</span>}
         </h2>
-        {done && (
-          <button
-            type="button"
-            onClick={() => setOpenedByHand((v) => !v)}
-            className="rounded border border-dark-700 px-2 py-0.5 text-[10px] text-dark-300 hover:text-primary-400"
-          >
-            {collapsed ? "details" : "hide"}
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => setClosedByHand((v) => !v)}
+          className="rounded border border-dark-700 px-2 py-0.5 text-[10px] text-dark-300 hover:text-primary-400"
+        >
+          {collapsed ? "show" : "hide"}
+        </button>
       </div>
       {/*
         `hidden`, not `{!collapsed && …}`. See the note at the top of this file: unmounting a
