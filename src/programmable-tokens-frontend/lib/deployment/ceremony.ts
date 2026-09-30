@@ -623,6 +623,16 @@ export async function buildPhaseOne(params: {
   /** Lovelace per seed output. No default: each seed funds part of the transaction that
    *  consumes it, so the right figure depends on the chain and on what should be left over. */
   seedLovelace: SeedTxParams["seedLovelace"];
+  /**
+   * CIP-171 provenance for the MULTISIG GENESIS, new in SDK 0.14.0.
+   *
+   * ⚑ WHY THIS TRANSACTION AND NOT ONLY THE PROTOCOL GENESIS. Records are keyed by script hash, so
+   * the genesis record already resolves `upgrade_multisig` — this is about TIMING. The multisig
+   * lands first and installs the upgrade authority, and until the genesis lands there is no
+   * provenance anywhere on chain. That gap is the window in which a driver wants to verify the
+   * authority they just installed, which on preprod is an hour with people on a call.
+   */
+  provenancePin?: MultisigGenesisTxParams["provenancePin"];
 }): Promise<CeremonyStep[]> {
   const steps: CeremonyStep[] = [];
 
@@ -640,6 +650,7 @@ export async function buildPhaseOne(params: {
     plan: params.plan,
     seedUtxo: params.seedUtxo,
     upgradeMultisigTree: params.upgradeMultisigTree,
+    provenancePin: params.provenancePin,
   };
   steps.push({
     label: "upgrade multisig",

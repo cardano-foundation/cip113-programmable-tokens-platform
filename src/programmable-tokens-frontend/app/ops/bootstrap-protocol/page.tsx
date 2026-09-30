@@ -132,14 +132,17 @@ function stepIdForLabel(label: string): string | null {
  *     provenance and is not: the genesis record already names those hashes, so a second record
  *     claims the same thing twice.
  *
- * ⚠ `multisig-genesis` IS ABSENT BECAUSE THE SDK CANNOT DO IT YET. `provenancePin` exists on
- * exactly one params type — `ProtocolGenesisTxParams` (`bootstrap.d.ts:496`);
- * `MultisigGenesisTxParams` takes `plan`, `seedUtxo` and `upgradeMultisigTree` and nothing else.
- * Attaching it here would mean splicing auxiliary data into an already-built transaction, which is
- * what docs/TESTING-SERIALISED-BYTES.md exists to warn against. Add "multisig-genesis" to this list
- * the moment the SDK accepts a pin there, and the link appears on its own.
+ * ⚑ `multisig-genesis` JOINED THIS LIST AT SDK 0.14.0, which added `provenancePin` to
+ * `MultisigGenesisTxParams`. Before that it was unreachable from here without splicing auxiliary
+ * data into an already-built transaction, which docs/TESTING-SERIALISED-BYTES.md exists to warn
+ * against.
+ *
+ * ⚠ VERIFYING IT ON CHAIN NEEDS THE RAW HASH, NOT THE DEPLOYED ONE. A CIP-171 entry is keyed by the
+ * UNPARAMETERISED script hash and carries the parameters that produce the deployed one — so
+ * `upgrade_multisig` appears in the record under its raw hash, not the hash that ends up in the
+ * deployment. Matching on the deployed hash makes a correct record look like a miss.
  */
-const STEPS_WITH_PROVENANCE: readonly string[] = ["protocol-genesis"];
+const STEPS_WITH_PROVENANCE: readonly string[] = ["multisig-genesis", "protocol-genesis"];
 
 const FIELD =
   "rounded border border-dark-600 bg-dark-900 px-2 py-1.5 font-mono text-xs text-white placeholder:text-dark-500 focus:border-cyan-600 focus:outline-none focus:ring-1 focus:ring-cyan-600/40";
@@ -528,6 +531,9 @@ export default function BootstrapProtocolPage() {
         maxInlineDatumBytes: Number(maxInline),
         alwaysFailNonce: nonce.trim(),
         unfrackingEnabled,
+        // Reaches the MULTISIG GENESIS via buildPhaseOne (SDK 0.14.0). The protocol genesis gets
+        // its own copy later, in preparePhaseTwo, because it is built in a separate pass.
+        provenancePin: loadedPin,
       });
       setPlanned(result);
     } catch (e) {

@@ -33,7 +33,7 @@
     "test:resume": "tsc lib/deployment/ceremony-storage.ts lib/deployment/registration-status.ts lib/utils/network.ts --outDir .resume-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .resume-build && node test-ceremony-resume.js"
   },
   "dependencies": {
-    "@easy1staking/cip113-sdk-ts": "^0.13.0",
+    "@easy1staking/cip113-sdk-ts": "^0.14.0",
     "@hookform/resolvers": "^3.9.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^1.8.0",

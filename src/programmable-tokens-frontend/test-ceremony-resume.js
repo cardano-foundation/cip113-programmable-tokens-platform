@@ -274,7 +274,14 @@ async function main() {
     // nothing, which reads as a failed verification rather than an absent record.
     const list = /const STEPS_WITH_PROVENANCE[^\n]*\n/.exec(page);
     assert.ok(list, "STEPS_WITH_PROVENANCE is gone — the link is unconditional again");
-    assert.ok(/"protocol-genesis"/.test(list[0]), "the genesis must be in the list; it is the only tx that carries a record today");
+    for (const carries of ["protocol-genesis", "multisig-genesis"]) {
+      assert.ok(
+        new RegExp(`"${carries}"`).test(list[0]),
+        `${carries} must be in the list — it carries a CIP-171 record. multisig-genesis joined at ` +
+        "SDK 0.14.0, which added provenancePin to MultisigGenesisTxParams; before that it was " +
+        "unreachable without splicing aux data into a built transaction.",
+      );
+    }
     for (const never of ["stake-registrations", "reference-scripts"]) {
       assert.ok(
         !new RegExp(`"${never}"`).test(list[0]),

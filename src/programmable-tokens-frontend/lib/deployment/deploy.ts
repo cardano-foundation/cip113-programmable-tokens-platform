@@ -263,6 +263,19 @@ export interface PlanDeploymentInput {
    * dispatcher was compiled against differs, and the deployment records both.
    */
   unfrackingEnabled?: boolean;
+  /**
+   * CIP-171 provenance, now attached to the MULTISIG GENESIS as well as the protocol genesis
+   * (SDK 0.14.0 added `provenancePin` to `MultisigGenesisTxParams`).
+   *
+   * ⚑ TIMING, NOT COVERAGE. Records are keyed by script hash and the genesis record already names
+   * `upgrade_multisig`, so this adds nothing to the registry's eventual knowledge. What it adds is
+   * a record that exists BETWEEN the phases: the multisig lands first and installs the upgrade
+   * authority, and until the genesis lands there is no provenance on chain at all — which is
+   * exactly when a driver wants to check the authority they just installed.
+   *
+   * Optional. Omitting it reproduces every deployment made before 0.14.0.
+   */
+  provenancePin?: unknown;
 }
 
 /**
@@ -407,6 +420,7 @@ export async function planDeployment(input: PlanDeploymentInput): Promise<Ceremo
         upgradeMultisigTree: input.multisig.tree as never,
         ownerAddress: ctx.changeAddress,
         seedLovelace: DEFAULT_SEED_LOVELACE,
+        provenancePin: input.provenancePin as never,
       })
     : [];
 
