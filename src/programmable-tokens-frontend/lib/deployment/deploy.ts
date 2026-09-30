@@ -53,20 +53,34 @@ import { verifyDeployment, verifyPlanScripts, type VerificationResult } from "./
 import { EvoAddress, EvoAssets, EvoTransaction, outputAssets } from "@easy1staking/cip113-sdk-ts";
 
 /**
- * Lovelace parked in each prepared seed — 50, 10, 10. Ruled by Giovanni, 2026-09-28.
+ * Lovelace parked in each prepared seed — 25 apiece. Measured by Giovanni, 2026-09-30.
  *
- * ⛔ THEY ARE NOT EQUAL, AND THE ORDER MATTERS. Each seed part-funds the transaction that consumes
- * it, and those transactions are not alike: protocol-genesis mints two assets, carries a withdraw-0
- * and runs scripts, while multisig-genesis mints one NFT into a 2 ADA output. This was 5 ADA
- * apiece, which was not enough.
+ * ⛔ EQUAL, AND THAT IS THE POINT. This was 50/10/10, sized on the reasoning that each seed
+ * part-funds the transaction consuming it and those transactions are not alike — protocol-genesis
+ * mints two assets, carries a withdraw-0 and runs scripts, where multisig-genesis mints one NFT
+ * into a small output. The reasoning was right about the FLOOR and wrong about what to optimise:
+ * a 10 ADA seed covers the multisig genesis and leaves a remainder that lands BELOW min-UTxO, so
+ * `build` refuses with *"Cannot create valid change … Available: 0 lovelace"* — a message that
+ * names a funding problem on a wallet holding thousands. Giovanni split 25/25/25 by hand and the
+ * ceremony built immediately.
  *
- * ⚑ THE BIGGEST GOES TO `protocolParams`, because selectSeedUtxos sorts candidates LARGEST FIRST
- * and assigns them in order — paramsSeed, issuanceSeed, multisigSeed. So the amounts here line up
- * with that assignment positionally, and reordering this array silently re-targets which seed gets
- * the headroom. If it turns out `issuance` or `upgradeMultisig` needs it instead, move the 50 and
- * nothing else has to change.
+ * ⚑ SO THE CONSTRAINT IS ON THE LEFTOVER, NOT ON THE OUTPUTS. A seed must cover its transaction
+ * AND leave change above min-UTxO (~0.97 ADA), and 25 clears both for every step with room to
+ * spare. Equal amounts also make the arithmetic reproducible rather than positional, which removes
+ * the trap the previous note had to warn about: `selectSeedUtxos` sorts candidates largest first
+ * and assigns them in order, so unequal amounts silently re-targeted which seed got the headroom
+ * whenever this array was reordered. Nothing here is positional any more.
+ *
+ * ⚠ 75 ADA total, up from 70, and all of it returns to the deployer except what the steps consume.
+ *
+ * ⚑ THE UNDERLYING NARROWNESS IS NOT FIXED BY THIS, only avoided: `planDeployment` funds from
+ * `client.getUtxos(changeAddress)` — ONE address — and seed prep pays the seeds to that same
+ * address, so the pool is whatever that one address holds beyond them. A wallet rich across other
+ * addresses can still present a thin pool here. Widening the read, or forwarding
+ * `onInsufficientChange` through the SDK's `buildOptions` (which today forwards only
+ * changeAddress, availableUtxos and evaluator), are the real fixes.
  */
-const SEED_PREP_LOVELACE: readonly bigint[] = [50_000_000n, 10_000_000n, 10_000_000n];
+const SEED_PREP_LOVELACE: readonly bigint[] = [25_000_000n, 25_000_000n, 25_000_000n];
 import type { UpstreamPin } from "./blueprint";
 import type { ResolvedMultisig } from "./multisig";
 import type { CardanoNetwork } from "../utils/network";
@@ -191,7 +205,7 @@ export async function prepareSeedUtxos(
   const utxos = (await client.getUtxos(addressObj as never)) as unknown as ChainUtxo[];
 
   let tx = client.newTx();
-  // One output per seed, at its own size — see SEED_PREP_LOVELACE for why they differ.
+  // One output per seed — equal amounts; see SEED_PREP_LOVELACE for why.
   for (const lovelace of SEED_PREP_LOVELACE) {
     tx = tx.payToAddress({ address: addressObj, assets: outputAssets(lovelace) });
   }

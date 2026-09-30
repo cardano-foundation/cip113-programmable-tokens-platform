@@ -1137,7 +1137,7 @@ export default function BootstrapProtocolPage() {
               <p>
                 {usableUtxoCount ?? 0} of {walletUtxoTotal ?? "?"} UTxOs are usable as seeds —
                 native assets or a reference script disqualify one — and three are needed.
-                Splitting makes <strong>50, 10 and 10 ADA</strong>.
+                Splitting makes three of <strong>25 ADA</strong>.
               </p>
             )}
             <button

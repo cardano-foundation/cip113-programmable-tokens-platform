@@ -418,6 +418,30 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
   ok(/Nothing is lost/.test(timedOut), "and says the outputs exist on chain, so nobody re-sends");
 }
 
+// ---- the seed SIZES, pinned as a property rather than as three numbers ----
+// ⛔ THIS HAS BROKEN TWICE, both times by sizing seeds against what their transaction SPENDS and
+// forgetting what it must LEAVE. At 5 ADA apiece the steps could not be funded; at 50/10/10 the
+// multisig genesis funded fine and left a remainder BELOW min-UTxO, so `build` refused with
+// "Cannot create valid change … Available: 0 lovelace" — a message naming a funding problem on a
+// wallet holding thousands. Equal 25s clear both bounds (Giovanni, measured 2026-09-30).
+{
+  const src = require("node:fs").readFileSync("lib/deployment/deploy.ts", "utf8");
+  const m = /SEED_PREP_LOVELACE: readonly bigint\[\] = \[([^\]]+)\]/.exec(src);
+  ok(m, "SEED_PREP_LOVELACE is gone or reshaped — this check is blind, fix it before trusting it");
+  const amounts = m[1].split(",").map((t) => Number(t.trim().replace(/_/g, "").replace(/n$/, "")))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  ok(amounts.length === 3, `expected three seed amounts, parsed ${amounts.length}`);
+  // A seed must cover its own step AND leave change above min-UTxO (~0.97 ADA). 20 ADA is the
+  // floor below which we have measured failures; it is not a derived minimum.
+  ok(amounts.every((a) => a >= 20_000_000),
+     `every seed must be at least 20 ADA — measured failures at 5 and at 10; got ${amounts.map((a) => a / 1e6)}`);
+  // Equal amounts are deliberate: selectSeedUtxos sorts candidates LARGEST FIRST and assigns them
+  // positionally, so unequal amounts silently re-target which seed gets the headroom whenever the
+  // array is reordered. Equality removes the positional coupling entirely.
+  ok(new Set(amounts).size === 1,
+     `seed amounts must be EQUAL so the assignment stops being positional; got ${amounts.map((a) => a / 1e6)}`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
 }
