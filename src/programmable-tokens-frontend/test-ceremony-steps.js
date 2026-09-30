@@ -126,4 +126,48 @@ assert.ok(
 console.log("  OK   reference scripts are paid to an address nothing can spend from");
 ran++;
 
+// ---- 8. an account change warns and blocks, and loses nothing ----
+// Giovanni's scenario: the driver is BOTH a signer (empty wallet, holds an upgrade key) and the
+// deployer (small hot wallet), so switching accounts mid-ceremony is normal. It must not be an
+// error and must not discard the plan — but phase one's transactions are built against the
+// original change address, so submitting from another account is refused by the wallet anyway.
+assert.ok(
+  /const accountMoved =/.test(page),
+  "the account-change comparison is gone; the page would silently let a submit fail at the wallet",
+);
+// Every submit must be gated on it. Missing one is the whole defect, so they are counted.
+const gatedSubmits = [...page.matchAll(/disabled=\{[^}]*accountMoved[^}]*\}/g)].length;
+assert.ok(
+  gatedSubmits >= 3,
+  `only ${gatedSubmits} submit control(s) are gated on accountMoved; expected at least 3 ` +
+    "(phase one, the genesis build, phase two). An ungated one fails at the wallet instead.",
+);
+// And it must NOT throw the plan away: nothing may clear `planned` on an account change.
+const readEffect = page.slice(page.indexOf("setLiveAddress"), page.indexOf("const derive ="));
+assert.ok(
+  !/setPlanned\(null\)|setCosign|setSubmitted\(null\)/.test(readEffect),
+  "the account-change path now discards the plan, witnesses or submitted hashes. It must warn and " +
+    "KEEP: losing a plan whose one-shot seeds are already spent is far worse than a wrong account.",
+);
+console.log(`  OK   an account change warns, blocks ${gatedSubmits} submits, and discards nothing`);
+ran++;
+
+// ---- 9. the CIP-171 record is actually PUBLISHED, not just described ----
+// The defect: step 4 said "CIP-171 provenance ready … label 1984" while the genesis call site
+// omitted `provenancePin`, so nothing was attached. A page that describes an on-chain record it
+// does not write is worse than one that says nothing.
+assert.ok(
+  /provenancePin:/.test(page),
+  "the genesis is built without `provenancePin`, so no CIP-171 record reaches the chain — while " +
+    "step 4 still tells the operator provenance is ready. Pass the pin or delete the claim.",
+);
+const claimsProvenance = /CIP-171 provenance ready/.test(page);
+const publishesProvenance = /provenancePin:\s*pin/.test(page);
+assert.ok(
+  !claimsProvenance || publishesProvenance,
+  "the page claims CIP-171 provenance is ready but does not pass the pin to the genesis",
+);
+console.log("  OK   the CIP-171 record the page promises is the one it publishes");
+ran++;
+
 console.log(`\n${ran} checks passed`);

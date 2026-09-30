@@ -22,6 +22,7 @@ import { deriveCoreDeployment, type DerivedCoreDeployment } from "@/lib/deployme
 import { resolveMultisig, type ResolvedMultisig } from "@/lib/deployment/multisig";
 import { loadPinnedBlueprint, type UpstreamPin } from "@/lib/deployment/blueprint";
 import { buildCoreCip171Record } from "@/lib/deployment/provenance";
+import { verifyTxUrl } from "@/lib/cip171/registry";
 import { describeError } from "@/lib/deployment/describe-error";
 import { useWallet } from "@/contexts/wallet-context";
 import {
@@ -133,6 +134,18 @@ export default function BootstrapProtocolPage() {
   /** Raw provider count, so "none usable" can say WHICH of its two causes applies. */
   const [walletUtxoTotal, setWalletUtxoTotal] = useState<number | null>(null);
   const [queriedAddress, setQueriedAddress] = useState<string | null>(null);
+  /**
+   * The wallet account in front of us RIGHT NOW, re-read whenever the tab wakes.
+   *
+   * ⛔ CIP-30 HAS NO ACCOUNT-CHANGE EVENT, so a value captured at connect describes an account the
+   * driver may have switched away from minutes ago. That is not a hypothetical here: Giovanni's own
+   * setup has him as both a signer (an empty wallet holding an upgrade key) and the deployer (a
+   * small hot wallet), and switching between them mid-ceremony is the normal way to run it.
+   *
+   * Re-reading on focus and visibility is the cheapest approximation of the event that does not
+   * exist. See `officina:cip30-wallet-sync`.
+   */
+  const [liveAddress, setLiveAddress] = useState<string | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [seedNotice, setSeedNotice] = useState<string | null>(null);
   const [syncStart, setSyncStart] = useState<ReturnType<typeof buildSyncStart> | null>(null);
@@ -224,6 +237,31 @@ export default function BootstrapProtocolPage() {
       setPreparing(false);
     }
   }, [wallet, network, loadSeedsFromWallet]);
+
+  useEffect(() => {
+    if (!wallet.connected) {
+      setLiveAddress(null);
+      return;
+    }
+    let live = true;
+    const read = async () => {
+      try {
+        const a = await wallet.wallet.getChangeAddress();
+        if (live) setLiveAddress(a);
+      } catch {
+        /* a wallet that will not answer is not evidence of a change */
+      }
+    };
+    read();
+    const onWake = () => { if (document.visibilityState === "visible") read(); };
+    window.addEventListener("focus", onWake);
+    document.addEventListener("visibilitychange", onWake);
+    return () => {
+      live = false;
+      window.removeEventListener("focus", onWake);
+      document.removeEventListener("visibilitychange", onWake);
+    };
+  }, [wallet.connected, wallet.wallet]);
 
   const derive = useCallback(async () => {
     setStage("deriving");
@@ -555,6 +593,18 @@ export default function BootstrapProtocolPage() {
             // `.utxo`, not the wrapper: awaitMultisigConfigUtxo returns { utxo, ref }.
             upgradeMultisigConfigUtxo: configUtxo.utxo as never,
             upgradeAuthoritySigners: (multisig?.members ?? []).map((m) => m.keyHash) as never,
+            /**
+             * ⛔ THE PAGE CLAIMED THIS AND DID NOT DO IT. Step 4 has always said "CIP-171
+             * provenance ready: N scripts … label 1984", and `ceremony.ts` has always plumbed
+             * `provenancePin` through — but this call site omitted it, so the genesis carried no
+             * metadata and the record existed only as text on screen. Found 2026-09-30 while
+             * answering Giovanni's ask for on-chain verification of the multisig.
+             *
+             * The SDK builds the record itself from the pin plus `plan.parameterizations`, which
+             * is what keeps its arity right: a wrong-arity record is DISCARDED SILENTLY by the
+             * registry, so assembling one by hand here would fail invisibly.
+             */
+            provenancePin: pin as never,
           }),
         {
           // A safety net behind the gate, not the primary mechanism. It should rarely fire now.
@@ -583,7 +633,11 @@ export default function BootstrapProtocolPage() {
     } finally {
       setPreparingGenesis(false);
     }
-  }, [planned, configUtxo, genesisStep, multisig, submitted]);
+    // `pin` is load-bearing, not incidental: it IS the CIP-171 record. Omitting it from the deps
+    // would let this callback close over a null pin from before `derive` ran, and the genesis would
+    // be built with `provenancePin: null` — no metadata, no error, and the page still claiming
+    // provenance was published. Exactly the silent-drop this ticket exists to fix.
+  }, [planned, configUtxo, genesisStep, multisig, submitted, pin]);
 
   const submitPhaseTwo = useCallback(async () => {
     if (!planned || !genesisStep || !cosign.complete) return;
@@ -739,6 +793,23 @@ export default function BootstrapProtocolPage() {
    */
   const seedsReady = !!paramsSeed.txHash && !!issuanceSeed.txHash && !!multisigSeed.txHash;
   const paramsReady = !!nonce.trim() && Number(maxInline) > 0;
+
+  /**
+   * Has the wallet moved away from the account this plan was BUILT for?
+   *
+   * ⚑ WARN, KEEP, BLOCK — Giovanni's ruling, 2026-09-30. Not an error: switching accounts is a
+   * legitimate thing for a driver who is also a signer to do, and losing a plan over it would be
+   * far worse than the inconvenience. But phase one's transactions are already built against the
+   * original change address, so submitting them from another account fails at the WALLET, with a
+   * wallet's error message instead of ours. Blocking the submit turns that into an explanation.
+   *
+   * Everything already collected — the plan, the witnesses, the submitted hashes — survives
+   * untouched, so selecting the original account again resumes exactly where it left off.
+   */
+  const accountMoved =
+    planned && liveAddress && liveAddress !== planned.ctx.changeAddress
+      ? { built: planned.ctx.changeAddress, now: liveAddress }
+      : null;
 
   /** The threshold rule, applied where it is typed rather than where it is used. */
   const thresholdProblem = (() => {
@@ -1192,6 +1263,27 @@ export default function BootstrapProtocolPage() {
               </div>
             )}
 
+            {/*
+              Warn, keep, block. Placed with the plan because it is the plan this invalidates
+              submitting — nothing here is lost, and reselecting the original account resumes.
+            */}
+            {accountMoved && (
+              <div className="space-y-2 rounded border border-amber-600 bg-amber-950/40 p-3 text-xs text-amber-100">
+                <p>
+                  <strong>The wallet has changed account since this plan was built.</strong>{" "}
+                  Nothing is lost — the plan, any signatures collected and every submitted
+                  transaction are all still here. But these transactions were built to be paid and
+                  signed by the original account, so submitting from this one would be refused by
+                  the wallet itself. Switch back and everything resumes.
+                </p>
+                <p className="break-all font-mono text-[10px] text-amber-200">
+                  built for {accountMoved.built}
+                  <br />
+                  now connected {accountMoved.now}
+                </p>
+              </div>
+            )}
+
           </>
         )}
       </CeremonyStep>
@@ -1215,6 +1307,7 @@ export default function BootstrapProtocolPage() {
                   disabled={
                     !planned.verification.ok ||
                     !!progress ||
+                    !!accountMoved ||
                     (cannotAuthorise && !acceptedNoAuthority)
                   }
                   className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
@@ -1257,6 +1350,21 @@ export default function BootstrapProtocolPage() {
                   {GENESIS_GATE_DEPTH} blocks, not a timer.
                 </p>
 
+                {/*
+                  ⚑ SAYING OUT LOUD WHAT WAS ALREADY PROVEN. `awaitMultisigConfigUtxo` passes the
+                  declared tree as `expectedTree` and `assertMultisigConfigUtxo` THROWS unless the
+                  datum on chain matches it — so by the time `configUtxo` is non-null, the member
+                  list has been verified against the chain. Giovanni asked to be able to verify the
+                  PKHs landed; the check existed and only the answer was missing.
+                */}
+                {configUtxo && multisig && (
+                  <p className="text-green-300">
+                    The config UTxO on chain carries the upgrade authority you declared —{" "}
+                    {multisig.required}-of-{multisig.members.length}, datum checked against all{" "}
+                    {multisig.members.length} key hashes, not just read back.
+                  </p>
+                )}
+
                 <p className={gateOpen ? "text-green-300" : "text-dark-300"}>
                   {!configUtxo
                     ? "Waiting for the upgrade-multisig config UTxO to appear…"
@@ -1270,7 +1378,7 @@ export default function BootstrapProtocolPage() {
                 <button
                   type="button"
                   onClick={preparePhaseTwo}
-                  disabled={!configUtxo || !gateOpen || preparingGenesis}
+                  disabled={!configUtxo || !gateOpen || preparingGenesis || !!accountMoved}
                   className={`rounded px-3 py-1.5 ${
                     gateOpen && configUtxo && !preparingGenesis
                       ? "border border-green-600 text-green-100 hover:bg-green-950"
@@ -1314,7 +1422,7 @@ export default function BootstrapProtocolPage() {
                 <button
                   type="button"
                   onClick={submitPhaseTwo}
-                  disabled={!!progress || deployComplete || !cosign.complete}
+                  disabled={!!progress || deployComplete || !cosign.complete || !!accountMoved}
                   className="rounded border border-amber-600 px-3 py-1.5 text-xs text-amber-100 disabled:opacity-40"
                 >
                   Submit the genesis and publish the reference scripts
@@ -1337,10 +1445,35 @@ export default function BootstrapProtocolPage() {
               {submitted.map((s) => (
                 <div key={s.txHash} className="contents">
                   <dt className="text-dark-400">{s.label}</dt>
-                  <dd className="break-all text-white">{s.txHash}</dd>
+                  <dd className="break-all text-white">
+                    {s.txHash}{" "}
+                    {/*
+                      Per-transaction replay on uplc.link for THIS build's network. The genesis is
+                      the one carrying the CIP-171 record, so that link is the one that resolves to
+                      a verification; the others are offered because a driver checking a ceremony
+                      wants every hash reachable, and a link that says "not indexed" is still a
+                      better answer than a hash they have to paste somewhere by hand.
+                    */}
+                    <a
+                      href={verifyTxUrl(s.txHash)}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="whitespace-nowrap text-primary-400 underline"
+                    >
+                      verify ↗
+                    </a>
+                  </dd>
                 </div>
               ))}
             </dl>
+            {deployComplete && (
+              <p className="text-xs text-dark-300">
+                The protocol genesis carries the CIP-171 provenance record, so its{" "}
+                <span className="text-primary-400">verify</span> link replays the build against the
+                source it was compiled from. Indexing is not instant — a link that reports nothing
+                yet is not the same as one that fails.
+              </p>
+            )}
             {syncStart && (
               <p className="text-xs text-dark-300">
                 Indexer sync start — <code>STORE_SYNC_START_BLOCKHASH</code>{" "}

@@ -74,12 +74,32 @@ export function parseSourceUrl(sourceUrl: string): {
 }
 
 /**
- * The registry browser. uplc.link has no per-script page today — its routes are `/`, `/docs`,
- * `/registry` and `/verify` — so "view on uplc.link" lands on the registry rather than deep
- * linking to this script.
+ * The registry browser. There is no per-SCRIPT page, so "view on uplc.link" lands on the registry
+ * and the hash is pasted there. For a transaction, use {@link verifyTxUrl} instead.
  */
 export function registrySiteUrl(): string {
   return `${SITE_HOST[getCardanoNetwork()]}/registry`;
+}
+
+/**
+ * Replay a transaction's CIP-171 verification on uplc.link.
+ *
+ * ⛔ THIS ROUTE IS REAL AND THIS FILE USED TO DENY IT. The note above said uplc.link had no deep
+ * link at all, which was half right and led us to hand operators a bare registry link: there is no
+ * per-SCRIPT page, but `/verify` takes a `txHash` — so a transaction carrying a provenance record
+ * has a direct replay URL. Giovanni knew; the comment was stale.
+ *
+ * MEASURED, not guessed, 2026-09-30: the `/verify` page bundle
+ * (`_next/static/chunks/app/verify/page-*.js`) calls `useSearchParams().get("txHash")` and seeds
+ * its initial state from whether that parameter is present, so the parameter selects the
+ * replay-from-transaction mode rather than merely prefilling a field. The path-shaped candidates
+ * (`/verify/{hash}`, `/registry/{hash}`, `/script/{hash}`, `/{hash}`) all 404.
+ *
+ * ⚠ A 200 from this URL means the PAGE loaded, not that a record exists — indexing is not instant
+ * and an unindexed transaction is indistinguishable from an unverifiable one until it resolves.
+ */
+export function verifyTxUrl(txHash: string): string {
+  return `${SITE_HOST[getCardanoNetwork()]}/verify?txHash=${encodeURIComponent(txHash)}`;
 }
 
 /** In-flight and settled lookups, negatives included: a 404 here is stable. */
