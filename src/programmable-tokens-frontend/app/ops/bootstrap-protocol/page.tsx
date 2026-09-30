@@ -108,6 +108,39 @@ function stepIdForLabel(label: string): string | null {
   }
 }
 
+/**
+ * Which steps carry a CIP-171 provenance record — and therefore which transactions are worth
+ * offering a uplc.link replay for.
+ *
+ * ⛔ MEASURED ON CHAIN, not assumed. Giovanni's preview run, checked with Koios: of the four
+ * transactions only the protocol genesis carries label 1984. The other three carry no metadata, so
+ * the `verify` link we offered on all four sent an operator to a page that finds nothing — which
+ * reads as a failed verification rather than as an absent record.
+ *
+ * Why these are the right two, once the SDK allows the second:
+ *
+ *   - `protocol-genesis` mints and runs scripts, and its record covers all TEN parameterised
+ *     scripts (everything but `issuance_mint`). Records are keyed by SCRIPT HASH, so one
+ *     transaction carrying it is enough for the registry to resolve every hash in it.
+ *   - `multisig-genesis` mints through the `upgrade_multisig` one-shot, and its hash is already in
+ *     the genesis record — so this is about TIMING, not coverage. The multisig lands first, and
+ *     between the two phases there is no provenance anywhere, which is precisely the window in
+ *     which a driver wants to check the upgrade authority.
+ *   - `stake-registrations` executes no scripts at all; six RegCerts introduce credentials and
+ *     publish no code.
+ *   - `reference-scripts` publishes the script BODIES, which sounds like the natural home for
+ *     provenance and is not: the genesis record already names those hashes, so a second record
+ *     claims the same thing twice.
+ *
+ * ⚠ `multisig-genesis` IS ABSENT BECAUSE THE SDK CANNOT DO IT YET. `provenancePin` exists on
+ * exactly one params type — `ProtocolGenesisTxParams` (`bootstrap.d.ts:496`);
+ * `MultisigGenesisTxParams` takes `plan`, `seedUtxo` and `upgradeMultisigTree` and nothing else.
+ * Attaching it here would mean splicing auxiliary data into an already-built transaction, which is
+ * what docs/TESTING-SERIALISED-BYTES.md exists to warn against. Add "multisig-genesis" to this list
+ * the moment the SDK accepts a pin there, and the link appears on its own.
+ */
+const STEPS_WITH_PROVENANCE: readonly string[] = ["protocol-genesis"];
+
 const FIELD =
   "rounded border border-dark-600 bg-dark-900 px-2 py-1.5 font-mono text-xs text-white placeholder:text-dark-500 focus:border-cyan-600 focus:outline-none focus:ring-1 focus:ring-cyan-600/40";
 
@@ -1705,30 +1738,32 @@ export default function BootstrapProtocolPage() {
                   <dd className="break-all text-white">
                     {s.txHash}{" "}
                     {/*
-                      Per-transaction replay on uplc.link for THIS build's network. The genesis is
-                      the one carrying the CIP-171 record, so that link is the one that resolves to
-                      a verification; the others are offered because a driver checking a ceremony
-                      wants every hash reachable, and a link that says "not indexed" is still a
-                      better answer than a hash they have to paste somewhere by hand.
+                      Only transactions that actually CARRY a record get a link. Offering one on a
+                      transaction with no metadata sends the operator to a page that finds nothing,
+                      which reads as a failed verification.
                     */}
-                    <a
-                      href={verifyTxUrl(s.txHash)}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      className="whitespace-nowrap text-primary-400 underline"
-                    >
-                      verify ↗
-                    </a>
+                    {STEPS_WITH_PROVENANCE.includes(stepIdForLabel(s.label) ?? "") && (
+                      <a
+                        href={verifyTxUrl(s.txHash)}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="whitespace-nowrap text-primary-400 underline"
+                      >
+                        verify ↗
+                      </a>
+                    )}
                   </dd>
                 </div>
               ))}
             </dl>
             {deployComplete && (
               <p className="text-xs text-dark-300">
-                The protocol genesis carries the CIP-171 provenance record, so its{" "}
-                <span className="text-primary-400">verify</span> link replays the build against the
-                source it was compiled from. Indexing is not instant — a link that reports nothing
-                yet is not the same as one that fails.
+                The protocol genesis carries the CIP-171 provenance record for all ten parameterised
+                scripts, so its <span className="text-primary-400">verify</span> link replays the
+                build against the source it was compiled from — and because records are keyed by
+                script hash, that one record covers the reference scripts too. The other
+                transactions publish no record and get no link. Indexing is not instant: a link that
+                reports nothing yet is not the same as one that fails.
               </p>
             )}
             {syncStart && (

@@ -268,6 +268,28 @@ async function main() {
       "after a reload — the inputs re-derive the plan and the stored hashes supply the rest");
   });
 
+  await check("a uplc.link verify link is offered ONLY where a record exists", () => {
+    // MEASURED on Giovanni's preview run via Koios: of the four transactions, only the protocol
+    // genesis carries metadata label 1984. Linking all four sent operators to a page that finds
+    // nothing, which reads as a failed verification rather than an absent record.
+    const list = /const STEPS_WITH_PROVENANCE[^\n]*\n/.exec(page);
+    assert.ok(list, "STEPS_WITH_PROVENANCE is gone — the link is unconditional again");
+    assert.ok(/"protocol-genesis"/.test(list[0]), "the genesis must be in the list; it is the only tx that carries a record today");
+    for (const never of ["stake-registrations", "reference-scripts"]) {
+      assert.ok(
+        !new RegExp(`"${never}"`).test(list[0]),
+        `${never} is listed as carrying provenance. It does not: registrations execute no scripts, ` +
+        "and the genesis record already names the reference scripts' hashes — records are keyed by " +
+        "script hash, so a second one claims the same thing twice.",
+      );
+    }
+    // And the link itself must be gated on that list, not rendered for every submitted step.
+    assert.ok(
+      /STEPS_WITH_PROVENANCE\.includes\(stepIdForLabel\(s\.label\)/.test(page),
+      "the verify link is no longer gated on STEPS_WITH_PROVENANCE",
+    );
+  });
+
   console.log(`\n  ${checks} checks passed`);
   if (failures > 0) throw new Error(`${failures} resume check(s) failed`);
 }
