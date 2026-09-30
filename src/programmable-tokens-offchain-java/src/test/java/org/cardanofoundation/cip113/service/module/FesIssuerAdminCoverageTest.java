@@ -107,6 +107,38 @@ class FesIssuerAdminCoverageTest {
     }
 
     @Test
+    @DisplayName("the TRANSFER credential is recorded and checked — it is pinned to the DEPLOYMENT")
+    void transferCredentialIsPinnedToTheDeployment() throws IOException {
+        // ⛔ A DIFFERENT DEPENDENCY FROM issuer_admin, and that asymmetry is the finding.
+        //   issuer_admin = (adminPkh, ASSET NAME)                               -- no core hash
+        //   transfer     = (programmableLogicBase.scriptHash, blacklistPolicy)  -- CARRIES one
+        // So a protocol re-bootstrap moves every core hash, invalidating `transfer` while leaving
+        // `issuer_admin` untouched. Measured on preprod 2026-09-30: after programmableLogicBase moved
+        // feae586b… -> d255fd34…, ISSUING an FES token still worked and TRANSFERRING it failed —
+        // and nothing in the error said why, because the ledger reports a rewards-balance problem.
+        assertTrue(read(ENTITY).contains("moduleTransferStakeAddress"),
+                "BlacklistInitEntity no longer records the transfer credential. Without it, a "
+                        + "re-bootstrap silently invalidates every pre-existing blacklist's transfer "
+                        + "path while issuing keeps working.");
+        var handler = read(HANDLER);
+        assertTrue(handler.contains(".moduleTransferStakeAddress(moduleTransferAddress.getAddress())"),
+                "the blacklist init no longer records which transfer credential it registered");
+        // ⛔ ANCHOR ON THE CONDITION, NOT THE ACCESSOR NAME. A first version asserted only that
+        // `getModuleTransferStakeAddress()` appeared somewhere — which stays true inside
+        // `if (false && initRow.get().getModuleTransferStakeAddress() != null)`. The mutant that
+        // disables the guard left the string in place and the check passed. The condition is what the
+        // defect has to alter, so that is what gets asserted.
+        assertTrue(handler.contains(
+                        "if (initRow.isPresent() && initRow.get().getModuleTransferStakeAddress() != null"),
+                "the transfer path no longer GUARDS on the init's recorded transfer credential. The "
+                        + "accessor appearing somewhere is not enough — it survives inside a disabled "
+                        + "condition, which is how this check was blind the first time it was written.");
+        assertTrue(handler.contains("RE-BOOTSTRAPPED"),
+                "the refusal no longer names the re-bootstrap as the usual cause — which is the one "
+                        + "thing that turns a rewards-balance message into an actionable answer");
+    }
+
+    @Test
     @DisplayName("the check is not vacuous — every anchor it asserts is a distinct, present string")
     void theCheckCanFail() throws IOException {
         // ⚑ PROOF OF HARNESS. Each assertion above is an `assertTrue(contains(...))`, which passes

@@ -50,6 +50,23 @@ public class BlacklistInitEntity {
     private String issuerAdminStakeAddress;
 
     /**
+     * Reward address of the FES {@code transfer} credential THIS init registered.
+     *
+     * <p>⛔ PINNED TO THE DEPLOYMENT, unlike {@link #issuerAdminStakeAddress}. {@code transfer} is
+     * parameterised by {@code (programmableLogicBase.scriptHash, blacklistNodePolicyId)}, so it
+     * carries a CORE hash — and a protocol re-bootstrap moves every core hash. A blacklist
+     * initialised before a re-bootstrap therefore registered a transfer credential that no longer
+     * exists, while its {@code issuer_admin} is untouched because no core hash feeds it.
+     *
+     * <p>Measured on preprod 2026-09-30: after a re-bootstrap, ISSUING an FES token still worked and
+     * TRANSFERRING it failed. That asymmetry is this field's reason for existing.
+     *
+     * <p>NULL = pre-dates this column; the cross-check stays silent.
+     */
+    @Column(name = "module_transfer_stake_address", length = 128)
+    private String moduleTransferStakeAddress;
+
+    /**
      * Transaction hash where the blacklist was initialized.
      */
     @Column(name = "tx_hash", nullable = false, length = 64)

@@ -1226,6 +1226,45 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
             var moduleTransferAddress = AddressProvider.getRewardAddress(parameterisedModuleTransferContract, network.getCardanoNetwork());
             log.info("moduleTransferAddress: {}", moduleTransferAddress.getAddress());
 
+            // ⛔ REFUSE BEFORE BUILDING IF THIS CREDENTIAL IS NOT THE ONE THE INIT REGISTERED.
+            //
+            // `transfer` is parameterised by (programmableLogicBase.scriptHash, blacklistPolicyId),
+            // so it carries a hash from the CORE DEPLOYMENT — and a protocol re-bootstrap moves
+            // every core hash. A blacklist initialised before a re-bootstrap registered a transfer
+            // credential that no longer exists, while its `issuer_admin` survives untouched because
+            // no core hash feeds it.
+            //
+            // ⚑ THAT ASYMMETRY IS THE WHOLE POINT, and it is what makes the failure so confusing:
+            // measured on preprod 2026-09-30, after programmableLogicBase moved feae586b… ->
+            // d255fd34…, ISSUING an FES token still worked and TRANSFERRING it failed. Issuing
+            // withdraws-0 from issuer_admin; transferring withdraws-0 from this credential. Nothing
+            // in the error said so — the ledger reports a rewards-balance problem.
+            //
+            // A transfer cannot repair it: the ledger applies withdrawals before certificates, so
+            // only a fresh blacklist init under the CURRENT deployment can register this credential.
+            // NULL means the row pre-dates the column — no evidence, stay silent.
+            var initRow = blacklistInitRepository.findByBlacklistNodePolicyId(blacklistNodePolicyId);
+            if (initRow.isPresent() && initRow.get().getModuleTransferStakeAddress() != null
+                && !initRow.get().getModuleTransferStakeAddress().equals(moduleTransferAddress.getAddress())) {
+                return TransactionContext.typedError(
+                        "This transfer needs a module transfer credential the blacklist init never "
+                        + "registered, so its withdraw-0 would target an unregistered reward account "
+                        + "and the ledger would reject it (code 3141, reported as a rewards-balance "
+                        + "problem).\n"
+                        + "\n"
+                        + "  init registered : " + initRow.get().getModuleTransferStakeAddress() + "\n"
+                        + "  this needs      : " + moduleTransferAddress.getAddress() + "\n"
+                        + "\n"
+                        + "  The FES transfer validator is parameterised by "
+                        + "(programmableLogicBase.scriptHash, blacklistNodePolicyId), so it carries a "
+                        + "hash from the CORE deployment. The usual cause is that the protocol was "
+                        + "RE-BOOTSTRAPPED after this blacklist was initialised: every core hash moved, "
+                        + "this credential changed, and issuer_admin did not — which is why issuing "
+                        + "this token still works while transferring it does not. A transfer cannot "
+                        + "register the account it withdraws from, so run a fresh blacklist init "
+                        + "against the current deployment and re-register the token.");
+            }
+
             var valueToSend = Value.from(progToken.policyId(), "0x" + progToken.assetName(), amountToTransfer);
 
             var inputUtxos = senderProgTokensUtxos.stream()
@@ -1581,6 +1620,12 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
                     // ledger rejects it as 3141 naming a balance problem. Recording the derived
                     // address lets registration COMPARE. Measured on preprod 2026-09-30.
                     .issuerAdminStakeAddress(moduleIssueAddress.getAddress())
+                    // ⛔ AND THE TRANSFER CREDENTIAL, which is pinned to the DEPLOYMENT rather than
+                    // the admin: transfer = (programmableLogicBase.scriptHash, blacklistPolicyId).
+                    // A protocol re-bootstrap moves every core hash, so this credential stops
+                    // existing while issuer_admin survives untouched — which is precisely why
+                    // issuing an FES token kept working on preprod while transferring it failed.
+                    .moduleTransferStakeAddress(moduleTransferAddress.getAddress())
                     .build());
 
             return TransactionContext.ok(transaction.serializeToHex(), new MintingResult(parameterisedBlacklistMintingScript.getPolicyId(), ""));
