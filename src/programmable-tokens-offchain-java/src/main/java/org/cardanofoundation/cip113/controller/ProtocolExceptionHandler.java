@@ -1,6 +1,7 @@
 package org.cardanofoundation.cip113.controller;
 
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.service.TokenNotInCurrentDeploymentException;
 import org.cardanofoundation.cip113.service.UnknownProtocolVersionException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -28,6 +29,19 @@ public class ProtocolExceptionHandler {
         // deployment that keeps a version history, and logging it at ERROR reintroduces the
         // false alert through the logging pipeline after removing it from the status code.
         log.warn("Rejected unresolvable protocolTxHash: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(Map.of("error", e.getMessage()));
+    }
+
+    /**
+     * A token from another deployment is a 400 for the same reason: well-formed request, healthy
+     * server, wrong token for this protocol version. WARN for the same reason too — with a
+     * version history this is an expected caller mistake, and ERROR would put it in alerting.
+     */
+    @ExceptionHandler(TokenNotInCurrentDeploymentException.class)
+    public ResponseEntity<Map<String, String>> handleTokenNotInCurrentDeployment(
+            TokenNotInCurrentDeploymentException e) {
+        log.warn("Rejected token from another protocol deployment: {}", e.getMessage());
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(Map.of("error", e.getMessage()));
     }

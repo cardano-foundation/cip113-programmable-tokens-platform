@@ -52,6 +52,8 @@ public class TokenOperationsService {
 
     private final ProtocolDeploymentResolver protocolDeploymentResolver;
 
+    private final org.cardanofoundation.cip113.repository.ProtocolParamsRepository protocolParamsRepository;
+
     private final RegistryService registryService;
 
     private final BlacklistInitRepository blacklistInitRepository;
@@ -539,6 +541,13 @@ public class TokenOperationsService {
         // Get protocol bootstrap params
         var protocolParams = resolveProtocolParams(protocolTxHash);
 
+        // ⛔ REFUSE A TOKEN FROM ANOTHER DEPLOYMENT BEFORE BUILDING ANYTHING. Placed here, on
+        // the shared path above the module switch, so it covers every substandard at once — the
+        // binding it enforces is the protocol's, not a module's. Without it the tx builds and
+        // the LEDGER rejects it with error 3141, whose text names neither the token nor the
+        // deployment. See TokenDeploymentGuard for what it deliberately does NOT refuse.
+        guardTokenDeployment(programmableToken.policyId(), protocolParams);
+
         // Resolve module from policyId via unified registry
         String moduleId = resolveModuleId(programmableToken.policyId());
 
@@ -689,5 +698,47 @@ public class TokenOperationsService {
      */
     public java.util.Set<String> getSupportedModules() {
         return handlerFactory.getRegisteredModules();
+    }
+
+    /**
+     * Applies {@link TokenDeploymentGuard} to the deployment currently in use.
+     *
+     * <p>The deployment record comes from {@code protocol-bootstraps-<network>.json} and carries
+     * only a {@code txHash}; the directory is keyed by {@code protocol_params.id}. When that row
+     * is not indexed yet the id is absent and the guard cannot judge — which is a pass, not a
+     * refusal, or no fresh bootstrap would ever transfer.
+     */
+    private void guardTokenDeployment(String policyId, ProtocolBootstrapParams protocolParams) {
+        Long currentId = protocolParamsRepository.findByTxHash(protocolParams.txHash())
+                .map(org.cardanofoundation.cip113.entity.ProtocolParamsEntity::getId)
+                .orElse(null);
+
+        var outcome = TokenDeploymentGuard.requireTokenInDeployment(
+                policyId,
+                currentId,
+                protocolParams.txHash(),
+                new TokenDeploymentGuard.RegistryView() {
+                    @Override
+                    public boolean isInDeployment(String policy, long protocolParamsId) {
+                        return registryService
+                                .findNodeByKeyAndProtocolParams(policy, protocolParamsId)
+                                .isPresent();
+                    }
+
+                    @Override
+                    public java.util.Optional<String> lastSeenDeploymentTxHash(String policy) {
+                        return registryService.findNodeByKey(policy)
+                                .map(node -> node.getProtocolParams() == null
+                                        ? null
+                                        : node.getProtocolParams().getTxHash());
+                    }
+                });
+
+        if (outcome == TokenDeploymentGuard.Outcome.UNDETERMINED) {
+            // WARN and proceed: this is the indexer-lag / not-yet-ingested window. Logged rather
+            // than silent, because if a real mismatch ever lands here it is the only trace.
+            log.warn("Could not confirm token {} belongs to deployment {} (protocol_params row or"
+                    + " directory node not indexed yet); proceeding", policyId, protocolParams.txHash());
+        }
     }
 }

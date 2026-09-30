@@ -116,6 +116,32 @@ public class RegistryService {
     }
 
     /**
+     * Find the live directory node for a policy id, in ANY deployment.
+     *
+     * <p>⚑ Takes the policy id AS GIVEN. {@link #findByPolicyId(String)} next to this one takes a
+     * UNIT and parses it through {@code AssetType.fromUnit}, which is the wrong entry point when
+     * the caller already holds a policy id: whether that parser accepts a 56-character string
+     * with no asset name is a property of an external library, not of this codebase, so a caller
+     * with a bare policy id would be betting on it. This method removes the bet.
+     *
+     * @param policyId the 56-hex policy id, used directly as the directory key
+     */
+    public Optional<RegistryNodeEntity> findNodeByKey(String policyId) {
+        return repository.findByKey(policyId);
+    }
+
+    /**
+     * Find the live directory node for a policy id within ONE deployment.
+     *
+     * <p>Deployment-scoped on purpose — see {@link #findNodeByKey(String)} for why this takes a
+     * policy id rather than a unit. The directory is per-deployment, so an unscoped hit says
+     * nothing about whether the token belongs to the deployment in use.
+     */
+    public Optional<RegistryNodeEntity> findNodeByKeyAndProtocolParams(String policyId, Long protocolParamsId) {
+        return repository.findByKeyAndProtocolParamsId(policyId, protocolParamsId);
+    }
+
+    /**
      * Find registry node by policy ID extracted from a unit string.
      * Uses AssetType utility to parse the unit into blacklistNodePolicyId and assetName.
      *
