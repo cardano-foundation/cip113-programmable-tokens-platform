@@ -20,7 +20,7 @@ public record ProtocolBootstrapParams(
         ScriptParams transfer,
         ScriptParams thirdParty,
         ScriptParams unfracking,
-        ScriptParams programmableLogicGlobal,
+        DispatcherParams programmableLogicGlobal,
         Long maxInlineDatumBytes,
         UpgradeMultisigParams upgradeMultisig,
         TxInput upgradeMultisigRefInput,

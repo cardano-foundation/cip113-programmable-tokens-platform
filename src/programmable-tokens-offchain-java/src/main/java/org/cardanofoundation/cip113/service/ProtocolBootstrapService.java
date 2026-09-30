@@ -230,6 +230,14 @@ public class ProtocolBootstrapService {
         if (params.thirdParty() == null) missing.add("thirdParty");
         if (params.unfracking() == null) missing.add("unfracking");
         if (params.programmableLogicGlobal() == null) missing.add("programmableLogicGlobal");
+        // ⛔ CHECKED HERE, WHERE THE RECORD IS LOADED, not where it is used. The SDK refuses a
+        // deployment whose dispatcher has no recorded `unfrackingParameter`, and rightly — it
+        // cannot tell "unfracking disabled" from "the field went missing". But the SDK runs in a
+        // BROWSER, five steps into an operator's flow; this runs at startup, against the file. A
+        // record that cannot build should fail where it is read.
+        else if (params.programmableLogicGlobal().unfrackingParameter() == null) {
+            missing.add("programmableLogicGlobal.unfrackingParameter");
+        }
         if (params.upgradeMultisig() == null || params.upgradeMultisig().txInput() == null
                 || params.upgradeMultisig().utxo() == null) missing.add("upgradeMultisig");
         if (params.upgradeAuthority() == null) missing.add("upgradeAuthority");

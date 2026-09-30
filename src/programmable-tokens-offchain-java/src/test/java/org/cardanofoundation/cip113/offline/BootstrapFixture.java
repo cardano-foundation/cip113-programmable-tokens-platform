@@ -38,6 +38,7 @@ import org.cardanofoundation.cip113.model.bootstrap.CredentialParams;
 import org.cardanofoundation.cip113.model.bootstrap.IssuanceParams;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.model.bootstrap.RegistryParams;
+import org.cardanofoundation.cip113.model.bootstrap.DispatcherParams;
 import org.cardanofoundation.cip113.model.bootstrap.ScriptParams;
 import org.cardanofoundation.cip113.model.bootstrap.TxInput;
 import org.cardanofoundation.cip113.model.bootstrap.UpgradeMultisigParams;
@@ -347,7 +348,13 @@ public final class BootstrapFixture {
                         TxInput.from(protocolSeed), protocolParams.getPolicyId(), TxInput.from(paramsUtxo)),
                 new ScriptParams(plb.getPolicyId()), new ScriptParams(transfer.getPolicyId()),
                 new ScriptParams(thirdParty.getPolicyId()), new ScriptParams(unfracking.getPolicyId()),
-                new ScriptParams(plg.getPolicyId()), CoreProtocolParamsDatum.DEFAULT_MAX_INLINE_DATUM_BYTES,
+                // ⛔ THE SECOND ARGUMENT IS WHAT THE DISPATCHER WAS COMPILED AGAINST, and above it
+                // is `unfracking.getScriptHash()` — the REAL script, not the disabled sentinel. Do
+                // not "simplify" this to UNFRACKING_DISABLED: the record would then describe a
+                // dispatcher whose unfracking arm can never be satisfied, while the fixture builds
+                // one that can, and every hash check would still pass.
+                new DispatcherParams(plg.getPolicyId(), unfracking.getPolicyId()),
+                CoreProtocolParamsDatum.DEFAULT_MAX_INLINE_DATUM_BYTES,
                 new UpgradeMultisigParams(upgradeMultisig.getPolicyId(), TxInput.from(upgradeSeed), TxInput.from(multisigUtxo)),
                 new TxInput(refHash, upgradeIdx),
                 new CredentialParams("script", upgradeMultisig.getPolicyId()),
