@@ -141,6 +141,17 @@ function stepIdForLabel(label: string): string | null {
  * UNPARAMETERISED script hash and carries the parameters that produce the deployed one — so
  * `upgrade_multisig` appears in the record under its raw hash, not the hash that ends up in the
  * deployment. Matching on the deployed hash makes a correct record look like a miss.
+ *
+ * ⛔ AND A VERIFY LINK SHOWING NOTHING IS OFTEN SUCCESS, NOT FAILURE. Measured 2026-09-30 on a
+ * preview genesis whose record was perfect: 1170 bytes, decoding cleanly, eleven raw hashes with
+ * their parameters. uplc.link had nothing to show for that TRANSACTION because it had already
+ * registered the identical claim against an earlier one — the SDK's own harness deployment two days
+ * before, and another from three weeks before that.
+ *
+ * The reason is structural and will keep happening: the record names the BLUEPRINT's unparameterised
+ * hashes plus its source and commit, none of which change between deployments. So every deployment
+ * of a given blueprint revision makes a byte-identical claim, and the registry credits the first
+ * transaction to make it. Only the first deployment of a NEW revision gets its own entry.
  */
 const STEPS_WITH_PROVENANCE: readonly string[] = ["multisig-genesis", "protocol-genesis"];
 
@@ -1763,14 +1774,22 @@ export default function BootstrapProtocolPage() {
               ))}
             </dl>
             {deployComplete && (
+              <>
               <p className="text-xs text-dark-300">
-                The protocol genesis carries the CIP-171 provenance record for all ten parameterised
-                scripts, so its <span className="text-primary-400">verify</span> link replays the
+                The multisig config and the protocol genesis each carry the CIP-171 provenance
+                record, so their <span className="text-primary-400">verify</span> links replay the
                 build against the source it was compiled from — and because records are keyed by
-                script hash, that one record covers the reference scripts too. The other
-                transactions publish no record and get no link. Indexing is not instant: a link that
-                reports nothing yet is not the same as one that fails.
+                script hash, those cover the reference scripts too. The other two transactions
+                publish no record and get no link.
               </p>
+              <p className="text-xs text-dark-400">
+                A link that shows nothing is usually not a failure. The record names the
+                blueprint&apos;s unparameterised hashes and its source commit, which do not change
+                between deployments — so if this blueprint revision has been deployed before,
+                anywhere, the registry already credits that earlier transaction and has nothing to
+                add for this one. Indexing is also not instant.
+              </p>
+              </>
             )}
             {syncStart && (
               <p className="text-xs text-dark-300">
