@@ -373,9 +373,65 @@ export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
   return {
     // The signature Evolution calls: (tx, additionalUtxos, context). The context is unused — we
     // delegate to the provider, which derives everything else itself.
-    evaluate: (tx: unknown, additionalUtxos: readonly unknown[] | undefined) =>
-      c.effect!.evaluateTx!(tx, additionalUtxos ? [...additionalUtxos] : undefined),
+    evaluate: (tx: unknown, additionalUtxos: readonly unknown[] | undefined) => {
+      const extra = additionalUtxos ? [...additionalUtxos] : undefined;
+      // ⛔ LOG BEFORE THE CALL, and return the provider's Effect UNTOUCHED. `evaluateTx` returns an
+      // Effect, not a Promise, so an async wrapper around it would hand Evolution a Promise of an
+      // Effect — which is why this file's own test asserts `out === "EFFECT"`. It caught exactly
+      // that mistake. Diagnosis has to be a side effect here, never a change of shape.
+      logEvaluationPayload(tx, extra);
+      return c.effect!.evaluateTx!(tx, extra);
+    },
   };
+}
+
+/**
+ * Prints what the evaluator is about to post, so an undecodable-payload fault can be located.
+ *
+ * ⛔ WHY. Blockfrost forwards evaluation to Ogmios, and Ogmios answers a malformed request with
+ * `Invalid request: failed to decode payload from base64 or base16` — which does not say WHICH
+ * payload, and the request has two candidates: the transaction `cbor`, and every `datum` and
+ * `script` inside `additionalUtxoSet`. Measured 2026-10-01 preparing phase two of the mainnet
+ * ceremony; the fault carries a `reflection.id` and nothing else, so without this the only way
+ * forward is guessing at an SDK's internals.
+ *
+ * ⚑ A SIDE EFFECT ON PURPOSE. It must not alter the evaluator's shape or swallow anything — see the
+ * note at the call site. Printing costs one encode per evaluation and buys the one fact the fault
+ * withholds.
+ */
+function logEvaluationPayload(tx: unknown, extra: readonly unknown[] | undefined): void {
+  try {
+    let txNote: string;
+    try {
+      const hex = EvoTx.toCBORHex(tx as never);
+      const bad = /[^0-9a-fA-F]/.exec(hex);
+      txNote =
+        `${hex.length / 2} bytes, ${hex.length % 2 === 0 ? "even" : "ODD"} length` +
+        (bad ? `, FIRST NON-HEX CHAR ${JSON.stringify(bad[0])} at ${bad.index}` : ", all hex");
+    } catch (e) {
+      txNote = `COULD NOT ENCODE TO CBOR HEX: ${String(e).slice(0, 140)}`;
+    }
+
+    // Only `datum` and `script` on an additional UTxO are decoded as base16 by Ogmios, so a UTxO
+    // carrying neither cannot be the cause of a decode fault.
+    const rows = (extra ?? []).map((u, i) => {
+      const o = u as Record<string, unknown>;
+      const carries = ["datum", "datumHash", "scriptRef", "script"].filter((k) => o?.[k] != null);
+      return (
+        `  [${i}] ${String(o?.txHash ?? "?").slice(0, 16)}#${String(o?.outputIndex ?? "?")} ` +
+        (carries.length > 0 ? `carries ${carries.map((k) => `${k}:${typeof o[k]}`).join(", ")}` : "plain")
+      );
+    });
+
+    console.log(
+      `[evaluate] tx cbor: ${txNote}\n[evaluate] additionalUtxoSet: ${extra?.length ?? 0}` +
+        (rows.length > 0 ? `\n${rows.join("\n")}` : "") +
+        "\n[evaluate] if this call fails with \"failed to decode payload from base64 or base16\", the " +
+        "culprit is a non-hex/odd-length tx cbor above, or a datum/script on one of these UTxOs.",
+    );
+  } catch {
+    // Diagnostics must never be able to break an evaluation.
+  }
 }
 
 /**
