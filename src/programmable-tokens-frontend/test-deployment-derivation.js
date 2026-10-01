@@ -392,15 +392,16 @@ async function main() {
   try { toBootstrapRecord(tampered, bad); } catch { refused = true; }
   if (!refused) throw new Error("emitted a record from a deployment that did not verify");
   console.log("  OK   no record is emitted from a deployment that did not verify");
-  // ---- the issuance_mint CBOR splice, measured against THIS blueprint -------
+  // ---- issuance_mint stays out of the provenance record ---------------------
   //
-  // The one part of the bootstrap whose correctness is a property of the artefact rather than
-  // of a chain, so it is the one part provable offline. A core deployment stores issuance_mint
-  // as CBOR either side of a placeholder minting-logic hash; the splice is only sound while
-  // that placeholder occurs exactly once AND lands on a byte boundary, and flat UPLC is
-  // BIT-packed, so neither is guaranteed by anything but measurement.
+  // ⚑ A SPLICE ASSERTION USED TO SIT HERE and it was passing against a GHOST. It imported
+  // `splitIssuanceMintCbor` from `lib/deployment/bootstrap.ts`, a module deleted in 9c33527;
+  // the function exists nowhere in the tree today. It kept passing locally because `tsc
+  // --outDir .deploy-build` never cleans, so a stale `bootstrap.js` from before the deletion
+  // stayed on disk and satisfied the dynamic import. The first clean checkout — CI — failed
+  // with ERR_MODULE_NOT_FOUND. Removed rather than resurrected: there is no production code
+  // left for it to protect.
   const { buildCoreScriptSet } = await import("./.deploy-build/deployment/derive.js");
-  const { splitIssuanceMintCbor } = await import("./.deploy-build/deployment/bootstrap.js");
 
   const coreSet = buildCoreScriptSet({
     blueprint,
@@ -412,13 +413,6 @@ async function main() {
     alwaysFailHash: deployment.issuance.alwaysFailScriptHash,
     maxInlineDatumBytes: deployment.maxInlineDatumBytes,
   });
-  const { cborPre, cborPost } = splitIssuanceMintCbor(coreSet);
-  if (cborPre.length === 0 || cborPost.length === 0) {
-    throw new Error("issuance_mint splice produced an empty half — the placeholder is at an edge");
-  }
-  console.log(
-    `  OK   issuance_mint splice: prefix ${cborPre.length / 2} B, postfix ${cborPost.length / 2} B`,
-  );
 
   // The splice must be SEALED out of the provenance record. issuance_mint belongs to a
   // module registration, not to this deployment, so publishing it here would attest a

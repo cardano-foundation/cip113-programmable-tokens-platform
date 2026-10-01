@@ -18,7 +18,8 @@
  * entries in package.json). Each suite is a `tsc` compile followed by plain `node`, and each
  * prints its own `N checks passed` line, which this runner echoes and totals.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -33,6 +34,30 @@ if (suites.length === 0) {
   );
   process.exit(1);
 }
+
+/**
+ * ⛔ DELETE THE COMPILE OUTPUTS FIRST. Every suite is `tsc --outDir .<name>-build && node …`,
+ * and tsc does NOT clean an outDir. So when a source module is deleted or renamed, its stale
+ * .js stays on disk and a suite's dynamic `import()` keeps resolving to a GHOST — passing
+ * locally forever while being broken on any clean checkout.
+ *
+ * That is not hypothetical: test:deployment imported `splitIssuanceMintCbor` from
+ * `lib/deployment/bootstrap.ts`, deleted in 9c33527, and passed locally for weeks against the
+ * leftover `bootstrap.js`. The first clean environment to run it — CI — failed with
+ * ERR_MODULE_NOT_FOUND. Cleaning here makes a local `npm test` mean the same thing as a CI
+ * run, which is the only version of local-green worth having.
+ */
+function cleanBuildDirs(root) {
+  const stale = readdirSync(root, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && /^\..+-build$/.test(d.name))
+    .map((d) => d.name);
+  for (const dir of stale) rmSync(new URL(`../${dir}/`, import.meta.url), { recursive: true, force: true });
+  return stale;
+}
+
+const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+const cleaned = cleanBuildDirs(projectRoot);
+if (cleaned.length > 0) console.log(`Removed stale compile output: ${cleaned.join(", ")}\n`);
 
 const inCI = Boolean(process.env.GITHUB_ACTIONS);
 
