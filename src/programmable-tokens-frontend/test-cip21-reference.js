@@ -310,6 +310,40 @@ for (const t of real) {
   );
 }
 
+// ---- 8c. and the logger actually USES it — the wiring, not just the helper ----
+// ⛔ A HELPER TESTED IN ISOLATION DOES NOT PIN ITS CALL SITE. Reverting `${safeUrl(url)}` back to
+// `${url}` while leaving `safeUrl` perfectly intact left the suite green AND printed the secret:
+//   [evaluate-request] POST https://h.io/api/v0/utils/txs/evaluate/utxos?project_id=preprodSECRET…
+// So this installs the real logger, drives a real fetch, and asserts on what was PRINTED.
+{
+  const { installEvaluateRequestLogger } = await import("./.cip21ref-build/deployment/evaluate-request-log.js");
+  const SECRET = "preprodSECRETKEY0123456789";
+
+  const printed = [];
+  const realLog = console.log;
+  const realWarn = console.warn;
+  const realFetch = globalThis.fetch;
+  console.log = (...a) => printed.push(a.join(" "));
+  console.warn = (...a) => printed.push(a.join(" "));
+  globalThis.fetch = async () => new Response("{}", { status: 200 });
+  try {
+    installEvaluateRequestLogger();
+    await globalThis.fetch(
+      `https://h.io/api/v0/utils/txs/evaluate/utxos?project_id=${SECRET}`,
+      { method: "POST", body: JSON.stringify({ cbor: "84a0a0f5f6", additionalUtxoSet: [] }) },
+    );
+  } finally {
+    console.log = realLog;
+    console.warn = realWarn;
+    globalThis.fetch = realFetch;
+  }
+
+  const all = printed.join("\n");
+  ok(all.includes("[evaluate-request]"), "the logger ran and printed something (otherwise this is vacuous)");
+  ok(!all.includes(SECRET),
+    `nothing the logger prints may contain a URL credential; printed:\n${all.slice(0, 400)}`);
+}
+
 // ---- 8. the oracle is not vacuous ----
 // ⛔ WITHOUT THIS THE WHOLE SUITE COULD PASS BY CALLING A LIBRARY THAT ANSWERS "fine" TO EVERYTHING.
 // "1800" is integer 0 written in two bytes: valid CBOR, not canonical.

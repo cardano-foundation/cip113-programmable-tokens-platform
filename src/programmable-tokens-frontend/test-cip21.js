@@ -128,23 +128,43 @@ ran++;
 // label `witnessSet`: its defects became `witnessSet{09}: …` and therefore ADVISORY instead of fatal.
 // The same bytes under an `84` header were correctly fatal. Found by the 2026-10-01 pre-merge audit.
 {
-  const real = require("./test-fixtures/real-preview-txs.json").transactions;
-  const good = real[1].cbor.toLowerCase();
-  const minimal = checkCip21(good);
-  assert.strictEqual(minimal.violations.length, 0, "the real transaction is conformant under `84`");
+  // ⛔ THE INPUT MUST HAVE A BODY DEFECT TO MISATTRIBUTE, or these assertions cannot fail. The first
+  // version of this test used the CONFORMANT real transaction: its body contains nothing to blame, so
+  // "nothing may be attributed to witnessSet" and "every finding must be fatal" were both trivially
+  // true and the test could not express a failure. Measured: with that input, reverting the dispatch's
+  // OFFSET (`head.first` back to a hardcoded 1) left all 306 checks green while the body really was
+  // being walked as the witness set. The count half was defended and the offset half was not, and the
+  // test looked directly at the property either way.
+  //
+  // ⇒ So the input is the real captured ceremony body a Ledger refused — which carries an unsorted
+  // mint map, i.e. a body-level defect that WILL be misattributed if the offset is wrong.
+  const fs2 = require("node:fs");
+  const defective = fs2.readFileSync("test-fixtures/ceremony-genesis-unsorted-mint.hex", "utf8").trim();
+  const underMinimal = checkCip21(defective);
+  assert.ok(underMinimal.scopedViolations.some((v) => v.message.startsWith("body.mint")),
+    `the fixture must carry a body.mint defect for this test to mean anything; got: ` +
+    underMinimal.violations.join(" | "));
 
-  // Same elements, non-minimal outer header. The header itself is a minimality violation, and
-  // everything inside must still be attributed to the BODY.
-  const nonMinimal = "9804" + good.slice(2);
-  const r = checkCip21(nonMinimal);
-  assert.ok(r.violations.length > 0, "a non-minimal outer array header is itself a violation");
+  // Same bytes, non-minimal outer header. The mint defect must STILL be body-scoped and fatal.
+  const r = checkCip21("9804" + defective.slice(2));
   const mislabelled = r.scopedViolations.filter((v) => v.message.startsWith("witnessSet"));
   assert.strictEqual(mislabelled.length, 0,
     `nothing may be attributed to witnessSet when the header is non-minimal; got: ` +
     mislabelled.map((v) => v.message).join(" | "));
+  assert.ok(r.scopedViolations.some((v) => v.message.startsWith("body.mint") && v.scope === "body"),
+    `the mint defect must still be attributed to the BODY; got ` +
+    JSON.stringify(r.scopedViolations.map((v) => `${v.scope}:${v.message.slice(0, 24)}`)));
   assert.ok(r.scopedViolations.every((v) => isFatalScope(v.scope)),
     `every finding on a mis-headered transaction must be fatal; got scopes ` +
     JSON.stringify(r.scopedViolations.map((v) => v.scope)));
+  assert.ok(r.scopedViolations.some((v) => /outer array header/.test(v.message)),
+    "and the non-minimal header is itself reported");
+
+  // Control, kept: a CONFORMANT transaction under a minimal header stays clean, so the checks above
+  // cannot be satisfied by a rule that simply flags everything.
+  const real = require("./test-fixtures/real-preview-txs.json").transactions;
+  assert.strictEqual(checkCip21(real[1].cbor.toLowerCase()).violations.length, 0,
+    "control: a real conformant transaction under `84` reports nothing");
   console.log("  OK   a non-minimal outer header does not reclassify the body as the witness set");
   ran++;
 }
@@ -189,6 +209,34 @@ ran++;
   ran++;
 }
 
+// ---- 11a6. the outer-header minimality boundaries, in both directions ----
+// ⛔ A WRONG BOUNDARY HERE IS A FALSE POSITIVE, and on this lane a false positive is a refused
+// ceremony. `< 24 ? 1 : < 256 ? 2 : < 65536 ? 3 : 5` has four transitions and widening either of the
+// first two (`<=` instead of `<`) was undetectable: both mutants survived the whole suite. Counts 24
+// and 256 are exactly where a correct 2- or 3-byte header must NOT be flagged.
+{
+  const elem = "f6"; // null — a cheap, conformant array element
+  const mk = (count, headerHex) => headerHex + elem.repeat(count);
+  const flagged = (hex) =>
+    checkCip21(hex).violations.filter((v) => /outer array header/.test(v)).length;
+
+  for (const [count, header, expect, why] of [
+    [23, "97", 0, "23 elements in a 1-byte header is minimal"],
+    [23, "9817", 1, "23 elements in a 2-byte header is NOT minimal"],
+    [24, "9818", 0, "24 elements needs 2 bytes, so 2 bytes is minimal"],
+    [24, "990018", 1, "24 elements in a 3-byte header is NOT minimal"],
+    [255, "98ff", 0, "255 elements needs 2 bytes"],
+    [255, "9900ff", 1, "255 elements in 3 bytes is NOT minimal"],
+    [256, "990100", 0, "256 elements needs 3 bytes, so 3 bytes is minimal"],
+  ]) {
+    const got = flagged(mk(count, header));
+    assert.strictEqual(got, expect,
+      `${why}: expected ${expect} header finding(s), got ${got}`);
+  }
+  console.log("  OK   outer-header minimality is exact at 23/24/255/256 in both directions");
+  ran++;
+}
+
 // ---- 11a5. nothing inside an output is reported twice ----
 // ⛔ `body.outputs` is inspected once for the legacy shape and then walked again by the generic
 // walker, so findings inside an output used to be recorded TWICE — inflating both the count an
@@ -215,6 +263,21 @@ ran++;
   assert.strictEqual(repeated.length, 0,
     `no violation may be reported more than once; repeated: ` +
     repeated.map(([v, n]) => `${n}x ${v}`).join(" | "));
+
+  // ⛔ EXACT-MESSAGE EQUALITY IS NOT ENOUGH, which is how the remaining duplicate hid. The same byte
+  // was reported twice under two different path labels — `body.outputs[0].coin` and
+  // `body.outputs[0][1][0]` — so the strings differed and the check above passed. Compare what is
+  // SAID, independently of where it is said, within one output.
+  const said = new Map();
+  for (const v of r.violations) {
+    const suffix = v.slice(v.indexOf(": ") + 2);
+    said.set(suffix, (said.get(suffix) ?? 0) + 1);
+  }
+  const sameComplaintTwice = [...said.entries()].filter(([, n]) => n > 1);
+  assert.strictEqual(sameComplaintTwice.length, 0,
+    `the same complaint must not appear under two different path labels; got: ` +
+    sameComplaintTwice.map(([t, n]) => `${n}x "${t.slice(0, 60)}…"`).join(" | ") +
+    `\n  full list: ${r.violations.join(" | ")}`);
   console.log(`  OK   ${r.violations.length} findings inside an output, each reported exactly once`);
   ran++;
 }

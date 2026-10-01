@@ -58,7 +58,15 @@ const BODY_FIELD: Record<number, string> = {
 export type Cip21Scope =
   /** Inside the body — the only part a hardware wallet reconstructs and hashes. FATAL. */
   | "body"
-  /** A whole-transaction rule (tag-258 all-or-nothing) that still changes the body a device hashes. FATAL. */
+  /**
+   * A rule about the transaction AS A WHOLE rather than localised to the body. Either it changes the
+   * body a device hashes (tag-258 all-or-nothing), or it means we cannot faithfully reproduce the
+   * transaction's framing (a non-minimal outer array header). Fatal either way — the second case does
+   * NOT alter the body bytes, so a device would hash the same body, but `canonicaliseBodyOnly` refuses
+   * such a transaction anyway and `cardano-hw-cli` refuses any transaction carrying a fixable issue
+   * anywhere. The earlier wording claimed every member of this scope changes the hashed body, which
+   * stopped being true the moment the header rule joined it.
+   */
   | "transaction"
   /** The checker could not read the bytes, so it has no opinion. FATAL — no finding is not a pass. */
   | "blind"
@@ -298,7 +306,15 @@ function walk(ctx: Ctx, i: number, path: string, isBody = false): number {
             if (head) {
               let q = head.first;
               for (let j = 0; j < head.count; j++) {
+                const beforeLegacy = ctx.violations.length;
                 checkLegacyOutput(ctx, q, `body.outputs[${j}]`);
+                // Keep only what checkLegacyOutput itself reports; discard what its internal walk
+                // reported, which the main walk below will find and name canonically.
+                const legacyOwn = ctx.violations
+                  .slice(beforeLegacy)
+                  .filter((v) => /token-free output/.test(v.message));
+                ctx.violations.length = beforeLegacy;
+                ctx.violations.push(...legacyOwn);
                 // ⛔ THIS PASS ONLY NEEDS THE OFFSET. The generic walker runs over the same outputs
                 // again below, so letting this inner walk REPORT duplicated every violation inside an
                 // output. The first fix for that deduped all violations by message text, which merged
@@ -310,6 +326,12 @@ function walk(ctx: Ctx, i: number, path: string, isBody = false): number {
                 // into `ctx.emptyInBody`, which is turned into violations later, after the walk is
                 // over. Rewinding only the first left the empty-map finding duplicated — caught by the
                 // no-duplicates test, which is the whole reason that test exists rather than a comment.
+                // ⚑ THE SNAPSHOT HAS TO COVER `checkLegacyOutput` TOO. It walks the coin itself to find
+                // the multiasset map, so with the snapshot taken after it, the coin's findings survived
+                // this pass and the main walk reported the same byte again under a different path label
+                // (`body.outputs[0].coin` and `body.outputs[0][1][0]`). Two names, one defect — and the
+                // no-duplicates test keys on exact message equality, so the differing labels slipped
+                // past it. Snapshot first, report second.
                 const reportedBefore = ctx.violations.length;
                 const emptiesBefore = ctx.emptyInBody.length;
                 q = walk(ctx, q, `body.outputs[${j}]`);
