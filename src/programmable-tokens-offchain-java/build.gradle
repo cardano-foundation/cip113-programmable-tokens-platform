@@ -115,6 +115,7 @@ ext.ciTestPatterns = [
 		'*TransactionDeserializationTest',
 		'*Cip68Test',
 		'*ConditionalBeanWiringTest',
+		'*RegistryCredentialCrossCheckTest',
 ]
 
 // ---------------------------- QUARANTINE ----------------------------

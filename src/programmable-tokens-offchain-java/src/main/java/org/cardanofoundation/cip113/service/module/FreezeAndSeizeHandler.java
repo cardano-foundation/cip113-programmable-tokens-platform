@@ -1189,18 +1189,24 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
 
             var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
 
+            // ⚑ KEEP THE PARSED NODE, not only its UTxO. The node is the CHAIN's own record of which
+            // scripts this token's operations must use, and the withdrawal below has to agree with it.
+            // Parsing it twice and throwing the result away is what let the two drift unnoticed.
+            record RegistryHit(com.bloxbean.cardano.client.api.model.Utxo utxo,
+                               org.cardanofoundation.cip113.model.onchain.RegistryNode node) {}
             var progTokenRegistryOpt = registryEntries.stream()
-                    .filter(utxo -> {
-                        var registryDatumOpt = registryNodeParser.parse(utxo.getInlineDatum());
-                        return registryDatumOpt.map(registryDatum -> registryDatum.key().equals(progToken.policyId())).orElse(false);
-                    })
+                    .flatMap(utxo -> registryNodeParser.parse(utxo.getInlineDatum())
+                            .filter(datum -> datum.key().equals(progToken.policyId()))
+                            .map(datum -> new RegistryHit(utxo, datum))
+                            .stream())
                     .findAny();
 
             if (progTokenRegistryOpt.isEmpty()) {
                 return TransactionContext.typedError("could not find registry entry for token");
             }
 
-            var progTokenRegistry = progTokenRegistryOpt.get();
+            var progTokenRegistryNode = progTokenRegistryOpt.get().node();
+            var progTokenRegistry = progTokenRegistryOpt.get().utxo();
             log.info("progTokenRegistry: {}", progTokenRegistry);
 
             var bootstrapTxHash = protocolParams.txHash();
@@ -1245,6 +1251,21 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
             );
 
             var moduleTransferAddress = AddressProvider.getRewardAddress(parameterisedModuleTransferContract, network.getCardanoNetwork());
+
+            // The chain decides whether this derivation is right — see registryCredentialMismatch.
+            // Measured on preprod 2026-10-01: the node recorded 83764aa7…, the init registered
+            // 83764aa7…, and this derivation produced a36376d3…; the transaction was built anyway and
+            // the ledger answered 3141.
+            var transferMismatch = registryCredentialMismatch(
+                    "transfer", progToken.policyId(),
+                    progTokenRegistryNode.transferLogicScript(), "transferLogicScript",
+                    parameterisedModuleTransferContract,
+                    "programmableLogicBase=" + protocolParams.programmableLogicBase().scriptHash()
+                            + ", blacklistNodePolicyId=" + blacklistNodePolicyId,
+                    protocolParams.txHash());
+            if (transferMismatch.isPresent()) {
+                return TransactionContext.typedError(transferMismatch.get());
+            }
             log.info("moduleTransferAddress: {}", moduleTransferAddress.getAddress());
 
             // ⛔ REFUSE BEFORE BUILDING IF THIS CREDENTIAL IS NOT THE ONE THE INIT REGISTERED.
@@ -1959,12 +1980,14 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
 
             var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
 
-            var progTokenRegistryOpt = registryEntries.stream()
-                    .filter(utxo -> {
-                        var registryDatumOpt = registryNodeParser.parse(utxo.getInlineDatum());
-                        return registryDatumOpt.map(registryDatum -> registryDatum.key().equals(progToken.policyId())).orElse(false);
-                    })
+            // Keep the parsed node: its recorded credentials are what the withdrawals must agree with.
+            var progTokenRegistryNodeOpt = registryEntries.stream()
+                    .flatMap(utxo -> registryNodeParser.parse(utxo.getInlineDatum())
+                            .filter(datum -> datum.key().equals(progToken.policyId()))
+                            .map(datum -> java.util.Map.entry(utxo, datum))
+                            .stream())
                     .findAny();
+            var progTokenRegistryOpt = progTokenRegistryNodeOpt.map(java.util.Map.Entry::getKey);
 
             if (progTokenRegistryOpt.isEmpty()) {
                 return TransactionContext.typedError("could not find registry entry for token");
@@ -2170,4 +2193,83 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
         return TransactionContext.typedError("Not yet implemented");
     }
 
+    /**
+     * Refuses an operation whose derived credential disagrees with the one the CHAIN records.
+     *
+     * <p>The registry node is written by the registration that REGISTERED these credentials, so when
+     * a local derivation disagrees with it the derivation is wrong and the operation's withdraw-0
+     * would target a reward account nothing registered. The ledger answers that with code 3141 —
+     * "rewards withdrawals must consume rewards in full" — which describes a balance problem and
+     * mentions the missing registration only in its last sentence, after the operator has signed.
+     *
+     * <p>⛔ WHY REFUSE INSTEAD OF USING THE CHAIN'S VALUE. A withdraw-0 from a script credential must
+     * carry the SCRIPT, not merely its hash. On a mismatch we hold the chain's hash and no script
+     * that hashes to it, so substituting it cannot produce a submittable transaction: it would trade
+     * 3141 for a phase-1 witness error at the same stage, after the same signature. The only honest
+     * repair is re-registration under the correct inputs. {@code KycExtendedSubstandardHandler}
+     * reached the same conclusion independently and refuses for the same reason.
+     *
+     * <p>⚑ A NON-SCRIPT OR SHORT CREDENTIAL IS "NO EVIDENCE", NOT A MISMATCH. The registry's hooks
+     * are {@code Credential}s and {@code EMPTY_VKEY} (a zero-length KEY credential) is the documented
+     * "unset" sentinel, so a node may legitimately record nothing here. Treating that as a mismatch
+     * would refuse valid operations; it is logged instead. It also must never be turned into a reward
+     * address: a key-typed credential sorts AFTER script ones in withdrawal order, which would shift
+     * every redeemer index in the transaction.
+     *
+     * @return the refusal message, or empty when the two agree or there is nothing to compare
+     */
+    // Package-private, not private: the decision is the valuable part and a test drives it directly
+    // rather than through a Spring context, three repositories and a chain.
+    Optional<String> registryCredentialMismatch(String operation,
+                                                        String policyId,
+                                                        Credential nodeCredential,
+                                                        String nodeFieldName,
+                                                        com.bloxbean.cardano.client.plutus.spec.PlutusScript derived,
+                                                        String derivationInputs,
+                                                        String protocolTxHash) {
+        if (nodeCredential == null
+                || nodeCredential.getType() != com.bloxbean.cardano.client.address.CredentialType.Script
+                || nodeCredential.getBytes() == null
+                || nodeCredential.getBytes().length != 28) {
+            log.warn("Registry node for token {} records no 28-byte SCRIPT {} ({}), so the on-chain "
+                            + "cross-check is skipped for this {}.",
+                    policyId, nodeFieldName, nodeCredential, operation);
+            return Optional.empty();
+        }
+
+        String onChain = HexUtil.encodeHexString(nodeCredential.getBytes());
+        String derivedHash;
+        try {
+            derivedHash = HexUtil.encodeHexString(derived.getScriptHash());
+        } catch (Exception e) {
+            log.warn("Could not hash the derived script for the {} cross-check on token {}: {}",
+                    operation, policyId, e.toString());
+            return Optional.empty();
+        }
+        if (onChain.equalsIgnoreCase(derivedHash)) {
+            return Optional.empty();
+        }
+
+        log.error("FES {} REFUSED for token {}: derived credential {} disagrees with the registry "
+                        + "node's {} ({}). Derivation inputs were {}; protocolTxHash={}.",
+                operation, policyId, derivedHash, nodeFieldName, onChain, derivationInputs,
+                protocolTxHash);
+
+        return Optional.of(
+                "This " + operation + " would withdraw-0 from a credential the registration never "
+                + "registered.\n"
+                + "\n"
+                + "  derived here      : " + derivedHash + "\n"
+                + "  registry node says: " + onChain + "   (" + nodeFieldName + ")\n"
+                + "\n"
+                + "  The registry node is the chain's own record of this token's logic, written by the "
+                + "registration that registered the credential — so it is right and this derivation is "
+                + "wrong. Submitting anyway is rejected as ledger code 3141, whose message describes a "
+                + "rewards-balance problem rather than a missing registration.\n"
+                + "\n"
+                + "  The derivation used " + derivationInputs + ", protocolTxHash=" + protocolTxHash
+                + " — one of those is not what the registration used. The on-chain hash cannot simply "
+                + "be substituted: a withdraw-0 must carry the SCRIPT and we hold no script for that "
+                + "hash. Re-register the token under the correct inputs.");
+    }
 }
