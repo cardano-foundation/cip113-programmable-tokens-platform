@@ -46,11 +46,18 @@ function summarise(key: string, value: unknown): unknown {
  */
 export function installEvaluateRequestLogger(): void {
   if (installed) return;
-  if (typeof window === "undefined" || typeof window.fetch !== "function") return;
+  /**
+   * ⚑ PATCH `globalThis`, NOT `window`. The SDK issues requests as a bare `fetch(url, { ...init })`
+   * (HttpUtils.ts), which is a CALL-TIME lookup on the global object — so patching there is what the
+   * call actually resolves. `window` happens to be the same object in a browser, but `globalThis` is
+   * also correct under a worker or SSR, and this file should not depend on which one it is loaded in.
+   */
+  const target = globalThis as typeof globalThis & { fetch?: typeof fetch };
+  if (typeof target.fetch !== "function") return;
   installed = true;
 
-  const original = window.fetch.bind(window);
-  window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const original = target.fetch.bind(target);
+  target.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     try {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (url.includes("/utils/txs/evaluate") && init?.body != null) {
@@ -78,5 +85,8 @@ export function installEvaluateRequestLogger(): void {
     return original(input as never, init);
   };
 
-  console.log("[evaluate-request] logger installed — the next evaluation prints its request body");
+  console.log(
+    "[evaluate-request] logger installed on globalThis.fetch — the next evaluation prints its " +
+      "request body. If you do not see an [evaluate-request] block below, this build predates it.",
+  );
 }
