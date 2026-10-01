@@ -31,7 +31,8 @@
     "test:relay": "tsc lib/deployment/relay-store.ts lib/tx/hash.ts lib/tx/witness-set.ts --outDir .relay-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .relay-build && node test-relay-store.js",
     "test:steps": "node test-ceremony-steps.js",
     "test:resume": "tsc lib/deployment/ceremony-storage.ts lib/deployment/registration-status.ts lib/utils/network.ts --outDir .resume-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .resume-build && node test-ceremony-resume.js",
-    "test": "node scripts/run-suites.mjs"
+    "test": "node scripts/run-suites.mjs",
+    "test:reftoken": "tsc lib/utils/cip68.ts --outDir .reftoken-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-reference-token-ui.js"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.15.0",
