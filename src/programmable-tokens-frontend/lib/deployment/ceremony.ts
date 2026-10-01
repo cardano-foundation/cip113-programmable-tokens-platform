@@ -408,7 +408,7 @@ export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
     // The signature Evolution calls: (tx, additionalUtxos, context). The context is unused — we
     // delegate to the provider, which derives everything else itself.
     evaluate: (tx: unknown, additionalUtxos: readonly unknown[] | undefined) => {
-      const extra = additionalUtxos ? [...additionalUtxos] : undefined;
+      const extra = narrowForwardedUtxos(additionalUtxos ? [...additionalUtxos] : undefined);
       // ⛔ LOG BEFORE THE CALL, and return the provider's Effect UNTOUCHED. `evaluateTx` returns an
       // Effect, not a Promise, so an async wrapper around it would hand Evolution a Promise of an
       // Effect — which is why this file's own test asserts `out === "EFFECT"`. It caught exactly
@@ -420,6 +420,69 @@ export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
   };
 }
 
+
+
+/**
+ * Lets an operator bisect `additionalUtxoSet` with a URL parameter, to find out which forwarded UTxO
+ * an evaluator is objecting to.
+ *
+ * ⛔ WHY A MANUAL BISECT AND NOT ANOTHER THEORY. Blockfrost's evaluation answered `Invalid request:
+ * failed to decode payload from base64 or base16` for a request that is clean by every check
+ * available: valid JSON, no bigint, `cbor` 11537 bytes of even-length hex, asset keys in Ogmios's
+ * `policyId.assetName` form, a datum that is well-formed Plutus data (`d87c9f…`, constructor 3), and
+ * bech32 addresses. Measured 2026-10-01 by logging the real HTTP body. Four successive hypotheses
+ * about WHICH field was malformed were each eliminated, so the next useful move is to remove inputs
+ * until the error changes rather than to guess a fifth time.
+ *
+ * ⚑ EVALUATION IS FREE, WHICH IS WHAT MAKES THIS A LEGITIMATE EXPERIMENT. Preparing a ceremony step
+ * submits nothing — a local build plus one evaluate call — so a failed probe costs only the wait.
+ *
+ * Append to the ceremony page's URL:
+ *   ?evalUtxos=all      every selected input is forwarded (the default, and today's behaviour)
+ *   ?evalUtxos=nodatum  forward only entries carrying neither datum nor script
+ *   ?evalUtxos=none     forward nothing; the evaluator sees only the provider's own ledger view
+ *
+ * ⚠ READ THE RESULT CAREFULLY, because "none" changes the question. Forwarding exists so an input
+ * created moments ago is evaluable; with `none`, a genuinely fresh input legitimately fails as
+ * "Unknown transaction input". So a DIFFERENT error under `none` localises the fault to the forwarded
+ * set, while the SAME decode error under `none` proves the forwarded UTxOs are innocent and the fault
+ * is in the transaction or in how Blockfrost translates the request.
+ */
+function narrowForwardedUtxos(extra: unknown[] | undefined): unknown[] | undefined {
+  if (!extra || extra.length === 0) return extra;
+  let mode = "all";
+  try {
+    if (typeof window !== "undefined") {
+      mode = new URLSearchParams(window.location.search).get("evalUtxos") ?? "all";
+    }
+  } catch {
+    return extra;
+  }
+  if (mode === "all") return extra;
+
+  if (mode === "none") {
+    console.warn(
+      `[evaluate] ?evalUtxos=none — forwarding 0 of ${extra.length} UTxOs. A fresh input will now ` +
+        "legitimately fail as \"Unknown transaction input\"; only a CHANGE of error tells you anything.",
+    );
+    return undefined;
+  }
+
+  if (mode === "nodatum") {
+    const kept = extra.filter((u) => {
+      const o = u as Record<string, unknown>;
+      return o?.datumOption == null && o?.scriptRef == null && o?.datum == null && o?.script == null;
+    });
+    console.warn(
+      `[evaluate] ?evalUtxos=nodatum — forwarding ${kept.length} of ${extra.length} UTxOs, dropping ` +
+        "those carrying a datum or script.",
+    );
+    return kept.length > 0 ? kept : undefined;
+  }
+
+  console.warn(`[evaluate] unrecognised ?evalUtxos=${mode}; forwarding all ${extra.length} UTxOs.`);
+  return extra;
+}
 
 /**
  * A transaction id as hex, whatever shape it arrives in.
