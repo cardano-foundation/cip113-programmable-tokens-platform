@@ -106,7 +106,20 @@ rwaToken:
 # @Value without this block, but only via a spelling nothing in the repo writes down, and the
 # chart that has to set it should not have to infer it. See ProtocolBootstrapService.
 cip113:
-  allow-no-deployment: ${CIP113_ALLOW_NO_DEPLOYMENT:false}
+  # ⚠ TRUE ONLY BECAUSE MAINNET HAS NO DEPLOYMENT YET. protocol-bootstraps-mainnet.json is an
+  # empty list: the protocol has never been bootstrapped on mainnet, and without this the service
+  # refuses to start at all. It starts and refuses every protocol OPERATION instead, which is the
+  # state this flag exists for — enough to check the database, the migrations and the node peer.
+  #
+  # ⛔ PUT THIS BACK TO false THE MOMENT A REAL MAINNET RECORD IS COMMITTED. Left at true it turns
+  # "the record went missing" — a deploy accident, a bad mount, a half-written file — into a
+  # service that starts cleanly and then declines every request, which reads as a protocol fault
+  # rather than a configuration one. The whole point of the strict default is that a missing record
+  # is loud.
+  #
+  # ⚑ THIS DOCUMENT IS MAINNET'S, and Spring merges it into EVERY profile, so preprod and preview
+  # pin it back to false in their own documents below. Do not rely on this value being mainnet-only.
+  allow-no-deployment: ${CIP113_ALLOW_NO_DEPLOYMENT:true}
 
 management:
   endpoints:
@@ -121,6 +134,13 @@ spring:
       on-profile: preprod
 
 network: preprod
+
+# Strict, deliberately: this network HAS a committed deployment, so a record that fails to
+# load is an accident and must stop the service rather than produce one that starts and
+# refuses everything. Pinned here because the mainnet document above defaults it to true and
+# Spring merges that into every profile.
+cip113:
+  allow-no-deployment: ${CIP113_ALLOW_NO_DEPLOYMENT:false}
 
 uplc-link:
   base-url: ${UPLC_LINK_BASE_URL:https://preprod-api.uplc.link}
@@ -154,6 +174,13 @@ spring:
       on-profile: preview
 
 network: preview
+
+# Strict, deliberately: this network HAS a committed deployment, so a record that fails to
+# load is an accident and must stop the service rather than produce one that starts and
+# refuses everything. Pinned here because the mainnet document above defaults it to true and
+# Spring merges that into every profile.
+cip113:
+  allow-no-deployment: ${CIP113_ALLOW_NO_DEPLOYMENT:false}
 uplc-link:
   base-url: ${UPLC_LINK_BASE_URL:https://preview-api.uplc.link}
 
