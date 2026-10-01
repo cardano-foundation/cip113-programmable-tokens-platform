@@ -353,6 +353,12 @@ public final class BootstrapFixture {
                 // not "simplify" this to UNFRACKING_DISABLED: the record would then describe a
                 // dispatcher whose unfracking arm can never be satisfied, while the fixture builds
                 // one that can, and every hash check would still pass.
+                //
+                // ⚑ AND THIS IS WHY THE FIXTURE COULD NOT CATCH THE PREPROD 3141: with unfracking
+                // ENABLED here, unfrackingParameter EQUALS unfracking's hash, so passing either to
+                // the dispatcher gives the same script. Only a record with unfracking DISABLED —
+                // i.e. a committed one — distinguishes them. See CommittedDeploymentHashesTest and
+                // ShippedDispatcherDerivationTest.
                 new DispatcherParams(plg.getPolicyId(), unfracking.getPolicyId()),
                 CoreProtocolParamsDatum.DEFAULT_MAX_INLINE_DATUM_BYTES,
                 new UpgradeMultisigParams(upgradeMultisig.getPolicyId(), TxInput.from(upgradeSeed), TxInput.from(multisigUtxo)),

@@ -1,6 +1,7 @@
 import * as cbor from "cbor";
 import { getCardanoNetwork } from "../utils/network";
 import { bytesHex, computeMemberRoot, hexBytes, type MemberLeaf } from "./member-root";
+import { TRUSTED_REGISTRY_DEPLOYMENTS } from "./trusted-registry-deployments.generated";
 
 const GS_ASSET_NAME = "476c6f62616c5374617465";
 type CborMap = Map<unknown, unknown>;
@@ -59,18 +60,22 @@ function assetAmount(output: CborMap, policy: string, assetName: string): number
   return asInt(value[0], "NFT output lovelace");
 }
 
-async function blockfrostJson<T>(path: string, lookup: string): Promise<T> {
+async function blockfrostResponse(path: string, lookup: string): Promise<Response> {
   const key = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY;
   if (!key) throw new Error("Direct chain verification needs NEXT_PUBLIC_BLOCKFROST_API_KEY");
   const network = getCardanoNetwork();
   const base = process.env.NEXT_PUBLIC_BLOCKFROST_URL || `https://cardano-${network}.blockfrost.io/api/v0`;
   const response = await fetch(`${base}${path}`, { headers: { project_id: key }, cache: "no-store" });
-  if (!response.ok) {
-    const hint = response.status === 404
-      ? " Check the selected network and trusted registry policy for this token's deployment, or wait for chain indexing."
-      : " Check the Blockfrost connection for the selected network.";
-    throw new Error(`${lookup} failed on ${network}: Blockfrost ${response.status} for ${path}.${hint}`);
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`${lookup} failed on ${network}: Blockfrost ${response.status} for ${path}. Check the Blockfrost connection for the selected network.`);
   }
+  return response;
+}
+
+async function blockfrostJson<T>(path: string, lookup: string): Promise<T> {
+  const response = await blockfrostResponse(path, lookup);
+  if (!response.ok)
+    throw new Error(`${lookup} failed on ${getCardanoNetwork()}: Blockfrost ${response.status} for ${path}. Check the selected network or wait for chain indexing.`);
   return response.json() as Promise<T>;
 }
 
@@ -85,20 +90,35 @@ async function uniqueAssetOutput(policyId: string, assetName: string, lookup: st
   return { ref, output };
 }
 
-function trustedRegistryPolicy(): string {
-  const configured = process.env.NEXT_PUBLIC_CMTA_REGISTRY_POLICY_ID;
-  // Keep this trust anchor in sync with the checked-in Preview deployment.
-  // Older deployments require an explicit build-time policy override.
-  const previewPinned = "2153801a53335a4d94cf5e7ea862282034d2f7ef813c11efc6759cb5";
-  const policy = configured || (getCardanoNetwork() === "preview" ? previewPinned : "");
-  if (!/^[0-9a-f]{56}$/i.test(policy))
-    throw new Error("Configure a trusted CMTA registry policy for this network");
-  return policy.toLowerCase();
-}
-
 async function gsPolicyForToken(tokenPolicyId: string): Promise<string> {
-  const registryPolicy = trustedRegistryPolicy();
-  const { output } = await uniqueAssetOutput(registryPolicy, tokenPolicyId, "Registry NFT");
+  const network = getCardanoNetwork();
+  const registryPolicies = [...new Set(TRUSTED_REGISTRY_DEPLOYMENTS[network]
+    .map((deployment) => deployment.registryPolicy))];
+  if (registryPolicies.length === 0)
+    throw new Error(`No trusted CMTA deployment is bundled for ${network}; rebuild the frontend with its deployment record`);
+  const candidates: Array<{ policy: string; txHash: string; outputIndex: number }> = [];
+  for (const policy of registryPolicies) {
+    const path = `/assets/${policy}${tokenPolicyId}/utxos`;
+    const response = await blockfrostResponse(path, "Registry NFT asset lookup");
+    if (response.status === 404) continue;
+    const utxos: unknown = await response.json();
+    if (!Array.isArray(utxos)) throw new Error(`Malformed Registry NFT asset lookup response for ${policy}`);
+    if (utxos.length === 0) continue;
+    if (utxos.length !== 1) throw new Error(`Registry NFT for ${tokenPolicyId} has multiple live UTxOs under ${policy}`);
+    const utxo = utxos[0];
+    if (typeof utxo?.tx_hash !== "string" || !/^[0-9a-f]{64}$/i.test(utxo.tx_hash)
+        || !Number.isSafeInteger(utxo.output_index) || utxo.output_index < 0)
+      throw new Error(`Malformed Registry NFT UTxO reference under ${policy}`);
+    candidates.push({ policy, txHash: utxo.tx_hash, outputIndex: utxo.output_index });
+  }
+  if (candidates.length === 0)
+    throw new Error(`Token ${tokenPolicyId} was not found in any trusted ${network} CMTA deployment`);
+  if (candidates.length !== 1)
+    throw new Error(`Token ${tokenPolicyId} appears in multiple trusted ${network} CMTA deployments`);
+  const registry = candidates[0];
+  const response = await blockfrostJson<{ cbor: string }>(`/txs/${registry.txHash}/cbor`, "Registry NFT transaction CBOR lookup");
+  const output = outputFromTx(response.cbor, registry.outputIndex);
+  assetAmount(output, registry.policy, tokenPolicyId);
   const fields = inlineDatumFields(output, 7);
   if (bytesHex(asBytes(fields[0], "registry token key")) !== tokenPolicyId.toLowerCase())
     throw new Error("Registry node does not belong to the selected token");

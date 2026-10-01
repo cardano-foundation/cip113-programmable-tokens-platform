@@ -13,3 +13,12 @@ backend-run.log
 
 # Build artifacts
 bin/
+
+# ⛔ EVERY .env VARIANT, because the patterns kept missing new ones. `.env`, `.env.preview` and
+# `.env*.local` did NOT match `.env copy` (a Finder duplicate, which reached origin/main of this
+# PUBLIC repo carrying a live mnemonic and Blockfrost key) and did NOT match `.envPreview` either.
+# Two different near-misses of the same shape is enough: match the prefix, and keep examples
+# explicitly.
+.env*
+!.env*.example
+!.env*Example

@@ -229,14 +229,20 @@ public class ProtocolBootstrapService {
         if (params.transfer() == null) missing.add("transfer");
         if (params.thirdParty() == null) missing.add("thirdParty");
         if (params.unfracking() == null) missing.add("unfracking");
-        if (params.programmableLogicGlobal() == null) missing.add("programmableLogicGlobal");
         // ⛔ CHECKED HERE, WHERE THE RECORD IS LOADED, not where it is used. The SDK refuses a
         // deployment whose dispatcher has no recorded `unfrackingParameter`, and rightly — it
         // cannot tell "unfracking disabled" from "the field went missing". But the SDK runs in a
         // BROWSER, five steps into an operator's flow; this runs at startup, against the file. A
         // record that cannot build should fail where it is read.
-        else if (params.programmableLogicGlobal().unfrackingParameter() == null) {
-            missing.add("programmableLogicGlobal.unfrackingParameter");
+        //
+        // ⚑ THE SHAPE IS CHECKED TOO, not just presence: both are 28-byte hex, and a malformed one
+        // would otherwise reach script parameterisation and fail there with no mention of the file.
+        if (params.programmableLogicGlobal() == null
+                || params.programmableLogicGlobal().scriptHash() == null
+                || !params.programmableLogicGlobal().scriptHash().matches("(?i)[0-9a-f]{56}")
+                || params.programmableLogicGlobal().unfrackingParameter() == null
+                || !params.programmableLogicGlobal().unfrackingParameter().matches("(?i)[0-9a-f]{56}")) {
+            missing.add("programmableLogicGlobal.scriptHash/unfrackingParameter (28-byte hex each)");
         }
         if (params.upgradeMultisig() == null || params.upgradeMultisig().txInput() == null
                 || params.upgradeMultisig().utxo() == null) missing.add("upgradeMultisig");

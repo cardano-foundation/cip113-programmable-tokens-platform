@@ -7,6 +7,7 @@ on:
     branches: ["main"]
     paths:
       - "src/programmable-tokens-frontend/**"
+      - "src/programmable-tokens-offchain-java/src/main/resources/protocol-bootstraps-*.json"
       - ".github/workflows/docker-frontend.yml"
   workflow_dispatch:
     inputs:
@@ -116,6 +117,8 @@ jobs:
         with:
           context: src/programmable-tokens-frontend
           file: src/programmable-tokens-frontend/Dockerfile
+          build-contexts: |
+            deployment-records=src/programmable-tokens-offchain-java/src/main/resources
           push: true
           tags: |
             ${{ env.DOCKER_REPO }}:${{ steps.version.outputs.git_tag }}-${{ matrix.network }}

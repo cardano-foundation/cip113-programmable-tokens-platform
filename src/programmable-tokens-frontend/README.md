@@ -110,6 +110,14 @@ The backend serves the pinned CIP-113 core and module blueprints. Their source a
 The frontend obtains the active schema-3 deployment from the backend. It validates that record
 with the CIP-113 SDK and uses it directly; legacy deployment adapters are intentionally absent.
 
+Before signing a CMTA member-root update, the browser checks the token's registry NFT directly
+against the trusted deployments bundled into that frontend build. The bundle is generated from
+`../programmable-tokens-offchain-java/src/main/resources/protocol-bootstraps-<network>.json`.
+After recording a new deployment, run `npm run generate:trusted-deployments` in this directory
+and rebuild the frontend. `npm run build` and CI reject a missing or stale bundle. The Docker
+build requires the backend deployment records as a named `deployment-records` build context;
+`build-docker.sh` and the Docker workflow supply it.
+
 ### Modules
 
 The backend lists available modules at `/api/v1/modules`. The four first-party Aiken projects are in [`../modules/`](../modules/); the RWA-token blueprint is supplied from upstream.
