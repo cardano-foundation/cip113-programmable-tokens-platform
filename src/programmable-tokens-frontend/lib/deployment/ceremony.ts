@@ -445,14 +445,33 @@ function logEvaluationPayload(tx: unknown, extra: readonly unknown[] | undefined
       txNote = `COULD NOT ENCODE TO CBOR HEX: ${String(e).slice(0, 140)}`;
     }
 
-    // Only `datum` and `script` on an additional UTxO are decoded as base16 by Ogmios, so a UTxO
-    // carrying neither cannot be the cause of a decode fault.
+    /**
+     * ⛔ READ THE FIELDS THE TYPE ACTUALLY HAS. The first version of this printed `?#?` for every
+     * entry and called them all "plain", because it probed `txHash` / `outputIndex` / `datum` /
+     * `script` — provider-shaped names. Evolution's `UTxO` is a tagged class whose fields are
+     * `transactionId` (an object carrying `.hash`), `index`, `datumOption` and `scriptRef`. So the
+     * reassuring "plain" was not an observation, it was four lookups missing at once, and it would
+     * have cleared the only suspects the fault left. A diagnostic that cannot find its subject must
+     * say UNREADABLE, never report an absence.
+     *
+     * Both shapes are read because our own ceremony code passes provider-shaped ChainUtxo objects
+     * in places and Evolution's own class in others.
+     */
     const rows = (extra ?? []).map((u, i) => {
       const o = u as Record<string, unknown>;
-      const carries = ["datum", "datumHash", "scriptRef", "script"].filter((k) => o?.[k] != null);
+      const txId =
+        (o?.transactionId as { hash?: unknown } | undefined)?.hash ?? o?.txHash ?? o?.transactionId;
+      const idx = o?.index ?? o?.outputIndex;
+      const fields = ["datumOption", "scriptRef", "datum", "datumHash", "script"];
+      const carries = fields.filter((k) => o?.[k] != null);
+      const located = txId != null && idx != null;
       return (
-        `  [${i}] ${String(o?.txHash ?? "?").slice(0, 16)}#${String(o?.outputIndex ?? "?")} ` +
-        (carries.length > 0 ? `carries ${carries.map((k) => `${k}:${typeof o[k]}`).join(", ")}` : "plain")
+        `  [${i}] ${located ? `${String(txId).slice(0, 16)}#${String(idx)}` : "UNREADABLE SHAPE"} ` +
+        (carries.length > 0
+          ? `carries ${carries.map((k) => `${k}:${typeof o[k]}`).join(", ")}`
+          : located
+            ? "no datum or script"
+            : `— cannot classify; keys are [${Object.keys(o ?? {}).join(", ")}]`)
       );
     });
 
@@ -460,7 +479,9 @@ function logEvaluationPayload(tx: unknown, extra: readonly unknown[] | undefined
       `[evaluate] tx cbor: ${txNote}\n[evaluate] additionalUtxoSet: ${extra?.length ?? 0}` +
         (rows.length > 0 ? `\n${rows.join("\n")}` : "") +
         "\n[evaluate] if this call fails with \"failed to decode payload from base64 or base16\", the " +
-        "culprit is a non-hex/odd-length tx cbor above, or a datum/script on one of these UTxOs.",
+        "culprit is a non-hex/odd-length tx cbor above, or a datumOption/scriptRef on one of these " +
+        "UTxOs. An entry printed as UNREADABLE SHAPE clears nothing — it means this log could not " +
+        "see the fields, not that they are absent.",
     );
   } catch {
     // Diagnostics must never be able to break an evaluation.
