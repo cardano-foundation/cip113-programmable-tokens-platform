@@ -1758,9 +1758,10 @@ export default function BootstrapProtocolPage() {
                       transaction with no metadata sends the operator to a page that finds nothing,
                       which reads as a failed verification.
                     */}
-                    {STEPS_WITH_PROVENANCE.includes(stepIdForLabel(s.label) ?? "") && (
+                    {STEPS_WITH_PROVENANCE.includes(stepIdForLabel(s.label) ?? "")
+                      && verifyTxUrl(s.txHash) && (
                       <a
-                        href={verifyTxUrl(s.txHash)}
+                        href={verifyTxUrl(s.txHash)!}
                         target="_blank"
                         rel="noreferrer noopener"
                         className="whitespace-nowrap text-primary-400 underline"

@@ -73,14 +73,18 @@ export function Cip171ProvenanceBadge({ policyId }: { policyId: string }) {
             <Row label="Compiler" value={`${record.compilerType} ${record.compilerVersion}`} />
             <Row label="Status" value={record.status} />
           </dl>
+          {/* No uplc.link for this network (devnet) → no link. An empty host used to render a
+              RELATIVE href, which opened this app's own /registry page and looked like a result. */}
+          {registrySiteUrl() && (
           <a
-            href={registrySiteUrl()}
+            href={registrySiteUrl()!}
             target="_blank"
             rel="noopener noreferrer"
             className="mt-2 inline-block text-accent-400 hover:underline"
           >
             View on uplc.link ↗
           </a>
+          )}
         </div>
       )}
     </>

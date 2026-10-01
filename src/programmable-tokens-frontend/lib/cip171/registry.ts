@@ -29,6 +29,20 @@ const API_HOST: Record<CardanoNetwork, string> = {
   devnet: "",
 };
 
+/**
+ * Is there a uplc.link for this network at all?
+ *
+ * ⛔ THE EMPTY SENTINEL WAS NOT BEING HONOURED, which made it worse than no sentinel. devnet maps
+ * to "" because no public registry indexes a local chain — but the URL builders interpolated the
+ * host directly, so "" produced RELATIVE urls: `/registry`, `/verify?txHash=…` and a fetch of
+ * `/api/v1/scripts/by-hash/…` against the app's OWN origin. This app serves `/registry` and
+ * `/verify`, so those links silently opened its own pages instead of failing — a wrong answer that
+ * looks like a right one. A sentinel nobody checks is just a bug with a comment.
+ */
+export function uplcLinkAvailable(network: CardanoNetwork = getCardanoNetwork()): boolean {
+  return SITE_HOST[network] !== "" && API_HOST[network] !== "";
+}
+
 const SITE_HOST: Record<CardanoNetwork, string> = {
   mainnet: "https://uplc.link",
   preview: "https://preview.uplc.link",
@@ -83,8 +97,10 @@ export function parseSourceUrl(sourceUrl: string): {
  * The registry browser. There is no per-SCRIPT page, so "view on uplc.link" lands on the registry
  * and the hash is pasted there. For a transaction, use {@link verifyTxUrl} instead.
  */
-export function registrySiteUrl(): string {
-  return `${SITE_HOST[getCardanoNetwork()]}/registry`;
+export function registrySiteUrl(): string | null {
+  const network = getCardanoNetwork();
+  if (!uplcLinkAvailable(network)) return null;
+  return `${SITE_HOST[network]}/registry`;
 }
 
 /**
@@ -104,12 +120,26 @@ export function registrySiteUrl(): string {
  * ⚠ A 200 from this URL means the PAGE loaded, not that a record exists — indexing is not instant
  * and an unindexed transaction is indistinguishable from an unverifiable one until it resolves.
  */
-export function verifyTxUrl(txHash: string): string {
-  return `${SITE_HOST[getCardanoNetwork()]}/verify?txHash=${encodeURIComponent(txHash)}`;
+export function verifyTxUrl(txHash: string): string | null {
+  const network = getCardanoNetwork();
+  if (!uplcLinkAvailable(network)) return null;
+  return `${SITE_HOST[network]}/verify?txHash=${encodeURIComponent(txHash)}`;
 }
 
-/** In-flight and settled lookups, negatives included: a 404 here is stable. */
+/**
+ * In-flight and settled lookups.
+ *
+ * ⛔ A 404 HERE IS NOT STABLE, which this comment used to claim. uplc.link indexes CIP-171 records
+ * on a TIMER, so a record published moments ago is absent now and present minutes later. Memoising
+ * that absence for the page's lifetime means no retry ever re-asks and a record that DID arrive can
+ * never be picked up. The backend's UplcLinkClient had the identical bug, with the identical
+ * reasoning, and was fixed by expiring negatives; this is the same fix on this side.
+ *
+ * Positives are kept indefinitely — a CIP-171 record is immutable once published.
+ */
+const NEGATIVE_TTL_MS = 60_000;
 const cache = new Map<string, Promise<Cip171Record | null>>();
+const negativeAt = new Map<string, number>();
 
 /**
  * Look a script hash up. Resolves to null for "no record", a failed request, or a slow one —
@@ -120,9 +150,19 @@ const cache = new Map<string, Promise<Cip171Record | null>>();
 export function lookupByScriptHash(scriptHash: string): Promise<Cip171Record | null> {
   const key = scriptHash.toLowerCase();
   const existing = cache.get(key);
-  if (existing) return existing;
+  if (existing) {
+    // A remembered NEGATIVE expires; a remembered record does not. Without this, the first lookup
+    // after a registration — which uplc.link has not indexed yet — is remembered as "no record"
+    // for the lifetime of the page and no retry ever re-asks.
+    const missedAt = negativeAt.get(key);
+    if (missedAt === undefined || Date.now() - missedAt < NEGATIVE_TTL_MS) return existing;
+    cache.delete(key);
+    negativeAt.delete(key);
+  }
 
   const pending = (async (): Promise<Cip171Record | null> => {
+    // No registry for this network: do not fetch a relative URL against our own origin.
+    if (!uplcLinkAvailable()) return null;
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 6000);
@@ -141,5 +181,9 @@ export function lookupByScriptHash(scriptHash: string): Promise<Cip171Record | n
   })();
 
   cache.set(key, pending);
+  // Record WHEN a miss happened, so the entry above can expire. A hit records nothing and is kept.
+  void pending.then((record) => {
+    if (record === null) negativeAt.set(key, Date.now());
+  });
   return pending;
 }
