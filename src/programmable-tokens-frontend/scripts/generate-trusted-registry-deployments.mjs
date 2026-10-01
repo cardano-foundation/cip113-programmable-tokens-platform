@@ -53,8 +53,38 @@ export function checkTrustedDeployments(sourceDir, outputPath, selectedNetwork) 
   }
   if (selectedNetwork) {
     if (!networks.includes(selectedNetwork)) throw new Error(`Unsupported Cardano network: ${selectedNetwork}`);
-    if (load(selectedNetwork, sourceDir).length === 0)
-      throw new Error(`No trusted CMTA deployment is recorded for ${selectedNetwork}; refusing to build that frontend image`);
+    if (load(selectedNetwork, sourceDir).length === 0) {
+      // ⛔ REFUSING IS THE DEFAULT AND IT IS CORRECT. With no recorded deployment there is no
+      // registry policy to anchor CMTA member-root verification to, so TRUSTED_REGISTRY_DEPLOYMENTS
+      // is empty for this network and review-root-tx.ts cannot verify anything. Failing here beats
+      // shipping an image that discovers it at runtime.
+      //
+      // ⚑ BUT A NETWORK CAN LEGITIMATELY NOT BE DEPLOYED YET, which is not the same as being
+      // misconfigured. mainnet has an empty protocol-bootstraps-mainnet.json on purpose: the
+      // protocol has never been bootstrapped there, and an image is still wanted so the
+      // deployment can be stood up and checked before any ceremony. The escape is EXPLICIT and
+      // per-build rather than a hole in the check.
+      //
+      // ⚠ AN IMAGE BUILT THIS WAY MUST RUN WITH FLOW_SECURITY_TOKEN_ENABLED=false. That flag is
+      // read at RUNTIME (app/api/config/route.ts), so this script cannot verify it and will not
+      // pretend to — the obligation is the deployer's, and it is the whole reason the override is
+      // opt-in and loud instead of a silent default.
+      if (process.env.ALLOW_NO_TRUSTED_DEPLOYMENT === "true") {
+        console.warn(
+          `[trusted-deployments] WARNING: no trusted CMTA deployment is recorded for ` +
+            `${selectedNetwork}. Building anyway because ALLOW_NO_TRUSTED_DEPLOYMENT=true. ` +
+            `The resulting image CANNOT verify CMTA member roots — run it with ` +
+            `FLOW_SECURITY_TOKEN_ENABLED=false, and rebuild once a deployment is recorded.`,
+        );
+      } else {
+        throw new Error(
+          `No trusted CMTA deployment is recorded for ${selectedNetwork}; refusing to build that ` +
+            `frontend image. If this network is deliberately not deployed yet, set ` +
+            `ALLOW_NO_TRUSTED_DEPLOYMENT=true for the build and run the image with ` +
+            `FLOW_SECURITY_TOKEN_ENABLED=false.`,
+        );
+      }
+    }
   }
 }
 

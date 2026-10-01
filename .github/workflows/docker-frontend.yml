@@ -44,12 +44,21 @@ jobs:
         include:
           - network: preview
             blockfrost_url: https://cardano-preview.blockfrost.io/api/v0
+            allow_no_trusted_deployment: "false"
             api_base_url_default: https://preview-indexer.programmabletokens.xyz
           - network: preprod
             blockfrost_url: https://cardano-preprod.blockfrost.io/api/v0
+            allow_no_trusted_deployment: "false"
             api_base_url_default: https://preprod-indexer.programmabletokens.xyz
           - network: mainnet
             blockfrost_url: https://cardano-mainnet.blockfrost.io/api/v0
+            # ⚠ mainnet has no recorded deployment yet, so there is no trusted CMTA catalog to
+            # build against. Allowed ONLY so the BOOTSTRAP CEREMONY image can exist: that page
+            # builds every transaction from the bundled blueprint and talks only to the chain, so
+            # it needs neither the backend nor a CMTA anchor. Such an image MUST run with
+            # FLOW_SECURITY_TOKEN_ENABLED=false. Set this back to "false" once mainnet is
+            # bootstrapped and the catalog is real.
+            allow_no_trusted_deployment: "true"
             api_base_url_default: https://mainnet-indexer.programmabletokens.xyz
 
     steps:
@@ -145,5 +154,6 @@ jobs:
             NEXT_PUBLIC_BLOCKFROST_URL=${{ matrix.blockfrost_url }}
             NEXT_PUBLIC_API_BASE_URL=${{ steps.urls.outputs.api_base_url }}
             NEXT_PUBLIC_BASE_URL=${{ steps.urls.outputs.base_url }}
+            ALLOW_NO_TRUSTED_DEPLOYMENT=${{ matrix.allow_no_trusted_deployment }}
           cache-from: type=gha,scope=frontend-${{ matrix.network }}
           cache-to: type=gha,scope=frontend-${{ matrix.network }},mode=max
