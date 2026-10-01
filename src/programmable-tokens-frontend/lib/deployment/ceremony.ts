@@ -34,6 +34,7 @@
 import { EvoAssets, EvoTransactionHash } from "@easy1staking/cip113-sdk-ts";
 import { CBOR as EvoCBOR, Data as EvoPlutusData, Transaction as EvoTx } from "@evolution-sdk/evolution";
 import { checkCip21 } from "../utils/cip21";
+import { installEvaluateRequestLogger } from "./evaluate-request-log";
 import {
   type BootstrapStepId,
   planBootstrap,
@@ -412,6 +413,7 @@ export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
       // Effect, not a Promise, so an async wrapper around it would hand Evolution a Promise of an
       // Effect — which is why this file's own test asserts `out === "EFFECT"`. It caught exactly
       // that mistake. Diagnosis has to be a side effect here, never a change of shape.
+      installEvaluateRequestLogger();
       logEvaluationPayload(tx, extra);
       return c.effect!.evaluateTx!(tx, extra);
     },
