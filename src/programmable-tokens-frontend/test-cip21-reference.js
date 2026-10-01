@@ -282,6 +282,34 @@ for (const t of real) {
   }
 }
 
+// ---- 8b. the evaluate logger cannot print a credential that rides in the URL ----
+// ⛔ A CREDENTIAL-HYGIENE GUARD WITH NO TEST IS A GUARD THAT GETS REVERTED — reverting `safeUrl` broke
+// nothing. Blockfrost carries its key in a `project_id` HEADER, which this logger never reads; the URL
+// was logged verbatim, so a provider that ever put one in a query parameter would print it into a
+// console an operator may paste into an issue.
+//
+// ⚑ EXERCISED, NOT GREPPED. The first version of this test asserted the SOURCE matched a regex — the
+// same shape that let the round-1 guard ship undefended. Four leak shapes, including userinfo, which
+// `u.origin` drops and nothing else would.
+{
+  const { safeUrl } = await import("./.cip21ref-build/deployment/evaluate-request-log.js");
+  const SECRET = "preprodSECRETKEY0123456789";
+  const shapes = [
+    [`https://host/api/v0/utils/txs/evaluate?project_id=${SECRET}`, "a query parameter"],
+    [`https://user:${SECRET}@host/api/v0/utils/txs/evaluate`, "URL userinfo"],
+    [`https://host/api/v0/utils/txs/evaluate#${SECRET}`, "a fragment"],
+    [`not-a-url://;;;/evaluate?key=${SECRET}`, "a string that does not parse as a URL"],
+  ];
+  for (const [url, what] of shapes) {
+    const reduced = safeUrl(url);
+    ok(!reduced.includes(SECRET), `${what} is stripped before logging (got ${reduced})`);
+  }
+  ok(
+    safeUrl("https://host/api/v0/utils/txs/evaluate") === "https://host/api/v0/utils/txs/evaluate",
+    "and an ordinary URL survives intact, so the log stays useful",
+  );
+}
+
 // ---- 8. the oracle is not vacuous ----
 // ⛔ WITHOUT THIS THE WHOLE SUITE COULD PASS BY CALLING A LIBRARY THAT ANSWERS "fine" TO EVERYTHING.
 // "1800" is integer 0 written in two bytes: valid CBOR, not canonical.

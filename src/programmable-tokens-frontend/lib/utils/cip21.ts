@@ -299,7 +299,22 @@ function walk(ctx: Ctx, i: number, path: string, isBody = false): number {
               let q = head.first;
               for (let j = 0; j < head.count; j++) {
                 checkLegacyOutput(ctx, q, `body.outputs[${j}]`);
+                // ⛔ THIS PASS ONLY NEEDS THE OFFSET. The generic walker runs over the same outputs
+                // again below, so letting this inner walk REPORT duplicated every violation inside an
+                // output. The first fix for that deduped all violations by message text, which merged
+                // two genuinely DISTINCT defects whenever their messages coincided — two non-minimal
+                // withdrawal keys of the same length became one finding. A checker that hides a defect
+                // to avoid printing it twice is worse than one that repeats itself, so the duplication
+                // is removed at its source: walk for the offset, discard what it says.
+                // ⚑ BOTH SINKS MUST BE TRUNCATED. `walk` reports into `ctx.violations` AND accumulates
+                // into `ctx.emptyInBody`, which is turned into violations later, after the walk is
+                // over. Rewinding only the first left the empty-map finding duplicated — caught by the
+                // no-duplicates test, which is the whole reason that test exists rather than a comment.
+                const reportedBefore = ctx.violations.length;
+                const emptiesBefore = ctx.emptyInBody.length;
                 q = walk(ctx, q, `body.outputs[${j}]`);
+                ctx.violations.length = reportedBefore;
+                ctx.emptyInBody.length = emptiesBefore;
               }
             }
           }
@@ -383,11 +398,61 @@ export function checkCip21(txCborHex: string): Cip21Report {
   try {
     const ib = bytes[0];
     if (ib >> 5 === 4) {
-      // A transaction: array whose first element is the body.
-      const n = ib & 0x1f;
-      let p = 1;
-      for (let k = 0; k < n; k++) {
-        p = k === 0 ? walk(ctx, p, "body", true) : walk(ctx, p, k === 1 ? "witnessSet" : k === 2 ? "isValid" : "auxiliaryData");
+      /**
+       * ⛔ THE ELEMENT COUNT AND THE HEADER WIDTH BOTH HAVE TO BE READ, and reading neither was a
+       * fatality INVERSION, not a cosmetic slip. This used `bytes[0] & 0x1f` as the count and a
+       * hardcoded `p = 1`. For a non-minimal outer header — `98 04`, four elements written in two
+       * bytes, valid CBOR and itself a CIP-21 minimality violation — every element shifted by one:
+       * offset 1 held the count byte, so THE TRANSACTION BODY WAS WALKED AS `witnessSet`. Measured on
+       * the real ceremony body a Ledger refused, identical bytes with only the header rewritten:
+       *
+       *   header 84   -> 1 fatal:    body.mint: keys out of canonical order at entry 2
+       *   header 9804 -> 0 fatal, 1 advisory: witnessSet{09}: keys out of canonical order at entry 2
+       *
+       * Two failures at once: the defect stops being fatal, and the diagnosis names the wrong field —
+       * and naming the right field is the whole purpose of this module. Found by the 2026-10-01
+       * pre-merge audit, which also noted that the only thing containing it was a DIFFERENT guard
+       * (`canonicaliseBodyOnly`'s replay post-condition, which throws first) — and that guard was
+       * itself undefended one round earlier. Safety borrowed from a neighbour breaks silently when the
+       * neighbour is refactored, so this reads its own header.
+       */
+      const head = headerCount(bytes, 0);
+      if (!head) {
+        // An indefinite or 4/8-byte-counted outer array: not a shape this understands. Say so loudly
+        // rather than guess an offset, because a guessed offset is what mislabels the body.
+        ctx.violations.push({
+          scope: "blind",
+          message:
+            `outer array header 0x${ib.toString(16).padStart(2, "0")} is indefinite or oversized — ` +
+            `cannot locate the transaction body, so treat this check as blind, not as a pass`,
+        });
+      } else {
+        /**
+         * ⚑ THE OUTER HEADER'S OWN MINIMALITY, which nothing checked. `walk` enforces minimal
+         * encoding for every item it visits — but the transaction array's header is consumed HERE, by
+         * the dispatch, so it was never visited and `9804` passed silently once the misroute above was
+         * fixed. CIP-21: "The expression of lengths in major types 2 through 5 must be as short as
+         * possible."
+         *
+         * Scope "transaction", so it is fatal. The outer header is not part of the body bytes, so a
+         * device would in fact hash the same body — but a transaction whose framing we cannot
+         * faithfully reproduce is one we refuse to re-serialize at all (`canonicaliseBodyOnly` throws
+         * on it), and the conservative classification is the one that matches that refusal.
+         */
+        const minimalWidth = head.count < 24 ? 1 : head.count < 256 ? 2 : head.count < 65536 ? 3 : 5;
+        if (head.first !== minimalWidth) {
+          ctx.violations.push({
+            scope: "transaction",
+            message:
+              `transaction: outer array header for ${head.count} element(s) uses ${head.first} bytes ` +
+              `but fits in ${minimalWidth} — CIP-21 requires the shortest length encoding`,
+          });
+        }
+
+        let p = head.first;
+        for (let k = 0; k < head.count; k++) {
+          p = k === 0 ? walk(ctx, p, "body", true) : walk(ctx, p, k === 1 ? "witnessSet" : k === 2 ? "isValid" : "auxiliaryData");
+        }
       }
     } else {
       walk(ctx, 0, "body", true);
@@ -426,16 +491,10 @@ export function checkCip21(txCborHex: string): Cip21Report {
     });
   }
 
-  // ⚑ DEDUPED BY MESSAGE. `body.outputs` is inspected once for the legacy shape and then walked again
-  // by the generic walker, so a violation inside an output is recorded twice. That inflated the count
-  // an operator reads and the list they have to work through. Deduping here fixes every double-walk,
-  // present and future, rather than one of them.
-  const seen = new Set<string>();
-  const scopedViolations = ctx.violations.filter((v) => {
-    if (seen.has(v.message)) return false;
-    seen.add(v.message);
-    return true;
-  });
+  // ⚑ NOT DEDUPED. Two distinct defects can legitimately produce the same message — two non-minimal
+  // withdrawal keys of equal length, for instance — and collapsing them loses one. The duplication
+  // that motivated deduping is fixed where it was caused, in the outputs pre-pass above.
+  const scopedViolations = ctx.violations;
 
   return {
     violations: scopedViolations.map((v) => v.message),

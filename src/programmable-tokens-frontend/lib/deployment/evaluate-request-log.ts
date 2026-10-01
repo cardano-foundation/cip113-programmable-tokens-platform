@@ -37,7 +37,7 @@ function summarise(key: string, value: unknown): unknown {
 }
 
 /** Origin + path, with any query string and fragment dropped. Falls back to the path-ish prefix. */
-function safeUrl(url: string): string {
+export function safeUrl(url: string): string {
   try {
     const u = new URL(url);
     return `${u.origin}${u.pathname}`;
