@@ -160,6 +160,34 @@ const STEPS_WITH_PROVENANCE: readonly string[] = ["protocol-genesis"];
 const FIELD =
   "rounded border border-dark-600 bg-dark-900 px-2 py-1.5 font-mono text-xs text-white placeholder:text-dark-500 focus:border-cyan-600 focus:outline-none focus:ring-1 focus:ring-cyan-600/40";
 
+/**
+ * Says what provoked a retry, from the failure itself rather than from a fingerprint.
+ *
+ * ⛔ THIS REPLACED A NOTE THAT GUESSED. The page used to read the UTxO fingerprint and conclude "the
+ * inputs were real and the evaluator was behind" whenever the set was unchanged — a cause it had no
+ * evidence for. Once undecodable-payload faults became retryable (they must be: the fallback that
+ * narrows the UTxO set is what fixes them) that sentence started appearing for a failure which has
+ * nothing to do with evaluator lag, and an operator reading it would wait for something that is not
+ * coming. The fingerprint is still reported; it is simply no longer dressed up as a diagnosis.
+ */
+function describeRetryFault(info: {
+  fault: "missing-utxo" | "undecodable-payload" | "other";
+  faultMessage: string;
+}): string {
+  switch (info.fault) {
+    case "missing-utxo":
+      return "the evaluator could not resolve an input it was given — it is behind, or the output was spent.";
+    case "undecodable-payload":
+      return (
+        "the evaluator REJECTED THE REQUEST as undecodable, which is a malformed payload rather than " +
+        "a failing script. Waiting will not help; the next attempt sends a narrower UTxO set, which " +
+        "does if the bad field belongs to a forwarded UTxO. See the [evaluate] console lines."
+      );
+    default:
+      return `an unexpected failure: ${info.faultMessage}`;
+  }
+}
+
 export default function BootstrapProtocolPage() {
   const network = getCardanoNetwork();
 
@@ -772,11 +800,8 @@ export default function BootstrapProtocolPage() {
           // nothing but time was needed, which is the evaluator lagging.
           onRetryInfo: (info) =>
             setGateNote(
-              info.utxoSetChanged
-                ? `Retry ${info.attempt}: the wallet's UTxO set CHANGED (${info.utxoCount} now) — ` +
-                  `the earlier attempt was funded from an output that no longer existed.`
-                : `Retry ${info.attempt}: the UTxO set was UNCHANGED (${info.utxoCount}) — ` +
-                  `the inputs were real and the evaluator was behind.`,
+              `Retry ${info.attempt}: ${describeRetryFault(info)}` +
+                ` UTxO set ${info.utxoSetChanged ? `CHANGED (${info.utxoCount} now)` : `UNCHANGED (${info.utxoCount})`}.`,
             ),
         },
       );
@@ -872,9 +897,8 @@ export default function BootstrapProtocolPage() {
             setProgress(`Evaluation could not resolve ${why} — retrying (${n} of 3, 10s apart)…`),
           onRetryInfo: (info) =>
             setGateNote(
-              info.utxoSetChanged
-                ? `Reference scripts, retry ${info.attempt}: the wallet's UTxO set CHANGED (${info.utxoCount}).`
-                : `Reference scripts, retry ${info.attempt}: the UTxO set was UNCHANGED (${info.utxoCount}).`,
+              `Reference scripts, retry ${info.attempt}: ${describeRetryFault(info)}` +
+                ` UTxO set ${info.utxoSetChanged ? `CHANGED (${info.utxoCount})` : `UNCHANGED (${info.utxoCount})`}.`,
             ),
         },
       );

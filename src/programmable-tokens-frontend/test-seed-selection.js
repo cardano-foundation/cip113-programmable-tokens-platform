@@ -12,6 +12,10 @@
  *
  * Run: npm run test:seeds
  */
+/** A real bech32 payment address, so assertCeremonyContext accepts the test contexts. */
+const VALID_BECH32 =
+  "addr_test1qqew0cqw4c59q2325fcu7sszkxcph9x23mlxgt3cpjfatcs9zrqvaqcx7xpujngkxmmy7cs5ka6th8ugs5kx4n6z0yjqcc6wxm";
+
 let pass = 0;
 let fail = 0;
 function ok(cond, name) {
@@ -365,6 +369,39 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
   const funding = new Error("Insufficient funds for change output");
   ok(!isRetryableEvaluation(funding),
     "a funding failure is still not retried — widening the predicate must not swallow real errors");
+}
+
+// ── a retry note must report the FAULT, not infer one from the fingerprint ───
+// ⛔ The page used to conclude "the evaluator was behind" from an unchanged UTxO set alone. Once
+// undecodable-payload faults became retryable that sentence started appearing for a failure which
+// has nothing to do with lag, telling an operator to wait for something that was not coming.
+{
+  const seen = [];
+  let calls = 0;
+  const fundingUtxo = {
+    txHash: HASHES[0], outputIndex: 0, address: VALID_BECH32, assets: { lovelace: 5_000_000n },
+  };
+  const failing = async () => {
+    calls += 1;
+    throw new Error("Invalid request: failed to decode payload from base64 or base16.");
+  };
+  let threw = null;
+  try {
+    await buildWithFreshUtxos(
+      { client: { newTx: () => ({}) }, changeAddress: VALID_BECH32, availableUtxos: [fundingUtxo] },
+      async () => [fundingUtxo],
+      failing,
+      { attempts: 3, delayMs: 1, onRetryInfo: (i) => seen.push(i) },
+    );
+  } catch (e) { threw = e; }
+
+  ok(threw !== null, "an undecodable payload still fails in the end — retrying must not mask it");
+  ok(calls === 3, `every attempt ran; got ${calls}`);
+  ok(seen.length === 2, `onRetryInfo fired for each retry; got ${seen.length}`);
+  ok(seen.every((i) => i.fault === "undecodable-payload"),
+    `each retry is reported as an undecodable payload; got ${seen.map((i) => i.fault).join(",")}`);
+  ok(seen.every((i) => /decode payload/.test(i.faultMessage)),
+    "the failure's own message is carried, so the note never has to guess");
 }
 
 // ── the evaluator that forwards additional UTxOs ─────────────────────────────

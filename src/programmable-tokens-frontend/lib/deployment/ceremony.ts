@@ -277,8 +277,24 @@ export async function buildWithFreshUtxos<T>(
     attempts?: number;
     delayMs?: number;
     onAttempt?: (n: number, why: string) => void;
-    /** Reports what changed between attempts, so a success says WHY it succeeded. */
-    onRetryInfo?: (info: { attempt: number; utxoSetChanged: boolean; utxoCount: number }) => void;
+    /**
+     * Reports what changed between attempts, so a success says WHY it succeeded.
+     *
+     * ⛔ `fault` IS NOT OPTIONAL DECORATION. Without it the caller can only compare UTxO
+     * fingerprints, and a note built from that alone ASSERTS A CAUSE IT CANNOT KNOW — the page said
+     * "the inputs were real and the evaluator was behind" for every unchanged set, including retries
+     * provoked by an undecodable payload, which has nothing to do with the evaluator lagging.
+     * Reporting the fingerprint is fine; inferring the cause from it is not.
+     */
+    onRetryInfo?: (info: {
+      attempt: number;
+      utxoSetChanged: boolean;
+      utxoCount: number;
+      /** What actually provoked this retry. */
+      fault: "missing-utxo" | "undecodable-payload" | "other";
+      /** The failure's own message, trimmed — the only account of it that is not a guess. */
+      faultMessage: string;
+    }) => void;
   } = {},
 ): Promise<T> {
   const attempts = opts.attempts ?? 4;
@@ -298,7 +314,19 @@ export async function buildWithFreshUtxos<T>(
     // same inputs became acceptable with nothing but time, which is the lag.
     const signature = fingerprintUtxos(fresh);
     const changed = previousSet !== null && signature !== previousSet;
-    if (n > 1) opts.onRetryInfo?.({ attempt: n, utxoSetChanged: changed, utxoCount: fresh.length });
+    if (n > 1) {
+      opts.onRetryInfo?.({
+        attempt: n,
+        utxoSetChanged: changed,
+        utxoCount: fresh.length,
+        fault: isUndecodablePayloadEvaluation(last)
+          ? "undecodable-payload"
+          : isMissingUtxoEvaluation(last)
+            ? "missing-utxo"
+            : "other",
+        faultMessage: serialiseError(last).slice(0, 300),
+      });
+    }
     previousSet = signature;
 
     const attemptCtx: CeremonyContext = { ...ctx, availableUtxos: fresh as CeremonyContext["availableUtxos"] };
