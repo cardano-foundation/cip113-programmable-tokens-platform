@@ -150,6 +150,23 @@ tasks.register('ciTest', Test) {
 		events 'failed'
 		exceptionFormat = 'short'
 	}
+
+	// ⛔ PRINT THE COUNT. On success Gradle prints nothing at all, so a green step proved only
+	// that the task did not fail — which is indistinguishable from a filter that matched nothing
+	// and a task that ran zero tests. `failOnNoMatchingTests` guards the empty case, but the
+	// number is what a human reading the CI log can actually check, and it is what was asked for.
+	afterSuite { desc, result ->
+		if (desc.parent == null) {
+			logger.lifecycle("\nciTest: ${result.testCount} tests EXECUTED, "
+					+ "${result.failedTestCount} failed, ${result.skippedTestCount} skipped "
+					+ "(result: ${result.resultType})")
+			if (result.testCount == 0) {
+				throw new GradleException("ciTest ran ZERO tests. The allowlist matched nothing, "
+						+ "which is a green that proves nothing — exactly the `aiken check` "
+						+ "failure this repo already has on the on-chain side.")
+			}
+		}
+	}
 }
 
 tasks.named('test') {
