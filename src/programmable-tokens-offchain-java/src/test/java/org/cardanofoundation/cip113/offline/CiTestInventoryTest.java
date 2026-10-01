@@ -45,7 +45,7 @@ class CiTestInventoryTest {
     private static final Path TEST_ROOT = Path.of("src/test/java");
 
     /** Every test class in the tree, as of 2026-10-01 (counted, not guessed). Bump deliberately, never reflexively. */
-    private static final int EXPECTED_TEST_CLASS_COUNT = 98;
+    private static final int EXPECTED_TEST_CLASS_COUNT = 99;
 
     /** Why the rest are out: they submit transactions, need a database, or need a live backend. */
     private static final String NOT_IN_CI_REASON =

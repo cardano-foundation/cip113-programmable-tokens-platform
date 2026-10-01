@@ -162,10 +162,36 @@ public class CoreScriptFactory {
                     outputReference(b.registry().txInput()),
                     policyId(b.registry().issuanceScriptHash()));
 
+            // ⛔ THE THIRD PARAMETER IS `unfrackingParameter`, NOT the unfracking script hash.
+            //
+            // The dispatcher records WHAT IT WAS COMPILED AGAINST: either the real unfracking hash,
+            // or the 28-byte disabled sentinel (0000…0000). A deployment may legitimately deploy,
+            // publish and record the real unfracking script while compiling the dispatcher against
+            // the sentinel — which is exactly what preprod does — so `unfracking.scriptHash` is NOT
+            // a substitute. `DispatcherParams`' own javadoc says so; this case used the substitute
+            // anyway, which is the whole bug.
+            //
+            // ⚠ MEASURED ON PREPROD 2026-10-01, and it cost a long hunt. unfrackingParameter there
+            // is the sentinel, so:
+            //     dispatcher(transfer, thirdParty, unfracking.scriptHash) = a36376d3…   ← what we built
+            //     dispatcher(transfer, thirdParty, unfrackingParameter)   = 24ef08d8…   ← the record,
+            //                                                                             and what the
+            //                                                                             bootstrap
+            //                                                                             REGISTERED
+            // A transfer withdraws-0 from the dispatcher, so it targeted an unregistered reward
+            // account and the ledger answered 3141 — a message about rewards balances. ISSUING kept
+            // working the whole time because the mint withdrawal set is (issuer_admin, issuanceLogic)
+            // and contains no dispatcher. The TypeScript SDK was unaffected because it takes the
+            // dispatcher hash straight from the deployment record instead of re-deriving it.
+            //
+            // ⚑ AND IT IS INVISIBLE ON DEVNET, which is why a 37-row devnet matrix passed over it:
+            // devnet bootstraps with unfracking ENABLED, so unfrackingParameter EQUALS the unfracking
+            // script hash there and the two spellings coincide. Only a deployment with unfracking
+            // disabled can tell them apart.
             case PROGRAMMABLE_LOGIC_GLOBAL -> ListPlutusData.of(
                     policyId(b.transfer().scriptHash()),
                     policyId(b.thirdParty().scriptHash()),
-                    policyId(b.unfracking().scriptHash()));
+                    policyId(requireUnfrackingParameter(b)));
 
             case ISSUANCE_LOGIC -> ListPlutusData.of(
                     scriptCredential(b.programmableLogicBase().scriptHash()),
@@ -215,5 +241,31 @@ public class CoreScriptFactory {
         return ConstrPlutusData.of(0,
                 BytesPlutusData.of(HexUtil.decodeHexString(input.txHash())),
                 BigIntPlutusData.of(input.outputIndex()));
+    }
+
+    /**
+     * The dispatcher's third parameter, refusing rather than guessing when it is absent.
+     *
+     * <p>⛔ NO DEFAULT IS SAFE HERE. "Absent" could mean the deployment disabled unfracking (the
+     * sentinel) or that the field was LOST in parsing — {@code DispatcherParams} exists because it
+     * was being dropped silently by a mapper with {@code FAIL_ON_UNKNOWN_PROPERTIES} disabled.
+     * Defaulting to the sentinel would be right often enough that nobody would ever check, and wrong
+     * on exactly the deployments that enable unfracking. Falling back to
+     * {@code unfracking.scriptHash} is what produced a 3141 on preprod.
+     */
+    private static String requireUnfrackingParameter(ProtocolBootstrapParams b) {
+        var dispatcher = b.programmableLogicGlobal();
+        var param = dispatcher == null ? null : dispatcher.unfrackingParameter();
+        if (param == null || param.isBlank()) {
+            throw new IllegalStateException(
+                    "programmableLogicGlobal.unfrackingParameter is missing from the deployment "
+                    + "record for protocol " + b.txHash() + ". The dispatcher cannot be compiled "
+                    + "without it and it must not be guessed: the sentinel ("
+                    + "0000…0000, unfracking disabled) and the real unfracking script hash produce "
+                    + "DIFFERENT dispatcher hashes, and only one of them is the credential the "
+                    + "bootstrap registered. Withdrawing from the wrong one is rejected as ledger "
+                    + "code 3141. Add the field to protocol-bootstraps-<network>.json.");
+        }
+        return param;
     }
 }
