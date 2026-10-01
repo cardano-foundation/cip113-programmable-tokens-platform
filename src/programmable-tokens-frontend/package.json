@@ -34,7 +34,7 @@
     "test": "node scripts/run-suites.mjs"
   },
   "dependencies": {
-    "@easy1staking/cip113-sdk-ts": "^0.14.0",
+    "@easy1staking/cip113-sdk-ts": "^0.15.0",
     "@hookform/resolvers": "^3.9.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^1.8.0",
