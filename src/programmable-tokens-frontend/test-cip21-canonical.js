@@ -13,12 +13,13 @@
  */
 const assert = require("node:assert");
 const fs = require("node:fs");
-const { checkCip21 } = require("./.cip21-build/cip21.js");
 
 let ran = 0;
+let checkCip21;
 const fixture = fs.readFileSync("test-fixtures/ceremony-genesis-unsorted-mint.hex", "utf8").trim();
 
 (async () => {
+  ({ checkCip21 } = await import("./.cip21can-build/utils/cip21.js"));
   const { CBOR, Transaction } = await import("@evolution-sdk/evolution");
   const canonicalise = (hex) =>
     Transaction.toCBORHex(Transaction.fromCBORHex(hex, CBOR.CANONICAL_OPTIONS), CBOR.CANONICAL_OPTIONS);
@@ -66,7 +67,46 @@ const fixture = fs.readFileSync("test-fixtures/ceremony-genesis-unsorted-mint.he
   console.log(`  OK   a no-op on ${real.transactions.length} real transactions, script data hash intact`);
   ran++;
 
-  // ---- 5. the ceremony's serializer actually calls it ----
+  // ---- 5. IT REPRODUCES ON EVERY CEREMONY, not just one plan ----
+  // A second real genesis from a later run, 2026-10-01: same defect, different policy IDs
+  // (3511a165… , 7395ab08… , 20bac61c… where canonical is 20bac61c… , 3511a165… , 7395ab08…).
+  // Two independent instances are what make this a property of the builder rather than bad luck.
+  const second = fs.readFileSync("test-fixtures/ceremony-genesis-unsorted-mint-2.hex", "utf8").trim();
+  assert.ok(checkCip21(second).violations.some((v) => v.startsWith("body.mint")),
+    "the second captured ceremony body no longer reproduces the unsorted mint map");
+  assert.deepStrictEqual(checkCip21(canonicalise(second)).violations, [],
+    "canonicalising did not fix the second captured ceremony body");
+  console.log("  OK   a second real ceremony body shows the same defect and the same fix");
+  ran++;
+
+  // ---- 6. cborOf turns a non-conformant body into a conformant one ----
+  // The end-to-end contract, exercised through the real entry point rather than the helper.
+  const { cborOf } = await import("./.cip21can-build/deployment/ceremony.js");
+  const out = cborOf({ cbor: second, txHash: "ab".repeat(32) });
+  assert.notStrictEqual(out, second, "cborOf returned the non-canonical body unchanged");
+  assert.deepStrictEqual(checkCip21(out).violations, [],
+    `cborOf returned a body that is still not CIP-21 conformant: ${checkCip21(out).violations.join(" | ")}`);
+  console.log("  OK   cborOf turns a real non-conformant ceremony body into a conformant one");
+  ran++;
+
+  // ---- 6b. ⛔ AND A SILENT NO-OP WOULD BE REFUSED, not shipped ----
+  // This is the regression that reached Giovanni TWICE on 2026-10-01: the canonical option was
+  // honoured and did nothing, because the installed SDK was too old, so the second ceremony came
+  // back with the identical violation. The guard cannot be triggered behaviourally while a correct
+  // SDK is installed — which is exactly why it is asserted structurally instead of quietly trusted.
+  const ceremonySrc = fs.readFileSync("lib/deployment/ceremony.ts", "utf8");
+  const guard = ceremonySrc.slice(ceremonySrc.indexOf("export function canonicaliseForHardwareWallets"));
+  assert.ok(/checkCip21\(canonical\)/.test(guard) && /throw new Error\(/.test(guard),
+    "canonicaliseForHardwareWallets no longer verifies its own output. Asking for canonical " +
+    "encoding and getting nothing is indistinguishable from success, and that silence shipped a " +
+    "body a Ledger rejected twice.");
+  assert.ok(/0\.5\.16/.test(guard) && /npm ci/.test(guard),
+    "the refusal message must name the likely cause and the action — an operator meeting this " +
+    "mid-ceremony needs the version and the command, not just the field.");
+  console.log("  OK   the canonicaliser verifies its own output and names cause and remedy");
+  ran++;
+
+  // ---- 7. the ceremony's serializer actually calls it ----
   const src = fs.readFileSync("lib/deployment/ceremony.ts", "utf8");
   const body = src.slice(src.indexOf("export function cborOf"), src.indexOf("export function canonicaliseForHardwareWallets"));
   assert.ok(/return canonicaliseForHardwareWallets\(u\.cbor\)/.test(body),

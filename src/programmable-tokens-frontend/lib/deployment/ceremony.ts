@@ -33,6 +33,7 @@
 
 import { EvoAssets, EvoTransactionHash } from "@easy1staking/cip113-sdk-ts";
 import { CBOR as EvoCBOR, Transaction as EvoTx } from "@evolution-sdk/evolution";
+import { checkCip21 } from "../utils/cip21";
 import {
   type BootstrapStepId,
   planBootstrap,
@@ -880,5 +881,37 @@ export function cborOf(built: unknown): string {
  * serializer and not in `signAndSubmitSequence`.
  */
 export function canonicaliseForHardwareWallets(cborHex: string): string {
-  return EvoTx.toCBORHex(EvoTx.fromCBORHex(cborHex, EvoCBOR.CANONICAL_OPTIONS), EvoCBOR.CANONICAL_OPTIONS);
+  const canonical = EvoTx.toCBORHex(
+    EvoTx.fromCBORHex(cborHex, EvoCBOR.CANONICAL_OPTIONS),
+    EvoCBOR.CANONICAL_OPTIONS,
+  );
+
+  /**
+   * ⛔ VERIFY THE RESULT, BECAUSE THE FAILURE MODE IS SILENCE. Asking for canonical encoding and
+   * getting nothing is indistinguishable, from here, from asking and getting it — and that is not a
+   * hypothetical: it happened on 2026-10-01, twice. The first ceremony failed on a Ledger with the
+   * unsorted mint map; the fix shipped; the NEXT build came back with the same violation, because
+   * the running install still had @evolution-sdk/evolution 0.5.2, whose canonical comparator sorts
+   * equal-length keys by length alone. The option was honoured. It just did nothing.
+   *
+   * So the ceremony refuses rather than hands an operator a body a hardware wallet will reject. It
+   * is one-shot and the seeds are already spent by the time a device says "hash mismatch"; a loud
+   * failure at build time costs nothing by comparison. Per `distill`: when a step's failure is
+   * silent, the fix is not to restate the step, it is to add the check that makes the failure loud.
+   */
+  const report = checkCip21(canonical);
+  if (report.violations.length > 0) {
+    throw new Error(
+      "This ceremony transaction is not CIP-21 conformant, so a hardware wallet would reconstruct a " +
+        "different body and refuse to sign it (reporting only \"hash mismatch\").\n\n" +
+        report.violations.map((v) => `  • ${v}`).join("\n") +
+        "\n\nMost likely cause: @evolution-sdk/evolution is older than 0.5.16. Through 0.5.2 its " +
+        "canonical comparator sorted map keys by LENGTH only, so every 29-byte policy ID tied and " +
+        "insertion order survived — canonical encoding became a no-op on exactly this field " +
+        "(fixed upstream in IntersectMBO/evolution-sdk#555). Run `npm ci` so the lockfile's 0.5.16 " +
+        "is installed, restart the dev server, and rebuild the image if this is a deployment. " +
+        "`npm run test:cip21canonical` asserts the behaviour directly.",
+    );
+  }
+  return canonical;
 }

@@ -30,7 +30,7 @@ const {
   selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
   resolveSeedUtxos, lovelaceOfUtxo, cborOf,
   buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos, awaitUtxosOf,
-} = await import("./.seeds-build/ceremony.js");
+} = await import("./.seeds-build/deployment/ceremony.js");
 
 const HASHES = [
   "5403b9c6cdf1ecd35403b9c6cdf1ecd35403b9c6cdf1ecd35403b9c6cdf1ecd3",
