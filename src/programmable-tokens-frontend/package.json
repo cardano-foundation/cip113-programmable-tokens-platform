@@ -43,7 +43,8 @@
     "test:regidentity": "node test-registration-identity-fields.js",
     "test:cip21": "tsc lib/utils/cip21.ts --outDir .cip21-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-cip21.js",
     "check:cip21": "tsc lib/utils/cip21.ts --outDir .cip21-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node scripts/cip21.mjs",
-    "test:cip21canonical": "tsc lib/utils/cip21.ts lib/deployment/ceremony.ts --outDir .cip21can-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .cip21can-build && node test-cip21-canonical.js"
+    "test:cip21canonical": "tsc lib/utils/cip21.ts lib/deployment/ceremony.ts --outDir .cip21can-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .cip21can-build && node test-cip21-canonical.js",
+    "test:cip21ref": "tsc lib/utils/cip21.ts lib/deployment/ceremony.ts --outDir .cip21ref-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .cip21ref-build && node test-cip21-reference.js"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.15.0",
@@ -72,6 +73,7 @@
     "@types/react-dom": "^19",
     "autoprefixer": "^10.0.1",
     "baseline-browser-mapping": "^2.9.14",
+    "cardano-hw-interop-lib": "^3.1.0",
     "eslint": "^9",
     "eslint-config-next": "^15.0.3",
     "postcss": "^8",
