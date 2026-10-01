@@ -216,9 +216,23 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
 // ── cborOf ────────────────────────────────────────────────────────────────────
 // ⛔ The SDK's builders return UnsignedTx, which ALREADY carries cbor as hex. Calling
 // toTransaction() on it — a method it has never had — failed every one of the five steps.
+//
+// ⚑ AND SINCE 2026-10-01 cborOf ALSO CANONICALISES, so it no longer passes bytes through: it
+// re-encodes them with Evolution's CBOR.CANONICAL_OPTIONS so a hardware wallet reconstructs the
+// same body (CIP-21). That makes parseable transaction CBOR a REQUIREMENT — this block used to
+// assert pass-through using the stub "84a300d9010281", which is a truncated body and now fails to
+// decode. The contract is asserted against a REAL transaction instead; test-cip21-canonical.js owns
+// the conformance half.
 {
-  ok(cborOf({ cbor: "84a300d9010281", txHash: "ab".repeat(32) }) === "84a300d9010281",
-    "cborOf reads UnsignedTx.cbor straight through");
+  const realTx = require("./test-fixtures/real-preview-txs.json").transactions[0].cbor;
+  ok(cborOf({ cbor: realTx, txHash: "ab".repeat(32) }) === realTx,
+    "cborOf returns an already-canonical transaction unchanged");
+
+  let nonCanonicalMsg = "";
+  try { cborOf({ cbor: "84a300d9010281", txHash: "ab".repeat(32) }); }
+  catch (e) { nonCanonicalMsg = String(e && e.message ? e.message : e); }
+  ok(/CBOR|decode|Transaction/i.test(nonCanonicalMsg),
+    "cborOf refuses CBOR it cannot parse rather than shipping a body it could not canonicalise");
 
   // An Evolution build result is the OTHER object, and must NOT be silently accepted here:
   // accepting it would mean a step whose CBOR came from somewhere unverified.

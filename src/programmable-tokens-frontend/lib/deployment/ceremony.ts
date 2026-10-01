@@ -32,6 +32,7 @@
  */
 
 import { EvoAssets, EvoTransactionHash } from "@easy1staking/cip113-sdk-ts";
+import { CBOR as EvoCBOR, Transaction as EvoTx } from "@evolution-sdk/evolution";
 import {
   type BootstrapStepId,
   planBootstrap,
@@ -831,5 +832,53 @@ export function cborOf(built: unknown): string {
         ".",
     );
   }
-  return u.cbor;
+  return canonicaliseForHardwareWallets(u.cbor);
+}
+
+/**
+ * Re-encodes a built ceremony transaction in canonical CBOR, so a hardware wallet signs the body
+ * we submit.
+ *
+ * ⛔ THE DEFECT THIS FIXES, MEASURED ON A REAL CEREMONY TRANSACTION, 2026-10-01. A Ledger reported
+ * only "hash mismatch". The cause was the `mint` field: its three policy IDs were emitted in the
+ * order the builder added them — 021761ef…, c639b35c…, 27e581ff… — and canonical order is
+ * 021761ef…, 27e581ff…, c639b35c…. CIP-21: "Since multiassets (policy_id and asset_name) are
+ * represented as maps, both need to be sorted in accordance with the specified canonical CBOR
+ * format." A HW wallet does not sign the bytes it is handed; it reconstructs the body canonically
+ * and signs THAT rolling hash, so the witness committed to a body we never submit. A software
+ * wallet signs our bytes verbatim, which is why every ceremony before this one worked.
+ *
+ * ⚑ WHY A RE-ENCODE AND NOT A SORT OF OUR OWN. The SDK's builders serialize internally and hand
+ * back hex, so there is no map for us to order. Evolution ships the canonicaliser —
+ * `CBOR.CANONICAL_OPTIONS`, and `toCBORHex` documents that "non-default options signal an explicit
+ * re-encode request" which bypasses the cached format tree. Reusing it beats hand-rolling a CBOR
+ * writer for a body that carries seven reference scripts and a script data hash.
+ *
+ * ⛔ AND IT NEEDS @evolution-sdk/evolution >= 0.5.16 TO DO ANYTHING. Through 0.5.2 the canonical
+ * comparator was `a.encodedKey.length - b.encodedKey.length` — length ONLY. Every policy ID
+ * encodes to 29 bytes, so the comparator returned 0, `Array.sort` is stable, and insertion order
+ * survived: canonical mode was a NO-OP on exactly the field that was wrong. Fixed upstream in
+ * IntersectMBO/evolution-sdk#555 ("sort equal-length CBOR map keys bytewise", merged 2026-09-28),
+ * whose own description is this bug: "a Ledger transaction-hash mismatch where two equal-length
+ * token policy IDs were emitted in insertion order". That is why the dependency is pinned exactly
+ * rather than by range, and why the test suite asserts the BEHAVIOUR instead of the version.
+ *
+ * ⚑ SAFE BECAUSE IT IS A NO-OP ON ANYTHING ALREADY CANONICAL — verified against the two real
+ * Conway transactions in test-fixtures/real-preview-txs.json, including the 3489-byte one carrying
+ * a script data hash: both re-encode BYTE-IDENTICAL. That is what retires upstream issue #576
+ * ("Plutus data encodings change on re-encode, breaking the script data hash and the transaction
+ * id") for these shapes: inline datums are `#6.24(bytes)`, already-serialized and opaque, so
+ * canonical mode cannot rewrite them. On the real ceremony body the ONLY bytes that moved were the
+ * two swapped mint entries; the script data hash and the auxiliary data hash were untouched.
+ *
+ * ⚠ THE BOUNDARY, because it is the thing that would bite next. Canonicalising changes the body
+ * and therefore the TRANSACTION ID whenever it changes anything at all. That is correct here: each
+ * ceremony step is built from UTxOs already confirmed on chain, and every id downstream comes from
+ * `submitTx`. It would NOT be safe to apply to a pair where an earlier transaction is non-canonical
+ * and a later one references its id computed before this ran — the FES registration's
+ * `chainingTransactionCborHex` is exactly that shape, which is why this lives in the ceremony's own
+ * serializer and not in `signAndSubmitSequence`.
+ */
+export function canonicaliseForHardwareWallets(cborHex: string): string {
+  return EvoTx.toCBORHex(EvoTx.fromCBORHex(cborHex, EvoCBOR.CANONICAL_OPTIONS), EvoCBOR.CANONICAL_OPTIONS);
 }
