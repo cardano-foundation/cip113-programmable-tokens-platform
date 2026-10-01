@@ -89,41 +89,56 @@ for (const t of real) {
   );
 }
 
-// ---- 4. a canonicalisation that would MOVE the witness set is refused ----
-// ⛔ THE HOLE THE REFERENCE IMPLEMENTATION REFUSES TO LEAVE OPEN. `script_data_hash` is computed over
-// the redeemers, datums and language views AS ENCODED IN THE WITNESS SET, and we re-encode the whole
-// transaction. Change one redeemer byte and the body commits to a preimage that no longer exists —
-// the ledger rejects it in phase 2, AFTER the Ledger has signed, with the seeds already spent.
-// vacuumlabs' `transformTx` throws MISSING_COST_MODELS_FOR_SCRIPT_DATA_HASH rather than guess; we
-// cannot recompute the hash at all from a hex string, so refusing is the whole correct behaviour.
+// ---- 4. the witness set is NEVER touched, so script_data_hash stays true ----
+// ⛔ THE DEFECT THIS PINS IS ONE WE SHIPPED AND THEN REMOVED. Canonicalising the WHOLE transaction
+// rewrites the redeemers (Plutus data goes indefinite → definite length) while the body keeps the
+// `script_data_hash` the builder computed over the originals. The node answers
+// `PPViewHashesDontMatch` — for a transaction that passes every CIP-21 check there is.
 //
-// The input is built by reversing the witness-set key order of the REAL 3489-byte on-chain
-// transaction above, which is the cheapest way to produce a body whose witness set is genuinely
-// non-canonical while everything else stays a transaction Evolution will parse.
+// Reported upstream as IntersectMBO/evolution-sdk#585, whose reproduction is this protocol's own
+// shape: "3 mints, 4 PlutusV3 redeemers, 1 script withdrawal". Our own fixtures could NOT have caught
+// it, because their witness sets are stripped to `a0` — which is exactly why this case is built here
+// instead of being hoped for.
+//
+// The input reverses the witness-set key order of the real 3489-byte on-chain transaction above: a
+// body still committing to a script data hash, over a witness set that is genuinely non-canonical.
 {
   const { CBOR } = await import("@evolution-sdk/evolution");
-  const sdhTx = real.find((t) => t.cbor === real[1].cbor);
-  const { value } = CBOR.fromCBORHexWithFormat(sdhTx.cbor);
+  const { value, format } = CBOR.fromCBORHexWithFormat(real[1].cbor.toLowerCase());
   const witnessSet = value[1];
-  assert.ok(CBOR.isMap(witnessSet) && witnessSet.size > 1,
-    "this construction needs a multi-entry witness set; the fixture changed and the check is blind");
+  assert.ok(
+    CBOR.isMap(witnessSet) && witnessSet.size > 1 && CBOR.isMap(value[0]) && value[0].get(11n) !== undefined,
+    "this construction needs a multi-entry witness set and a script_data_hash; the fixture changed " +
+      "and the check is now blind",
+  );
   const reversed = new Map([...witnessSet.entries()].reverse());
-  const movedWitnessSet = CBOR.toCBORHex([value[0], reversed, value[2], value[3]]);
+  const nonCanonicalWitnessSet = CBOR.toCBORHex([value[0], reversed, value[2], value[3]]);
 
-  let refused = "";
-  try {
-    canonicaliseForHardwareWallets(movedWitnessSet);
-  } catch (e) {
-    refused = e.message;
-  }
+  // Sanity: canonical encoding really would rewrite this witness set, so the case is not vacuous.
+  const wouldChange =
+    CBOR.toCBORHex(reversed, CBOR.CANONICAL_OPTIONS) !== CBOR.toCBORHex(reversed);
+  ok(wouldChange, "the constructed witness set is one canonical encoding WOULD rewrite");
+
+  const out = canonicaliseForHardwareWallets(nonCanonicalWitnessSet);
+
+  const before = CBOR.fromCBORHexWithFormat(nonCanonicalWitnessSet);
+  const after = CBOR.fromCBORHexWithFormat(out);
+  const wsBefore = CBOR.toCBORHexWithFormat(before.value[1], before.format.children[1]);
+  const wsAfter = CBOR.toCBORHexWithFormat(after.value[1], after.format.children[1]);
   ok(
-    /WITNESS SET/.test(refused) && /script_data_hash/.test(refused),
-    "a canonicalisation that would move the witness set is REFUSED, naming script_data_hash",
+    wsBefore === wsAfter,
+    "the witness set comes back BYTE-IDENTICAL, so the body's script_data_hash still commits to " +
+      "bytes that exist (this is what #585 reports going wrong)",
   );
   ok(
-    /cardano-hw-interop-lib|MISSING_COST_MODELS/.test(refused),
-    "and the refusal points at the reference implementation that refuses the same transformation",
+    CBOR.toCBORHexWithFormat(after.value[0], after.format.children[0]) ===
+      CBOR.toCBORHex(before.value[0], CBOR.CANONICAL_OPTIONS),
+    "while the BODY is canonical — which is the only part a hardware wallet reconstructs",
   );
+
+  // And the fee stays exact: canonical ordering is a permutation, so the body cannot change length.
+  ok(out.length === nonCanonicalWitnessSet.length,
+    "the transaction's total length is unchanged, so the builder's fee is still correct");
 }
 
 // ---- 5. the oracle is not vacuous ----

@@ -1135,74 +1135,89 @@ export function cborOf(built: unknown): string {
 }
 
 /**
- * Refuses a canonicalisation that moved the witness set while the body commits to its hash.
+ * Canonicalises the transaction BODY and leaves every other element byte-for-byte alone.
  *
- * ⛔ THE HOLE THIS CLOSES, AND IT IS CIP-21'S OWN REFERENCE IMPLEMENTATION THAT NAMES IT.
- * `script_data_hash` (body key 11) is blake2b-256 over the redeemers, the datums and the language
- * views AS ENCODED IN THE WITNESS SET. We re-encode the WHOLE transaction, witness set included. So
- * if canonicalising changes one redeemer byte, the body's script_data_hash now commits to a preimage
- * that no longer exists, and the ledger rejects the transaction in phase 2 — AFTER the operator has
- * signed it on a hardware wallet, at the one point in a one-shot ceremony where the seeds are
- * already spent.
+ * ⛔ WHY NOT RE-ENCODE THE WHOLE TRANSACTION, WHICH IS WHAT THIS DID FIRST. `script_data_hash`
+ * (body key 11) is blake2b-256 over the redeemers, the datums and the language views AS ENCODED IN
+ * THE WITNESS SET, and the builder computes it with the DEFAULT options. Re-encoding the whole
+ * transaction canonically rewrites the witness set — Plutus data goes from indefinite to
+ * definite length — while the body keeps the hash computed over the old bytes. The node then
+ * rejects it with `PPViewHashesDontMatch`, having passed every CIP-21 check we can run.
  *
- * ⚑ VACUUMLABS TREATS THIS AS MANDATORY, NOT A CORNER CASE. `cardano-hw-interop-lib` — the library
- * CIP-21's own "Implementation Plan" points to — will not transform a transaction carrying a
- * script_data_hash unless you hand it the cost models, so it can RECOMPUTE the hash:
- * `transformTx(tx, costModels, usedCostModelLanguages)` throws
- * `MISSING_COST_MODELS_FOR_SCRIPT_DATA_HASH` otherwise. Measured 2026-10-01 against v3.1.0 on this
- * protocol's own failing ceremony body: it refused outright.
+ * ⚑ THIS IS MEASURED AND REPORTED UPSTREAM, NOT INFERRED: IntersectMBO/evolution-sdk#585,
+ * "Canonical transaction encoding leaves a stale script data hash; no way to build hw-cli-signable
+ * Plutus txs", opened 2026-10-01. Its reproduction is this protocol's own shape — "3 mints, 4
+ * PlutusV3 redeemers, 1 script withdrawal" — and it reports the witness set re-encoded with
+ * definite-length Plutus data while body field 11 still held the hash over the indefinite original.
+ * It also names the two other things the builder computes with default options: the auxiliary data
+ * hash, and `calculateTransactionSize`, which is what the fee was derived from.
  *
- * ⚑ WE CANNOT RECOMPUTE IT HERE, so refusing is the whole of the correct behaviour. The cost models
- * live in the protocol parameters the SDK fetched during its own build; by the time `cborOf` sees a
- * hex string they are gone. Recomputing from a partial view would produce a hash that is wrong in a
- * way nothing downstream can detect — strictly worse than not shipping.
+ * ⚑ AND THE BODY IS ALL A HARDWARE WALLET NEEDS, which is what makes the narrow fix the complete
+ * one. The device never sees our bytes: it is streamed the body field by field, serializes it
+ * canonically itself, and signs the hash of its own serialization. #585 says so in as many words —
+ * "The Ledger only needs a canonical body". The witness set is not part of what it hashes, so
+ * leaving it untouched costs nothing and keeps `script_data_hash` and `auxiliary_data_hash` true.
  *
- * ⚑ AND IT DOES NOT FIRE ON ANY SHAPE WE ACTUALLY BUILD, which is what makes refusal affordable
- * rather than a blocker. Verified against the real on-chain Conway transaction in
- * `test-fixtures/real-preview-txs.json` that carries redeemers (witness key 5), Plutus scripts (7)
- * and a script data hash (body 11): canonical re-encoding is byte-identical, so the witness set does
- * not move. The guard exists for the day the builder emits a non-canonical redeemer map — the same
- * class of defect as the unsorted mint map, one field over, and silent in exactly the same way.
+ * ⚠ THE ONE CASE THIS STILL DOES NOT COVER, stated so nobody discovers it the hard way:
+ * `cardano-hw-cli transaction witness` refuses a transaction with ANY fixable issue, witness set
+ * included (`validateTxBeforeWitnessing` throws on `containsFixable`). A body-canonical transaction
+ * is enough for a Ledger reached through CIP-30, which is this ceremony's path, and not enough for
+ * the hw-cli path. That needs the builder to emit canonical bytes throughout — upstream #584 and
+ * #585 — or `cardano-hw-cli transaction transform`, which recomputes the script data hash from a
+ * protocol-params file and changes the transaction id.
  */
-function assertScriptDataHashStillValid(originalHex: string, canonicalHex: string): void {
-  if (originalHex.toLowerCase() === canonicalHex.toLowerCase()) return;
+function canonicaliseBodyOnly(cborHex: string): string {
+  const decoded = EvoCBOR.fromCBORHexWithFormat(cborHex);
+  const tx = decoded.value as readonly EvoCBOR.CBOR[];
+  const children = (decoded.format as { children?: readonly EvoCBOR.CBORFormat[] }).children;
 
-  let originalWitnessSet: string;
-  let canonicalWitnessSet: string;
-  try {
-    const decoded = EvoCBOR.fromCBORHexWithFormat(originalHex);
-    const tx = decoded.value as readonly EvoCBOR.CBOR[];
-    const format = decoded.format as { children?: readonly EvoCBOR.CBORFormat[] };
-    const body = tx?.[0];
-    // No script data hash, nothing committing to the witness set's bytes: nothing to protect.
-    if (!EvoCBOR.isMap(body) || body.get(11n) === undefined) return;
-    const witnessFormat = format.children?.[1];
-    if (tx.length < 2 || witnessFormat === undefined) return;
-    originalWitnessSet = EvoCBOR.toCBORHexWithFormat(tx[1], witnessFormat);
-    canonicalWitnessSet = EvoCBOR.toCBORHex(tx[1], EvoCBOR.CANONICAL_OPTIONS);
-  } catch {
-    // ⚑ A GUARD THAT CANNOT READ THE TRANSACTION MUST NOT VETO IT. `checkCip21` below walks the same
-    // bytes and is the authority on conformance; this one only answers a narrower question, so when
-    // it cannot answer it stays quiet rather than blocking a ceremony on its own blind spot.
-    return;
+  if (!Array.isArray(tx) || tx.length !== 4 || children === undefined || children.length !== 4) {
+    throw new Error(
+      "This does not decode as a Conway transaction — expected the 4-element array " +
+        "[body, witness_set, is_valid, auxiliary_data], got " +
+        (Array.isArray(tx) ? `${tx.length} element(s)` : typeof tx) +
+        ". Refusing rather than guessing at a shape a hardware wallet has to reconstruct exactly.",
+    );
   }
 
-  if (originalWitnessSet.toLowerCase() === canonicalWitnessSet.toLowerCase()) return;
+  // ⛔ PROVE THE REPLAY IS FAITHFUL BEFORE RELYING ON IT. The whole splice rests on
+  // `toCBORHexWithFormat` reproducing the captured encoding byte-for-byte; if it does not, the
+  // witness set we paste back is not the one whose hash the body commits to, and the failure would
+  // surface as PPViewHashesDontMatch after the operator has signed. So it is checked, not trusted.
+  const parts = tx.map((element, i) => EvoCBOR.toCBORHexWithFormat(element, children[i]));
+  const replayed = `84${parts.join("")}`;
+  if (replayed !== cborHex.toLowerCase()) {
+    throw new Error(
+      "Could not reproduce this transaction's own bytes from its captured CBOR format, so the " +
+        "witness set cannot be spliced back unchanged. " +
+        `Input was ${cborHex.length / 2} bytes, replay produced ${replayed.length / 2}. ` +
+        "Refusing: a witness set that is not byte-identical invalidates `script_data_hash`.",
+    );
+  }
 
-  throw new Error(
-    "Canonicalising this ceremony transaction would change its WITNESS SET, and the body commits to " +
-      "that witness set through `script_data_hash`. Submitting it would fail phase 2 validation " +
-      "AFTER the hardware wallet had signed it, with the seeds already spent.\n\n" +
-      `  witness set before: ${originalWitnessSet.length / 2} bytes\n` +
-      `  witness set after:  ${canonicalWitnessSet.length / 2} bytes\n\n` +
-      "The script data hash is blake2b-256 over the redeemers, datums and language views as encoded " +
-      "in the witness set, so it would have to be RECOMPUTED — which needs the cost models, and " +
-      "those are gone by the time a builder hands back hex. CIP-21's own reference implementation, " +
-      "vacuumlabs/cardano-hw-interop-lib, refuses the same transformation for the same reason " +
-      "(`MISSING_COST_MODELS_FOR_SCRIPT_DATA_HASH`).\n\n" +
-      "This most likely means the builder emitted a non-canonical redeemer map — the unsorted-mint " +
-      "defect one field over. Fix it where the transaction is BUILT, so no re-encode is needed.",
-  );
+  const canonicalBody = EvoCBOR.toCBORHex(tx[0], EvoCBOR.CANONICAL_OPTIONS);
+
+  // ⚠ THE FEE WAS SIZED FOR THE OLD BODY. Sorting map keys is a permutation of the same bytes, so
+  // the length is unchanged — verified on both real transactions in the fixture (310→310, 516→516).
+  // A body that GREW would be underpaid and rejected, so that is refused; one that shrank is merely
+  // overpaid, which the node accepts, so it is reported and allowed through.
+  if (canonicalBody.length > parts[0].length) {
+    throw new Error(
+      "Canonicalising this body made it LARGER " +
+        `(${parts[0].length / 2} → ${canonicalBody.length / 2} bytes), so the fee the builder ` +
+        "computed is now too low for the transaction we would submit and the node would reject it. " +
+        "Canonical ordering alone never changes the size — it is a permutation of the same bytes — " +
+        "so something else was rewritten. Fix it where the transaction is BUILT.",
+    );
+  }
+  if (canonicalBody.length < parts[0].length) {
+    console.warn(
+      `[cip21] the canonical body is ${(parts[0].length - canonicalBody.length) / 2} bytes smaller; ` +
+        "the fee is now slightly over-paid, which the node accepts.",
+    );
+  }
+
+  return `84${canonicalBody}${parts.slice(1).join("")}`;
 }
 
 /**
@@ -1224,6 +1239,13 @@ function assertScriptDataHashStillValid(originalHex: string, canonicalHex: strin
  * re-encode request" which bypasses the cached format tree. Reusing it beats hand-rolling a CBOR
  * writer for a body that carries seven reference scripts and a script data hash.
  *
+ * ⛔ BUT ONLY THE BODY IS RE-ENCODED — see `canonicaliseBodyOnly`, which is the whole of the
+ * correctness argument. Canonicalising the witness set too would rewrite the redeemers and strand
+ * the `script_data_hash` the builder computed over the originals, and the node would answer
+ * `PPViewHashesDontMatch` for a transaction that passes every CIP-21 check
+ * (IntersectMBO/evolution-sdk#585). A hardware wallet only reconstructs the BODY, so that is
+ * exactly as much as may be touched.
+ *
  * ⛔ AND IT NEEDS @evolution-sdk/evolution >= 0.5.16 TO DO ANYTHING. Through 0.5.2 the canonical
  * comparator was `a.encodedKey.length - b.encodedKey.length` — length ONLY. Every policy ID
  * encodes to 29 bytes, so the comparator returned 0, `Array.sort` is stable, and insertion order
@@ -1235,11 +1257,15 @@ function assertScriptDataHashStillValid(originalHex: string, canonicalHex: strin
  *
  * ⚑ SAFE BECAUSE IT IS A NO-OP ON ANYTHING ALREADY CANONICAL — verified against the two real
  * Conway transactions in test-fixtures/real-preview-txs.json, including the 3489-byte one carrying
- * a script data hash: both re-encode BYTE-IDENTICAL. That is what retires upstream issue #576
- * ("Plutus data encodings change on re-encode, breaking the script data hash and the transaction
- * id") for these shapes: inline datums are `#6.24(bytes)`, already-serialized and opaque, so
- * canonical mode cannot rewrite them. On the real ceremony body the ONLY bytes that moved were the
- * two swapped mint entries; the script data hash and the auxiliary data hash were untouched.
+ * a script data hash: both re-encode BYTE-IDENTICAL. On the real ceremony body the ONLY bytes that
+ * moved were the two swapped mint entries; the script data hash and the auxiliary data hash were
+ * untouched.
+ *
+ * ⚑ AND THE VERDICT IS NOT OURS TO GIVE. `npm run test:cip21ref` puts the output through
+ * vacuumlabs/cardano-hw-interop-lib — the library CIP-21's own Implementation Plan names — which
+ * reports "CBOR is not canonical" for both real bodies a Ledger refused and reports NOTHING for what
+ * this produces from them. Our walker in `lib/utils/cip21.ts` is the thing under test; the reference
+ * implementation is the oracle, and where they disagree the reference wins.
  *
  * ⚠ THE BOUNDARY, because it is the thing that would bite next. Canonicalising changes the body
  * and therefore the TRANSACTION ID whenever it changes anything at all. That is correct here: each
@@ -1250,12 +1276,7 @@ function assertScriptDataHashStillValid(originalHex: string, canonicalHex: strin
  * serializer and not in `signAndSubmitSequence`.
  */
 export function canonicaliseForHardwareWallets(cborHex: string): string {
-  const canonical = EvoTx.toCBORHex(
-    EvoTx.fromCBORHex(cborHex, EvoCBOR.CANONICAL_OPTIONS),
-    EvoCBOR.CANONICAL_OPTIONS,
-  );
-
-  assertScriptDataHashStillValid(cborHex, canonical);
+  const canonical = canonicaliseBodyOnly(cborHex);
 
   /**
    * ⛔ VERIFY THE RESULT, BECAUSE THE FAILURE MODE IS SILENCE. Asking for canonical encoding and
@@ -1271,11 +1292,40 @@ export function canonicaliseForHardwareWallets(cborHex: string): string {
    * silent, the fix is not to restate the step, it is to add the check that makes the failure loud.
    */
   const report = checkCip21(canonical);
-  if (report.violations.length > 0) {
+
+  /**
+   * ⛔ A BODY VIOLATION IS FATAL; A WITNESS-SET VIOLATION IS NOT OURS TO FIX. A hardware wallet
+   * reconstructs and hashes the BODY, so a body that is not canonical is the defect that produces
+   * "hash mismatch" and the ceremony must stop. The witness set is a different question: we
+   * deliberately leave its bytes alone, because canonicalising them would strand the
+   * `script_data_hash` the builder computed over the originals and the node would answer
+   * `PPViewHashesDontMatch` (IntersectMBO/evolution-sdk#585). So a non-canonical witness set is
+   * reported and allowed through — it is real, it is unfixable from here, and it does not stop a
+   * Ledger reached over CIP-30.
+   *
+   * ⚠ IT WOULD STOP `cardano-hw-cli`, which refuses any transaction carrying a FIXABLE issue
+   * anywhere (`validateTxBeforeWitnessing` throws on `containsFixable`). If this ceremony ever
+   * signs through hw-cli rather than a CIP-30 wallet, this warning becomes a blocker and the fix
+   * has to move into the builder — upstream #584 and #585.
+   */
+  const witnessOnly = report.violations.filter((v) => !v.startsWith("body"));
+  const bodyViolations = report.violations.filter((v) => v.startsWith("body"));
+
+  if (witnessOnly.length > 0) {
+    console.warn(
+      `[cip21] ${witnessOnly.length} non-canonical item(s) OUTSIDE the transaction body, left ` +
+        "untouched on purpose — rewriting them would invalidate `script_data_hash`. A Ledger over " +
+        "CIP-30 only reconstructs the body, so this does not block signing; `cardano-hw-cli` would " +
+        "refuse it.\n" +
+        witnessOnly.map((v) => `  • ${v}`).join("\n"),
+    );
+  }
+
+  if (bodyViolations.length > 0) {
     throw new Error(
-      "This ceremony transaction is not CIP-21 conformant, so a hardware wallet would reconstruct a " +
-        "different body and refuse to sign it (reporting only \"hash mismatch\").\n\n" +
-        report.violations.map((v) => `  • ${v}`).join("\n") +
+      "This ceremony transaction's BODY is not CIP-21 conformant, so a hardware wallet would " +
+        "reconstruct a different body and refuse to sign it (reporting only \"hash mismatch\").\n\n" +
+        bodyViolations.map((v) => `  • ${v}`).join("\n") +
         "\n\nMost likely cause: @evolution-sdk/evolution is older than 0.5.16. Through 0.5.2 its " +
         "canonical comparator sorted map keys by LENGTH only, so every 29-byte policy ID tied and " +
         "insertion order survived — canonical encoding became a no-op on exactly this field " +
