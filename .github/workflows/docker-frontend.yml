@@ -33,9 +33,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ⚑ mainnet IS in the matrix but is DISPATCH-ONLY: the gate below skips it on push.
-        # A push to main must not publish a mainnet-targeted image on its own, and today there is
-        # no mainnet deployment for one to talk to (no protocol-bootstraps-mainnet.json).
+        # All three build on a push to main and on `all`, symmetrically.
+        #
+        # ⚠ A :mainnet IMAGE DOES NOT MEAN MAINNET WORKS. protocol-bootstraps-mainnet.json is still
+        # an empty list — the protocol has never been bootstrapped on mainnet — so the backend runs
+        # there with cip113.allow-no-deployment=true and refuses every protocol OPERATION. The image
+        # is built and publishable; the deployment behind it is not yet a thing. Do not read a green
+        # build here as readiness.
         network: [preview, preprod, mainnet]
         include:
           - network: preview
@@ -46,26 +50,14 @@ jobs:
             api_base_url_default: https://preprod-indexer.programmabletokens.xyz
           - network: mainnet
             blockfrost_url: https://cardano-mainnet.blockfrost.io/api/v0
-            # ⛔ NO DEFAULT ON PURPOSE. NEXT_PUBLIC_* is inlined at BUILD time, so whatever goes
-            # here is permanent in the image and cannot be changed by k8s. There is no mainnet
-            # indexer yet — `mainnet-indexer.programmabletokens.xyz` does not resolve and
-            # `indexer.programmabletokens.xyz` answers a bare router 404 — so any value written
-            # here would be a guess baked into a published artefact. The step below REFUSES an
-            # empty resolution rather than falling back to the frontend's own
-            # `http://localhost:8080` default. Set the repo variable
-            # NEXT_PUBLIC_API_BASE_URL_MAINNET when the indexer exists.
-            api_base_url_default: ""
+            api_base_url_default: https://mainnet-indexer.programmabletokens.xyz
 
     steps:
       - name: Skip if network not selected
         id: gate
         run: |
           requested="${{ github.event.inputs.networks }}"
-          # mainnet never builds from a push, and not from `all` either: it must be asked for by
-          # name, so publishing a mainnet image is always a deliberate act.
-          if [ "${{ matrix.network }}" = "mainnet" ] && [ "$requested" != "mainnet" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          elif [ -n "$requested" ] && [ "$requested" != "all" ] && [ "$requested" != "${{ matrix.network }}" ]; then
+          if [ -n "$requested" ] && [ "$requested" != "all" ] && [ "$requested" != "${{ matrix.network }}" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
