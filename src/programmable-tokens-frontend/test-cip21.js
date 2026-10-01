@@ -264,19 +264,22 @@ ran++;
     `no violation may be reported more than once; repeated: ` +
     repeated.map(([v, n]) => `${n}x ${v}`).join(" | "));
 
-  // ⛔ EXACT-MESSAGE EQUALITY IS NOT ENOUGH, which is how the remaining duplicate hid. The same byte
-  // was reported twice under two different path labels — `body.outputs[0].coin` and
-  // `body.outputs[0][1][0]` — so the strings differed and the check above passed. Compare what is
-  // SAID, independently of where it is said, within one output.
-  const said = new Map();
-  for (const v of r.violations) {
-    const suffix = v.slice(v.indexOf(": ") + 2);
-    said.set(suffix, (said.get(suffix) ?? 0) + 1);
-  }
-  const sameComplaintTwice = [...said.entries()].filter(([, n]) => n > 1);
-  assert.strictEqual(sameComplaintTwice.length, 0,
-    `the same complaint must not appear under two different path labels; got: ` +
-    sameComplaintTwice.map(([t, n]) => `${n}x "${t.slice(0, 60)}…"`).join(" | ") +
+  // ⛔ EXACT-MESSAGE EQUALITY MISSES THE DUPLICATE THAT ACTUALLY OCCURRED: the pre-pass reported the
+  // same byte the main walk reports, under a different path label, so the strings differed.
+  //
+  // ⛔ AND "SAME COMPLAINT, DIFFERENT LABEL" IS NOT THE RULE — I tried it and it is WRONG. On an output
+  // whose coin position holds an empty map, `body.outputs[0][1][0]` and `body.outputs[0][1][1]` are two
+  // GENUINELY DIFFERENT bytes that produce the identical complaint, so that heuristic flags a legitimate
+  // pair as a duplicate. The property wanted is "no byte is reported twice", and the path label is not a
+  // reliable proxy for the byte either way.
+  //
+  // ⇒ So this asserts the specific leak instead of a clever general rule: the pre-pass's own label must
+  // never reach the output. `checkLegacyOutput` walks the coin as `${path}.coin` to locate the multiasset
+  // map, and that label is reported by nothing else — if it appears, the pre-pass is reporting again.
+  const prePassLabels = r.scopedViolations.filter((v) => /\.coin$/.test(v.path));
+  assert.strictEqual(prePassLabels.length, 0,
+    `the legacy-shape pre-pass must report nothing of its own walk; leaked: ` +
+    prePassLabels.map((v) => v.path).join(", ") +
     `\n  full list: ${r.violations.join(" | ")}`);
   console.log(`  OK   ${r.violations.length} findings inside an output, each reported exactly once`);
   ran++;

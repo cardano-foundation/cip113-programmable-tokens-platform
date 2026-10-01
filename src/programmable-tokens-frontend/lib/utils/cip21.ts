@@ -83,6 +83,17 @@ export function isFatalScope(scope: Cip21Scope): boolean {
 export interface Cip21Violation {
   scope: Cip21Scope;
   message: string;
+  /**
+   * The path this violation was found at, CARRIED rather than recovered from the message.
+   *
+   * ⛔ A DUPLICATE CHECK THAT RE-DERIVES THE PATH BY STRING SURGERY GOES BLIND ON WHOLE MESSAGE
+   * FAMILIES. The first such check split on the first `": "` to compare complaints independently of
+   * where they occurred — and the empty-collection messages contain no `": "` at all, so the split
+   * returned the whole string and every path-differing duplicate in that family looked distinct. It
+   * reported zero duplicates on an input that had one. Carrying the path makes "same complaint,
+   * different label" answerable without parsing prose.
+   */
+  path: string;
 }
 
 export interface Cip21Report {
@@ -128,7 +139,7 @@ function scopeOfPath(path: string): Cip21Scope {
 
 /** Record a violation, taking its scope from the path rather than from its wording. */
 function pushAt(ctx: Ctx, path: string, message: string): void {
-  ctx.violations.push({ scope: scopeOfPath(path), message });
+  ctx.violations.push({ scope: scopeOfPath(path), message, path });
 }
 
 /**
@@ -170,32 +181,33 @@ function inBody(path: string): boolean {
  * `[address, coin, ?datum_hash]` instead of `[address, [coin, {}], ?datum_hash]`." The empty-map
  * rule already catches the `{}`, but a token-free output deserves the message that names the fix.
  */
-function checkLegacyOutput(ctx: Ctx, i: number, path: string): void {
+function checkLegacyOutput(ctx: Ctx, i: number, path: string): string | null {
   const b = ctx.bytes;
-  if ((b[i] >> 5) !== 4) return;               // post-Alonzo map output: different rules
+  if ((b[i] >> 5) !== 4) return null;          // post-Alonzo map output: different rules
   const n = b[i] & 0x1f;
-  if (n < 2 || n > 3) return;
+  if (n < 2 || n > 3) return null;
   // skip the address (a byte string)
   let p = i + 1;
   const ab = b[p];
-  if ((ab >> 5) !== 2) return;
+  if ((ab >> 5) !== 2) return null;
   const ai2 = ab & 0x1f;
   // An address is 29 or 57 bytes, so its length is either inline or one byte. Anything longer is
   // not an address shape this check understands — skip rather than read the wrong offset.
-  if (ai2 > 24) return;
+  if (ai2 > 24) return null;
   p += ai2 < 24 ? 1 + ai2 : 2 + b[i + 2];
   // value position: a bare uint is already the simple tuple; an array is [coin, multiasset]
-  if ((b[p] >> 5) !== 4) return;
+  if ((b[p] >> 5) !== 4) return null;
   const vn = b[p] & 0x1f;
-  if (vn !== 2) return;
+  if (vn !== 2) return null;
   // walk past coin to reach the multiasset map
   const after = walk(ctx, p + 1, `${path}.coin`);
   if (b[after] === 0xa0) {
-    pushAt(ctx, path,
+    return (
       `${path}: token-free output serialized as [address, [coin, {}]] — CIP-21 requires the simple ` +
       `tuple [address, coin, ?datum_hash] when an output carries no multi-asset tokens`
     );
   }
+  return null;
 }
 
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
@@ -306,37 +318,28 @@ function walk(ctx: Ctx, i: number, path: string, isBody = false): number {
             if (head) {
               let q = head.first;
               for (let j = 0; j < head.count; j++) {
-                const beforeLegacy = ctx.violations.length;
-                checkLegacyOutput(ctx, q, `body.outputs[${j}]`);
-                // Keep only what checkLegacyOutput itself reports; discard what its internal walk
-                // reported, which the main walk below will find and name canonically.
-                const legacyOwn = ctx.violations
-                  .slice(beforeLegacy)
-                  .filter((v) => /token-free output/.test(v.message));
-                ctx.violations.length = beforeLegacy;
-                ctx.violations.push(...legacyOwn);
-                // ⛔ THIS PASS ONLY NEEDS THE OFFSET. The generic walker runs over the same outputs
-                // again below, so letting this inner walk REPORT duplicated every violation inside an
-                // output. The first fix for that deduped all violations by message text, which merged
-                // two genuinely DISTINCT defects whenever their messages coincided — two non-minimal
-                // withdrawal keys of the same length became one finding. A checker that hides a defect
-                // to avoid printing it twice is worse than one that repeats itself, so the duplication
-                // is removed at its source: walk for the offset, discard what it says.
-                // ⚑ BOTH SINKS MUST BE TRUNCATED. `walk` reports into `ctx.violations` AND accumulates
-                // into `ctx.emptyInBody`, which is turned into violations later, after the walk is
-                // over. Rewinding only the first left the empty-map finding duplicated — caught by the
-                // no-duplicates test, which is the whole reason that test exists rather than a comment.
-                // ⚑ THE SNAPSHOT HAS TO COVER `checkLegacyOutput` TOO. It walks the coin itself to find
-                // the multiasset map, so with the snapshot taken after it, the coin's findings survived
-                // this pass and the main walk reported the same byte again under a different path label
-                // (`body.outputs[0].coin` and `body.outputs[0][1][0]`). Two names, one defect — and the
-                // no-duplicates test keys on exact message equality, so the differing labels slipped
-                // past it. Snapshot first, report second.
+                /**
+                 * ⚑ SNAPSHOT BOTH SINKS BEFORE ANYTHING IN THIS PASS RUNS. This pre-pass exists only to
+                 * find the forbidden legacy output SHAPE; everything else inside an output is reported by
+                 * the main walk below, at its canonical path. `walk` has TWO sinks — it reports into
+                 * `ctx.violations` AND accumulates into `ctx.emptyInBody`, which becomes violations after
+                 * the walk is over — and both `checkLegacyOutput`'s internal walk and this pass's own walk
+                 * write to them.
+                 *
+                 * Three earlier versions each got this slightly wrong and each left the SAME BYTE reported
+                 * twice under two different path labels: rewinding only `violations`; snapshotting
+                 * `emptyInBody` after `checkLegacyOutput` had already run; and keeping the right findings
+                 * by MATCHING THE MESSAGE TEXT, which would silently drop a fatal finding the day the
+                 * message was reworded. `checkLegacyOutput` now RETURNS its finding instead of pushing, so
+                 * there is nothing of its own to preserve across the rewind and no prose to match.
+                 */
                 const reportedBefore = ctx.violations.length;
                 const emptiesBefore = ctx.emptyInBody.length;
+                const legacyFinding = checkLegacyOutput(ctx, q, `body.outputs[${j}]`);
                 q = walk(ctx, q, `body.outputs[${j}]`);
                 ctx.violations.length = reportedBefore;
                 ctx.emptyInBody.length = emptiesBefore;
+                if (legacyFinding !== null) pushAt(ctx, `body.outputs[${j}]`, legacyFinding);
               }
             }
           }
@@ -410,7 +413,7 @@ export function checkCip21(txCborHex: string): Cip21Report {
 
   if (bytes.length === 0) {
     // "blind", not advisory: a checker handed nothing has no opinion, and no opinion is not a pass.
-    const empty: Cip21Violation = { scope: "blind", message: "empty CBOR — nothing to check" };
+    const empty: Cip21Violation = { scope: "blind", path: "", message: "empty CBOR — nothing to check" };
     return {
       violations: [empty.message], scopedViolations: [empty],
       tag258Count: 0, bareSetFields: [], taggedSetFields: [],
@@ -444,6 +447,7 @@ export function checkCip21(txCborHex: string): Cip21Report {
         // rather than guess an offset, because a guessed offset is what mislabels the body.
         ctx.violations.push({
           scope: "blind",
+          path: "",
           message:
             `outer array header 0x${ib.toString(16).padStart(2, "0")} is indefinite or oversized — ` +
             `cannot locate the transaction body, so treat this check as blind, not as a pass`,
@@ -465,12 +469,27 @@ export function checkCip21(txCborHex: string): Cip21Report {
         if (head.first !== minimalWidth) {
           ctx.violations.push({
             scope: "transaction",
+            path: "transaction",
             message:
               `transaction: outer array header for ${head.count} element(s) uses ${head.first} bytes ` +
               `but fits in ${minimalWidth} — CIP-21 requires the shortest length encoding`,
           });
         }
 
+        /**
+         * ⚑ `head.count` IS UNPINNED BY ANY TEST, AND THAT IS RECORDED RATHER THAN FIXED. Substituting
+         * the raw `ib & 0x1f` back for `head.count` survives the suite — but it is an EQUIVALENT MUTANT
+         * on every input the product can produce: a Conway transaction is always four elements under an
+         * `84` header, where `ib & 0x1f === 4 === head.count`. Where the two diverge (a non-minimal
+         * header) the affected elements all sit at index ≥ 3 and are therefore labelled `auxiliaryData`,
+         * i.e. advisory, so it can never change fatality. Pinning it would mean constructing an input no
+         * builder emits, to defend a difference that cannot be observed.
+         *
+         * ⛔ THE OFFSET IS A DIFFERENT STORY and IS pinned — see test 11a1. `headerCount` returns TWO
+         * operands and they failed independently: one round pinned the count and left the offset bare,
+         * the next pinned the offset and left the count bare. Both times the operand not under discussion
+         * was the unprotected one. Enumerate a decision's operands, not the decision.
+         */
         let p = head.first;
         for (let k = 0; k < head.count; k++) {
           p = k === 0 ? walk(ctx, p, "body", true) : walk(ctx, p, k === 1 ? "witnessSet" : k === 2 ? "isValid" : "auxiliaryData");
@@ -485,6 +504,7 @@ export function checkCip21(txCborHex: string): Cip21Report {
     // and passed it. The wording was right and powerless; the scope is what the caller acts on.
     ctx.violations.push({
       scope: "blind",
+      path: "",
       message: `could not walk the CBOR (${(e as Error)?.message ?? e}) — treat this check as blind, not as a pass`,
     });
   }
@@ -506,6 +526,7 @@ export function checkCip21(txCborHex: string): Cip21Report {
     // the opposite of the truth on both counts.
     ctx.violations.push({
       scope: "transaction",
+      path: "transaction",
       message:
       `tag 258 is INCONSISTENT across the transaction: tagged [${ctx.taggedSetFields.join(", ")}] ` +
       `but bare [${ctx.bareSetFields.join(", ")}]. CIP-21: "either there are no tags 258 in sets, or ` +

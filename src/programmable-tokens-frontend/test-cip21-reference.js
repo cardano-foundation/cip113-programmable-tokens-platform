@@ -339,7 +339,13 @@ for (const t of real) {
   }
 
   const all = printed.join("\n");
-  ok(all.includes("[evaluate-request]"), "the logger ran and printed something (otherwise this is vacuous)");
+  // ⛔ "[evaluate-request]" IS NOT PROOF THE REQUEST WAS SEEN. `installEvaluateRequestLogger` prints an
+  // unconditional banner carrying that same prefix at install time, so this assertion was satisfied
+  // whether or not a single request was ever intercepted — measured: disabling the URL match entirely
+  // left all 309 checks green with the logger completely inert. Assert on a string only the REQUEST
+  // path emits.
+  ok(all.includes("raw body is"),
+    `the logger must have actually intercepted the request, not merely installed; printed:\n${all.slice(0, 300)}`);
   ok(!all.includes(SECRET),
     `nothing the logger prints may contain a URL credential; printed:\n${all.slice(0, 400)}`);
 }
