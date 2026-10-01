@@ -58,9 +58,27 @@ export function getCardanoNetwork(): CardanoNetwork {
 /**
  * The chain parameters a devnet cannot have as constants.
  *
- * ⚠ A DEVNET'S ZERO TIME CHANGES EVERY TIME THE CLUSTER IS RECREATED — it is the genesis
- * `systemStart` — so none of this can be baked in the way preview's and mainnet's are. The
- * Evolution SDK's own Chain docs invite a custom chain for exactly this case.
+ * ⚠ A DEVNET'S ZERO TIME CHANGES EVERY TIME THE CLUSTER IS RECREATED, so none of this can be
+ * baked in the way preview's and mainnet's are. The Evolution SDK's own Chain docs invite a
+ * custom chain for exactly this case.
+ *
+ * ⛔ AND `zeroTime` IS **NOT** THE SHELLEY GENESIS `systemStart`. On a yaci devkit devnet the
+ * Shelley genesis `systemStart` is one `epochLength` LATER than slot 0 — it is the start of the
+ * Shelley era, while slot numbers run continuously from the chain's start. Measured 2026-10-01:
+ * the Shelley genesis said 1790810647 (23:24:07Z) and slot 0 was actually at 1790810047
+ * (23:14:07Z), exactly 600 s — one epoch — apart. I configured the genesis value and it was
+ * wrong.
+ *
+ * A 600-second error here does not fail in the builder or the SDK. It fails at the LEDGER, as a
+ * validity-interval rejection that names nothing about configuration — the same shape as the
+ * `SlotTooFarInThePast` case the backend's YaciConfiguration documents for a mainnet default.
+ *
+ * ⇒ DERIVE IT FROM A LIVE BLOCK, every time the cluster is recreated:
+ *
+ * <pre>
+ *   curl -s http://&lt;devkit&gt;/api/v1/blocks/latest   # {"slot":S,"time":T,...}
+ *   # NEXT_PUBLIC_DEVNET_ZERO_TIME (ms) === (T - S * slotLength) * 1000
+ * </pre>
  */
 export interface DevnetChainParams {
   readonly networkMagic: number;
