@@ -307,8 +307,13 @@ export async function buildWithFreshUtxos<T>(
       return await build(attemptCtx);
     } catch (e) {
       last = e;
-      if (!isMissingUtxoEvaluation(e) || n === attempts) throw e;
-      opts.onAttempt?.(n, missingInputOf(e) ?? "an input was missing from the UTxO set");
+      if (!isRetryableEvaluation(e) || n === attempts) throw e;
+      opts.onAttempt?.(
+        n,
+        isUndecodablePayloadEvaluation(e)
+          ? "the evaluator rejected the request as undecodable; retrying with a narrower UTxO set"
+          : missingInputOf(e) ?? "an input was missing from the UTxO set",
+      );
       await new Promise((r) => setTimeout(r, delay));
     }
   }
@@ -540,6 +545,31 @@ export function withoutOutputsOf(
       return false; // unreadable: not something to fund from
     }
   });
+}
+
+/**
+ * The evaluator rejected the REQUEST rather than the scripts.
+ *
+ * ⛔ WHY THIS IS RETRYABLE, measured 2026-10-01. Ogmios answers a malformed request with `Invalid
+ * request: failed to decode payload from base64 or base16`, and the only base16 fields in the
+ * request besides the transaction are the `datum` and `script` on each entry of
+ * `additionalUtxoSet`. Attempt 1 forwards EVERY wallet UTxO, phase one's change included; attempt 2
+ * excludes phase one's outputs and therefore sends a much smaller set. So if the undecodable field
+ * belongs to a forwarded UTxO, the existing fallback already fixes it — and it was never reached,
+ * because this fault did not match the retry predicate and was rethrown on the first attempt.
+ *
+ * ⚑ RETRYING IS FREE HERE, which is the only reason this is safe. Preparing phase two SUBMITS
+ * NOTHING: it is a local build plus one evaluate call, so a wasted attempt costs the delay and no
+ * money. If the undecodable field is the transaction's own CBOR, every attempt fails identically
+ * and the error surfaces unchanged — a retry cannot mask it.
+ */
+export function isUndecodablePayloadEvaluation(err: unknown): boolean {
+  return /failed to decode payload|base64 or base16/i.test(serialiseError(err));
+}
+
+/** Either failure is worth another attempt with a different UTxO set; anything else is rethrown. */
+export function isRetryableEvaluation(err: unknown): boolean {
+  return isMissingUtxoEvaluation(err) || isUndecodablePayloadEvaluation(err);
 }
 
 /** Only this failure is worth retrying; anything else is rethrown at once. */

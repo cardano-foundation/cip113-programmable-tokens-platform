@@ -29,7 +29,7 @@ const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
 const {
   selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
   resolveSeedUtxos, lovelaceOfUtxo, cborOf,
-  buildWithFreshUtxos, isMissingUtxoEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos, awaitUtxosOf,
+  buildWithFreshUtxos, isMissingUtxoEvaluation, isUndecodablePayloadEvaluation, isRetryableEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos, awaitUtxosOf,
 } = await import("./.seeds-build/deployment/ceremony.js");
 
 const HASHES = [
@@ -346,6 +346,25 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
     "with nothing to exclude the list is returned untouched, unreadable entries included");
   ok(withoutOutputsOf([settled, { junk: true }], [HASHES[1]]).length === 1,
     "when filtering, an unreadable entry is dropped rather than funded from");
+}
+
+// ── an undecodable payload reaches the filtered fallback ─────────────────────
+// ⛔ The regression this prevents: preparing phase two died on ATTEMPT 1 with Ogmios's "failed to
+// decode payload from base64 or base16", so the attempt that excludes phase one's outputs — the one
+// that sends a far smaller additionalUtxoSet, and would have fixed it if the bad field were on a
+// forwarded UTxO — was never reached.
+{
+  const ogmios = new Error('Blockfrost evaluation fault: Invalid request: failed to decode payload '
+    + 'from base64 or base16. {"type":"jsonwsp/fault","fault":{"code":"client"}}');
+  ok(isUndecodablePayloadEvaluation(ogmios), "the Ogmios decode fault is recognised");
+  ok(isRetryableEvaluation(ogmios), "and it is retryable, so the filtered fallback gets a turn");
+  ok(!isMissingUtxoEvaluation(ogmios),
+    "but it is NOT a missing-UTxO failure — the two must stay distinguishable, because only one of "
+    + "them is fixed by waiting");
+
+  const funding = new Error("Insufficient funds for change output");
+  ok(!isRetryableEvaluation(funding),
+    "a funding failure is still not retried — widening the predicate must not swallow real errors");
 }
 
 // ── the evaluator that forwards additional UTxOs ─────────────────────────────
