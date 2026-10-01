@@ -33,7 +33,7 @@ const { TransactionHash, Assets } = await import("@evolution-sdk/evolution");
 const {
   selectSeedUtxos, toChainUtxo, isPlainSeedCandidate, assertCeremonyContext,
   resolveSeedUtxos, lovelaceOfUtxo, cborOf,
-  buildWithFreshUtxos, isMissingUtxoEvaluation, isUndecodablePayloadEvaluation, isRetryableEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos, awaitUtxosOf,
+  buildWithFreshUtxos, isMissingUtxoEvaluation, isUndecodablePayloadEvaluation, isRetryableEvaluation, missingInputOf, fingerprintUtxos, withoutOutputsOf, withoutRefs, providerEvaluatorWithAdditionalUtxos, awaitUtxosOf, carriesNativeAssets,
 } = await import("./.seeds-build/deployment/ceremony.js");
 
 const HASHES = [
@@ -429,6 +429,47 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
   let refused = "";
   try { providerEvaluatorWithAdditionalUtxos({ effect: {} }); } catch (e) { refused = e.message; }
   ok(/effect.evaluateTx/.test(refused), "a client without effect.evaluateTx is refused by name");
+}
+
+// ── an asset-bearing UTxO is NOT forwarded to the evaluator ──────────────────
+// ⛔ THE DEFECT THIS PINS, AND IT IS BLOCKFROST'S, NOT OURS. Hosted
+// Blockfrost /utils/txs/evaluate/utxos answers `Invalid request: failed to decode payload from
+// base64 or base16` when any additionalUtxoSet entry carries native assets. Measured independently
+// by apollo, whose blockfrost backend guards the same endpoint with
+// `additionalUtxosContainNativeAssets` and the comment "Hosted Blockfrost /evaluate/utxos currently
+// faults on those entries, so they must not be used as an evaluate fallback."
+//
+// ⚑ FOUR CORRECT CHECKS PASSED BEFORE THIS LANDED, which is why it is a test and not a comment: the
+// request was valid JSON with valid hex and valid asset keys, and still could not be served. Nothing
+// about the body shows the cause, so only a pinned filter keeps it fixed.
+{
+  const withToken = { assets: { lovelace: 2_000_000n, multiAsset: { map: new Map([["policy", new Map()]]) } } };
+  const adaOnly = { assets: { lovelace: 5_000_000n } };
+  const emptyMulti = { assets: { lovelace: 5_000_000n, multiAsset: { map: new Map() } } };
+
+  ok(carriesNativeAssets(withToken), "a UTxO holding a token is recognised as asset-bearing");
+  ok(!carriesNativeAssets(adaOnly), "an ADA-only UTxO is not");
+  ok(!carriesNativeAssets(emptyMulti), "nor is one whose multiAsset map is present but empty");
+  ok(!carriesNativeAssets(undefined) && !carriesNativeAssets({}),
+    "and a malformed entry is not reported as asset-bearing, so the filter cannot drop everything");
+
+  let seen = "unset";
+  const client = { effect: { evaluateTx: (_tx, additional) => { seen = additional; return "EFFECT"; } } };
+  const ev = providerEvaluatorWithAdditionalUtxos(client);
+
+  ev.evaluate({}, [adaOnly, withToken], {});
+  ok(Array.isArray(seen) && seen.length === 1 && seen[0] === adaOnly,
+    "the asset-bearing UTxO is dropped and the ADA-only one is kept");
+
+  // ⚑ ADA-ONLY ENTRIES MUST SURVIVE. They are what makes a freshly created change output evaluable;
+  // dropping them reintroduces "Unknown transaction input", which is why this evaluator exists.
+  ev.evaluate({}, [adaOnly, adaOnly], {});
+  ok(Array.isArray(seen) && seen.length === 2, "an all-ADA set is forwarded untouched");
+
+  // Nothing left to forward must be `undefined`, not `[]`: Blockfrost treats an empty array as a
+  // request with an empty additional set, which is a different question from not asking.
+  ev.evaluate({}, [withToken], {});
+  ok(seen === undefined, "when every entry is dropped the set becomes undefined, not []");
 }
 
 // ── withoutRefs: the seeds are not funding ───────────────────────────────────

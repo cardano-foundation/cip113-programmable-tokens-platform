@@ -423,47 +423,81 @@ export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
 
 
 /**
- * Lets an operator bisect `additionalUtxoSet` with a URL parameter, to find out which forwarded UTxO
- * an evaluator is objecting to.
+ * Drops the forwarded UTxOs that hosted Blockfrost's evaluator cannot parse.
  *
- * ⛔ WHY A MANUAL BISECT AND NOT ANOTHER THEORY. Blockfrost's evaluation answered `Invalid request:
- * failed to decode payload from base64 or base16` for a request that is clean by every check
- * available: valid JSON, no bigint, `cbor` 11537 bytes of even-length hex, asset keys in Ogmios's
+ * ⛔ THE DEFECT, AND IT IS NOT OURS. `/utils/txs/evaluate/utxos` answered `Invalid request: failed
+ * to decode payload from base64 or base16` for a request that is clean by every check available:
+ * valid JSON, no bigint, `cbor` 11537 bytes of even-length hex, asset keys in Ogmios's
  * `policyId.assetName` form, a datum that is well-formed Plutus data (`d87c9f…`, constructor 3), and
- * bech32 addresses. Measured 2026-10-01 by logging the real HTTP body. Four successive hypotheses
- * about WHICH field was malformed were each eliminated, so the next useful move is to remove inputs
- * until the error changes rather than to guess a fifth time.
+ * bech32 addresses. Measured 2026-10-01 by logging the real HTTP body. Four hypotheses about WHICH
+ * field was malformed were each eliminated — because none of them was wrong.
  *
- * ⚑ EVALUATION IS FREE, WHICH IS WHAT MAKES THIS A LEGITIMATE EXPERIMENT. Preparing a ceremony step
- * submits nothing — a local build plus one evaluate call — so a failed probe costs only the wait.
+ * ⚑ THE ANSWER CAME FROM SOMEONE ELSE'S MEASUREMENT, which is why it is trustworthy and why we
+ * stopped guessing. Apollo (a Go Cardano library) carries this in
+ * `backend/blockfrost/blockfrost.go`, as a comment on the code that avoids the endpoint:
  *
- * Append to the ceremony page's URL:
- *   ?evalUtxos=all      every selected input is forwarded (the default, and today's behaviour)
- *   ?evalUtxos=nodatum  forward only entries carrying neither datum nor script
- *   ?evalUtxos=none     forward nothing; the evaluator sees only the provider's own ledger view
+ *   "Hosted Blockfrost→Ogmios rejects that path for additional UTxOs that include native assets
+ *    (jsonwsp fault: \"failed to decode payload from base64 or base16\"), while the same txs
+ *    evaluate successfully via the bare endpoint once inputs are visible."
  *
- * ⚠ READ THE RESULT CAREFULLY, because "none" changes the question. Forwarding exists so an input
- * created moments ago is evaluable; with `none`, a genuinely fresh input legitimately fails as
- * "Unknown transaction input". So a DIFFERENT error under `none` localises the fault to the forwarded
- * set, while the SAME decode error under `none` proves the forwarded UTxOs are innocent and the fault
- * is in the transaction or in how Blockfrost translates the request.
+ * It guards the fallback with `additionalUtxosContainNativeAssets`, commented "Hosted Blockfrost
+ * /evaluate/utxos currently faults on those entries, so they must not be used as an evaluate
+ * fallback." ⇒ The request was never malformed. The endpoint cannot handle an asset-bearing entry,
+ * and the fault text names the wrong thing — which is exactly why four correct checks all passed.
+ *
+ * ⇒ AND OUR FAILING REQUEST MATCHES THE CONDITION EXACTLY. The forwarded multisig-config UTxO
+ * carries the `UpgradeMultisig` token (asset key `…557067726164654d756c7469736967`), logged from the
+ * real body on 2026-10-01.
+ *
+ * ⚑ WHY DROPPING THEM IS SAFE RATHER THAN A LOSS. Forwarding exists so an input created moments ago
+ * is evaluable before the indexer sees it. But every UTxO this ceremony forwards is already
+ * CONFIRMED on chain — `awaitMultisigConfigUtxo` blocks until it is — so Blockfrost can resolve it
+ * from its own ledger view without being told. Apollo reaches the same conclusion from the other
+ * side: it retries the bare endpoint through the indexing lag rather than forwarding, and
+ * `buildWithFreshUtxos` already gives us that retry.
+ *
+ * ⚠ ADA-ONLY ENTRIES ARE STILL FORWARDED, deliberately. They are what makes a freshly created
+ * change output evaluable, they do not trip the defect, and dropping them would reintroduce the
+ * "Unknown transaction input" failure this evaluator was added to fix (proven on preview 2026-09-28).
+ *
+ * The URL parameter remains, now for overriding the default rather than bisecting:
+ *   ?evalUtxos=safe      drop asset-bearing entries — THE DEFAULT, and the fix above
+ *   ?evalUtxos=all       forward everything, i.e. the behaviour that fails; kept to re-measure
+ *   ?evalUtxos=nodatum   forward only entries carrying neither datum nor script
+ *   ?evalUtxos=none      forward nothing; the evaluator sees only the provider's own ledger view
  */
+function forwardedUtxoMode(): string {
+  try {
+    if (typeof window === "undefined") return "safe";
+    return new URLSearchParams(window.location.search).get("evalUtxos") ?? "safe";
+  } catch {
+    return "safe";
+  }
+}
+
+/** Whether a UTxO carries native tokens — the entries hosted Blockfrost's evaluator faults on. */
+export function carriesNativeAssets(utxo: unknown): boolean {
+  const assets = (utxo as { assets?: { multiAsset?: { map?: { size?: number } } } })?.assets;
+  return (assets?.multiAsset?.map?.size ?? 0) > 0;
+}
+
 function narrowForwardedUtxos(extra: unknown[] | undefined): unknown[] | undefined {
   if (!extra || extra.length === 0) return extra;
-  let mode = "all";
-  try {
-    if (typeof window !== "undefined") {
-      mode = new URLSearchParams(window.location.search).get("evalUtxos") ?? "all";
-    }
-  } catch {
+  const mode = forwardedUtxoMode();
+
+  if (mode === "all") {
+    console.warn(
+      `[evaluate] ?evalUtxos=all — forwarding all ${extra.length} UTxOs, including any carrying ` +
+        "native assets. Hosted Blockfrost faults on those with \"failed to decode payload from " +
+        "base64 or base16\"; this mode exists to re-measure that, not to use.",
+    );
     return extra;
   }
-  if (mode === "all") return extra;
 
   if (mode === "none") {
     console.warn(
       `[evaluate] ?evalUtxos=none — forwarding 0 of ${extra.length} UTxOs. A fresh input will now ` +
-        "legitimately fail as \"Unknown transaction input\"; only a CHANGE of error tells you anything.",
+        "legitimately fail as \"Unknown transaction input\".",
     );
     return undefined;
   }
@@ -480,8 +514,21 @@ function narrowForwardedUtxos(extra: unknown[] | undefined): unknown[] | undefin
     return kept.length > 0 ? kept : undefined;
   }
 
-  console.warn(`[evaluate] unrecognised ?evalUtxos=${mode}; forwarding all ${extra.length} UTxOs.`);
-  return extra;
+  if (mode !== "safe") {
+    console.warn(`[evaluate] unrecognised ?evalUtxos=${mode}; falling back to the default, "safe".`);
+  }
+
+  const kept = extra.filter((u) => !carriesNativeAssets(u));
+  const dropped = extra.length - kept.length;
+  if (dropped > 0) {
+    console.info(
+      `[evaluate] forwarding ${kept.length} of ${extra.length} UTxOs; dropped ${dropped} carrying ` +
+        "native assets, which hosted Blockfrost's /evaluate/utxos cannot parse (it reports " +
+        "\"failed to decode payload from base64 or base16\"). They are already confirmed on chain, " +
+        "so the evaluator resolves them from its own ledger view. Override with ?evalUtxos=all.",
+    );
+  }
+  return kept.length > 0 ? kept : undefined;
 }
 
 /**
@@ -1088,6 +1135,77 @@ export function cborOf(built: unknown): string {
 }
 
 /**
+ * Refuses a canonicalisation that moved the witness set while the body commits to its hash.
+ *
+ * ⛔ THE HOLE THIS CLOSES, AND IT IS CIP-21'S OWN REFERENCE IMPLEMENTATION THAT NAMES IT.
+ * `script_data_hash` (body key 11) is blake2b-256 over the redeemers, the datums and the language
+ * views AS ENCODED IN THE WITNESS SET. We re-encode the WHOLE transaction, witness set included. So
+ * if canonicalising changes one redeemer byte, the body's script_data_hash now commits to a preimage
+ * that no longer exists, and the ledger rejects the transaction in phase 2 — AFTER the operator has
+ * signed it on a hardware wallet, at the one point in a one-shot ceremony where the seeds are
+ * already spent.
+ *
+ * ⚑ VACUUMLABS TREATS THIS AS MANDATORY, NOT A CORNER CASE. `cardano-hw-interop-lib` — the library
+ * CIP-21's own "Implementation Plan" points to — will not transform a transaction carrying a
+ * script_data_hash unless you hand it the cost models, so it can RECOMPUTE the hash:
+ * `transformTx(tx, costModels, usedCostModelLanguages)` throws
+ * `MISSING_COST_MODELS_FOR_SCRIPT_DATA_HASH` otherwise. Measured 2026-10-01 against v3.1.0 on this
+ * protocol's own failing ceremony body: it refused outright.
+ *
+ * ⚑ WE CANNOT RECOMPUTE IT HERE, so refusing is the whole of the correct behaviour. The cost models
+ * live in the protocol parameters the SDK fetched during its own build; by the time `cborOf` sees a
+ * hex string they are gone. Recomputing from a partial view would produce a hash that is wrong in a
+ * way nothing downstream can detect — strictly worse than not shipping.
+ *
+ * ⚑ AND IT DOES NOT FIRE ON ANY SHAPE WE ACTUALLY BUILD, which is what makes refusal affordable
+ * rather than a blocker. Verified against the real on-chain Conway transaction in
+ * `test-fixtures/real-preview-txs.json` that carries redeemers (witness key 5), Plutus scripts (7)
+ * and a script data hash (body 11): canonical re-encoding is byte-identical, so the witness set does
+ * not move. The guard exists for the day the builder emits a non-canonical redeemer map — the same
+ * class of defect as the unsorted mint map, one field over, and silent in exactly the same way.
+ */
+function assertScriptDataHashStillValid(originalHex: string, canonicalHex: string): void {
+  if (originalHex.toLowerCase() === canonicalHex.toLowerCase()) return;
+
+  let originalWitnessSet: string;
+  let canonicalWitnessSet: string;
+  try {
+    const decoded = EvoCBOR.fromCBORHexWithFormat(originalHex);
+    const tx = decoded.value as readonly EvoCBOR.CBOR[];
+    const format = decoded.format as { children?: readonly EvoCBOR.CBORFormat[] };
+    const body = tx?.[0];
+    // No script data hash, nothing committing to the witness set's bytes: nothing to protect.
+    if (!EvoCBOR.isMap(body) || body.get(11n) === undefined) return;
+    const witnessFormat = format.children?.[1];
+    if (tx.length < 2 || witnessFormat === undefined) return;
+    originalWitnessSet = EvoCBOR.toCBORHexWithFormat(tx[1], witnessFormat);
+    canonicalWitnessSet = EvoCBOR.toCBORHex(tx[1], EvoCBOR.CANONICAL_OPTIONS);
+  } catch {
+    // ⚑ A GUARD THAT CANNOT READ THE TRANSACTION MUST NOT VETO IT. `checkCip21` below walks the same
+    // bytes and is the authority on conformance; this one only answers a narrower question, so when
+    // it cannot answer it stays quiet rather than blocking a ceremony on its own blind spot.
+    return;
+  }
+
+  if (originalWitnessSet.toLowerCase() === canonicalWitnessSet.toLowerCase()) return;
+
+  throw new Error(
+    "Canonicalising this ceremony transaction would change its WITNESS SET, and the body commits to " +
+      "that witness set through `script_data_hash`. Submitting it would fail phase 2 validation " +
+      "AFTER the hardware wallet had signed it, with the seeds already spent.\n\n" +
+      `  witness set before: ${originalWitnessSet.length / 2} bytes\n` +
+      `  witness set after:  ${canonicalWitnessSet.length / 2} bytes\n\n` +
+      "The script data hash is blake2b-256 over the redeemers, datums and language views as encoded " +
+      "in the witness set, so it would have to be RECOMPUTED — which needs the cost models, and " +
+      "those are gone by the time a builder hands back hex. CIP-21's own reference implementation, " +
+      "vacuumlabs/cardano-hw-interop-lib, refuses the same transformation for the same reason " +
+      "(`MISSING_COST_MODELS_FOR_SCRIPT_DATA_HASH`).\n\n" +
+      "This most likely means the builder emitted a non-canonical redeemer map — the unsorted-mint " +
+      "defect one field over. Fix it where the transaction is BUILT, so no re-encode is needed.",
+  );
+}
+
+/**
  * Re-encodes a built ceremony transaction in canonical CBOR, so a hardware wallet signs the body
  * we submit.
  *
@@ -1136,6 +1254,8 @@ export function canonicaliseForHardwareWallets(cborHex: string): string {
     EvoTx.fromCBORHex(cborHex, EvoCBOR.CANONICAL_OPTIONS),
     EvoCBOR.CANONICAL_OPTIONS,
   );
+
+  assertScriptDataHashStillValid(cborHex, canonical);
 
   /**
    * ⛔ VERIFY THE RESULT, BECAUSE THE FAILURE MODE IS SILENCE. Asking for canonical encoding and
