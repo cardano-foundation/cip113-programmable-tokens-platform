@@ -61,10 +61,58 @@ interface Ctx {
   bareSetFields: string[];
   /** Set to true for the item directly following a tag 258, so it is not counted as untagged. */
   justTagged: boolean;
+  /** Empty arrays/maps found inside the BODY, by path. CIP-21 forbids them there. */
+  emptyInBody: string[];
 }
 
 /** Fields whose value is a set in the Conway CDDL, i.e. where tag 258 is permitted. */
 const SET_FIELDS = new Set([0, 4, 13, 14, 18]);
+
+/**
+ * Is this path inside the transaction BODY?
+ *
+ * Only the body is hashed, and CIP-21's empty-collection rule is scoped to "the transaction body or
+ * its elements". The witness set of an UNSIGNED transaction is legitimately an empty map (`a0`), so
+ * applying the rule transaction-wide would flag every unsigned transaction we ever build.
+ */
+function inBody(path: string): boolean {
+  return path === "body" || path.startsWith("body.") || path.startsWith("body[") || path.startsWith("body{");
+}
+
+/**
+ * Checks one output for the legacy shape CIP-21 forbids.
+ *
+ * "Outputs containing no multi-asset tokens must be serialized as a simple tuple, i.e.
+ * `[address, coin, ?datum_hash]` instead of `[address, [coin, {}], ?datum_hash]`." The empty-map
+ * rule already catches the `{}`, but a token-free output deserves the message that names the fix.
+ */
+function checkLegacyOutput(ctx: Ctx, i: number, path: string): void {
+  const b = ctx.bytes;
+  if ((b[i] >> 5) !== 4) return;               // post-Alonzo map output: different rules
+  const n = b[i] & 0x1f;
+  if (n < 2 || n > 3) return;
+  // skip the address (a byte string)
+  let p = i + 1;
+  const ab = b[p];
+  if ((ab >> 5) !== 2) return;
+  const ai2 = ab & 0x1f;
+  // An address is 29 or 57 bytes, so its length is either inline or one byte. Anything longer is
+  // not an address shape this check understands — skip rather than read the wrong offset.
+  if (ai2 > 24) return;
+  p += ai2 < 24 ? 1 + ai2 : 2 + b[i + 2];
+  // value position: a bare uint is already the simple tuple; an array is [coin, multiasset]
+  if ((b[p] >> 5) !== 4) return;
+  const vn = b[p] & 0x1f;
+  if (vn !== 2) return;
+  // walk past coin to reach the multiasset map
+  const after = walk(ctx, p + 1, `${path}.coin`);
+  if (b[after] === 0xa0) {
+    ctx.violations.push(
+      `${path}: token-free output serialized as [address, [coin, {}]] — CIP-21 requires the simple ` +
+      `tuple [address, coin, ?datum_hash] when an output carries no multi-asset tokens`
+    );
+  }
+}
 
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
   const n = Math.min(a.length, b.length);
@@ -133,12 +181,14 @@ function walk(ctx: Ctx, i: number, path: string, isBody = false): number {
 
     case 4: {
       if (indefinite) return skipIndefinite(ctx, p, path);
+      if (len === 0 && inBody(path)) ctx.emptyInBody.push(`${path} (empty list)`);
       for (let k = 0; k < len; k++) p = walk(ctx, p, `${path}[${k}]`);
       return p;
     }
 
     case 5: {
       if (indefinite) return skipIndefinite(ctx, p, path);
+      if (len === 0 && inBody(path)) ctx.emptyInBody.push(`${path} (empty map)`);
       let prev: Uint8Array | null = null;
       for (let k = 0; k < len; k++) {
         const ks = p;
@@ -166,6 +216,12 @@ function walk(ctx: Ctx, i: number, path: string, isBody = false): number {
             ctx.violations.push(`body: contains \`${name}\` — CIP-21 lists this entry as unsupported, it must not be included`);
           }
           if (SET_FIELDS.has(n)) classifySet(ctx, ke, label);
+          if (n === 1 && (b[ke] >> 5) === 4) {
+            // outputs: inspect each element for the forbidden legacy shape
+            const cnt = b[ke] & 0x1f;
+            let q = ke + 1;
+            if (cnt < 24) for (let j = 0; j < cnt; j++) { checkLegacyOutput(ctx, q, `body.outputs[${j}]`); q = walk(ctx, q, `body.outputs[${j}]`); }
+          }
           p = walk(ctx, ke, label);
           continue;
         }
@@ -232,7 +288,7 @@ export function hexToBytes(h: string): Uint8Array {
  */
 export function checkCip21(txCborHex: string): Cip21Report {
   const bytes = hexToBytes(txCborHex);
-  const ctx: Ctx = { bytes, violations: [], tag258: 0, taggedSetFields: [], bareSetFields: [], justTagged: false };
+  const ctx: Ctx = { bytes, violations: [], tag258: 0, taggedSetFields: [], bareSetFields: [], justTagged: false, emptyInBody: [] };
 
   if (bytes.length === 0) {
     return { violations: ["empty CBOR"], tag258Count: 0, bareSetFields: [], taggedSetFields: [] };
@@ -252,6 +308,15 @@ export function checkCip21(txCborHex: string): Cip21Report {
     }
   } catch (e) {
     ctx.violations.push(`could not walk the CBOR (${(e as Error)?.message ?? e}) — treat this check as blind, not as a pass`);
+  }
+
+  // "Unless mentioned otherwise in this CIP, optional empty lists and maps must not be included as
+  // part of the transaction body or its elements." HW wallets enforce this in many cases.
+  for (const e of ctx.emptyInBody) {
+    ctx.violations.push(
+      `${e} — CIP-21 forbids optional empty lists and maps in the transaction body; omit the field ` +
+      `entirely instead of including it empty`
+    );
   }
 
   // The all-or-nothing rule. Either state alone is fine; the mixture is what CIP-21 forbids.

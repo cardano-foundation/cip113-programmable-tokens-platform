@@ -121,4 +121,44 @@ assert.ok(r.violations.length > 0,
 console.log("  OK   unparseable CBOR is never reported as a pass");
 ran++;
 
+// ---- 12. optional empty lists and maps are forbidden IN THE BODY ----
+// CIP-21: "optional empty lists and maps must not be included as part of the transaction body or
+// its elements", and "HW wallets enforce this in many cases".
+r = report(`a300${"81"}${INPUT}${OUTPUTS}${FEE}`.replace(/^a3/, "a4") + "0e80");
+assert.ok(firstMatching(r, /empty list/),
+  `an empty required_signers set should be refused; got: ${r.violations.join(" | ")}`);
+console.log("  OK   an empty optional list in the body is flagged");
+ran++;
+
+// ---- 13. but an unsigned tx's EMPTY WITNESS SET is not a violation ----
+// The rule is scoped to the body. Every unsigned transaction we build carries `a0` here, so
+// applying it transaction-wide would flag all of them — the cry-wolf failure again.
+r = report(`84${bodyA}a0f5f6`);
+assert.deepStrictEqual(r.violations, [],
+  `an unsigned tx's empty witness set must NOT be flagged; got: ${r.violations.join(" | ")}`);
+console.log("  OK   an unsigned transaction's empty witness set is not a violation");
+ran++;
+
+// ---- 14. the legacy output shape CIP-21 forbids ----
+// "[address, [coin, {}]]" instead of "[address, coin]" for a token-free output.
+const badOut = `0181824100821a000f4240a0`;
+r = report(`a300${"81"}${INPUT}${badOut}${FEE}`);
+assert.ok(firstMatching(r, /token-free output/),
+  `expected the legacy [coin, {}] shape to be refused; got: ${r.violations.join(" | ")}`);
+console.log("  OK   a token-free output written as [address, [coin, {}]] is flagged");
+ran++;
+
+// ---- 15. AND THE REAL ENCODER'S OUTPUT STAYS CLEAN ----
+// Two real Conway transactions from this protocol's live preview deployment, fetched from Koios.
+// If a rule added here flags these, the rule is wrong — they are what the chain accepted.
+const real = require("./test-fixtures/real-preview-txs.json");
+for (const tx of real.transactions) {
+  const rr = report(tx.cbor);
+  assert.deepStrictEqual(rr.violations, [],
+    `real preview tx ${tx.txHash} was flagged, which means a rule here is too strict: ` +
+    rr.violations.join(" | "));
+}
+console.log(`  OK   ${real.transactions.length} real preview transactions remain conformant`);
+ran++;
+
 console.log(`\n${ran} checks passed`);
