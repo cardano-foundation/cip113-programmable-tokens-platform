@@ -501,6 +501,21 @@ export function CombinedBuildSignSubmitStep({
         variant: 'success',
       });
 
+      // ⛔ THE SAME IDENTITY FIELDS AS THE BUILD PATH. This payload REPLACES the earlier one in
+      // the wizard's step state (the reducer spreads the step but overwrites `result`), and the
+      // backend registration callback fires on THIS step — so anything omitted here is simply
+      // gone by the time the row is written.
+      //
+      // ⚠ MEASURED 2026-10-01 on preprod. `userAssetNameHex` was missing, so
+      // freeze-and-seize-flow's `getRegistrationCallbackData` fell back to
+      // `stringToHex(tokenDetails.assetName)` — the UNLABELLED name — and the backend stored a row
+      // whose (adminPkh, assetName) derives a DIFFERENT policy id than the token actually has.
+      // Every later lookup was then refused with "the stored row belongs to a different token".
+      //
+      // ⚑ AND IT ONLY BIT THE SDK PATH, which is why it hid: the backend branch writes its own row
+      // server-side from the name IT derived, so the callback's value is redundant there. On the
+      // SDK path this callback is the ONLY writer. A field that is merely redundant on one branch
+      // and load-bearing on the other is exactly the kind that gets dropped.
       onComplete({
         stepId: 'combined-build-sign',
         data: {
@@ -508,6 +523,9 @@ export function CombinedBuildSignSubmitStep({
           initTxHash,
           tokenPolicyId,
           regTxHash: hash2,
+          adminPkh: adminPkh || undefined,
+          blacklistInitTxInput,
+          userAssetNameHex,
         },
         txHash: hash2,
         completedAt: Date.now(),
@@ -521,7 +539,8 @@ export function CombinedBuildSignSubmitStep({
     } finally {
       setProcessing(false);
     }
-  }, [connected, wallet, signedRegTx, initTxHash, blacklistNodePolicyId, tokenPolicyId, onComplete, onError, setProcessing]);
+  }, [connected, wallet, signedRegTx, initTxHash, blacklistNodePolicyId, tokenPolicyId,
+      adminPkh, blacklistInitTxInput, userAssetNameHex, onComplete, onError, setProcessing]);
 
   // Full retry from scratch
   const handleFullRetry = useCallback(() => {

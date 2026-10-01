@@ -86,10 +86,33 @@ const freezeAndSeizeFlow: RegistrationFlow = {
       userAssetNameHex?: string;
     } | undefined;
     if (!combinedResult?.tokenPolicyId) return null;
+
+    // ⛔ NO SILENT FALLBACK TO THE UNLABELLED NAME FOR A CIP-68 TOKEN, for the same reason the
+    // adminPkh guard below exists: issuer_admin is parameterised by (adminPkh, assetName) and the
+    // policy id is the hash of the issuance_mint built on that, so a wrong asset name here records
+    // a row describing a DIFFERENT token.
+    //
+    // ⚠ MEASURED 2026-10-01 on preprod, via the SDK path. The submit step's onComplete omitted
+    // `userAssetNameHex`, this expression fell back to the raw name, and the backend refused every
+    // later lookup with "the stored row belongs to a different token … derive policy 602030fa…"
+    // against a real policy of b6e7a4ad…. The token and the chain were both fine.
+    //
+    // Falling back is still right when CIP-68 is OFF: there is no label, so the raw hex IS the
+    // minted name. It is only a lie when a label was applied.
+    const cip68Enabled = !!tokenDetails?.cip68Metadata?.enabled;
+    if (cip68Enabled && !combinedResult.userAssetNameHex) {
+      throw new Error(
+        'The registration flow did not report the LABELLED asset name this CIP-68 token was ' +
+          'minted with. Refusing to fall back to the unlabelled name: the token policy id is ' +
+          'derived from (adminPkh, assetName), so the unlabelled form records a row describing a ' +
+          'different token and every later operation is refused in terms that blame the token.',
+      );
+    }
+
     return {
       policyId: combinedResult.tokenPolicyId,
       moduleId: 'freeze-and-seize',
-      // Store the full asset name hex (including CIP-67 label if present)
+      // The full asset name hex AS MINTED — labelled when CIP-68 applied a CIP-67 label.
       assetName: combinedResult.userAssetNameHex || stringToHex(tokenDetails?.assetName || ''),
       blacklistNodePolicyId: combinedResult.blacklistNodePolicyId,
       // ⛔ THE PKH THE SCRIPTS WERE ACTUALLY BUILT WITH, not one re-derived from the wallet.
@@ -112,7 +135,7 @@ const freezeAndSeizeFlow: RegistrationFlow = {
       // What the init actually registered. The backend cross-checks this at registration time,
       // and a row that does not carry it disables that check — so state it explicitly rather
       // than letting it default to "unknown".
-      cip68Enabled: !!tokenDetails?.cip68Metadata?.enabled,
+      cip68Enabled,
     };
   },
   buildRegistrationRequest: (state: WizardState): FreezeAndSeizeRegistrationData => {
