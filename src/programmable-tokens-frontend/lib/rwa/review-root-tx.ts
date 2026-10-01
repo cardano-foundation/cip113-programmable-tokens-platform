@@ -196,6 +196,18 @@ export async function reviewMemberRootTransaction(args: {
   baseline: MemberLeaf[]; added: MemberLeaf[]; approvedAdded: MemberLeaf[]; leaves: MemberLeaf[];
 }): Promise<void> {
   const network = getCardanoNetwork();
+  // ⛔ REFUSES ON DEVNET RATHER THAN GUESSING. These are the rwa-token contract's OWN network
+  // numbers: compared against the on-chain global-state datum ("GS network ID") below and fed
+  // into computeMemberRoot, so a wrong value does not fail loudly — it produces a member root
+  // that disagrees with the chain's. The contracts define no devnet member, and inventing one
+  // would corrupt a root comparison. rwa-token is not part of the devnet path.
+  if (network === "devnet") {
+    throw new Error(
+      "rwa-token member-root review is not available on devnet: the contract's network id " +
+        "enumeration (preview/preprod/mainnet) has no devnet member, and guessing one would " +
+        "produce a member root that silently disagrees with the on-chain global state."
+    );
+  }
   const networkId = { preview: 0, preprod: 1, mainnet: 2 }[network];
   const registeredGsPolicy = await gsPolicyForToken(args.tokenPolicyId);
   if (registeredGsPolicy !== args.gsPolicyId.toLowerCase())

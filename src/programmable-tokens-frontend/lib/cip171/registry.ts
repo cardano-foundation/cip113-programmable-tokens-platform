@@ -18,16 +18,22 @@
  */
 import { getCardanoNetwork, type CardanoNetwork } from "@/lib/utils/network";
 
+// ⚑ A DEVNET HAS NO PUBLIC REGISTRY, so its entry is empty and callers must treat empty as
+// "unavailable" rather than building a URL from it. Empty-disables is already this project's
+// convention for exactly this: the backend's devnet profile sets `uplc-link.base-url: ""`, noting
+// that without it devnet would inherit mainnet's host and ask it about devnet scripts.
 const API_HOST: Record<CardanoNetwork, string> = {
   mainnet: "https://api.uplc.link",
   preview: "https://preview-api.uplc.link",
   preprod: "https://preprod-api.uplc.link",
+  devnet: "",
 };
 
 const SITE_HOST: Record<CardanoNetwork, string> = {
   mainnet: "https://uplc.link",
   preview: "https://preview.uplc.link",
   preprod: "https://preprod.uplc.link",
+  devnet: "",
 };
 
 export interface Cip171Script {

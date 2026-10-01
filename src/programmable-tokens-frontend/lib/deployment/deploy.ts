@@ -20,11 +20,11 @@
  * it catches a field written into the wrong slot, which is the failure the alpha.3 migration
  * actually shipped.
  */
+// Relative, not "@/...": this file is also compiled standalone by the test:deployment and
+// test:seeds suites, which invoke tsc without a tsconfig and so have no path aliases.
+import { getEvolutionChain } from "../utils/chain";
 import {
   evoClient,
-  previewChain,
-  preprodChain,
-  mainnetChain,
   paymentCredentialHash,
 } from "@easy1staking/cip113-sdk-ts";
 import type { PlutusBlueprint } from "@easy1staking/cip113-sdk-ts";
@@ -85,15 +85,13 @@ import type { UpstreamPin } from "./blueprint";
 import type { ResolvedMultisig } from "./multisig";
 import type { CardanoNetwork } from "../utils/network";
 
+/**
+ * Delegates to the one shared selector. This used to be a second switch over the network, which
+ * returned `undefined` for anything it did not list — so a devnet build reached the deployment
+ * plan with no chain, and `chain.id` below was the first thing to notice.
+ */
 function chainFor(network: CardanoNetwork) {
-  switch (network) {
-    case "mainnet":
-      return mainnetChain;
-    case "preprod":
-      return preprodChain;
-    case "preview":
-      return previewChain;
-  }
+  return getEvolutionChain(network);
 }
 
 function blockfrostBaseUrl(network: CardanoNetwork): string {

@@ -9,6 +9,8 @@
  * Uses Evolution SDK client directly — no adapter abstraction.
  */
 
+import { getEvolutionChain } from "@/lib/utils/chain";
+import { toSdkNetwork, getDevnetChainParams, type CardanoNetwork } from "@/lib/utils/network";
 import {
   createContext,
   useContext,
@@ -27,9 +29,6 @@ import {
   stringToHex,
   labeledAssetName,
   evoClient,
-  previewChain,
-  preprodChain,
-  mainnetChain,
   EvoAddress,
   EvoAssets,
   EvoTransactionHash,
@@ -171,6 +170,15 @@ function moduleToSdkBlueprint(bp: { id: string; validators: Array<{ title: strin
 // Provider
 // ---------------------------------------------------------------------------
 
+/**
+ * The chain API base for a network. Devnet takes it from configuration and fails loudly without
+ * it; the public networks keep their conventional Blockfrost host.
+ */
+function chainApiBaseUrl(network: CardanoNetwork): string {
+  if (network === "devnet") return getDevnetChainParams().chainApiUrl;
+  return `https://cardano-${network}.blockfrost.io/api/v0`;
+}
+
 export function CIP113Provider({ children }: { children: ReactNode }) {
   const network = getCardanoNetwork();
   const blockfrostKey = process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY || "";
@@ -209,13 +217,10 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
   const available = !!blockfrostKey;
 
   /** Get the Evolution SDK chain preset for the configured network */
-  const getChain = useCallback(() => {
-    switch (network) {
-      case "mainnet": return mainnetChain;
-      case "preprod": return preprodChain;
-      case "preview": return previewChain;
-    }
-  }, [network]);
+  // One selector for every network, devnet included — see lib/utils/chain.ts for why this is no
+  // longer a switch here. It used to return `undefined` for an unlisted network, which is how a
+  // devnet build handed the Evolution client no chain at all.
+  const getChain = useCallback(() => getEvolutionChain(network), [network]);
 
   const getProtocol = useCallback(async (): Promise<CIP113Protocol> => {
     // Refuse to initialise before the version list has resolved.
@@ -275,7 +280,9 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
       const chain = getChain();
       const readClient = evoClient(chain).withBlockfrost({
         projectId: blockfrostKey,
-        baseUrl: blockfrostUrl || `https://cardano-${network}.blockfrost.io/api/v0`,
+        // A devnet must not fall through to a public host: the template would build
+        // `https://cardano-devnet.blockfrost.io`. Its chain API is explicit configuration.
+        baseUrl: blockfrostUrl || chainApiBaseUrl(network),
       });
       // Use a dummy address to give the client network context
       const dummyAddr = chain.id === 1
@@ -497,7 +504,9 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
         .withCip30(params.rawWalletApi as any)
         .withBlockfrost({
           projectId: blockfrostKey,
-          baseUrl: blockfrostUrl || `https://cardano-${network}.blockfrost.io/api/v0`,
+          // A devnet must not fall through to a public host: the template would build
+          // `https://cardano-devnet.blockfrost.io`. Its chain API is explicit configuration.
+          baseUrl: blockfrostUrl || chainApiBaseUrl(network),
         });
       console.log("[CIP-113] Created SigningClient with CIP-30 wallet");
     }
@@ -546,7 +555,11 @@ export function CIP113Provider({ children }: { children: ReactNode }) {
       client,
       standardScripts: protocol.scripts,
       deployment: protocol.deployment,
-      network: network,
+      // The SDK's Network union has no devnet member and this option is optional, so a devnet
+      // passes `undefined` rather than a stand-in. Nothing is lost: freeze-and-seize derives the
+      // network id it needs from client.chain.id. Mapped rather than cast — `network as Network`
+      // compiles for any string.
+      network: toSdkNetwork(network),
       checkStakeRegistration: async (stakeAddress: string) => {
         try {
           const data = await apiGet<{ isRegistered: boolean }>(
