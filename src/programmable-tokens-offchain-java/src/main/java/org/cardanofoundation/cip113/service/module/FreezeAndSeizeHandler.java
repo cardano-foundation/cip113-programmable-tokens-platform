@@ -418,7 +418,24 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
             // build anyway and let the ledger decide — is what produced 3141. A false refusal
             // costs a retry; a false proceed costs the init deposit and leaves the operator reading
             // a message about rewards balances.
-            if (!scriptRegistrationService.isStakeAddressRegistered(expectedIssuerAdmin)) {
+            // ⛔ ONLY WHEN THE INIT IS ALREADY ON CHAIN. In the CHAINED flow the init transaction
+            // is the thing that registers this credential and it has NOT been submitted yet — the
+            // registration is built on its outputs and the two are signed and submitted together,
+            // init first. So "not registered" is the correct answer about the chain and the wrong
+            // answer about the situation, and asking here refused every FIRST registration against
+            // a fresh blacklist. Measured 2026-10-01: a brand-new wallet on develop could not
+            // register at all, because a new wallet never has a pre-existing blacklist.
+            //
+            // ⚑ SKIPPING IT COSTS NOTHING THAT MATTERS, which is why this is the right fix rather
+            // than a weakening. The comparison above is the real protection against a wrong admin
+            // or asset name, and it DOES work in the chained case: buildBlacklistInitTransaction
+            // persists the init row with issuerAdminStakeAddress at BUILD time, before submission,
+            // so the row is present and compared. This probe only ever added the case where no row
+            // exists or the row pre-dates V33 — and in the chained flow a row always exists,
+            // because the init that is being chained wrote it moments earlier.
+            boolean initIsChainedInThisBatch = request.getChainingTransactionCborHex() != null;
+            if (!initIsChainedInThisBatch
+                && !scriptRegistrationService.isStakeAddressRegistered(expectedIssuerAdmin)) {
                 return TransactionContext.typedError(
                         "The issuer_admin reward account this registration must withdraw-0 from is "
                         + "not registered on chain:\n"
@@ -434,7 +451,11 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
                         + "  issuer_admin is parameterised by (admin key hash, asset name), so a "
                         + "blacklist covers exactly one pair. Run a blacklist init with THIS admin ("
                         + HexUtil.encodeHexString(adminPkh.getBytes()) + ") and THIS asset name, and "
-                        + "register the token against that blacklist.");
+                        + "register the token against that blacklist.\n"
+                        + "\n"
+                        + "  If you ARE initialising a blacklist in the same batch, the registration "
+                        + "must carry chainingTransactionCborHex — without it this check cannot tell "
+                        + "an in-flight init from a missing one.");
             }
 
             /// Getting Module Contracts and parameterize
