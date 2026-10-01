@@ -14,6 +14,7 @@ import org.cardanofoundation.cip113.model.Cip68Metadata;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import org.cardanofoundation.cip113.service.ReferenceTokenNotTransferableException;
 
 /**
  * CIP-67 asset-name labels and CIP-68 reference-token datums.
@@ -53,6 +54,35 @@ public final class Cip68 {
     public static final int LABEL_FT = 333;
 
     private Cip68() {
+    }
+
+    /**
+     * Refuses an operation that would move a {@code (100)} reference token.
+     *
+     * <p>Checks the LABEL rather than reading the UTxO's datum, and that is the stronger test
+     * here: a reference token carries metadata by construction, so the label settles it offline
+     * with no chain read, no race against ingestion, and no way for an empty-looking datum to
+     * sneak the asset through. The SDK's equivalent inspects the datum, which it must, because
+     * it is already holding the UTxO.
+     *
+     * @param operation human-readable operation name, for the message ("transfer", "seize")
+     * @param assetNameHex the asset name as hex, label included
+     * @throws ReferenceTokenNotTransferableException if the name carries CIP-67 label 100
+     */
+    public static void refuseReferenceToken(String operation, String assetNameHex) {
+        Integer label = readLabel(assetNameHex);
+        if (label != null && label == LABEL_REFERENCE) {
+            throw new ReferenceTokenNotTransferableException(
+                    "Refusing to " + operation + " the CIP-68 (100) reference token "
+                            + assetNameHex + ". Its inline datum IS the token's metadata, and a"
+                            + " programmable " + operation + " rebuilds outputs with a Void datum,"
+                            + " so the metadata would be ERASED rather than moved — the ledger"
+                            + " accepts that, because no validator requires a datum to survive."
+                            + " Operate on the user token ("
+                            + labelPrefixHex(LABEL_FT) + " fungible, "
+                            + labelPrefixHex(LABEL_NFT) + " non-fungible) instead; the reference"
+                            + " token stays with the issuer by design.");
+        }
     }
 
     /**

@@ -541,6 +541,11 @@ public class TokenOperationsService {
         // Get protocol bootstrap params
         var protocolParams = resolveProtocolParams(protocolTxHash);
 
+        // ⛔ A (100) REFERENCE TOKEN MUST NOT BE TRANSFERRED: the transfer writes a Void datum,
+        // so its metadata would be erased rather than moved, and the ledger accepts that.
+        org.cardanofoundation.cip113.util.Cip68.refuseReferenceToken(
+                "transfer", programmableToken.assetName());
+
         // ⛔ REFUSE A TOKEN FROM ANOTHER DEPLOYMENT BEFORE BUILDING ANYTHING. Placed here, on
         // the shared path above the module switch, so it covers every substandard at once — the
         // binding it enforces is the protocol's, not a module's. Without it the tx builds and

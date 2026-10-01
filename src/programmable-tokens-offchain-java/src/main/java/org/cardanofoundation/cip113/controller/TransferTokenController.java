@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.model.TransferTokenRequest;
 import org.cardanofoundation.cip113.service.TokenOperationsService;
+import org.cardanofoundation.cip113.service.ReferenceTokenNotTransferableException;
 import org.cardanofoundation.cip113.service.TokenNotInCurrentDeploymentException;
 import org.cardanofoundation.cip113.service.UnknownProtocolVersionException;
 import org.springframework.http.ResponseEntity;
@@ -34,6 +35,9 @@ public class TransferTokenController {
                 return ResponseEntity.internalServerError().body(transactionContext.error());
             }
 
+        } catch (ReferenceTokenNotTransferableException e) {
+            // 400, for the same reason as the two below.
+            throw e;
         } catch (TokenNotInCurrentDeploymentException e) {
             // Same reason as below: the generic catch would turn a correct 400 refusal into a
             // 500, which is what alerting counts.

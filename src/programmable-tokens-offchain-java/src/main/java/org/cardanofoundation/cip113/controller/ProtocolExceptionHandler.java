@@ -1,6 +1,7 @@
 package org.cardanofoundation.cip113.controller;
 
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.service.ReferenceTokenNotTransferableException;
 import org.cardanofoundation.cip113.service.TokenNotInCurrentDeploymentException;
 import org.cardanofoundation.cip113.service.UnknownProtocolVersionException;
 import org.springframework.http.HttpStatus;
@@ -42,6 +43,15 @@ public class ProtocolExceptionHandler {
     public ResponseEntity<Map<String, String>> handleTokenNotInCurrentDeployment(
             TokenNotInCurrentDeploymentException e) {
         log.warn("Rejected token from another protocol deployment: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(Map.of("error", e.getMessage()));
+    }
+
+    /** Moving a (100) reference token would erase its metadata; a 400, not a server fault. */
+    @ExceptionHandler(ReferenceTokenNotTransferableException.class)
+    public ResponseEntity<Map<String, String>> handleReferenceToken(
+            ReferenceTokenNotTransferableException e) {
+        log.warn("Rejected an operation that would erase CIP-68 metadata: {}", e.getMessage());
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(Map.of("error", e.getMessage()));
     }

@@ -786,6 +786,13 @@ public class ComplianceController {
 
             var progToken = AssetType.fromUnit(request.unit());
 
+            // ⛔ Seizing the (100) reference token is the same data loss as transferring it: the
+            // datum travels to output 1 while the token itself goes to the destination, leaving
+            // metadata on an output that no longer holds the asset it describes. The existing
+            // catch(IllegalArgumentException) below answers 400.
+            org.cardanofoundation.cip113.util.Cip68.refuseReferenceToken(
+                    "seize", progToken.assetName());
+
             // Resolve module from policyId via unified registry
             var moduleId = resolveModuleId(progToken.policyId());
 
