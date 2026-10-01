@@ -17,6 +17,7 @@ import {
 import { addressHexToBech32, evoClient, preprodChain, previewChain, mainnetChain, EvoTransactionWitnessSet } from "@easy1staking/cip113-sdk-ts";
 import { CBOR as EvoCBOR } from "@evolution-sdk/evolution";
 import { getCardanoNetwork } from "@/lib/utils/network";
+import { warnIfNotCip21Conformant } from "@/lib/utils/cip21";
 import * as cbor from "cbor";
 
 import { assembleSignedTxPreservingBody } from "@/lib/tx/witness-set";
@@ -131,6 +132,13 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         return addressHexToBech32(hexAddr);
       },
       async signTx(tx: string, partialSign?: boolean) {
+        // ⛔ CHECK BEFORE THE POPUP, because a hardware wallet reports only "hash mismatch".
+        // A HW wallet re-serializes the body canonically and signs THAT hash (CIP-21), so a
+        // non-canonical field makes the witness apply to a body we never submit. The wallet
+        // cannot tell us which field; this can. Non-blocking on purpose — software wallets sign
+        // our bytes verbatim and must keep working even if this check is wrong.
+        warnIfNotCip21Conformant(tx, "unsigned tx");
+
         // CIP-30 signTx returns the witness set CBOR, not the full signed tx.
         // We need to assemble the full signed tx for submitTx.
         const witnessSetHex = await api.signTx(tx, partialSign);
@@ -165,6 +173,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
           : network === "preview" ? previewChain
           : preprodChain;
         const evoSigner = evoClient(chain).withCip30(api as any);
+
+        // Same check, per transaction: a chained pair fails on whichever one is non-canonical,
+        // and the operator needs to know WHICH.
+        txs.forEach((tx, i) => warnIfNotCip21Conformant(tx, `unsigned tx ${i + 1}/${txs.length}`));
 
         console.log("[Wallet] Signing", txs.length, "txs via Evolution SDK CIP-103");
         const witnessSets = await evoSigner.signTxs(txs);

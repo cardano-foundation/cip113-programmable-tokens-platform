@@ -40,7 +40,9 @@
     "test:reftoken": "tsc lib/utils/cip68.ts --outDir .reftoken-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-reference-token-ui.js",
     "test:fesparity": "node test-fes-sdk-parity.js",
     "test:network": "tsc lib/utils/network.ts --outDir .network-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-network-resolution.js",
-    "test:regidentity": "node test-registration-identity-fields.js"
+    "test:regidentity": "node test-registration-identity-fields.js",
+    "test:cip21": "tsc lib/utils/cip21.ts --outDir .cip21-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-cip21.js",
+    "check:cip21": "tsc lib/utils/cip21.ts --outDir .cip21-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node scripts/cip21.mjs"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.15.0",
