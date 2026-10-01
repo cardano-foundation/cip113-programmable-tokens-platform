@@ -33,7 +33,7 @@
 
 import { EvoAssets, EvoTransactionHash } from "@easy1staking/cip113-sdk-ts";
 import { CBOR as EvoCBOR, Data as EvoPlutusData, Transaction as EvoTx } from "@evolution-sdk/evolution";
-import { checkCip21 } from "../utils/cip21";
+import { checkCip21, isFatalScope } from "../utils/cip21";
 import { installEvaluateRequestLogger } from "./evaluate-request-log";
 import {
   type BootstrapStepId,
@@ -1308,8 +1308,25 @@ export function canonicaliseForHardwareWallets(cborHex: string): string {
    * signs through hw-cli rather than a CIP-30 wallet, this warning becomes a blocker and the fix
    * has to move into the builder — upstream #584 and #585.
    */
-  const witnessOnly = report.violations.filter((v) => !v.startsWith("body"));
-  const bodyViolations = report.violations.filter((v) => v.startsWith("body"));
+  /**
+   * ⛔ CLASSIFY ON SCOPE, NEVER ON THE MESSAGE. This split used to be
+   * `violations.filter((v) => v.startsWith("body"))`, and three body-level violations have messages
+   * that do not begin with "body": the tag-258 inconsistency, the "could not walk the CBOR" blind
+   * case, and "empty CBOR". Each was downgraded to a console warning which told the operator the item
+   * was OUTSIDE the body and did not block signing — both false. An adversarial audit reached it on
+   * 2026-10-01 with a body whose `inputs` carried tag 258 while `reference_inputs` did not:
+   * `canonicaliseForHardwareWallets` printed the reassuring warning and RETURNED, so the ceremony
+   * would have proceeded to a Ledger that normalises tag 258, hashes a different body, and reports
+   * only "hash mismatch" — with the seeds already spent.
+   *
+   * ⚑ THE LESSON IS NOT "WRITE BETTER MESSAGES". It is that a decision about whether to stop must not
+   * be derived from prose a later edit can reword. `isFatalScope` is the single place that decides,
+   * and `scopeOfPath` defaults unknown paths to body, i.e. to fatal.
+   */
+  const fatal = report.scopedViolations.filter((v) => isFatalScope(v.scope));
+  const advisory = report.scopedViolations.filter((v) => !isFatalScope(v.scope));
+  const witnessOnly = advisory.map((v) => `${v.scope}: ${v.message}`);
+  const bodyViolations = fatal.map((v) => v.message);
 
   if (witnessOnly.length > 0) {
     console.warn(
@@ -1323,8 +1340,8 @@ export function canonicaliseForHardwareWallets(cborHex: string): string {
 
   if (bodyViolations.length > 0) {
     throw new Error(
-      "This ceremony transaction's BODY is not CIP-21 conformant, so a hardware wallet would " +
-        "reconstruct a different body and refuse to sign it (reporting only \"hash mismatch\").\n\n" +
+      "This ceremony transaction is not fit for a hardware wallet: the device would reconstruct a " +
+        "different body and refuse to sign, reporting only \"hash mismatch\".\n\n" +
         bodyViolations.map((v) => `  • ${v}`).join("\n") +
         "\n\nMost likely cause: @evolution-sdk/evolution is older than 0.5.16. Through 0.5.2 its " +
         "canonical comparator sorted map keys by LENGTH only, so every 29-byte policy ID tied and " +

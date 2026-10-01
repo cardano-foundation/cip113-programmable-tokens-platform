@@ -443,15 +443,24 @@ function providerUtxo(hashHex, index, { assets, scriptRef, lovelace } = {}) {
 // request was valid JSON with valid hex and valid asset keys, and still could not be served. Nothing
 // about the body shows the cause, so only a pinned filter keeps it fixed.
 {
-  const withToken = { assets: { lovelace: 2_000_000n, multiAsset: { map: new Map([["policy", new Map()]]) } } };
-  const adaOnly = { assets: { lovelace: 5_000_000n } };
-  const emptyMulti = { assets: { lovelace: 5_000_000n, multiAsset: { map: new Map() } } };
+  // ⛔ BUILT WITH THE REAL `Assets` CLASS, NOT A HAND-ROLLED LOOKALIKE. `carriesNativeAssets` reads
+  // `assets.multiAsset.map.size`, which is Evolution's internal shape. Asserting against plain objects
+  // we wrote ourselves would keep passing after an upstream change while production silently forwarded
+  // every asset-bearing UTxO again — the exact failure the filter exists to prevent.
+  const withToken = { assets: Assets.fromRecord({ lovelace: 2_000_000n, ["b".repeat(56) + "cafe"]: 1n }) };
+  const adaOnly = { assets: Assets.fromLovelace(5_000_000n) };
 
-  ok(carriesNativeAssets(withToken), "a UTxO holding a token is recognised as asset-bearing");
-  ok(!carriesNativeAssets(adaOnly), "an ADA-only UTxO is not");
-  ok(!carriesNativeAssets(emptyMulti), "nor is one whose multiAsset map is present but empty");
-  ok(!carriesNativeAssets(undefined) && !carriesNativeAssets({}),
-    "and a malformed entry is not reported as asset-bearing, so the filter cannot drop everything");
+  ok(carriesNativeAssets(withToken), "a UTxO holding a token is recognised as asset-bearing (real Assets)");
+  ok(!carriesNativeAssets(adaOnly), "an ADA-only UTxO is not (real Assets)");
+  ok(!carriesNativeAssets({ assets: { lovelace: 5_000_000n, multiAsset: { map: new Map() } } }),
+    "nor is one whose multiAsset map is present but empty");
+
+  // ⚑ THE DEGRADATION DIRECTION IS DELIBERATE AND IS THE ONE THAT LOOKS WRONG. An entry whose shape
+  // this cannot read resolves to "not asset-bearing", i.e. KEEP. Keeping too much costs one loud,
+  // retryable decode fault; dropping too much silently removes the forwarding that makes a fresh
+  // input evaluable at all. Loud-and-retryable beats silent, so this is the safe default here.
+  ok(!carriesNativeAssets(undefined) && !carriesNativeAssets({}) && !carriesNativeAssets({ assets: "nope" }),
+    "an unreadable entry is kept, not dropped — the filter can never drop everything");
 
   let seen = "unset";
   const client = { effect: { evaluateTx: (_tx, additional) => { seen = additional; return "EFFECT"; } } };

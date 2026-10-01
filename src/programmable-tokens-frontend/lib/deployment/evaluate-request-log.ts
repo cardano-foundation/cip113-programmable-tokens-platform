@@ -36,6 +36,16 @@ function summarise(key: string, value: unknown): unknown {
   return value;
 }
 
+/** Origin + path, with any query string and fragment dropped. Falls back to the path-ish prefix. */
+function safeUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return url.split(/[?#]/)[0];
+  }
+}
+
 /**
  * Installs the logger on `window.fetch`, once.
  *
@@ -62,7 +72,11 @@ export function installEvaluateRequestLogger(): void {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (url.includes("/utils/txs/evaluate") && init?.body != null) {
         const raw = typeof init.body === "string" ? init.body : "<non-string body>";
-        console.log(`[evaluate-request] POST ${url}`);
+        // ⚑ PATH ONLY, NEVER THE QUERY STRING. Blockfrost carries its key in a `project_id` HEADER,
+        // which this logger never touches — but a provider that ever put a credential in a query
+        // parameter would have it printed into a console an operator may screenshot or paste into an
+        // issue. Logging the path costs nothing and removes the whole class.
+        console.log(`[evaluate-request] POST ${safeUrl(url)}`);
         console.log(`[evaluate-request] raw body is ${raw.length} characters`);
         try {
           const parsed = JSON.parse(raw) as Record<string, unknown>;

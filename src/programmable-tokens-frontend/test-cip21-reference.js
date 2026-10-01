@@ -141,7 +141,148 @@ for (const t of real) {
     "the transaction's total length is unchanged, so the builder's fee is still correct");
 }
 
-// ---- 5. the oracle is not vacuous ----
+// ---- 5. THE GUARD ACTUALLY FIRES — a body-level violation that survives canonicalisation ----
+// ⛔ THIS IS THE TEST WHOSE ABSENCE WAS A FINDING. An adversarial pre-merge audit replaced the fatal
+// classification in ceremony.ts with a never-matching predicate, making the `throw` dead code, and
+// ALL 278 CHECKS STAYED GREEN. The only cover was a source-text regex asserting that the string
+// `checkCip21(canonical)` and the word `throw` both appear — which the mutation left intact. A test
+// that greps for a mechanism is not a test of the mechanism.
+//
+// ⚑ AND THE PREMISE THAT EXCUSED IT WAS FALSE. The old comment claimed "the guard cannot be triggered
+// behaviourally while a correct SDK is installed". It can: tag-258 presence is NOT normalised by
+// Evolution's canonical encoder, so a body with `inputs` tagged and `reference_inputs` bare survives
+// canonicalisation unchanged and reaches the guard. That is the input below.
+{
+  const { CBOR } = await import("@evolution-sdk/evolution");
+
+  // inputs (field 0) TAGGED with 258; reference_inputs (field 18) BARE. Both are body fields, and
+  // CIP-21: "either there are no tags 258 in sets, or there are such tags everywhere".
+  const outRef = [new Uint8Array(32).fill(0xab), 0n];
+  const body = new Map([
+    [0n, { _tag: "Tag", tag: 258, value: [outRef] }],
+    [18n, [outRef]],
+  ]);
+  const mixed = CBOR.toCBORHex([body, new Map(), true, null]);
+
+  // Non-vacuity: canonicalisation must NOT silently fix this, or the guard is never reached.
+  ok(
+    CBOR.toCBORHex(body, CBOR.CANONICAL_OPTIONS) === CBOR.toCBORHex(body),
+    "Evolution's canonical encoder does not normalise tag-258 presence, so the mixture survives to the guard",
+  );
+
+  const report = checkCip21(mixed);
+  const tagFinding = report.scopedViolations.find((v) => v.message.startsWith("tag 258"));
+  ok(tagFinding !== undefined, "the checker reports the tag-258 inconsistency");
+  ok(
+    tagFinding.scope === "transaction" && !tagFinding.message.startsWith("body"),
+    "and its scope is structural, NOT inferred from a message that does not begin with \"body\" — " +
+      "the exact mismatch that made this fatal defect a console warning",
+  );
+
+  let refused = "";
+  try {
+    canonicaliseForHardwareWallets(mixed);
+  } catch (e) {
+    refused = e.message;
+  }
+  ok(
+    /tag 258 is INCONSISTENT/.test(refused),
+    "canonicaliseForHardwareWallets THROWS on it rather than warning and returning the body unchanged",
+  );
+}
+
+// ---- 6. the checker cannot be blind and silent at the same time ----
+// ⛔ The "could not walk the CBOR" message has always ended "treat this check as blind, not as a
+// pass" — and the caller used to do exactly what it forbids, because it classified by message prefix
+// and the message does not begin with "body". `blind` is now a scope, and a scope is fatal or it is
+// not; no wording is consulted.
+{
+  // Empty input is the one input that reaches the blind branch; everything else the walker can read
+  // far enough to report on.
+  const blindReport = checkCip21("");
+  ok(
+    blindReport.scopedViolations.length === 1 && blindReport.scopedViolations[0].scope === "blind",
+    "a checker handed nothing reports `blind` rather than an empty, reassuring violation list",
+  );
+
+  // ⚑ TRUNCATION DOES NOT GO BLIND — it is READ, and reported as a body defect. Pinned because the
+  // obvious assumption (unreadable ⇒ blind) is wrong here, and a future reader would otherwise
+  // "fix" this test by asserting the scope it does not have.
+  const truncated = "84a30081825820" + "ab".repeat(8);
+  const scopes = checkCip21(truncated).scopedViolations.map((v) => v.scope);
+  ok(
+    scopes.length > 0 && scopes.every((sc) => sc === "body"),
+    `truncated CBOR is reported as a body defect, not as blind and not as clean (got ${JSON.stringify(scopes)})`,
+  );
+
+  // Both must stop a ceremony, which is the property that actually matters.
+  for (const [hex, what] of [["", "empty input"], [truncated, "truncated input"]]) {
+    let threw = false;
+    try {
+      canonicaliseForHardwareWallets(hex);
+    } catch {
+      threw = true;
+    }
+    ok(threw, `${what} stops the ceremony — absence of a finding is never a pass`);
+  }
+
+  // ⚠ A KNOWN HOLE, PINNED SO IT STAYS KNOWN. A bare "84" — an array header promising four elements
+  // with nothing after it — is reported by the checker as CONFORMANT (zero violations), because the
+  // walker's element loop simply never runs. It is harmless today only because
+  // `canonicaliseForHardwareWallets` refuses it at the element-count guard before the checker is
+  // consulted. That refusal is the real protection, so it is what gets asserted.
+  ok(checkCip21("84").violations.length === 0, "documenting the hole: a bare `84` produces no findings");
+  let barRefused = false;
+  try {
+    canonicaliseForHardwareWallets("84");
+  } catch {
+    barRefused = true;
+  }
+  ok(barRefused, "but the element-count guard refuses it, which is what keeps the hole harmless");
+}
+
+// ---- 7. the faithful-replay post-condition is what makes the hardcoded "84" safe ----
+// ⛔ THE OUTER ARRAY HEADER IS WRITTEN AS A LITERAL "84". That is only safe because the replay check
+// proves the input really was a definite 4-element array encoded minimally. The audit showed that
+// disabling the check left every suite green.
+//
+// ⛔ AND MY FIRST ATTEMPT AT THIS TEST PASSED FOR THE WRONG REASON — recorded because it is the trap
+// this whole file exists to avoid. It used `a0` as the body, which is itself a CIP-21 violation (an
+// empty map in the body), so every case threw at the conformance check and the structural guard was
+// never exercised. The mutation still survived. So the cases below are built from the REAL conformant
+// transaction's own elements, re-headered: the body is beyond reproach, and the ONLY thing left to
+// object to is the shape of the outer array.
+{
+  const { CBOR } = await import("@evolution-sdk/evolution");
+  const good = real[1].cbor.toLowerCase();
+  const { value, format } = CBOR.fromCBORHexWithFormat(good);
+  const parts = value.map((v, i) => CBOR.toCBORHexWithFormat(v, format.children[i]));
+
+  // Control: re-headered with the correct "84" this IS the real transaction, and must pass cleanly.
+  ok(
+    canonicaliseForHardwareWallets("84" + parts.join("")) === good,
+    "control: the real transaction's own elements under an \"84\" header pass through unchanged",
+  );
+
+  const cases = [
+    ["9f" + parts.join("") + "ff", "an INDEFINITE-length outer array"],
+    ["9804" + parts.join(""), "a non-minimal 4-element header (9804 rather than 84)"],
+    ["83" + parts.slice(0, 3).join(""), "a 3-element transaction array"],
+    ["85" + parts.join("") + "f6", "a 5-element transaction array"],
+    [parts[0], "a bare body with no transaction array at all"],
+  ];
+  for (const [hex, what] of cases) {
+    let threw = false;
+    try {
+      canonicaliseForHardwareWallets(hex);
+    } catch {
+      threw = true;
+    }
+    ok(threw, `${what} is refused rather than spliced against a hardcoded "84" header`);
+  }
+}
+
+// ---- 8. the oracle is not vacuous ----
 // ⛔ WITHOUT THIS THE WHOLE SUITE COULD PASS BY CALLING A LIBRARY THAT ANSWERS "fine" TO EVERYTHING.
 // "1800" is integer 0 written in two bytes: valid CBOR, not canonical.
 const notCanonical = "84ac00d901028282582018000000000000000000000000000000000000000000000000000000000000001800";

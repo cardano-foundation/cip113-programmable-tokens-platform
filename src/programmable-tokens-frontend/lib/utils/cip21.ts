@@ -40,9 +40,48 @@ const BODY_FIELD: Record<number, string> = {
   21: "current_treasury_value", 22: "donation",
 };
 
+/**
+ * Which part of the transaction a violation sits in — and therefore whether it is FATAL.
+ *
+ * ⛔ THIS EXISTS BECAUSE CLASSIFYING BY MESSAGE PREFIX WAS A REAL DEFECT. `ceremony.ts` used to split
+ * fatal from advisory with `violation.startsWith("body")`. Three violations describe body-level
+ * defects whose text does not begin with "body" — the tag-258 inconsistency, the "could not walk the
+ * CBOR" blind case, and "empty CBOR" — so each was downgraded to a console warning telling the
+ * operator the item was OUTSIDE the body and did not block signing. Both claims were false. The blind
+ * case was the worst: its own message says "treat this check as blind, not as a pass", and the caller
+ * passed it.
+ *
+ * ⚑ SO SCOPE IS STRUCTURAL, DERIVED FROM THE PATH, AND PROSE CAN NEVER DECIDE FATALITY AGAIN. Found
+ * by an adversarial pre-merge audit, 2026-10-01, which reached the warning with a body whose `inputs`
+ * carried tag 258 while `reference_inputs` did not.
+ */
+export type Cip21Scope =
+  /** Inside the body — the only part a hardware wallet reconstructs and hashes. FATAL. */
+  | "body"
+  /** A whole-transaction rule (tag-258 all-or-nothing) that still changes the body a device hashes. FATAL. */
+  | "transaction"
+  /** The checker could not read the bytes, so it has no opinion. FATAL — no finding is not a pass. */
+  | "blind"
+  /** Outside the body: real, but not part of what a device hashes. ADVISORY. */
+  | "witnessSet"
+  | "isValid"
+  | "auxiliaryData";
+
+/** A scope that makes a transaction unfit for a hardware wallet. */
+export function isFatalScope(scope: Cip21Scope): boolean {
+  return scope === "body" || scope === "transaction" || scope === "blind";
+}
+
+export interface Cip21Violation {
+  scope: Cip21Scope;
+  message: string;
+}
+
 export interface Cip21Report {
   /** Human-readable violations, each naming the field it sits in. Empty means conformant. */
   violations: string[];
+  /** The same violations, each carrying the scope that decides whether it is fatal. */
+  scopedViolations: Cip21Violation[];
   /** How many tag 258 wrappers the transaction carries. */
   tag258Count: number;
   /** Set-valued body fields encoded as a bare array, with no tag 258. */
@@ -53,7 +92,7 @@ export interface Cip21Report {
 
 interface Ctx {
   bytes: Uint8Array;
-  violations: string[];
+  violations: Cip21Violation[];
   tag258: number;
   /** Set-valued body fields carrying tag 258, by name. */
   taggedSetFields: string[];
@@ -63,6 +102,43 @@ interface Ctx {
   justTagged: boolean;
   /** Empty arrays/maps found inside the BODY, by path. CIP-21 forbids them there. */
   emptyInBody: string[];
+}
+
+/**
+ * The scope a violation at this path belongs to.
+ *
+ * Paths are rooted at the transaction element they describe — "body…", "witnessSet…", "isValid",
+ * "auxiliaryData…" — so the root IS the scope. Anything unrecognised is treated as body, i.e. FATAL:
+ * a path shape this function does not know must not quietly become advisory.
+ */
+function scopeOfPath(path: string): Cip21Scope {
+  if (path.startsWith("witnessSet")) return "witnessSet";
+  if (path.startsWith("auxiliaryData")) return "auxiliaryData";
+  if (path.startsWith("isValid")) return "isValid";
+  return "body";
+}
+
+/** Record a violation, taking its scope from the path rather than from its wording. */
+function pushAt(ctx: Ctx, path: string, message: string): void {
+  ctx.violations.push({ scope: scopeOfPath(path), message });
+}
+
+/**
+ * The element count of an array/map header, and where its first element starts.
+ *
+ * ⛔ READING `b[i] & 0x1f` AS THE COUNT IS ONLY RIGHT BELOW 24. At 24 or more the low bits hold the
+ * additional-info code and the real count follows in 1, 2, 4 or 8 bytes. The legacy-output check used
+ * the raw value behind `if (cnt < 24)`, so it silently stopped firing at exactly 24 outputs — probed
+ * by the 2026-10-01 audit: 23 outputs produced 23 findings, 24 produced none.
+ */
+function headerCount(b: Uint8Array, i: number): { count: number; first: number } | null {
+  const ai = b[i] & 0x1f;
+  if (ai < 24) return { count: ai, first: i + 1 };
+  if (ai === 24) return { count: b[i + 1], first: i + 2 };
+  if (ai === 25) return { count: (b[i + 1] << 8) | b[i + 2], first: i + 3 };
+  // 4- and 8-byte counts mean more elements than CIP-21 permits anyway (UINT16_MAX), and an
+  // indefinite length (31) is reported by the walker itself. Decline rather than guess an offset.
+  return null;
 }
 
 /** Fields whose value is a set in the Conway CDDL, i.e. where tag 258 is permitted. */
@@ -107,7 +183,7 @@ function checkLegacyOutput(ctx: Ctx, i: number, path: string): void {
   // walk past coin to reach the multiasset map
   const after = walk(ctx, p + 1, `${path}.coin`);
   if (b[after] === 0xa0) {
-    ctx.violations.push(
+    pushAt(ctx, path,
       `${path}: token-free output serialized as [address, [coin, {}]] — CIP-21 requires the simple ` +
       `tuple [address, coin, ?datum_hash] when an output carries no multi-asset tokens`
     );
@@ -146,24 +222,24 @@ function walk(ctx: Ctx, i: number, path: string, isBody = false): number {
     len = ai;
   } else if (ai === 24) {
     len = b[i + 1]; hdr = 2;
-    if (len < 24) ctx.violations.push(`${path}: value/length ${len} uses an extra byte but fits in the header — CIP-21 requires the shortest encoding`);
+    if (len < 24) pushAt(ctx, path, `${path}: value/length ${len} uses an extra byte but fits in the header — CIP-21 requires the shortest encoding`);
   } else if (ai === 25) {
     len = (b[i + 1] << 8) | b[i + 2]; hdr = 3;
-    if (len <= 0xff) ctx.violations.push(`${path}: value/length ${len} encoded in 2 bytes but fits in 1 — not minimal`);
+    if (len <= 0xff) pushAt(ctx, path, `${path}: value/length ${len} encoded in 2 bytes but fits in 1 — not minimal`);
   } else if (ai === 26) {
     len = ((b[i + 1] << 24) | (b[i + 2] << 16) | (b[i + 3] << 8) | b[i + 4]) >>> 0; hdr = 5;
-    if (len <= 0xffff) ctx.violations.push(`${path}: value/length ${len} encoded in 4 bytes but fits in 2 — not minimal`);
+    if (len <= 0xffff) pushAt(ctx, path, `${path}: value/length ${len} encoded in 4 bytes but fits in 2 — not minimal`);
   } else if (ai === 27) {
     hdr = 9;
     let v = 0n;
     for (let k = 1; k <= 8; k++) v = (v << 8n) | BigInt(b[i + k]);
     len = Number(v);
-    if (v <= 0xffffffffn) ctx.violations.push(`${path}: value/length ${v} encoded in 8 bytes but fits in 4 — not minimal`);
+    if (v <= 0xffffffffn) pushAt(ctx, path, `${path}: value/length ${v} encoded in 8 bytes but fits in 4 — not minimal`);
   } else if (ai === 31) {
     indefinite = true;
-    ctx.violations.push(`${path}: INDEFINITE length (0x${ib.toString(16).padStart(2, "0")}) — CIP-21 requires definite-length items`);
+    pushAt(ctx, path, `${path}: INDEFINITE length (0x${ib.toString(16).padStart(2, "0")}) — CIP-21 requires definite-length items`);
   } else {
-    ctx.violations.push(`${path}: reserved additional-info ${ai} (0x${ib.toString(16)})`);
+    pushAt(ctx, path, `${path}: reserved additional-info ${ai} (0x${ib.toString(16)})`);
     return i + 1;
   }
 
@@ -200,7 +276,7 @@ function walk(ctx: Ctx, i: number, path: string, isBody = false): number {
         // built in the order the builder happened to add them.
         if (prev && compareBytes(prev, key) >= 0) {
           const what = compareBytes(prev, key) === 0 ? "DUPLICATE key" : "keys out of canonical order";
-          ctx.violations.push(
+          pushAt(ctx, path,
             `${path}: ${what} at entry ${k} — 0x${hex(prev)} then 0x${hex(key)}. CIP-21 requires map keys sorted lowest to highest; a HW wallet re-sorts them and hashes a different body.`
           );
         }
@@ -213,14 +289,19 @@ function walk(ctx: Ctx, i: number, path: string, isBody = false): number {
           const name = BODY_FIELD[n] ?? `unknown_field_${n}`;
           label = `body.${name}`;
           if (n === 6 || n === 20) {
-            ctx.violations.push(`body: contains \`${name}\` — CIP-21 lists this entry as unsupported, it must not be included`);
+            pushAt(ctx, "body", `body: contains \`${name}\` — CIP-21 lists this entry as unsupported, it must not be included`);
           }
           if (SET_FIELDS.has(n)) classifySet(ctx, ke, label);
           if (n === 1 && (b[ke] >> 5) === 4) {
             // outputs: inspect each element for the forbidden legacy shape
-            const cnt = b[ke] & 0x1f;
-            let q = ke + 1;
-            if (cnt < 24) for (let j = 0; j < cnt; j++) { checkLegacyOutput(ctx, q, `body.outputs[${j}]`); q = walk(ctx, q, `body.outputs[${j}]`); }
+            const head = headerCount(b, ke);
+            if (head) {
+              let q = head.first;
+              for (let j = 0; j < head.count; j++) {
+                checkLegacyOutput(ctx, q, `body.outputs[${j}]`);
+                q = walk(ctx, q, `body.outputs[${j}]`);
+              }
+            }
           }
           p = walk(ctx, ke, label);
           continue;
@@ -291,7 +372,12 @@ export function checkCip21(txCborHex: string): Cip21Report {
   const ctx: Ctx = { bytes, violations: [], tag258: 0, taggedSetFields: [], bareSetFields: [], justTagged: false, emptyInBody: [] };
 
   if (bytes.length === 0) {
-    return { violations: ["empty CBOR"], tag258Count: 0, bareSetFields: [], taggedSetFields: [] };
+    // "blind", not advisory: a checker handed nothing has no opinion, and no opinion is not a pass.
+    const empty: Cip21Violation = { scope: "blind", message: "empty CBOR — nothing to check" };
+    return {
+      violations: [empty.message], scopedViolations: [empty],
+      tag258Count: 0, bareSetFields: [], taggedSetFields: [],
+    };
   }
 
   try {
@@ -307,13 +393,19 @@ export function checkCip21(txCborHex: string): Cip21Report {
       walk(ctx, 0, "body", true);
     }
   } catch (e) {
-    ctx.violations.push(`could not walk the CBOR (${(e as Error)?.message ?? e}) — treat this check as blind, not as a pass`);
+    // ⛔ SCOPE "blind", WHICH IS FATAL. This message has always said "treat this check as blind, not
+    // as a pass" — and until 2026-10-01 the caller classified it by prefix, found no leading "body",
+    // and passed it. The wording was right and powerless; the scope is what the caller acts on.
+    ctx.violations.push({
+      scope: "blind",
+      message: `could not walk the CBOR (${(e as Error)?.message ?? e}) — treat this check as blind, not as a pass`,
+    });
   }
 
   // "Unless mentioned otherwise in this CIP, optional empty lists and maps must not be included as
   // part of the transaction body or its elements." HW wallets enforce this in many cases.
   for (const e of ctx.emptyInBody) {
-    ctx.violations.push(
+    pushAt(ctx, e,
       `${e} — CIP-21 forbids optional empty lists and maps in the transaction body; omit the field ` +
       `entirely instead of including it empty`
     );
@@ -321,15 +413,33 @@ export function checkCip21(txCborHex: string): Cip21Report {
 
   // The all-or-nothing rule. Either state alone is fine; the mixture is what CIP-21 forbids.
   if (ctx.taggedSetFields.length > 0 && ctx.bareSetFields.length > 0) {
-    ctx.violations.push(
+    // ⛔ SCOPE "transaction", WHICH IS FATAL. CIP-21 states the rule across the whole transaction, but
+    // the consequence lands on the body: "A HW wallet normalises this and hashes a different body."
+    // Classified by prefix this read as non-body and became an advisory warning that told the operator
+    // the opposite of the truth on both counts.
+    ctx.violations.push({
+      scope: "transaction",
+      message:
       `tag 258 is INCONSISTENT across the transaction: tagged [${ctx.taggedSetFields.join(", ")}] ` +
       `but bare [${ctx.bareSetFields.join(", ")}]. CIP-21: "either there are no tags 258 in sets, or ` +
-      `there are such tags everywhere". A HW wallet normalises this and hashes a different body.`
-    );
+      `there are such tags everywhere". A HW wallet normalises this and hashes a different body.`,
+    });
   }
 
+  // ⚑ DEDUPED BY MESSAGE. `body.outputs` is inspected once for the legacy shape and then walked again
+  // by the generic walker, so a violation inside an output is recorded twice. That inflated the count
+  // an operator reads and the list they have to work through. Deduping here fixes every double-walk,
+  // present and future, rather than one of them.
+  const seen = new Set<string>();
+  const scopedViolations = ctx.violations.filter((v) => {
+    if (seen.has(v.message)) return false;
+    seen.add(v.message);
+    return true;
+  });
+
   return {
-    violations: ctx.violations,
+    violations: scopedViolations.map((v) => v.message),
+    scopedViolations,
     tag258Count: ctx.tag258,
     bareSetFields: ctx.bareSetFields,
     taggedSetFields: ctx.taggedSetFields,

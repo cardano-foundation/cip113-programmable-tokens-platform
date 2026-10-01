@@ -121,6 +121,43 @@ assert.ok(r.violations.length > 0,
 console.log("  OK   unparseable CBOR is never reported as a pass");
 ran++;
 
+// ---- 11b. an empty MAP in the body, not just an empty list ----
+// ⛔ ASYMMETRIC COVERAGE WAS A FINDING. Removing the empty-LIST half of this rule was killed by the
+// test below; removing the empty-MAP half left every suite green. One CIP-21 rule, one of its two
+// halves defended.
+{
+  // body = { 9: {} } — an empty `mint` map, which CIP-21 forbids outright in the body.
+  const r = checkCip21("84a109a0a0f5f6");
+  assert.ok(firstMatching(r, /empty map/),
+    `an empty mint map in the body should be refused; got: ${r.violations.join(" | ")}`);
+  assert.ok(r.scopedViolations.some((v) => v.scope === "body"),
+    "and it must be scoped `body`, i.e. fatal — not advisory");
+  console.log("  OK   an empty optional MAP in the body is flagged, and scoped fatal");
+  ran++;
+}
+
+// ---- 11c. the legacy-output check does not stop firing at 24 outputs ----
+// ⛔ MEASURED HOLE: the count came from `b[i] & 0x1f`, which at 24+ holds the additional-info code,
+// not the count. Probed by the audit: 23 outputs -> 23 findings, 24 -> ZERO. The boundary is the
+// test, because either side of it alone passes.
+{
+  // one token-free output in the forbidden [address, [coin, {}]] shape
+  const legacyOut = "82" + "581c" + "11".repeat(28) + "82" + "01" + "a0";
+  const build = (n) => {
+    const header = n < 24 ? (0x80 + n).toString(16).padStart(2, "0") : "98" + n.toString(16).padStart(2, "0");
+    return "84" + "a101" + header + legacyOut.repeat(n) + "a0f5f6";
+  };
+  for (const n of [1, 23, 24, 25]) {
+    const r = checkCip21(build(n));
+    const hits = r.violations.filter((v) => /token-free output/.test(v)).length;
+    assert.strictEqual(hits, n,
+      `${n} legacy outputs should produce ${n} findings, got ${hits} — the array-header count is ` +
+      `being read as the raw additional-info value again`);
+  }
+  console.log("  OK   legacy outputs are counted correctly across the 24-element header boundary");
+  ran++;
+}
+
 // ---- 12. optional empty lists and maps are forbidden IN THE BODY ----
 // CIP-21: "optional empty lists and maps must not be included as part of the transaction body or
 // its elements", and "HW wallets enforce this in many cases".
