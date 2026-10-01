@@ -2,7 +2,7 @@ name: Off-chain (Java)
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "develop"]
     paths:
       - "src/programmable-tokens-offchain-java/**"
       - ".github/workflows/offchain.yml"
@@ -25,8 +25,20 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
-      # For now removing the test runs
+      # `-x test` stays, and is NOT laziness: a bare `./gradlew test` runs Preview*/Preprod*/
+      # Devnet*/IssueToken*/Transfer*/DirectoryMint*/ProtocolParamsMint*, which build and SUBMIT
+      # REAL TRANSACTIONS from a mnemonic committed in the test sources — and this job has the
+      # Blockfrost keys in scope, so it would genuinely spend funds on every push.
       - run: ./gradlew build -x test
         env:
           BLOCKFROST_KEY_PREVIEW: ${{ secrets.BLOCKFROST_KEY_PREVIEW }}
           BLOCKFROST_KEY_PREPROD: ${{ secrets.BLOCKFROST_KEY_PREPROD }}
+      # The offline tests, by ALLOWLIST (ext.ciTestPatterns in build.gradle). Until now this
+      # workflow ran no backend tests at all, which hid six tests that had been failing for days.
+      # CiTestInventoryTest asserts no allowlist pattern can reach a submitting class and that a
+      # newly added test class cannot go unrun.
+      #
+      # ⛔ NO BLOCKFROST KEYS ON THIS STEP, deliberately: the allowlist is the first line of
+      # defence and an empty environment is the second, so a misclassified test fails rather
+      # than reaching a real backend.
+      - run: ./gradlew ciTest

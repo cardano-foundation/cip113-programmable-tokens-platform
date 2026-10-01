@@ -88,6 +88,70 @@ dependencies {
 
 }
 
+// ============================ CI TEST TASK ============================
+// ⛔ AN ALLOWLIST, NEVER AN EXCLUSION LIST, and the reason is money. A bare `./gradlew test`
+// runs PreviewConstants-driven classes — Preview*, Preprod*, Devnet*, IssueToken, Transfer,
+// DirectoryMint, ProtocolParamsMint — which BUILD AND SUBMIT REAL TRANSACTIONS against
+// whatever CARDANO_BACKEND_URL points at, from a mnemonic committed in the test sources. They
+// are gated by no annotation. That is why the workflow has always passed `-x test`.
+//
+// An exclusion list gets this wrong exactly once and then CI spends real funds, so the safe
+// direction is to name what RUNS. CiTestInventoryTest enforces two things about this list: that
+// no submitting class can be matched by it, and that a newly added test class cannot go
+// unclassified and silently unrun.
+ext.ciTestPatterns = [
+		// The offline package, by package: new offline tests land here and are picked up with
+		// no edit to this list, which is the only self-maintaining part of this arrangement.
+		'org.cardanofoundation.cip113.offline.*',
+		// Verified offline and passing, 2026-10-01. Named individually because they predate the
+		// offline package convention and live beside network-touching classes.
+		'*AddressTest',
+		'*ProtocolScriptBuilderServiceHashDerivationTest',
+		'*DirectorySetNodeTest',
+		'*ProtocolParamsParserTest',
+		'*RegistryNodeParserTest',
+		'*RegistryNodeRoundTripTest',
+		'*IssuancePolicyIdTest',
+		'*TransactionDeserializationTest',
+		'*Cip68Test',
+		'*ConditionalBeanWiringTest',
+]
+
+// ---------------------------- QUARANTINE ----------------------------
+// Failing on a clean tree since before 2026-08-14 and NOT caused by anything in CI. Excluded so
+// the other ~90 tests can run at all: a permanently red check is the noise floor, but `-x test`
+// was worse — it made every passing test invisible, so nothing prompted the question.
+//
+// EXPIRES 2026-10-31. CiTestInventoryTest FAILS once that date passes, which is the point: a
+// quarantine with no expiry is a deletion with extra steps. On that date, fix or delete them.
+//
+//   BalanceValueHelperTest  (3) IllegalArgumentException, "Invalid asset unit length: 29"
+//   AddressUtilTest         (2) expected: not <null>
+//   MpfTreeServiceTest      (6) Mockito Wanted-but-not-invoked + UnnecessaryStubbingException
+ext.ciQuarantinedTests = [
+		'BalanceValueHelperTest',
+		'AddressUtilTest',
+		'MpfTreeServiceTest',
+]
+ext.ciQuarantineExpiry = '2026-10-31'
+
+tasks.register('ciTest', Test) {
+	group = 'verification'
+	description = 'Offline tests that are safe to run in CI (allowlist; never submits transactions).'
+	useJUnitPlatform()
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	outputs.upToDateWhen { false }   // a green "UP-TO-DATE" that ran nothing is the trap this repo already has
+	filter {
+		ciTestPatterns.each { includeTestsMatching it }
+		failOnNoMatchingTests = true
+	}
+	testLogging {
+		events 'failed'
+		exceptionFormat = 'short'
+	}
+}
+
 tasks.named('test') {
 	useJUnitPlatform()
 	// NOTE: this task used to declare two vendored contract trees (../core-contracts and

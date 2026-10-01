@@ -1667,18 +1667,7 @@ public class OfflineCip68EvalTest {
                 blacklistInitRepository(initCip68Enabled),
                 Mockito.mock(ProgrammableTokenRegistryRepository.class),
                 Mockito.mock(CustomStakeRegistrationRepository.class),
-                new org.cardanofoundation.cip113.service.ScriptRegistrationService(
-                        Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
-                        // Deliberately null, not a mock: isStakeAddressRegistered never touches the
-                        // builder, and mocking QuickTxBuilder instruments it for every test in the
-                        // JVM under the inline mock maker — which silently broke the rwa-token
-                        // burn's real evaluator whenever this class ran as a whole.
-                        null,
-                        Mockito.mock(AccountService.class),
-                        Mockito.mock(CustomStakeRegistrationRepository.class),
-                        // Nothing pre-recorded: these tests exercise the ledger and
-                        // indexed-certificate sources, not the learned one.
-                        Mockito.mock(org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class)),
+                registrationsAllRegistered(),
                 utxoProvider,
                 Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class));
 
@@ -2460,14 +2449,7 @@ public class OfflineCip68EvalTest {
                 chain.protocolParamsSupplier(),
                 registry,
                 Mockito.mock(CustomStakeRegistrationRepository.class),
-                new org.cardanofoundation.cip113.service.ScriptRegistrationService(
-                        Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
-                        null,
-                        Mockito.mock(AccountService.class),
-                        Mockito.mock(CustomStakeRegistrationRepository.class),
-                        // Nothing pre-recorded: these tests exercise the ledger and
-                        // indexed-certificate sources, not the learned one.
-                        Mockito.mock(org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class)));
+                registrationsAllRegistered());
     }
 
     /**
@@ -2634,5 +2616,32 @@ public class OfflineCip68EvalTest {
 
         return new DummyResult(chain, tx, policyId,
                 boot.params().programmableLogicBase().scriptHash());
+    }
+
+    /**
+     * A {@link org.cardanofoundation.cip113.service.ScriptRegistrationService} that answers "yes,
+     * registered" for every credential.
+     *
+     * <p>⛔ WHY A STUB AND NOT THE REAL SERVICE OVER EMPTY MOCKS. These tests exercise CIP-68
+     * minting, transfer selection and seizure refusal. They are not about how registration is
+     * DISCOVERED. Previously they built the real service over mocked repositories and a mocked
+     * AccountService, all answering their defaults, so it reported every credential unregistered —
+     * harmless until the FES registration path gained a pre-registration guard, at which point all
+     * six tests failed before reaching anything they were written to assert, with
+     * "The issuer_admin reward account this registration must withdraw-0 from is not registered on
+     * chain".
+     *
+     * <p>⚠ AND NOBODY SAW IT FOR DAYS, because this class was not in the offline test set anyone
+     * ran and CI ran no backend tests at all. It surfaced only when the suites were wired into CI.
+     * The premise these tests need is a chain where the credential IS registered; stating it
+     * directly is both truthful and immune to the next guard added upstream of them.
+     *
+     * <p>Registration DISCOVERY itself is covered by {@code StakeRegistrationIdempotenceTest},
+     * which builds the real service deliberately — leave that one alone.
+     */
+    private static org.cardanofoundation.cip113.service.ScriptRegistrationService registrationsAllRegistered() {
+        var svc = Mockito.mock(org.cardanofoundation.cip113.service.ScriptRegistrationService.class);
+        Mockito.when(svc.isStakeAddressRegistered(Mockito.anyString())).thenReturn(true);
+        return svc;
     }
 }
