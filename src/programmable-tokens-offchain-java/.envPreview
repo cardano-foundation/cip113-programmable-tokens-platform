@@ -1,0 +1,17 @@
+export SPRING_PROFILES_ACTIVE=preprod
+
+export WALLET_MNEMONIC="base sun bonus asset priority twenty puppy rural animal public rural symbol tilt crowd grape claim fury satisfy wing churn ginger essence cigar nasty"
+
+export STORE_CARDANO_HOST=preview-node.play.dev.cardano.org
+export STORE_CARDANO_PORT=3001
+
+export BLOCKFROST_KEY=previewLuT5YB85o7hilvwv454mApBAwoMOsWUf
+
+export STORE_CARDANO_SYNCSTARTBLOCKHASH="ea73e2ada73150f443ba5e8dcd30804d2f2041716668e035a97b01c2dcccc440"
+export STORE_CARDANO_SYNCSTARTSLOT="123943569"
+
+export KERI_URL=https://keria.dev.ecosyseng.cf-deployments.org
+#https://keria.dev.ecosyseng.cf-deployments.org
+export KERI_BOOT_URL=https://keria-boot.dev.ecosyseng.cf-deployments.org
+export KERI_ENABLED=true
+export CIP113_ALLOW_NO_DEPLOYMENT=true

@@ -37,6 +37,7 @@ import org.cardanofoundation.cip113.model.blueprint.Validator;
 import org.cardanofoundation.cip113.model.bootstrap.CredentialParams;
 import org.cardanofoundation.cip113.model.bootstrap.IssuanceParams;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
+import org.cardanofoundation.cip113.model.bootstrap.ProgrammableLogicGlobalParams;
 import org.cardanofoundation.cip113.model.bootstrap.RegistryParams;
 import org.cardanofoundation.cip113.model.bootstrap.ScriptParams;
 import org.cardanofoundation.cip113.model.bootstrap.TxInput;
@@ -347,7 +348,8 @@ public final class BootstrapFixture {
                         TxInput.from(protocolSeed), protocolParams.getPolicyId(), TxInput.from(paramsUtxo)),
                 new ScriptParams(plb.getPolicyId()), new ScriptParams(transfer.getPolicyId()),
                 new ScriptParams(thirdParty.getPolicyId()), new ScriptParams(unfracking.getPolicyId()),
-                new ScriptParams(plg.getPolicyId()), CoreProtocolParamsDatum.DEFAULT_MAX_INLINE_DATUM_BYTES,
+                new ProgrammableLogicGlobalParams(plg.getPolicyId(), unfracking.getPolicyId()),
+                CoreProtocolParamsDatum.DEFAULT_MAX_INLINE_DATUM_BYTES,
                 new UpgradeMultisigParams(upgradeMultisig.getPolicyId(), TxInput.from(upgradeSeed), TxInput.from(multisigUtxo)),
                 new TxInput(refHash, upgradeIdx),
                 new CredentialParams("script", upgradeMultisig.getPolicyId()),

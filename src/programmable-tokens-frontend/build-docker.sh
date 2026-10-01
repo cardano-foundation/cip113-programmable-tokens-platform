@@ -2,6 +2,7 @@
 # Build Docker images for CIP-113 Programmable Tokens Frontend
 
 set -e
+cd "$(dirname "$0")"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -72,19 +73,14 @@ build_network() {
     local NETWORK_UPPER=$(echo "$NETWORK" | tr '[:lower:]' '[:upper:]')
     local BASE_URL_VAR="NEXT_PUBLIC_BASE_URL_${NETWORK_UPPER}"
     local BASE_URL="${!BASE_URL_VAR:-}"
-    local REGISTRY_POLICY_VAR="NEXT_PUBLIC_CMTA_REGISTRY_POLICY_ID_${NETWORK_UPPER}"
-    local REGISTRY_POLICY="${!REGISTRY_POLICY_VAR:-}"
-    if [ "$NETWORK" != "preview" ] && [[ ! "$REGISTRY_POLICY" =~ ^[0-9a-fA-F]{56}$ ]]; then
-        echo -e "${RED}Set ${REGISTRY_POLICY_VAR} to the verified CMTA registry policy before building ${NETWORK}.${NC}"
-        return 1
-    fi
+    NEXT_PUBLIC_NETWORK="$NETWORK" npm run check:trusted-deployments
 
     # Build the Docker image
     docker build --push \
+        --build-context deployment-records=../programmable-tokens-offchain-java/src/main/resources \
         --build-arg NEXT_PUBLIC_NETWORK=$NETWORK \
         --build-arg NEXT_PUBLIC_BLOCKFROST_API_KEY=$API_KEY \
         --build-arg NEXT_PUBLIC_BLOCKFROST_URL=$BLOCKFROST_URL \
-        --build-arg NEXT_PUBLIC_CMTA_REGISTRY_POLICY_ID=$REGISTRY_POLICY \
         --build-arg NEXT_PUBLIC_API_BASE_URL=$API_BASE_URL \
         ${BASE_URL:+--build-arg NEXT_PUBLIC_BASE_URL=$BASE_URL} \
         -t ${DOCKER_REPO}:${VERSION_TAG} \

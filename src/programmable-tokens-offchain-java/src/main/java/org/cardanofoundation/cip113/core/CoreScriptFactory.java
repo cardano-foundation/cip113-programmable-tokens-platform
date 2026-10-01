@@ -45,7 +45,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@code ConstrPlutusData.of(1, ...)} whose meaning is not otherwise apparent.
  *
  * <p>Scripts are cached per deployment: a parameterised script depends only on the
- * blueprint and the bootstrap record, both immutable for a given {@code txHash}.
+ * blueprint and the full bootstrap record. Records with the same txHash but different
+ * parameters must not share a cached script.
  */
 @Service
 @RequiredArgsConstructor
@@ -54,8 +55,8 @@ public class CoreScriptFactory {
 
     private final CoreBlueprint blueprint;
 
-    /** deployment txHash -> validator -> parameterised script. */
-    private final Map<String, Map<CoreValidator, PlutusScript>> cache = new ConcurrentHashMap<>();
+    /** Full deployment record -> validator -> parameterised script. */
+    private final Map<ProtocolBootstrapParams, Map<CoreValidator, PlutusScript>> cache = new ConcurrentHashMap<>();
 
     /**
      * The parameterised script for a core validator under a given deployment.
@@ -78,8 +79,25 @@ public class CoreScriptFactory {
                             + "record; call alwaysFail(nonce) instead.");
         }
         return cache
-                .computeIfAbsent(bootstrap.txHash(), k -> new ConcurrentHashMap<>())
-                .computeIfAbsent(validator, v -> apply(v, parametersFor(v, bootstrap)));
+                .computeIfAbsent(bootstrap, k -> new ConcurrentHashMap<>())
+                .computeIfAbsent(validator, v -> {
+                    var script = apply(v, parametersFor(v, bootstrap));
+                    if (v == CoreValidator.PROGRAMMABLE_LOGIC_GLOBAL) {
+                        final String derived;
+                        try {
+                            derived = script.getPolicyId();
+                        } catch (CborSerializationException e) {
+                            throw new IllegalStateException("Could not hash the programmableLogicGlobal script", e);
+                        }
+                        if (!derived.equalsIgnoreCase(bootstrap.programmableLogicGlobal().scriptHash())) {
+                            throw new IllegalStateException("Deployment " + bootstrap.txHash()
+                                    + " records programmableLogicGlobal.scriptHash="
+                                    + bootstrap.programmableLogicGlobal().scriptHash()
+                                    + " but the recorded unfrackingParameter derives " + derived);
+                        }
+                    }
+                    return script;
+                });
     }
 
     /**
@@ -165,7 +183,7 @@ public class CoreScriptFactory {
             case PROGRAMMABLE_LOGIC_GLOBAL -> ListPlutusData.of(
                     policyId(b.transfer().scriptHash()),
                     policyId(b.thirdParty().scriptHash()),
-                    policyId(b.unfracking().scriptHash()));
+                    policyId(requireDispatcherParameter(b)));
 
             case ISSUANCE_LOGIC -> ListPlutusData.of(
                     scriptCredential(b.programmableLogicBase().scriptHash()),
@@ -179,6 +197,16 @@ public class CoreScriptFactory {
             case ISSUANCE_MINT, ALWAYS_FAIL -> throw new IllegalStateException(
                     "handled by dedicated methods: " + validator);
         };
+    }
+
+    private static String requireDispatcherParameter(ProtocolBootstrapParams bootstrap) {
+        var dispatcher = bootstrap.programmableLogicGlobal();
+        var parameter = dispatcher == null ? null : dispatcher.unfrackingParameter();
+        if (parameter == null || !parameter.matches("(?i)[0-9a-f]{56}")) {
+            throw new IllegalStateException("Deployment " + bootstrap.txHash()
+                    + " requires a 28-byte hexadecimal programmableLogicGlobal.unfrackingParameter");
+        }
+        return parameter;
     }
 
     private PlutusScript apply(CoreValidator validator, ListPlutusData parameters) {

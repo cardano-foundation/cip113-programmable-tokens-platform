@@ -8,11 +8,12 @@ intended for public client use.
 
 ## Build locally
 
-Docker 20.10+ and a Blockfrost key for the selected network are required. This
+Docker with named build-context support and a Blockfrost key for the selected network are required. This
 example builds a Preview image without publishing it:
 
 ```bash
 docker build \
+  --build-context deployment-records=../programmable-tokens-offchain-java/src/main/resources \
   --build-arg NEXT_PUBLIC_NETWORK=preview \
   --build-arg NEXT_PUBLIC_BLOCKFROST_API_KEY=your_preview_key \
   --build-arg NEXT_PUBLIC_BLOCKFROST_URL=https://cardano-preview.blockfrost.io/api/v0 \
@@ -21,6 +22,10 @@ docker build \
   -t cip113-frontend:preview .
 docker run --rm -p 3000:3000 cip113-frontend:preview
 ```
+
+The named context supplies the checked-in protocol deployment records. The build
+fails if they are missing or if the generated trusted-deployment catalog is stale;
+run `npm run generate:trusted-deployments` after adding a deployment record.
 
 Set `NEXT_PUBLIC_API_BASE_URL` to the backend origin reachable **from the user's
 browser**. The frontend adds `/api/v1` to requests; do not include that path in

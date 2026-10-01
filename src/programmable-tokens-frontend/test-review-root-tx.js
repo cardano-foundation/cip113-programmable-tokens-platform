@@ -1,14 +1,14 @@
 const assert = require("node:assert/strict");
 const cbor = require("cbor");
-const { readFileSync } = require("node:fs");
 const { reviewMemberRootTransaction } = require("./.root-build/rwa/review-root-tx.js");
 const { computeMemberRoot } = require("./.root-build/rwa/member-root.js");
+const { TRUSTED_REGISTRY_DEPLOYMENTS: trusted } = require("./.root-build/rwa/trusted-registry-deployments.generated.js");
 
 const bytes = (hex) => Buffer.from(hex, "hex");
 const hex = (value) => cbor.encode(value).toString("hex");
 const policy = "ab".repeat(28);
 const gsPolicy = "cd".repeat(28);
-const registryPolicy = "dd".repeat(28);
+const registryPolicy = trusted.preview[0].registryPolicy;
 const assetName = "476c6f62616c5374617465";
 const admin = "11".repeat(28);
 const gsTx = "aa".repeat(32);
@@ -81,7 +81,7 @@ function withPlainOutputs(change, collateralReturn) {
 }
 
 process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY = "fixture-key";
-process.env.NEXT_PUBLIC_CMTA_REGISTRY_POLICY_ID = registryPolicy;
+process.env.NEXT_PUBLIC_NETWORK = "preview";
 let missingPath = null;
 global.fetch = async (url) => {
   if (missingPath && url.endsWith(missingPath)) return { ok: false, status: 404 };
@@ -97,23 +97,29 @@ global.fetch = async (url) => {
 };
 
 async function main() {
-  // The Preview fallback must remain the trusted policy from the checked-in deployment.
-  const bootstrap = JSON.parse(readFileSync("../programmable-tokens-offchain-java/src/main/resources/protocol-bootstraps-preview.json", "utf8"));
-  const deployedRegistry = bootstrap[0].registry.scriptHash;
-  delete process.env.NEXT_PUBLIC_CMTA_REGISTRY_POLICY_ID;
   const originalFetch = global.fetch;
+  assert.match(registryPolicy, /^[0-9a-f]{56}$/);
+  assert.notEqual(trusted.preview[0].registryPolicy, trusted.preprod[0].registryPolicy);
+  process.env.NEXT_PUBLIC_NETWORK = "preprod";
   global.fetch = async (url) => {
-    assert.ok(url.endsWith(`/assets/${deployedRegistry}${policy}/utxos`), `Unexpected Preview registry asset lookup: ${url}`);
+    assert.ok(url.endsWith(`/assets/${trusted.preprod[0].registryPolicy}${policy}/utxos`));
     return { ok: false, status: 404 };
   };
   await assert.rejects(() => reviewMemberRootTransaction(candidate),
-    /Registry NFT asset lookup failed on preview: Blockfrost 404/);
+    /not found in any trusted preprod CMTA deployment/);
+
+  process.env.NEXT_PUBLIC_NETWORK = "mainnet";
+  await assert.rejects(() => reviewMemberRootTransaction(candidate),
+    /No trusted CMTA deployment is bundled for mainnet/);
+
+  process.env.NEXT_PUBLIC_NETWORK = "preview";
   global.fetch = originalFetch;
-  process.env.NEXT_PUBLIC_CMTA_REGISTRY_POLICY_ID = registryPolicy;
 
   await reviewMemberRootTransaction(candidate);
+  missingPath = `/assets/${registryPolicy}${policy}/utxos`;
+  await assert.rejects(() => reviewMemberRootTransaction(candidate), /not found in any trusted preview CMTA deployment/);
+  missingPath = null;
   for (const [path, stage] of [
-    [`/assets/${registryPolicy}${policy}/utxos`, "Registry NFT asset lookup"],
     [`/txs/${registryTx}/cbor`, "Registry NFT transaction CBOR lookup"],
     [`/assets/${gsPolicy}${assetName}/utxos`, "Global State NFT asset lookup"],
     [`/txs/${gsTx}/cbor`, "Global State NFT transaction CBOR lookup"],
@@ -123,6 +129,87 @@ async function main() {
       error.message.includes(`${stage} failed on preview: Blockfrost 404 for ${path}`));
   }
   missingPath = null;
+
+  const originalPreview = trusted.preview;
+  const olderPolicy = "ef".repeat(28);
+  trusted.preview = [{ txHash: "00".repeat(32), registryPolicy: olderPolicy }, ...originalPreview];
+  try {
+    let olderQueries = 0;
+    global.fetch = async (url) => {
+      if (url.endsWith(`/assets/${olderPolicy}${policy}/utxos`)) { olderQueries++; return { ok: false, status: 404 }; }
+      return originalFetch(url);
+    };
+    await reviewMemberRootTransaction(candidate);
+    assert.equal(olderQueries, 1, "a token in a later trusted deployment must be discoverable");
+
+    global.fetch = async (url) => {
+      if (url.endsWith(`/assets/${olderPolicy}${policy}/utxos`)) return { ok: true, json: async () => [] };
+      return originalFetch(url);
+    };
+    await reviewMemberRootTransaction(candidate);
+
+    for (const status of [401, 429, 500]) {
+      global.fetch = async (url) => {
+        if (url.endsWith(`/assets/${olderPolicy}${policy}/utxos`)) return { ok: false, status };
+        return originalFetch(url);
+      };
+      await assert.rejects(() => reviewMemberRootTransaction(candidate),
+        new RegExp(`Registry NFT asset lookup failed on preview: Blockfrost ${status}`));
+    }
+    global.fetch = async (url) => {
+      if (url.endsWith(`/assets/${olderPolicy}${policy}/utxos`))
+        return { ok: true, json: async () => [{ tx_hash: registryTx, output_index: 0 }] };
+      return originalFetch(url);
+    };
+    await assert.rejects(() => reviewMemberRootTransaction(candidate), /multiple trusted preview CMTA deployments/);
+
+    trusted.preview = [...originalPreview, { txHash: "22".repeat(32), registryPolicy: olderPolicy }];
+    global.fetch = async (url) => {
+      if (url.endsWith(`/assets/${olderPolicy}${policy}/utxos`)) return { ok: false, status: 429 };
+      return originalFetch(url);
+    };
+    await assert.rejects(() => reviewMemberRootTransaction(candidate),
+      /Registry NFT asset lookup failed on preview: Blockfrost 429/);
+    global.fetch = async (url) => {
+      if (url.endsWith(`/assets/${olderPolicy}${policy}/utxos`)) return { ok: false, status: 404 };
+      return originalFetch(url);
+    };
+    await reviewMemberRootTransaction(candidate); // token belongs to the older, first record
+
+    trusted.preview = [...originalPreview, { txHash: "11".repeat(32), registryPolicy }];
+    let duplicateQueries = 0;
+    global.fetch = async (url) => {
+      if (url.endsWith(`/assets/${registryPolicy}${policy}/utxos`)) duplicateQueries++;
+      return originalFetch(url);
+    };
+    await reviewMemberRootTransaction(candidate);
+    assert.equal(duplicateQueries, 1, "identical registry policies must be queried only once");
+  } finally {
+    trusted.preview = originalPreview;
+    global.fetch = originalFetch;
+  }
+
+  global.fetch = async (url) => {
+    if (url.endsWith(`/assets/${registryPolicy}${policy}/utxos`)) return { ok: true, json: async () => ({ wrong: true }) };
+    return originalFetch(url);
+  };
+  await assert.rejects(() => reviewMemberRootTransaction(candidate), /Malformed Registry NFT asset lookup response/);
+  global.fetch = async (url) => {
+    if (url.endsWith(`/txs/${registryTx}/cbor`)) return { ok: true, json: async () => ({ cbor: sourceTx }) };
+    return originalFetch(url);
+  };
+  await assert.rejects(() => reviewMemberRootTransaction(candidate), /GS NFT policy is absent/);
+  const malformedRegistry = new Map(registryOutput);
+  malformedRegistry.set(2, [1, new cbor.Tagged(24, cbor.encode(new cbor.Tagged(121, [bytes(policy)])))]);
+  const malformedRegistrySource = hex([new Map([[1, [malformedRegistry]]]), new Map(), true, null]);
+  global.fetch = async (url) => {
+    if (url.endsWith(`/txs/${registryTx}/cbor`))
+      return { ok: true, json: async () => ({ cbor: malformedRegistrySource }) };
+    return originalFetch(url);
+  };
+  await assert.rejects(() => reviewMemberRootTransaction(candidate), /Unexpected 7-field datum layout/);
+  global.fetch = originalFetch;
+
   // Redeemer pointers address the lexically sorted ledger input set, not the
   // order in which the backend serialized the two inputs into CBOR.
   for (const gsFirst of [true, false]) {

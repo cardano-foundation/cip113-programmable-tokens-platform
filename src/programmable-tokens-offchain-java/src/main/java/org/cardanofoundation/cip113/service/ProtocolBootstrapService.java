@@ -229,7 +229,13 @@ public class ProtocolBootstrapService {
         if (params.transfer() == null) missing.add("transfer");
         if (params.thirdParty() == null) missing.add("thirdParty");
         if (params.unfracking() == null) missing.add("unfracking");
-        if (params.programmableLogicGlobal() == null) missing.add("programmableLogicGlobal");
+        if (params.programmableLogicGlobal() == null
+                || params.programmableLogicGlobal().scriptHash() == null
+                || !params.programmableLogicGlobal().scriptHash().matches("(?i)[0-9a-f]{56}")
+                || params.programmableLogicGlobal().unfrackingParameter() == null
+                || !params.programmableLogicGlobal().unfrackingParameter().matches("(?i)[0-9a-f]{56}")) {
+            missing.add("programmableLogicGlobal.scriptHash/unfrackingParameter (28-byte hex each)");
+        }
         if (params.upgradeMultisig() == null || params.upgradeMultisig().txInput() == null
                 || params.upgradeMultisig().utxo() == null) missing.add("upgradeMultisig");
         if (params.upgradeAuthority() == null) missing.add("upgradeAuthority");
