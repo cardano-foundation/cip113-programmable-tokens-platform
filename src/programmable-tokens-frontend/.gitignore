@@ -50,19 +50,9 @@ frontend.log
 
 # Output of `npm run test:deployment` — it compiles lib/deployment/derive.ts so a plain
 # node script can import it. Generated, never committed.
-.deploy-build/
+# Per-suite tsc output (scripts/run-suites.mjs deletes these before every run, because
+# tsc does not clean an outDir and a stale .js keeps satisfying a deleted module's import).
+# One pattern, not one line per suite: a new test:* script needs no .gitignore edit.
+.*-build/
 
 # Output of `npm run test:upgrade`. Generated, never committed.
-.upgrade-build/
-.root-build/
-.stake-build/
-.attestation-build/
-.mint-recovery-build/
-.registry-build/
-.witness-build/
-.hash-build/
-.sdkrec-build/
-.colour-build/
-.seeds-build/
-.relay-build/
-.resume-build/
