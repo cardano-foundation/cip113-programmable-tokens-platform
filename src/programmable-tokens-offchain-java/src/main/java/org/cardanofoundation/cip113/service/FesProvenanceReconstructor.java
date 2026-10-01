@@ -1,9 +1,11 @@
 package org.cardanofoundation.cip113.service;
 
+import com.bloxbean.cardano.client.address.AddressProvider;
 import com.bloxbean.cardano.client.transaction.spec.TransactionInput;
 import com.bloxbean.cardano.client.util.HexUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.cip171.Cip171Parameters;
 import org.cardanofoundation.cip113.cip171.UplcLinkClient;
 import org.cardanofoundation.cip113.entity.BlacklistInitEntity;
@@ -69,6 +71,7 @@ public class FesProvenanceReconstructor {
     private final FreezeAndSeizeScriptBuilderService fesScriptBuilder;
     private final BlacklistInitRepository blacklistInitRepository;
     private final FreezeAndSeizeTokenRegistrationRepository tokenRegistrationRepository;
+    private final AppConfig.Network network;
 
     /**
      * @param policyId            the programmable token's policy id
@@ -104,11 +107,44 @@ public class FesProvenanceReconstructor {
             return Optional.empty();
         }
 
-        if (!reproducesTransferLogic(progLogicBaseHash, blacklistPolicy.get(), transferLogicScript)) {
-            log.warn("REFUSING CIP-171 rebuild for token {}: blacklist policy {} does not reproduce "
-                    + "the transfer logic {} the chain reports. The record does not describe this token.",
-                    policyId, blacklistPolicy.get(), transferLogicScript);
+        // ⛔ THE DEPLOYMENT BASE COMES FROM THE RECORD, NOT FROM US.
+        //
+        // `transfer` is parameterised by (programmableLogicBase.scriptHash, blacklistNodePolicyId),
+        // and the record publishes BOTH — the base as `programmable_logic_base_cred`. Verifying
+        // against the base the caller happens to know only works while the token belongs to a
+        // deployment this instance still has a record for.
+        //
+        // ⚑ WHICH IS EXACTLY THE CASE THAT FAILS. A token minted on ANOTHER instance, or before a
+        // re-bootstrap, carries a transfer hash computed with a base this instance may no longer
+        // record at all — `protocol-bootstraps-<network>.json` holds one record and a re-bootstrap
+        // REPLACES it, so the old deployment is simply gone locally. The caller then passes null,
+        // nothing reproduces, and the refusal said "the record does not describe this token" when
+        // the truth was "this instance cannot name the deployment the record describes".
+        //
+        // Using the record's own base makes the check INDEPENDENT of local deployment history, and
+        // it is not a weakening: the recovered base still has to reproduce the transfer hash THE
+        // CHAIN reports, so a wrong or hostile base fails the same comparison as before.
+        var recordBase = Cip171Parameters.credentialHash(hop1.get(), "programmable_logic_base_cred");
+        String baseForProof = recordBase
+                .filter(b -> reproducesTransferLogic(b, blacklistPolicy.get(), transferLogicScript))
+                .or(() -> Optional.ofNullable(progLogicBaseHash)
+                        .filter(b -> reproducesTransferLogic(b, blacklistPolicy.get(), transferLogicScript)))
+                .orElse(null);
+
+        if (baseForProof == null) {
+            log.warn("REFUSING CIP-171 rebuild for token {}: neither the record's own "
+                    + "programmable_logic_base_cred ({}) nor this instance's base ({}) reproduces the "
+                    + "transfer logic {} the chain reports, with blacklist policy {}. Either the "
+                    + "record does not describe this token, or it was produced by a different "
+                    + "freeze-and-seize version.",
+                    policyId, recordBase.orElse("absent"), progLogicBaseHash, transferLogicScript,
+                    blacklistPolicy.get());
             return Optional.empty();
+        }
+        if (recordBase.isPresent() && !recordBase.get().equalsIgnoreCase(progLogicBaseHash)) {
+            log.info("Token {} belongs to deployment base {}, not this instance's {} — rebuilding "
+                    + "from the record's own base, which reproduces the chain's transfer hash.",
+                    policyId, recordBase.get(), progLogicBaseHash);
         }
 
         // ---- hop 2: the bootstrap UTxO and admin key, proven against the blacklist policy ----
@@ -133,6 +169,19 @@ public class FesProvenanceReconstructor {
         }
 
         // ---- both hops proven: persist ----
+        // ⛔ AND THE TRANSFER CREDENTIAL, WHICH IS NOW PROVEN RATHER THAN MISSING.
+        //
+        // V33 added module_transfer_stake_address so a transfer can refuse before building when a
+        // re-bootstrap has invalidated the credential. A rebuilt row used to leave it NULL, and the
+        // cross-check treats NULL as "no evidence" and stays silent — so every reconstructed token
+        // silently lost that protection and went back to failing on chain as 3141.
+        //
+        // It is derivable here, and PROVEN: it is the reward address of the very transfer script
+        // whose hash was just matched against the chain's registry node. Nothing is assumed.
+        String moduleTransferStakeAddress = AddressProvider.getRewardAddress(
+                fesScriptBuilder.buildTransferScript(baseForProof, blacklistPolicy.get()),
+                network.getCardanoNetwork()).getAddress();
+
         var blacklistInit = blacklistInitRepository.findByBlacklistNodePolicyId(blacklistPolicy.get())
                 .orElseGet(() -> blacklistInitRepository.save(BlacklistInitEntity.builder()
                         .blacklistNodePolicyId(blacklistPolicy.get())
@@ -142,6 +191,14 @@ public class FesProvenanceReconstructor {
                         // Not in the record and not derivable from it. Null means "not stated",
                         // which the registration cross-check already treats as "no evidence".
                         .cip68Enabled(null)
+                        // ⚑ issuer_admin_stake_address stays NULL deliberately. It is
+                        // (adminPkh, ASSET NAME), and while the record carries both, nothing on
+                        // chain exposes the issuer_admin script hash — so a derived value could not
+                        // be PROVEN the way the transfer credential just was. An unprovable value
+                        // written into a column the registration guard trusts would turn this
+                        // reconstruction into a source of false refusals. "No evidence" is correct.
+                        .issuerAdminStakeAddress(null)
+                        .moduleTransferStakeAddress(moduleTransferStakeAddress)
                         .build()));
 
         var registration = tokenRegistrationRepository.save(FreezeAndSeizeTokenRegistrationEntity.builder()
@@ -151,9 +208,11 @@ public class FesProvenanceReconstructor {
                 .build());
 
         log.info("Rebuilt freeze-and-seize record for token {} from CIP-171: blacklist={}, "
-                        + "admin={}, bootstrapUtxo={}#{} — both hops verified against chain hashes.",
+                        + "admin={}, bootstrapUtxo={}#{}, base={}, transferCred={} — both hops "
+                        + "verified against chain hashes.",
                 policyId, blacklistPolicy.get(), adminPkh.get(),
-                bootstrapUtxo.get().getTransactionId(), bootstrapUtxo.get().getIndex());
+                bootstrapUtxo.get().getTransactionId(), bootstrapUtxo.get().getIndex(),
+                baseForProof, moduleTransferStakeAddress);
 
         return Optional.of(registration);
     }

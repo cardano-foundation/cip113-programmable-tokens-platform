@@ -57,6 +57,32 @@ public final class Cip171Parameters {
         });
     }
 
+    /**
+     * A parameter that is a {@code Credential}: {@code Constr 0 [keyHash]} for a verification key,
+     * {@code Constr 1 [scriptHash]} for a script. Returns the 28-byte hash either way.
+     *
+     * <p>⛔ NEEDED BECAUSE A CREDENTIAL IS NOT A BYTE STRING. {@code programmable_logic_base_cred}
+     * is declared as {@code cardano/address/Credential} in the blueprint, so
+     * {@link #bytes(JsonNode, String)} sees a {@code ConstrPlutusData} and returns empty — which
+     * reads as "the record does not carry it" when the record carries it perfectly well. That
+     * silent empty is why the deployment base looked unrecoverable from provenance.
+     */
+    public static Optional<String> credentialHash(JsonNode record, String title) {
+        return findByTitle(record, title).flatMap(hex -> {
+            try {
+                if (PlutusData.deserialize(HexUtil.decodeHexString(hex)) instanceof ConstrPlutusData c) {
+                    var fields = c.getData().getPlutusDataList();
+                    if (fields.size() == 1 && fields.get(0) instanceof BytesPlutusData h) {
+                        return Optional.of(HexUtil.encodeHexString(h.getValue()));
+                    }
+                }
+            } catch (Exception ignored) {
+                // Third-party data: undecodable is "absent", never an error.
+            }
+            return Optional.empty();
+        });
+    }
+
     /** A parameter that is an {@code OutputReference}: {@code Constr 0 [bytes32, int]}. */
     public static Optional<TransactionInput> outputReference(JsonNode record, String title) {
         return findByTitle(record, title).flatMap(hex -> {

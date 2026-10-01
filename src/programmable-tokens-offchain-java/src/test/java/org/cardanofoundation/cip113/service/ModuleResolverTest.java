@@ -126,12 +126,12 @@ class ModuleResolverTest {
 
     /** A client that answers nothing, so the local-derivation tests above stay offline. */
     private static UplcLinkClient disabledUplcLink() {
-        return new UplcLinkClient(WebClient.builder(), "", false, 1000);
+        return new UplcLinkClient(WebClient.builder(), "", false, 1000, 60_000);
     }
 
     /** A client that answers with one canned record, whatever it is asked. */
     private static UplcLinkClient stubbedWith(String json) {
-        return new UplcLinkClient(WebClient.builder(), "", false, 1000) {
+        return new UplcLinkClient(WebClient.builder(), "", false, 1000, 60_000) {
             @Override
             public Optional<JsonNode> byHash(String scriptHash) {
                 try {
