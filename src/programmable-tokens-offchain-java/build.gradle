@@ -135,6 +135,9 @@ ext.ciQuarantinedTests = [
 ]
 ext.ciQuarantineExpiry = '2026-10-31'
 
+// Headroom below the 133 tests the allowlist matched on 2026-10-01.
+ext.CI_TEST_FLOOR = 110
+
 tasks.register('ciTest', Test) {
 	group = 'verification'
 	description = 'Offline tests that are safe to run in CI (allowlist; never submits transactions).'
@@ -160,10 +163,21 @@ tasks.register('ciTest', Test) {
 			logger.lifecycle("\nciTest: ${result.testCount} tests EXECUTED, "
 					+ "${result.failedTestCount} failed, ${result.skippedTestCount} skipped "
 					+ "(result: ${result.resultType})")
-			if (result.testCount == 0) {
-				throw new GradleException("ciTest ran ZERO tests. The allowlist matched nothing, "
-						+ "which is a green that proves nothing — exactly the `aiken check` "
-						+ "failure this repo already has on the on-chain side.")
+			// ⛔ A FLOOR, NOT JUST NON-ZERO. Zero is the obvious failure; the dangerous one is a
+			// SMALL number. If 'org.cardanofoundation.cip113.offline.*' stops matching — a package
+			// rename, a moved class — the task still runs the handful of individually named
+			// classes, reports SUCCESS, and nothing says that a hundred tests vanished.
+			// `failOnNoMatchingTests` cannot see this either, because tests DID match.
+			//
+			// Set with headroom below the current count so legitimately deleting a test does not
+			// redden CI; raise it when the suite grows substantially.
+			if (result.testCount < CI_TEST_FLOOR) {
+				throw new GradleException("ciTest ran only ${result.testCount} tests, below the "
+						+ "floor of ${CI_TEST_FLOOR}. Either a large number of tests stopped being "
+						+ "matched by ext.ciTestPatterns — check that the offline package pattern "
+						+ "still resolves — or the suite shrank on purpose, in which case lower the "
+						+ "floor deliberately. A filter that matches a FEW tests still reports "
+						+ "SUCCESS, which is why non-zero is not a sufficient check.")
 			}
 		}
 	}

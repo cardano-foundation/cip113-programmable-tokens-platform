@@ -138,12 +138,29 @@ console.log(
 );
 console.log("=".repeat(72));
 
-// A suite that prints no recognisable count still counts as executed — it may legitimately
-// report differently — but zero checks across ALL of them means nothing asserted anything.
-if (totalChecks === 0) {
+// ⛔ FLOORS, NOT JUST NON-ZERO. Zero is the obvious failure; a SMALL number is the dangerous
+// one, because it still reports success. If package.json were rewritten and most `test:*` scripts
+// disappeared, or most suites stopped printing countable output, this would otherwise pass while
+// almost nothing ran. Headroom below the 21 suites / 204 checks measured on 2026-10-01, so
+// deleting a test does not redden CI; raise them when the suite grows substantially.
+const SUITE_FLOOR = 15;
+const CHECK_FLOOR = 150;
+
+if (results.length < SUITE_FLOOR) {
   console.error(
-    "Every suite ran but not one reported a check count. Treating as failure: this is what a " +
-      "broken harness looks like from the outside."
+    `Only ${results.length} suites were discovered, below the floor of ${SUITE_FLOOR}. Either ` +
+      "package.json lost a number of `test:*` scripts, or discovery is broken. A run that " +
+      "executes a handful of suites still exits 0, which is why non-zero is not enough."
+  );
+  process.exit(1);
+}
+
+if (totalChecks < CHECK_FLOOR) {
+  console.error(
+    `Only ${totalChecks} checks were counted across ${results.length} suites, below the floor of ` +
+      `${CHECK_FLOOR}. Either assertions disappeared, or the suites changed their output format ` +
+      "and the counter can no longer see them — which looks identical to a harness that runs " +
+      "nothing."
   );
   process.exit(1);
 }
