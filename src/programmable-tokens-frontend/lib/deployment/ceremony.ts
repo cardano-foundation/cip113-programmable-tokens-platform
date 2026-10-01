@@ -32,7 +32,7 @@
  */
 
 import { EvoAssets, EvoTransactionHash } from "@easy1staking/cip113-sdk-ts";
-import { CBOR as EvoCBOR, Transaction as EvoTx } from "@evolution-sdk/evolution";
+import { CBOR as EvoCBOR, Data as EvoPlutusData, Transaction as EvoTx } from "@evolution-sdk/evolution";
 import { checkCip21 } from "../utils/cip21";
 import {
   type BootstrapStepId,
@@ -418,6 +418,57 @@ export function providerEvaluatorWithAdditionalUtxos(client: unknown): unknown {
   };
 }
 
+
+/**
+ * A transaction id as hex, whatever shape it arrives in.
+ *
+ * ⛔ `TransactionHash.hash` IS A BYTE ARRAY, not a string. Interpolating it produced
+ * `116,151,163,211,` — the array's `toString()`, comma-separated and then truncated mid-number,
+ * which is unusable for looking a UTxO up anywhere. A log that mangles the one identifier it prints
+ * cannot be cross-referenced against a chain explorer, which is most of what it is for.
+ */
+function outRefHex(txId: unknown): string {
+  if (typeof txId === "string") return txId.slice(0, 16);
+  const bytes = txId as ArrayLike<number> | undefined;
+  if (bytes && typeof bytes.length === "number") {
+    return Array.from(bytes as ArrayLike<number>)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+      .slice(0, 16);
+  }
+  return String(txId).slice(0, 16);
+}
+
+/**
+ * Serializes a forwarded UTxO's inline datum EXACTLY as the provider will, and reports whether the
+ * result is valid base16.
+ *
+ * ⛔ WHY THIS IS THE LAST SUSPECT STANDING. The transaction CBOR is already proven clean (11537
+ * bytes, even, all hex, measured 2026-10-01), so the only other base16 fields in an evaluate request
+ * are `datum` and the script on each additional UTxO. The provider builds the datum as
+ * `PlutusData.toCBORHex(datumOption.data)` — the same call made here, deliberately, so that what is
+ * printed is what is sent rather than an approximation of it. If this prints anything other than a
+ * clean even-length hex string, Ogmios's "failed to decode payload from base64 or base16" is fully
+ * explained and the fix belongs in that serialization.
+ */
+function describeDatum(o: Record<string, unknown>): string {
+  const d = o?.datumOption as { _tag?: unknown; data?: unknown; hash?: unknown } | undefined;
+  if (!d) return "";
+  if (d._tag === "DatumHash") return " (a datum HASH, not inline — sent as datumHash)";
+  try {
+    const hex = EvoPlutusData.toCBORHex(d.data as never);
+    if (typeof hex !== "string") return ` (inline datum serialized to ${typeof hex}, NOT A STRING)`;
+    const bad = /[^0-9a-fA-F]/.exec(hex);
+    return (
+      ` (inline datum -> ${hex.length / 2} bytes, ${hex.length % 2 === 0 ? "even" : "ODD"} length` +
+      (bad ? `, FIRST NON-HEX CHAR ${JSON.stringify(bad[0])} at ${bad.index}` : ", all hex") +
+      ")"
+    );
+  } catch (e) {
+    return ` (inline datum COULD NOT BE SERIALIZED: ${String(e).slice(0, 160)})`;
+  }
+}
+
 /**
  * Prints what the evaluator is about to post, so an undecodable-payload fault can be located.
  *
@@ -466,9 +517,9 @@ function logEvaluationPayload(tx: unknown, extra: readonly unknown[] | undefined
       const carries = fields.filter((k) => o?.[k] != null);
       const located = txId != null && idx != null;
       return (
-        `  [${i}] ${located ? `${String(txId).slice(0, 16)}#${String(idx)}` : "UNREADABLE SHAPE"} ` +
+        `  [${i}] ${located ? `${outRefHex(txId)}#${String(idx)}` : "UNREADABLE SHAPE"} ` +
         (carries.length > 0
-          ? `carries ${carries.map((k) => `${k}:${typeof o[k]}`).join(", ")}`
+          ? `carries ${carries.map((k) => `${k}:${typeof o[k]}`).join(", ")}${describeDatum(o)}`
           : located
             ? "no datum or script"
             : `— cannot classify; keys are [${Object.keys(o ?? {}).join(", ")}]`)
