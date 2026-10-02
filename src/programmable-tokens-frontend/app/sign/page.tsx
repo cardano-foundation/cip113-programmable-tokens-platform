@@ -338,8 +338,9 @@ export default function SignPage() {
           </div>
           <p className="text-[11px] text-dark-400">
             Give the <strong>address</strong>, not the key hash — it carries a checksum, so a
-            mangled one is refused on sight where a wrong hash is 56 valid-looking characters. The
-            hash is shown so you can match it against a member list afterwards.
+            <strong> mistyped</strong> one is refused on sight, where a mistyped hash is 56
+            valid-looking characters. Only the payment credential is read, so a stake part does not
+            matter. The hash is shown so you can match it against a member list afterwards.
           </p>
           <ul className="space-y-1.5">
             {myCredentials.map((c) => (

@@ -1217,10 +1217,12 @@ export default function BootstrapProtocolPage() {
         </label>
         <p className="text-xs text-dark-400">
           One per line: an <strong>address</strong> (preferred) or a payment key hash. Addresses
-          are checksummed, so a mangled one is refused on paste; a wrong key hash looks valid and
-          survives to the signing round. Script credentials are <strong>not currently
-          supported</strong> — the standard allows them, but every declared member signs at genesis
-          and a script cannot take part in that.
+          carry a checksum, so a <strong>mistyped</strong> one is refused on paste; a mistyped key
+          hash is 56 valid-looking characters and survives to the signing round. A stake part is
+          ignored — only the payment credential is stored, so an address whose payment and staking
+          keys come from different wallets is accepted and reduced correctly. Script credentials are{" "}
+          <strong>not currently supported</strong> — the standard allows them, but every declared
+          member signs at genesis and a script cannot take part in that.
         </p>
         <textarea
           id="multisig-members"
