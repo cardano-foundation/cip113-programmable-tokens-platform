@@ -2,13 +2,12 @@ const assert = require("node:assert/strict");
 const cbor = require("cbor");
 const { reviewMemberRootTransaction } = require("./.root-build/rwa/review-root-tx.js");
 const { computeMemberRoot } = require("./.root-build/rwa/member-root.js");
-const { TRUSTED_REGISTRY_DEPLOYMENTS: trusted } = require("./.root-build/rwa/trusted-registry-deployments.generated.js");
 
 const bytes = (hex) => Buffer.from(hex, "hex");
 const hex = (value) => cbor.encode(value).toString("hex");
 const policy = "ab".repeat(28);
 const gsPolicy = "cd".repeat(28);
-const registryPolicy = trusted.preview[0].registryPolicy;
+const registryPolicy = "de".repeat(28);
 const assetName = "476c6f62616c5374617465";
 const admin = "11".repeat(28);
 const gsTx = "aa".repeat(32);
@@ -83,7 +82,21 @@ function withPlainOutputs(change, collateralReturn) {
 process.env.NEXT_PUBLIC_BLOCKFROST_API_KEY = "fixture-key";
 process.env.NEXT_PUBLIC_NETWORK = "preview";
 let missingPath = null;
+let currentBootstrap = { registry: { scriptHash: registryPolicy } };
+let indexedProtocols = [];
+let backendStatus = {};
+let backendCalls = [];
 global.fetch = async (url) => {
+  if (url.endsWith("/api/v1/protocol/bootstrap")) {
+    backendCalls.push("current");
+    if (backendStatus.current) return { ok: false, status: backendStatus.current };
+    return { ok: true, json: async () => currentBootstrap };
+  }
+  if (url.endsWith("/api/v1/registry/protocols")) {
+    backendCalls.push("indexed");
+    if (backendStatus.indexed) return { ok: false, status: backendStatus.indexed };
+    return { ok: true, json: async () => indexedProtocols };
+  }
   if (missingPath && url.endsWith(missingPath)) return { ok: false, status: 404 };
   if (url.endsWith(`/assets/${registryPolicy}${policy}/utxos`))
     return { ok: true, json: async () => [{ tx_hash: registryTx, output_index: 0 }] };
@@ -99,25 +112,26 @@ global.fetch = async (url) => {
 async function main() {
   const originalFetch = global.fetch;
   assert.match(registryPolicy, /^[0-9a-f]{56}$/);
-  assert.notEqual(trusted.preview[0].registryPolicy, trusted.preprod[0].registryPolicy);
+  // A current deployment absent from the old bundled catalog still works.
+  backendCalls = [];
+  await reviewMemberRootTransaction(candidate);
+  assert.deepEqual(backendCalls, ["current", "indexed"]);
+
   process.env.NEXT_PUBLIC_NETWORK = "preprod";
   global.fetch = async (url) => {
-    assert.ok(url.endsWith(`/assets/${trusted.preprod[0].registryPolicy}${policy}/utxos`));
+    if (url.includes("/api/v1/")) return originalFetch(url);
+    assert.ok(url.endsWith(`/assets/${registryPolicy}${policy}/utxos`));
     return { ok: false, status: 404 };
   };
   await assert.rejects(() => reviewMemberRootTransaction(candidate),
-    /not found in any trusted preprod CMTA deployment/);
-
-  process.env.NEXT_PUBLIC_NETWORK = "mainnet";
-  await assert.rejects(() => reviewMemberRootTransaction(candidate),
-    /No trusted CMTA deployment is bundled for mainnet/);
+    /not found in any backend-reported preprod CMTA deployment/);
 
   process.env.NEXT_PUBLIC_NETWORK = "preview";
   global.fetch = originalFetch;
 
   await reviewMemberRootTransaction(candidate);
   missingPath = `/assets/${registryPolicy}${policy}/utxos`;
-  await assert.rejects(() => reviewMemberRootTransaction(candidate), /not found in any trusted preview CMTA deployment/);
+  await assert.rejects(() => reviewMemberRootTransaction(candidate), /not found in any backend-reported preview CMTA deployment/);
   missingPath = null;
   for (const [path, stage] of [
     [`/txs/${registryTx}/cbor`, "Registry NFT transaction CBOR lookup"],
@@ -130,17 +144,17 @@ async function main() {
   }
   missingPath = null;
 
-  const originalPreview = trusted.preview;
   const olderPolicy = "ef".repeat(28);
-  trusted.preview = [{ txHash: "00".repeat(32), registryPolicy: olderPolicy }, ...originalPreview];
   try {
+    currentBootstrap = { registry: { scriptHash: olderPolicy } };
+    indexedProtocols = [{ registryNodePolicyId: registryPolicy }];
     let olderQueries = 0;
     global.fetch = async (url) => {
       if (url.endsWith(`/assets/${olderPolicy}${policy}/utxos`)) { olderQueries++; return { ok: false, status: 404 }; }
       return originalFetch(url);
     };
     await reviewMemberRootTransaction(candidate);
-    assert.equal(olderQueries, 1, "a token in a later trusted deployment must be discoverable");
+    assert.equal(olderQueries, 1, "an indexed historical token must be discoverable");
 
     global.fetch = async (url) => {
       if (url.endsWith(`/assets/${olderPolicy}${policy}/utxos`)) return { ok: true, json: async () => [] };
@@ -161,9 +175,9 @@ async function main() {
         return { ok: true, json: async () => [{ tx_hash: registryTx, output_index: 0 }] };
       return originalFetch(url);
     };
-    await assert.rejects(() => reviewMemberRootTransaction(candidate), /multiple trusted preview CMTA deployments/);
+    await assert.rejects(() => reviewMemberRootTransaction(candidate), /multiple backend-reported preview CMTA deployments/);
 
-    trusted.preview = [...originalPreview, { txHash: "22".repeat(32), registryPolicy: olderPolicy }];
+    indexedProtocols = [{ registryNodePolicyId: olderPolicy }, { registryNodePolicyId: registryPolicy }];
     global.fetch = async (url) => {
       if (url.endsWith(`/assets/${olderPolicy}${policy}/utxos`)) return { ok: false, status: 429 };
       return originalFetch(url);
@@ -176,7 +190,8 @@ async function main() {
     };
     await reviewMemberRootTransaction(candidate); // token belongs to the older, first record
 
-    trusted.preview = [...originalPreview, { txHash: "11".repeat(32), registryPolicy }];
+    currentBootstrap = { registry: { scriptHash: registryPolicy.toUpperCase() } };
+    indexedProtocols = [{ registryNodePolicyId: registryPolicy }];
     let duplicateQueries = 0;
     global.fetch = async (url) => {
       if (url.endsWith(`/assets/${registryPolicy}${policy}/utxos`)) duplicateQueries++;
@@ -185,9 +200,39 @@ async function main() {
     await reviewMemberRootTransaction(candidate);
     assert.equal(duplicateQueries, 1, "identical registry policies must be queried only once");
   } finally {
-    trusted.preview = originalPreview;
+    currentBootstrap = { registry: { scriptHash: registryPolicy } };
+    indexedProtocols = [];
     global.fetch = originalFetch;
   }
+
+  // Each review fetches deployment identity anew; it cannot retain a stale policy.
+  currentBootstrap = { registry: { scriptHash: olderPolicy } };
+  global.fetch = async (url) => {
+    if (url.endsWith(`/assets/${olderPolicy}${policy}/utxos`)) return { ok: false, status: 404 };
+    return originalFetch(url);
+  };
+  await assert.rejects(() => reviewMemberRootTransaction(candidate), /not found in any backend-reported preview CMTA deployment/);
+  currentBootstrap = { registry: { scriptHash: registryPolicy } };
+  global.fetch = originalFetch;
+  await reviewMemberRootTransaction(candidate);
+
+  for (const [source, status] of [["current", 503], ["indexed", 429]]) {
+    backendStatus[source] = status;
+    await assert.rejects(() => reviewMemberRootTransaction(candidate),
+      new RegExp(`${source === "current" ? "Current deployment" : "Indexed deployments"} lookup failed: backend HTTP ${status}`));
+    backendStatus[source] = undefined;
+  }
+  for (const invalid of [null, {}, { registry: { scriptHash: "xyz" } }]) {
+    currentBootstrap = invalid;
+    await assert.rejects(() => reviewMemberRootTransaction(candidate), /Current deployment has an invalid registry policy/);
+  }
+  currentBootstrap = { registry: { scriptHash: registryPolicy } };
+  for (const invalid of [null, {}, [{ registryNodePolicyId: "xyz" }]]) {
+    indexedProtocols = invalid;
+    await assert.rejects(() => reviewMemberRootTransaction(candidate),
+      /Indexed deployments response is not an array|Indexed deployment 0 has an invalid registry policy/);
+  }
+  indexedProtocols = [];
 
   global.fetch = async (url) => {
     if (url.endsWith(`/assets/${registryPolicy}${policy}/utxos`)) return { ok: true, json: async () => ({ wrong: true }) };

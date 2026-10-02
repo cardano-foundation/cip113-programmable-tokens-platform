@@ -1,7 +1,6 @@
 import * as cbor from "cbor";
 import { getCardanoNetwork } from "../utils/network";
 import { bytesHex, computeMemberRoot, hexBytes, type MemberLeaf } from "./member-root";
-import { TRUSTED_REGISTRY_DEPLOYMENTS } from "./trusted-registry-deployments.generated";
 
 const GS_ASSET_NAME = "476c6f62616c5374617465";
 type CborMap = Map<unknown, unknown>;
@@ -90,12 +89,44 @@ async function uniqueAssetOutput(policyId: string, assetName: string, lookup: st
   return { ref, output };
 }
 
+async function backendJson(path: string, lookup: string): Promise<unknown> {
+  const base = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8080";
+  const response = await fetch(`${base}/api/v1${path}`, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`${lookup} failed: backend HTTP ${response.status}`);
+  return response.json();
+}
+
+function registryPolicy(value: unknown, source: string): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{56}$/i.test(value))
+    throw new Error(`${source} has an invalid registry policy`);
+  return value.toLowerCase();
+}
+
+async function registryPoliciesForTokenReview(): Promise<string[]> {
+  // The backend supplies deployment identity; the chain queries below still verify
+  // the selected token's registry NFT, GS datum, and exact transaction independently.
+  const [current, indexed] = await Promise.all([
+    backendJson("/protocol/bootstrap", "Current deployment lookup"),
+    backendJson("/registry/protocols", "Indexed deployments lookup"),
+  ]);
+  const currentPolicy = registryPolicy(
+    (current as { registry?: { scriptHash?: unknown } } | null)?.registry?.scriptHash,
+    "Current deployment",
+  );
+  if (!Array.isArray(indexed)) throw new Error("Indexed deployments response is not an array");
+  const policies = indexed.map((entry, index) => registryPolicy(
+    (entry as { registryNodePolicyId?: unknown } | null)?.registryNodePolicyId,
+    `Indexed deployment ${index}`,
+  ));
+  return [...new Set([currentPolicy, ...policies])];
+}
+
 async function gsPolicyForToken(tokenPolicyId: string): Promise<string> {
   const network = getCardanoNetwork();
-  const registryPolicies = [...new Set(TRUSTED_REGISTRY_DEPLOYMENTS[network]
-    .map((deployment) => deployment.registryPolicy))];
-  if (registryPolicies.length === 0)
-    throw new Error(`No trusted CMTA deployment is bundled for ${network}; rebuild the frontend with its deployment record`);
+  const registryPolicies = await registryPoliciesForTokenReview();
   const candidates: Array<{ policy: string; txHash: string; outputIndex: number }> = [];
   for (const policy of registryPolicies) {
     const path = `/assets/${policy}${tokenPolicyId}/utxos`;
@@ -112,9 +143,9 @@ async function gsPolicyForToken(tokenPolicyId: string): Promise<string> {
     candidates.push({ policy, txHash: utxo.tx_hash, outputIndex: utxo.output_index });
   }
   if (candidates.length === 0)
-    throw new Error(`Token ${tokenPolicyId} was not found in any trusted ${network} CMTA deployment`);
+    throw new Error(`Token ${tokenPolicyId} was not found in any backend-reported ${network} CMTA deployment`);
   if (candidates.length !== 1)
-    throw new Error(`Token ${tokenPolicyId} appears in multiple trusted ${network} CMTA deployments`);
+    throw new Error(`Token ${tokenPolicyId} appears in multiple backend-reported ${network} CMTA deployments`);
   const registry = candidates[0];
   const response = await blockfrostJson<{ cbor: string }>(`/txs/${registry.txHash}/cbor`, "Registry NFT transaction CBOR lookup");
   const output = outputFromTx(response.cbor, registry.outputIndex);
