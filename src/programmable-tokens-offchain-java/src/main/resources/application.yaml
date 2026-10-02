@@ -197,7 +197,7 @@ wallet:
 programmable:
   token:
     default:
-      txHash: "16602a2a5b72e7dbab67b66cd7db3babd90732f02d74ac820480e42cea866287"
+      txHash: "8e9668a6432ea4567bb1deba919c0f76adcce8373d6d89d1a06faee2c83d00f9"
 
 blockfrost:
   url: https://cardano-preview.blockfrost.io/api/v0/
