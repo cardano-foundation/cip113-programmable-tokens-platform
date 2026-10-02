@@ -11,7 +11,7 @@
  * input as a bare set, so every conformant transaction looked inconsistent.
  */
 const assert = require("node:assert");
-const { checkCip21 } = require("./.cip21-build/cip21.js");
+const { checkCip21, isFatalScope } = require("./.cip21-build/cip21.js");
 
 let ran = 0;
 const AB = "ab".repeat(32);
@@ -120,6 +120,170 @@ assert.ok(r.violations.length > 0,
   "truncated/garbage CBOR was reported as conformant — a blind check must say it is blind");
 console.log("  OK   unparseable CBOR is never reported as a pass");
 ran++;
+
+// ---- 11a1. the outer array header is READ, so the body is never walked as the witness set ----
+// ⛔ A FATALITY INVERSION, not a cosmetic slip. The top-level dispatch used `bytes[0] & 0x1f` as the
+// element count and a hardcoded 1-byte header. With a non-minimal outer header (`9804` — four
+// elements in two bytes, valid CBOR) every element shifted by one, so the BODY was walked under the
+// label `witnessSet`: its defects became `witnessSet{09}: …` and therefore ADVISORY instead of fatal.
+// The same bytes under an `84` header were correctly fatal. Found by the 2026-10-01 pre-merge audit.
+{
+  // ⛔ THE INPUT MUST HAVE A BODY DEFECT TO MISATTRIBUTE, or these assertions cannot fail. The first
+  // version of this test used the CONFORMANT real transaction: its body contains nothing to blame, so
+  // "nothing may be attributed to witnessSet" and "every finding must be fatal" were both trivially
+  // true and the test could not express a failure. Measured: with that input, reverting the dispatch's
+  // OFFSET (`head.first` back to a hardcoded 1) left all 306 checks green while the body really was
+  // being walked as the witness set. The count half was defended and the offset half was not, and the
+  // test looked directly at the property either way.
+  //
+  // ⇒ So the input is the real captured ceremony body a Ledger refused — which carries an unsorted
+  // mint map, i.e. a body-level defect that WILL be misattributed if the offset is wrong.
+  const fs2 = require("node:fs");
+  const defective = fs2.readFileSync("test-fixtures/ceremony-genesis-unsorted-mint.hex", "utf8").trim();
+  const underMinimal = checkCip21(defective);
+  assert.ok(underMinimal.scopedViolations.some((v) => v.message.startsWith("body.mint")),
+    `the fixture must carry a body.mint defect for this test to mean anything; got: ` +
+    underMinimal.violations.join(" | "));
+
+  // Same bytes, non-minimal outer header. The mint defect must STILL be body-scoped and fatal.
+  const r = checkCip21("9804" + defective.slice(2));
+  const mislabelled = r.scopedViolations.filter((v) => v.message.startsWith("witnessSet"));
+  assert.strictEqual(mislabelled.length, 0,
+    `nothing may be attributed to witnessSet when the header is non-minimal; got: ` +
+    mislabelled.map((v) => v.message).join(" | "));
+  assert.ok(r.scopedViolations.some((v) => v.message.startsWith("body.mint") && v.scope === "body"),
+    `the mint defect must still be attributed to the BODY; got ` +
+    JSON.stringify(r.scopedViolations.map((v) => `${v.scope}:${v.message.slice(0, 24)}`)));
+  assert.ok(r.scopedViolations.every((v) => isFatalScope(v.scope)),
+    `every finding on a mis-headered transaction must be fatal; got scopes ` +
+    JSON.stringify(r.scopedViolations.map((v) => v.scope)));
+  assert.ok(r.scopedViolations.some((v) => /outer array header/.test(v.message)),
+    "and the non-minimal header is itself reported");
+
+  // Control, kept: a CONFORMANT transaction under a minimal header stays clean, so the checks above
+  // cannot be satisfied by a rule that simply flags everything.
+  const real = require("./test-fixtures/real-preview-txs.json").transactions;
+  assert.strictEqual(checkCip21(real[1].cbor.toLowerCase()).violations.length, 0,
+    "control: a real conformant transaction under `84` reports nothing");
+  console.log("  OK   a non-minimal outer header does not reclassify the body as the witness set");
+  ran++;
+}
+
+// ---- 11a2. an unreadable outer header is blind, not clean ----
+{
+  // 9f… — indefinite-length outer array. `headerCount` declines, so the body cannot be located.
+  const r = checkCip21("9fa0a0f5f6ff");
+  assert.ok(r.scopedViolations.some((v) => v.scope === "blind"),
+    `an indefinite outer array must be reported blind, not walked at a guessed offset; got ` +
+    JSON.stringify(r.scopedViolations.map((v) => v.scope)));
+  console.log("  OK   an indefinite outer array header is reported blind rather than guessed at");
+  ran++;
+}
+
+// ---- 11a3. `blind` is fatal as a MECHANISM, asserted directly ----
+// ⛔ THIS ASSERTION EXISTS BECAUSE THE BEHAVIOURAL TEST FOR IT PASSED FOR THE WRONG REASON. A
+// ceremony does refuse empty input — but it refuses inside `fromCBORHexWithFormat`, before the
+// checker is ever consulted, so dropping "blind" from `isFatalScope` changed nothing and every suite
+// stayed green. The mechanism needs its own assertion, not cover borrowed from an earlier guard.
+assert.strictEqual(isFatalScope("blind"), true, "`blind` must be fatal: no finding is not a pass");
+assert.strictEqual(isFatalScope("transaction"), true, "`transaction` must be fatal");
+assert.strictEqual(isFatalScope("body"), true, "`body` must be fatal");
+assert.strictEqual(isFatalScope("witnessSet"), false, "`witnessSet` is advisory — we leave its bytes alone");
+assert.strictEqual(isFatalScope("auxiliaryData"), false, "`auxiliaryData` is advisory");
+console.log("  OK   isFatalScope maps every scope the way the ceremony depends on");
+ran++;
+
+// ---- 11a4. two distinct defects with identical messages are both reported ----
+// ⛔ The first fix for duplicate reporting deduped by message text, which merged genuinely distinct
+// defects: two non-minimal withdrawal keys of the same length produce the same string. A checker that
+// hides a defect to avoid printing it twice is worse than one that repeats itself.
+{
+  // body = { 5: { h'1800...' : 1800, ... } } is awkward to hand-roll; use two non-minimal integers in
+  // the same map value position instead: body = {5: {a: 1800, b: 1800}} with 1800 = 0 in 2 bytes.
+  const r = checkCip21("84a105a2411a1800411b1800a0f5f6");
+  const nonMinimal = r.violations.filter((v) => /shortest encoding|not minimal/.test(v));
+  assert.strictEqual(nonMinimal.length, 2,
+    `two separate non-minimal encodings must BOTH be reported, not merged into one; got ` +
+    `${nonMinimal.length}: ${r.violations.join(" | ")}`);
+  console.log(`  OK   ${nonMinimal.length} identical-message defects are each reported, not deduped away`);
+  ran++;
+}
+
+// ---- 11a6. the outer-header minimality boundaries, in both directions ----
+// ⛔ A WRONG BOUNDARY HERE IS A FALSE POSITIVE, and on this lane a false positive is a refused
+// ceremony. `< 24 ? 1 : < 256 ? 2 : < 65536 ? 3 : 5` has four transitions and widening either of the
+// first two (`<=` instead of `<`) was undetectable: both mutants survived the whole suite. Counts 24
+// and 256 are exactly where a correct 2- or 3-byte header must NOT be flagged.
+{
+  const elem = "f6"; // null — a cheap, conformant array element
+  const mk = (count, headerHex) => headerHex + elem.repeat(count);
+  const flagged = (hex) =>
+    checkCip21(hex).violations.filter((v) => /outer array header/.test(v)).length;
+
+  for (const [count, header, expect, why] of [
+    [23, "97", 0, "23 elements in a 1-byte header is minimal"],
+    [23, "9817", 1, "23 elements in a 2-byte header is NOT minimal"],
+    [24, "9818", 0, "24 elements needs 2 bytes, so 2 bytes is minimal"],
+    [24, "990018", 1, "24 elements in a 3-byte header is NOT minimal"],
+    [255, "98ff", 0, "255 elements needs 2 bytes"],
+    [255, "9900ff", 1, "255 elements in 3 bytes is NOT minimal"],
+    [256, "990100", 0, "256 elements needs 3 bytes, so 3 bytes is minimal"],
+  ]) {
+    const got = flagged(mk(count, header));
+    assert.strictEqual(got, expect,
+      `${why}: expected ${expect} header finding(s), got ${got}`);
+  }
+  console.log("  OK   outer-header minimality is exact at 23/24/255/256 in both directions");
+  ran++;
+}
+
+// ---- 11a5. nothing inside an output is reported twice ----
+// ⛔ `body.outputs` is inspected once for the legacy shape and then walked again by the generic
+// walker, so findings inside an output used to be recorded TWICE — inflating both the count an
+// operator reads and the list they work through. The first fix deduped by message text, which merged
+// genuinely distinct defects (11a4 guards that). The real fix is that the pre-pass walks only for the
+// offset and discards what it reports, so this pins the absence of duplicates directly.
+{
+  // body = {1: [ [addr, [coin, {}]] ]} — a token-free output in the forbidden legacy shape, which
+  // trips BOTH the legacy-output rule and the empty-map-in-body rule.
+  // ⚑ THE INPUT MUST EXERCISE BOTH SINKS, or each rewind defends the other's mutation. `walk` reports
+  // into `ctx.violations` (the non-minimal coin `1800` — zero written in two bytes) and accumulates
+  // into `ctx.emptyInBody` (the `a0`). Rewinding only one leaves the other duplicated, and an input
+  // that trips only one sink cannot tell the two mutations apart — measured: with a minimal coin,
+  // removing the `violations` rewind changed nothing and survived.
+  const legacyOut = "82" + "581c" + "11".repeat(28) + "82" + "1800" + "a0";
+  const r = checkCip21("84" + "a101" + "81" + legacyOut + "a0f5f6");
+  assert.ok(r.violations.some((v) => /token-free output/.test(v)), "the legacy shape is reported");
+  assert.ok(r.violations.some((v) => /empty map/.test(v)), "the empty map is reported (emptyInBody sink)");
+  assert.ok(r.violations.some((v) => /shortest encoding|not minimal/.test(v)),
+    `the non-minimal coin is reported (violations sink); got ${r.violations.join(" | ")}`);
+  const counts = new Map();
+  for (const v of r.violations) counts.set(v, (counts.get(v) ?? 0) + 1);
+  const repeated = [...counts.entries()].filter(([, n]) => n > 1);
+  assert.strictEqual(repeated.length, 0,
+    `no violation may be reported more than once; repeated: ` +
+    repeated.map(([v, n]) => `${n}x ${v}`).join(" | "));
+
+  // ⛔ EXACT-MESSAGE EQUALITY MISSES THE DUPLICATE THAT ACTUALLY OCCURRED: the pre-pass reported the
+  // same byte the main walk reports, under a different path label, so the strings differed.
+  //
+  // ⛔ AND "SAME COMPLAINT, DIFFERENT LABEL" IS NOT THE RULE — I tried it and it is WRONG. On an output
+  // whose coin position holds an empty map, `body.outputs[0][1][0]` and `body.outputs[0][1][1]` are two
+  // GENUINELY DIFFERENT bytes that produce the identical complaint, so that heuristic flags a legitimate
+  // pair as a duplicate. The property wanted is "no byte is reported twice", and the path label is not a
+  // reliable proxy for the byte either way.
+  //
+  // ⇒ So this asserts the specific leak instead of a clever general rule: the pre-pass's own label must
+  // never reach the output. `checkLegacyOutput` walks the coin as `${path}.coin` to locate the multiasset
+  // map, and that label is reported by nothing else — if it appears, the pre-pass is reporting again.
+  const prePassLabels = r.scopedViolations.filter((v) => /\.coin$/.test(v.path));
+  assert.strictEqual(prePassLabels.length, 0,
+    `the legacy-shape pre-pass must report nothing of its own walk; leaked: ` +
+    prePassLabels.map((v) => v.path).join(", ") +
+    `\n  full list: ${r.violations.join(" | ")}`);
+  console.log(`  OK   ${r.violations.length} findings inside an output, each reported exactly once`);
+  ran++;
+}
 
 // ---- 11b. an empty MAP in the body, not just an empty list ----
 // ⛔ ASYMMETRIC COVERAGE WAS A FINDING. Removing the empty-LIST half of this rule was killed by the

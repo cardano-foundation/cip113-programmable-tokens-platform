@@ -58,7 +58,15 @@ const BODY_FIELD: Record<number, string> = {
 export type Cip21Scope =
   /** Inside the body — the only part a hardware wallet reconstructs and hashes. FATAL. */
   | "body"
-  /** A whole-transaction rule (tag-258 all-or-nothing) that still changes the body a device hashes. FATAL. */
+  /**
+   * A rule about the transaction AS A WHOLE rather than localised to the body. Either it changes the
+   * body a device hashes (tag-258 all-or-nothing), or it means we cannot faithfully reproduce the
+   * transaction's framing (a non-minimal outer array header). Fatal either way — the second case does
+   * NOT alter the body bytes, so a device would hash the same body, but `canonicaliseBodyOnly` refuses
+   * such a transaction anyway and `cardano-hw-cli` refuses any transaction carrying a fixable issue
+   * anywhere. The earlier wording claimed every member of this scope changes the hashed body, which
+   * stopped being true the moment the header rule joined it.
+   */
   | "transaction"
   /** The checker could not read the bytes, so it has no opinion. FATAL — no finding is not a pass. */
   | "blind"
@@ -75,6 +83,17 @@ export function isFatalScope(scope: Cip21Scope): boolean {
 export interface Cip21Violation {
   scope: Cip21Scope;
   message: string;
+  /**
+   * The path this violation was found at, CARRIED rather than recovered from the message.
+   *
+   * ⛔ A DUPLICATE CHECK THAT RE-DERIVES THE PATH BY STRING SURGERY GOES BLIND ON WHOLE MESSAGE
+   * FAMILIES. The first such check split on the first `": "` to compare complaints independently of
+   * where they occurred — and the empty-collection messages contain no `": "` at all, so the split
+   * returned the whole string and every path-differing duplicate in that family looked distinct. It
+   * reported zero duplicates on an input that had one. Carrying the path makes "same complaint,
+   * different label" answerable without parsing prose.
+   */
+  path: string;
 }
 
 export interface Cip21Report {
@@ -120,7 +139,7 @@ function scopeOfPath(path: string): Cip21Scope {
 
 /** Record a violation, taking its scope from the path rather than from its wording. */
 function pushAt(ctx: Ctx, path: string, message: string): void {
-  ctx.violations.push({ scope: scopeOfPath(path), message });
+  ctx.violations.push({ scope: scopeOfPath(path), message, path });
 }
 
 /**
@@ -162,32 +181,33 @@ function inBody(path: string): boolean {
  * `[address, coin, ?datum_hash]` instead of `[address, [coin, {}], ?datum_hash]`." The empty-map
  * rule already catches the `{}`, but a token-free output deserves the message that names the fix.
  */
-function checkLegacyOutput(ctx: Ctx, i: number, path: string): void {
+function checkLegacyOutput(ctx: Ctx, i: number, path: string): string | null {
   const b = ctx.bytes;
-  if ((b[i] >> 5) !== 4) return;               // post-Alonzo map output: different rules
+  if ((b[i] >> 5) !== 4) return null;          // post-Alonzo map output: different rules
   const n = b[i] & 0x1f;
-  if (n < 2 || n > 3) return;
+  if (n < 2 || n > 3) return null;
   // skip the address (a byte string)
   let p = i + 1;
   const ab = b[p];
-  if ((ab >> 5) !== 2) return;
+  if ((ab >> 5) !== 2) return null;
   const ai2 = ab & 0x1f;
   // An address is 29 or 57 bytes, so its length is either inline or one byte. Anything longer is
   // not an address shape this check understands — skip rather than read the wrong offset.
-  if (ai2 > 24) return;
+  if (ai2 > 24) return null;
   p += ai2 < 24 ? 1 + ai2 : 2 + b[i + 2];
   // value position: a bare uint is already the simple tuple; an array is [coin, multiasset]
-  if ((b[p] >> 5) !== 4) return;
+  if ((b[p] >> 5) !== 4) return null;
   const vn = b[p] & 0x1f;
-  if (vn !== 2) return;
+  if (vn !== 2) return null;
   // walk past coin to reach the multiasset map
   const after = walk(ctx, p + 1, `${path}.coin`);
   if (b[after] === 0xa0) {
-    pushAt(ctx, path,
+    return (
       `${path}: token-free output serialized as [address, [coin, {}]] — CIP-21 requires the simple ` +
       `tuple [address, coin, ?datum_hash] when an output carries no multi-asset tokens`
     );
   }
+  return null;
 }
 
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
@@ -298,8 +318,28 @@ function walk(ctx: Ctx, i: number, path: string, isBody = false): number {
             if (head) {
               let q = head.first;
               for (let j = 0; j < head.count; j++) {
-                checkLegacyOutput(ctx, q, `body.outputs[${j}]`);
+                /**
+                 * ⚑ SNAPSHOT BOTH SINKS BEFORE ANYTHING IN THIS PASS RUNS. This pre-pass exists only to
+                 * find the forbidden legacy output SHAPE; everything else inside an output is reported by
+                 * the main walk below, at its canonical path. `walk` has TWO sinks — it reports into
+                 * `ctx.violations` AND accumulates into `ctx.emptyInBody`, which becomes violations after
+                 * the walk is over — and both `checkLegacyOutput`'s internal walk and this pass's own walk
+                 * write to them.
+                 *
+                 * Three earlier versions each got this slightly wrong and each left the SAME BYTE reported
+                 * twice under two different path labels: rewinding only `violations`; snapshotting
+                 * `emptyInBody` after `checkLegacyOutput` had already run; and keeping the right findings
+                 * by MATCHING THE MESSAGE TEXT, which would silently drop a fatal finding the day the
+                 * message was reworded. `checkLegacyOutput` now RETURNS its finding instead of pushing, so
+                 * there is nothing of its own to preserve across the rewind and no prose to match.
+                 */
+                const reportedBefore = ctx.violations.length;
+                const emptiesBefore = ctx.emptyInBody.length;
+                const legacyFinding = checkLegacyOutput(ctx, q, `body.outputs[${j}]`);
                 q = walk(ctx, q, `body.outputs[${j}]`);
+                ctx.violations.length = reportedBefore;
+                ctx.emptyInBody.length = emptiesBefore;
+                if (legacyFinding !== null) pushAt(ctx, `body.outputs[${j}]`, legacyFinding);
               }
             }
           }
@@ -373,7 +413,7 @@ export function checkCip21(txCborHex: string): Cip21Report {
 
   if (bytes.length === 0) {
     // "blind", not advisory: a checker handed nothing has no opinion, and no opinion is not a pass.
-    const empty: Cip21Violation = { scope: "blind", message: "empty CBOR — nothing to check" };
+    const empty: Cip21Violation = { scope: "blind", path: "", message: "empty CBOR — nothing to check" };
     return {
       violations: [empty.message], scopedViolations: [empty],
       tag258Count: 0, bareSetFields: [], taggedSetFields: [],
@@ -383,11 +423,77 @@ export function checkCip21(txCborHex: string): Cip21Report {
   try {
     const ib = bytes[0];
     if (ib >> 5 === 4) {
-      // A transaction: array whose first element is the body.
-      const n = ib & 0x1f;
-      let p = 1;
-      for (let k = 0; k < n; k++) {
-        p = k === 0 ? walk(ctx, p, "body", true) : walk(ctx, p, k === 1 ? "witnessSet" : k === 2 ? "isValid" : "auxiliaryData");
+      /**
+       * ⛔ THE ELEMENT COUNT AND THE HEADER WIDTH BOTH HAVE TO BE READ, and reading neither was a
+       * fatality INVERSION, not a cosmetic slip. This used `bytes[0] & 0x1f` as the count and a
+       * hardcoded `p = 1`. For a non-minimal outer header — `98 04`, four elements written in two
+       * bytes, valid CBOR and itself a CIP-21 minimality violation — every element shifted by one:
+       * offset 1 held the count byte, so THE TRANSACTION BODY WAS WALKED AS `witnessSet`. Measured on
+       * the real ceremony body a Ledger refused, identical bytes with only the header rewritten:
+       *
+       *   header 84   -> 1 fatal:    body.mint: keys out of canonical order at entry 2
+       *   header 9804 -> 0 fatal, 1 advisory: witnessSet{09}: keys out of canonical order at entry 2
+       *
+       * Two failures at once: the defect stops being fatal, and the diagnosis names the wrong field —
+       * and naming the right field is the whole purpose of this module. Found by the 2026-10-01
+       * pre-merge audit, which also noted that the only thing containing it was a DIFFERENT guard
+       * (`canonicaliseBodyOnly`'s replay post-condition, which throws first) — and that guard was
+       * itself undefended one round earlier. Safety borrowed from a neighbour breaks silently when the
+       * neighbour is refactored, so this reads its own header.
+       */
+      const head = headerCount(bytes, 0);
+      if (!head) {
+        // An indefinite or 4/8-byte-counted outer array: not a shape this understands. Say so loudly
+        // rather than guess an offset, because a guessed offset is what mislabels the body.
+        ctx.violations.push({
+          scope: "blind",
+          path: "",
+          message:
+            `outer array header 0x${ib.toString(16).padStart(2, "0")} is indefinite or oversized — ` +
+            `cannot locate the transaction body, so treat this check as blind, not as a pass`,
+        });
+      } else {
+        /**
+         * ⚑ THE OUTER HEADER'S OWN MINIMALITY, which nothing checked. `walk` enforces minimal
+         * encoding for every item it visits — but the transaction array's header is consumed HERE, by
+         * the dispatch, so it was never visited and `9804` passed silently once the misroute above was
+         * fixed. CIP-21: "The expression of lengths in major types 2 through 5 must be as short as
+         * possible."
+         *
+         * Scope "transaction", so it is fatal. The outer header is not part of the body bytes, so a
+         * device would in fact hash the same body — but a transaction whose framing we cannot
+         * faithfully reproduce is one we refuse to re-serialize at all (`canonicaliseBodyOnly` throws
+         * on it), and the conservative classification is the one that matches that refusal.
+         */
+        const minimalWidth = head.count < 24 ? 1 : head.count < 256 ? 2 : head.count < 65536 ? 3 : 5;
+        if (head.first !== minimalWidth) {
+          ctx.violations.push({
+            scope: "transaction",
+            path: "transaction",
+            message:
+              `transaction: outer array header for ${head.count} element(s) uses ${head.first} bytes ` +
+              `but fits in ${minimalWidth} — CIP-21 requires the shortest length encoding`,
+          });
+        }
+
+        /**
+         * ⚑ `head.count` IS UNPINNED BY ANY TEST, AND THAT IS RECORDED RATHER THAN FIXED. Substituting
+         * the raw `ib & 0x1f` back for `head.count` survives the suite — but it is an EQUIVALENT MUTANT
+         * on every input the product can produce: a Conway transaction is always four elements under an
+         * `84` header, where `ib & 0x1f === 4 === head.count`. Where the two diverge (a non-minimal
+         * header) the affected elements all sit at index ≥ 3 and are therefore labelled `auxiliaryData`,
+         * i.e. advisory, so it can never change fatality. Pinning it would mean constructing an input no
+         * builder emits, to defend a difference that cannot be observed.
+         *
+         * ⛔ THE OFFSET IS A DIFFERENT STORY and IS pinned — see test 11a1. `headerCount` returns TWO
+         * operands and they failed independently: one round pinned the count and left the offset bare,
+         * the next pinned the offset and left the count bare. Both times the operand not under discussion
+         * was the unprotected one. Enumerate a decision's operands, not the decision.
+         */
+        let p = head.first;
+        for (let k = 0; k < head.count; k++) {
+          p = k === 0 ? walk(ctx, p, "body", true) : walk(ctx, p, k === 1 ? "witnessSet" : k === 2 ? "isValid" : "auxiliaryData");
+        }
       }
     } else {
       walk(ctx, 0, "body", true);
@@ -398,6 +504,7 @@ export function checkCip21(txCborHex: string): Cip21Report {
     // and passed it. The wording was right and powerless; the scope is what the caller acts on.
     ctx.violations.push({
       scope: "blind",
+      path: "",
       message: `could not walk the CBOR (${(e as Error)?.message ?? e}) — treat this check as blind, not as a pass`,
     });
   }
@@ -419,6 +526,7 @@ export function checkCip21(txCborHex: string): Cip21Report {
     // the opposite of the truth on both counts.
     ctx.violations.push({
       scope: "transaction",
+      path: "transaction",
       message:
       `tag 258 is INCONSISTENT across the transaction: tagged [${ctx.taggedSetFields.join(", ")}] ` +
       `but bare [${ctx.bareSetFields.join(", ")}]. CIP-21: "either there are no tags 258 in sets, or ` +
@@ -426,16 +534,10 @@ export function checkCip21(txCborHex: string): Cip21Report {
     });
   }
 
-  // ⚑ DEDUPED BY MESSAGE. `body.outputs` is inspected once for the legacy shape and then walked again
-  // by the generic walker, so a violation inside an output is recorded twice. That inflated the count
-  // an operator reads and the list they have to work through. Deduping here fixes every double-walk,
-  // present and future, rather than one of them.
-  const seen = new Set<string>();
-  const scopedViolations = ctx.violations.filter((v) => {
-    if (seen.has(v.message)) return false;
-    seen.add(v.message);
-    return true;
-  });
+  // ⚑ NOT DEDUPED. Two distinct defects can legitimately produce the same message — two non-minimal
+  // withdrawal keys of equal length, for instance — and collapsing them loses one. The duplication
+  // that motivated deduping is fixed where it was caused, in the outputs pre-pass above.
+  const scopedViolations = ctx.violations;
 
   return {
     violations: scopedViolations.map((v) => v.message),

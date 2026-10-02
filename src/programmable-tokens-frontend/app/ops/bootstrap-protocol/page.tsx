@@ -59,12 +59,13 @@ import {
   type RegistrationProbe,
 } from "@/lib/deployment/registration-status";
 import { apiGet } from "@/lib/api/client";
-import { STAKE_REGISTRATION_ORDER } from "@easy1staking/cip113-sdk-ts";
+import { STAKE_REGISTRATION_ORDER, BOOTSTRAP_STEPS } from "@easy1staking/cip113-sdk-ts";
 import { SdkRecordDownload } from "@/components/deployment/sdk-record-download";
 import { assembleUpgradeTx } from "@/lib/upgrade/witness";
 import { waitForTxConfirmation } from "@/lib/utils/tx-confirmation";
 import { buildSyncStart } from "@/lib/deployment/record";
 import { toBootstrapRecord } from "@/lib/deployment/verify";
+import { inspectDeployment, type DeploymentOnChain } from "@/lib/deployment/resume";
 
 type Stage = "idle" | "deriving" | "derived" | "error";
 
@@ -188,6 +189,43 @@ function describeRetryFault(info: {
   }
 }
 
+/**
+ * Lovelace per reference-script output. UNCHANGED at 20 ADA pending Giovanni's ruling.
+ *
+ * ⚑ WHY THIS IS A NAMED CONSTANT NOW. It was `20_000_000n as never` — and the cast was stale: the
+ * SDK declares `referenceScriptLovelace: bigint` as a required field, so the value IS honoured. The
+ * cast was hiding nothing and suggesting the field did not exist.
+ *
+ * ⚠ 20 ADA × 7 OUTPUTS IS 140 ADA LOCKED FOREVER. These outputs are paid to always_fail's address,
+ * so the ADA is unrecoverable by design. Measured against the committed blueprint at
+ * coinsPerUtxoByte = 4310, the actual min-UTxO per script is:
+ *
+ *   programmableLogicGlobal   334 B →  2.34 ADA      transfer         1993 B →  9.49 ADA
+ *   programmableLogicBase     564 B →  3.34 ADA      issuanceLogic    2128 B → 10.08 ADA
+ *   unfracking               1702 B →  8.24 ADA      upgradeMultisig  2791 B → 12.93 ADA
+ *   thirdParty               1773 B →  8.55 ADA      ------------------------------------
+ *                                                    total at min-UTxO      → 54.97 ADA
+ *
+ * ⛔ BUT THE SDK TAKES ONE FLAT VALUE FOR ALL SEVEN OUTPUTS, so the full 85 ADA saving is not
+ * reachable from here. The most this constant can do is drop to the LARGEST requirement plus a
+ * margin — upgradeMultisig's 12.93 ADA — giving 7 × ~14 = ~98 ADA, a saving of ~42 ADA. Getting the
+ * rest needs the SDK to size each output, either by computing min-UTxO per script or by passing
+ * Evolution's `autoMinUtxo` through.
+ *
+ * ⚑ EVOLUTION HAS THE MACHINERY AND IT IS OPT-IN, OFF BY DEFAULT. `autoMinUtxo` (per call or in
+ * build options) makes `payToAddress` raise a too-small amount to the minimum — `max(specified,
+ * required)`. It NEVER LOWERS an over-large one, so turning it on while still passing 20 ADA would
+ * change nothing at all.
+ *
+ * ⚠ AND min-UTxO IS CHECKED ONLY WHEN AN OUTPUT IS CREATED, so going to the exact minimum is not a
+ * future liability: a later rise in coinsPerUtxoByte cannot invalidate a UTxO that already exists.
+ * The 20 ADA was never too little either — the largest script needs 12.93 — so it is pure headroom.
+ *
+ * ⛔ THE FIGURES ABOVE ARE UNPARAMETERISED BLUEPRINT SIZES. Applying parameters adds bytes, so any
+ * reduction needs a margin and needs proving on preprod before it is used on mainnet.
+ */
+const REFERENCE_SCRIPT_LOVELACE = 20_000_000n;
+
 export default function BootstrapProtocolPage() {
   const network = getCardanoNetwork();
 
@@ -221,6 +259,12 @@ export default function BootstrapProtocolPage() {
   const wallet = useWallet();
   const [planning, setPlanning] = useState(false);
   const [planned, setPlanned] = useState<CeremonyPlan | null>(null);
+  // ---- recovery: publish the reference scripts for a ceremony that stopped after the genesis ----
+  const [onChain, setOnChain] = useState<DeploymentOnChain | null>(null);
+  const [recoverStep, setRecoverStep] = useState<{ label: string; unsignedCbor: string } | null>(null);
+  const [recoverBusy, setRecoverBusy] = useState<string | null>(null);
+  const [recoverError, setRecoverError] = useState<string | null>(null);
+  const [recoverHash, setRecoverHash] = useState<string | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<{ label: string; txHash: string }[] | null>(null);
@@ -404,6 +448,31 @@ export default function BootstrapProtocolPage() {
    */
   useEffect(() => {
     if (!seedsReadyFor(paramsSeed, issuanceSeed, multisigSeed) && !submitted) return;
+    /**
+     * ⛔ NEVER OVERWRITE A STORED `submitted` LIST WITH AN EMPTY ONE. In a fresh tab the in-memory
+     * `submitted` is null, and restoring the inputs makes the seeds ready — so this effect fired and
+     * wrote `submitted: []`, ERASING the record of which transactions had landed. The inputs
+     * survived (they are re-saved identically), but the genesis tx hash the deployment record needs,
+     * and the knowledge of which steps are done, did not.
+     *
+     * Measured against the mainnet ceremony of 2026-10-02, whose stored ceremony was the only copy
+     * of its parameterisation. A second tab was exactly the thing about to be opened.
+     *
+     * ⚑ KEEP WHAT IS STORED WHEN THIS SESSION HAS NOTHING BETTER. A resume reads the list; it does
+     * not author it. Only a session that has actually submitted something may replace it.
+     */
+    const live = (submitted ?? []).flatMap((x) => {
+      const step = stepIdForLabel(x.label);
+      return step ? [{ step, txHash: x.txHash }] : [];
+    });
+    /**
+     * ⚑ FROM STATE, NOT FROM A SECOND `loadCeremony`. `test-ceremony-resume.js` asserts that exactly
+     * ONE effect reads storage — the invariant being that a restore is OFFERED, never applied on
+     * load. Reading storage here to protect the list would have been a second reader and broke that
+     * check, correctly: the floor is already in state, because `found` is what the offer loaded and
+     * `restored` is what the operator accepted.
+     */
+    const stored = (restored ?? found)?.submitted ?? [];
     saveCeremony({
       network,
       changeAddress: planned?.ctx.changeAddress ?? liveAddress ?? null,
@@ -412,16 +481,14 @@ export default function BootstrapProtocolPage() {
         nonce, maxInlineDatumBytes: maxInline, unfrackingEnabled,
         membersText, threshold,
       },
-      submitted: (submitted ?? []).flatMap((s) => {
-        // The id travels with the step that produced it — see CeremonyStep.step. A submitted
-        // entry with no matching built step is not persisted rather than guessed at.
-        const step = stepIdForLabel(s.label);
-        return step ? [{ step, txHash: s.txHash }] : [];
-      }),
+      // The id travels with the step that produced it — see CeremonyStep.step. A submitted entry
+      // with no matching built step is not persisted rather than guessed at.
+      submitted: live.length >= stored.length ? live : stored,
     });
   }, [
     network, planned, liveAddress, paramsSeed, issuanceSeed, multisigSeed,
     nonce, maxInline, unfrackingEnabled, membersText, threshold, submitted,
+    restored, found,
   ]);
 
   /** Ask the backend which of the six credentials are already registered. Never guesses. */
@@ -888,7 +955,7 @@ export default function BootstrapProtocolPage() {
              */
             referenceScriptAddress: planned.plan.addresses.issuanceCborHex as never,
             // ⚠ PER OUTPUT, not in total: seven scripts at 20 ADA each locks ~140 ADA.
-            referenceScriptLovelace: 20_000_000n as never,
+            referenceScriptLovelace: REFERENCE_SCRIPT_LOVELACE,
           }),
         {
           attempts: 3,
@@ -943,6 +1010,109 @@ export default function BootstrapProtocolPage() {
       );
     }
   }, [planned, genesisStep, cosign, wallet, network, submitted, configUtxo]);
+
+  /**
+   * ⛔ RECOVERY FOR A CEREMONY THAT STOPPED AFTER THE GENESIS. The mainnet ceremony of 2026-10-02
+   * landed four of the five BOOTSTRAP_STEPS and crashed before publishing the reference scripts,
+   * leaving a deployment nothing can transact against. `submitPhaseTwo` cannot be re-run: it submits
+   * the genesis FIRST, and that is already on chain.
+   *
+   * ⚑ THIS IS THE ONE STEP THAT MAY BE RE-RUN, and it is worth being precise about why, because the
+   * reasoning is what makes it safe rather than lucky: `buildReferenceScriptsTx` consumes no
+   * one-shot seed and nothing the genesis created, and it carries no multisig witness — only the
+   * genesis needed the signers. So the deployer alone can publish it, at any later time.
+   *
+   * ⛔ BUT ONLY ON PROOF THAT THE PARAMETERISATION MATCHES WHAT IS DEPLOYED. `inspectDeployment`
+   * compares the derived protocol-params datum against the one the genesis published, byte for byte,
+   * and refuses on any difference. Restoring inputs that merely LOOK right would otherwise publish
+   * scripts this deployment does not reference — which fails at redeemer evaluation, not at
+   * submission, and only once somebody tries to use the protocol.
+   */
+  const utxosAtAddress = useCallback(
+    async (address: string): Promise<readonly unknown[]> => {
+      if (!planned) throw new Error("Derive the plan first — the addresses come from it.");
+      return (await (
+        planned.ctx.client as { getUtxos: (a: unknown) => Promise<readonly unknown[]> }
+      ).getUtxos(EvoAddress.fromBech32(address))) as readonly unknown[];
+    },
+    [planned],
+  );
+
+  const checkChain = useCallback(async () => {
+    if (!planned) return;
+    setRecoverError(null);
+    setRecoverBusy("Asking the chain what landed…");
+    try {
+      setOnChain(await inspectDeployment({ plan: planned.plan, utxosAt: utxosAtAddress }));
+    } catch (e) {
+      setRecoverError(`Could not read the chain: ${(e as Error).message}`);
+    } finally {
+      setRecoverBusy(null);
+    }
+  }, [planned, utxosAtAddress]);
+
+  /**
+   * Builds the reference-scripts transaction and STOPS. Everything up to here is read-only, so an
+   * operator can inspect the real transaction — its size, its seven outputs, its fee — before
+   * anything irreversible happens. Submission is a separate, explicit act.
+   */
+  const buildRefScriptsOnly = useCallback(async () => {
+    if (!planned || !onChain || onChain.blockers.length > 0) return;
+    setRecoverError(null);
+    setRecoverStep(null);
+    setRecoverBusy("Re-reading the wallet and building the reference-scripts transaction…");
+    try {
+      const built = await buildWithFreshUtxos(
+        planned.ctx,
+        () => readWalletUtxos(network, wallet.rawApi, planned.ctx.changeAddress),
+        (ctx) =>
+          buildReferenceScripts({
+            ctx,
+            plan: planned.plan,
+            referenceScriptAddress: planned.plan.addresses.issuanceCborHex as never,
+            referenceScriptLovelace: REFERENCE_SCRIPT_LOVELACE,
+          }),
+        {
+          attempts: 3,
+          delayMs: 10_000,
+          onAttempt: (n, why) =>
+            setRecoverBusy(`Evaluation could not resolve ${why} — retrying (${n} of 3, 10s apart)…`),
+        },
+      );
+      setRecoverStep(built);
+    } catch (e) {
+      setRecoverError(describeError(e));
+    } finally {
+      setRecoverBusy(null);
+    }
+  }, [planned, onChain, network, wallet]);
+
+  const submitRefScriptsOnly = useCallback(async () => {
+    if (!recoverStep || !onChain || onChain.blockers.length > 0) return;
+    setRecoverError(null);
+    setRecoverBusy("Waiting for your signature…");
+    try {
+      const result = await signAndSubmitSequence(wallet.wallet, [recoverStep], {
+        onPhase: (ph: MultiTxPhase) =>
+          setRecoverBusy(
+            ph.phase === "signing" ? "Waiting for your signature…" : `${ph.phase} ${ph.label}`,
+          ),
+        waitForConfirmation: (txHash) => waitForTxConfirmation(txHash),
+      });
+      const hash = result.submitted[0]?.txHash ?? null;
+      setRecoverHash(hash);
+      // Record it in the SAME place a normal run does, so the deployment record can be rebuilt.
+      setSubmitted([...(submitted ?? []), ...result.submitted]);
+      // Re-read, so the operator sees the seven outputs rather than being told they exist.
+      setOnChain(await inspectDeployment({ plan: planned!.plan, utxosAt: utxosAtAddress }));
+    } catch (e) {
+      setRecoverError(
+        e instanceof MultiTxError ? e.message : `Publishing failed: ${(e as Error).message}`,
+      );
+    } finally {
+      setRecoverBusy(null);
+    }
+  }, [recoverStep, onChain, wallet, submitted, planned, utxosAtAddress]);
 
   const downloadDeployedRecord = useCallback(() => {
     if (!planned?.verification.ok) return;
@@ -1025,9 +1195,9 @@ export default function BootstrapProtocolPage() {
             finished step: throwing the answer away at the moment it becomes useful.
           */}
           <h2 className="text-sm font-semibold text-white">
-            {found.submitted.length >= 4
+            {found.submitted.length >= BOOTSTRAP_STEPS.length
               ? "A completed ceremony is saved in this browser"
-              : "An unfinished ceremony is saved in this browser"}
+              : `An unfinished ceremony is saved in this browser — ${found.submitted.length} of ${BOOTSTRAP_STEPS.length} steps submitted`}
           </h2>
           <p className="text-xs text-dark-300">
             Saved {new Date(found.savedAt).toLocaleString()}
@@ -1039,8 +1209,8 @@ export default function BootstrapProtocolPage() {
             )}
             . Restoring re-enters the inputs and re-derives the same plan; it does not re-run
             anything.{" "}
-            {found.submitted.length >= 4
-              ? "All four transactions are on chain, so this is kept only so the bootstrap record can be rebuilt."
+            {found.submitted.length >= BOOTSTRAP_STEPS.length
+              ? "Every step is on chain, so this is kept only so the bootstrap record can be rebuilt."
               : "Signatures are not saved and have to be collected again — a witness commits to one transaction body, and phase two is rebuilt against a fresh UTxO set on resume."}
           </p>
           {found.changeAddress && (
@@ -1847,6 +2017,109 @@ export default function BootstrapProtocolPage() {
           </div>
         )}
       </section>
+
+      {/*
+        ⛔ RECOVERY, SHOWN ONLY WHEN THE STORED CEREMONY IS GENUINELY PART-WAY. A ceremony that
+        never started does not need this, and one that finished must not be invited to pay for the
+        reference scripts twice.
+      */}
+      {planned?.verification.ok && restored && restored.submitted.length > 0 &&
+        restored.submitted.length < BOOTSTRAP_STEPS.length && (
+        <section className="space-y-3 rounded border border-amber-500/40 bg-amber-500/5 p-4">
+          <h2 className="text-sm font-semibold text-white">
+            Recover: publish the reference scripts for a ceremony that stopped
+          </h2>
+          <p className="text-xs text-dark-300">
+            {restored.submitted.length} of {BOOTSTRAP_STEPS.length} steps are recorded as submitted
+            (<strong>{restored.submitted.map((x) => x.step).join(", ")}</strong>). The reference
+            scripts are the one step that can be published later: they consume no one-shot seed and
+            nothing the genesis created, and they need <strong>no signer but you</strong> — only the
+            genesis needed the multisig. Nothing earlier is rebuilt or re-submitted.
+          </p>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={checkChain}
+              disabled={recoverBusy !== null}
+              className="rounded border border-primary-500/50 px-3 py-1.5 text-xs text-primary-200 hover:bg-primary-500/10 disabled:opacity-40"
+            >
+              1. Check what is on chain
+            </button>
+            <button
+              type="button"
+              onClick={buildRefScriptsOnly}
+              disabled={recoverBusy !== null || !onChain || onChain.blockers.length > 0}
+              className="rounded border border-primary-500/50 px-3 py-1.5 text-xs text-primary-200 hover:bg-primary-500/10 disabled:opacity-40"
+            >
+              2. Build it (nothing is submitted)
+            </button>
+            <button
+              type="button"
+              onClick={submitRefScriptsOnly}
+              disabled={recoverBusy !== null || !recoverStep || !onChain || onChain.blockers.length > 0}
+              className="rounded border border-red-500/60 px-3 py-1.5 text-xs text-red-200 hover:bg-red-500/10 disabled:opacity-40"
+            >
+              3. Sign and submit — irreversible
+            </button>
+          </div>
+
+          {recoverBusy && <p className="text-xs text-primary-300">{recoverBusy}</p>}
+          {recoverError && (
+            <p className="whitespace-pre-wrap break-words text-xs text-red-300">{recoverError}</p>
+          )}
+
+          {onChain && (
+            <div className="space-y-1 rounded border border-dark-700 bg-dark-900/60 p-3 text-xs">
+              <p className={onChain.paramsDatumMatches ? "text-green-300" : "text-red-300"}>
+                {onChain.paramsUtxoFound
+                  ? onChain.paramsDatumMatches
+                    ? "✓ the protocol-params datum on chain MATCHES these inputs byte for byte — the parameterisation is provably the deployed one"
+                    : "✗ the protocol-params datum on chain does NOT match these inputs"
+                  : "✗ no protocol-params UTxO found at the derived address"}
+              </p>
+              <p className={onChain.referenceScriptOutputs === 0 ? "text-green-300" : "text-red-300"}>
+                {onChain.referenceScriptOutputs === 0
+                  ? `✓ no reference-script outputs at always_fail yet — ${onChain.referenceScriptsExpected} to publish`
+                  : `✗ ${onChain.referenceScriptOutputs} reference-script output(s) already present`}
+              </p>
+              {onChain.blockers.map((b, i) => (
+                <p key={i} className="whitespace-pre-wrap break-words text-amber-300">
+                  ⚠ {b}
+                </p>
+              ))}
+              {onChain.blockers.length === 0 && (
+                <p className="text-green-300">
+                  Every check passed. Building is read-only; only step 3 spends anything.
+                </p>
+              )}
+            </div>
+          )}
+
+          {recoverStep && (
+            <div className="space-y-1 rounded border border-dark-700 bg-dark-900/60 p-3">
+              <p className="text-xs text-dark-200">
+                Built: <strong>{recoverStep.unsignedCbor.length / 2} bytes</strong>, publishing{" "}
+                {onChain?.referenceScriptsExpected} scripts and locking{" "}
+                {Number(REFERENCE_SCRIPT_LOVELACE) / 1e6 * (onChain?.referenceScriptsExpected ?? 0)}{" "}
+                ADA at always_fail — unrecoverable by design.
+              </p>
+              <textarea
+                readOnly
+                value={recoverStep.unsignedCbor}
+                className="h-20 w-full rounded border border-dark-700 bg-dark-950 p-2 font-mono text-[10px] text-dark-300"
+              />
+            </div>
+          )}
+
+          {recoverHash && (
+            <p className="break-all text-xs text-green-300">
+              Published: <span className="font-mono">{recoverHash}</span>. Rebuild the deployment
+              record below, then flip the deployment flags.
+            </p>
+          )}
+        </section>
+      )}
 
       <section className="space-y-2 border-t border-dark-800 pt-6">
         <p className="text-xs text-dark-400">

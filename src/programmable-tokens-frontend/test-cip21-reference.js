@@ -282,6 +282,74 @@ for (const t of real) {
   }
 }
 
+// ---- 8b. the evaluate logger cannot print a credential that rides in the URL ----
+// ⛔ A CREDENTIAL-HYGIENE GUARD WITH NO TEST IS A GUARD THAT GETS REVERTED — reverting `safeUrl` broke
+// nothing. Blockfrost carries its key in a `project_id` HEADER, which this logger never reads; the URL
+// was logged verbatim, so a provider that ever put one in a query parameter would print it into a
+// console an operator may paste into an issue.
+//
+// ⚑ EXERCISED, NOT GREPPED. The first version of this test asserted the SOURCE matched a regex — the
+// same shape that let the round-1 guard ship undefended. Four leak shapes, including userinfo, which
+// `u.origin` drops and nothing else would.
+{
+  const { safeUrl } = await import("./.cip21ref-build/deployment/evaluate-request-log.js");
+  const SECRET = "preprodSECRETKEY0123456789";
+  const shapes = [
+    [`https://host/api/v0/utils/txs/evaluate?project_id=${SECRET}`, "a query parameter"],
+    [`https://user:${SECRET}@host/api/v0/utils/txs/evaluate`, "URL userinfo"],
+    [`https://host/api/v0/utils/txs/evaluate#${SECRET}`, "a fragment"],
+    [`not-a-url://;;;/evaluate?key=${SECRET}`, "a string that does not parse as a URL"],
+  ];
+  for (const [url, what] of shapes) {
+    const reduced = safeUrl(url);
+    ok(!reduced.includes(SECRET), `${what} is stripped before logging (got ${reduced})`);
+  }
+  ok(
+    safeUrl("https://host/api/v0/utils/txs/evaluate") === "https://host/api/v0/utils/txs/evaluate",
+    "and an ordinary URL survives intact, so the log stays useful",
+  );
+}
+
+// ---- 8c. and the logger actually USES it — the wiring, not just the helper ----
+// ⛔ A HELPER TESTED IN ISOLATION DOES NOT PIN ITS CALL SITE. Reverting `${safeUrl(url)}` back to
+// `${url}` while leaving `safeUrl` perfectly intact left the suite green AND printed the secret:
+//   [evaluate-request] POST https://h.io/api/v0/utils/txs/evaluate/utxos?project_id=preprodSECRET…
+// So this installs the real logger, drives a real fetch, and asserts on what was PRINTED.
+{
+  const { installEvaluateRequestLogger } = await import("./.cip21ref-build/deployment/evaluate-request-log.js");
+  const SECRET = "preprodSECRETKEY0123456789";
+
+  const printed = [];
+  const realLog = console.log;
+  const realWarn = console.warn;
+  const realFetch = globalThis.fetch;
+  console.log = (...a) => printed.push(a.join(" "));
+  console.warn = (...a) => printed.push(a.join(" "));
+  globalThis.fetch = async () => new Response("{}", { status: 200 });
+  try {
+    installEvaluateRequestLogger();
+    await globalThis.fetch(
+      `https://h.io/api/v0/utils/txs/evaluate/utxos?project_id=${SECRET}`,
+      { method: "POST", body: JSON.stringify({ cbor: "84a0a0f5f6", additionalUtxoSet: [] }) },
+    );
+  } finally {
+    console.log = realLog;
+    console.warn = realWarn;
+    globalThis.fetch = realFetch;
+  }
+
+  const all = printed.join("\n");
+  // ⛔ "[evaluate-request]" IS NOT PROOF THE REQUEST WAS SEEN. `installEvaluateRequestLogger` prints an
+  // unconditional banner carrying that same prefix at install time, so this assertion was satisfied
+  // whether or not a single request was ever intercepted — measured: disabling the URL match entirely
+  // left all 309 checks green with the logger completely inert. Assert on a string only the REQUEST
+  // path emits.
+  ok(all.includes("raw body is"),
+    `the logger must have actually intercepted the request, not merely installed; printed:\n${all.slice(0, 300)}`);
+  ok(!all.includes(SECRET),
+    `nothing the logger prints may contain a URL credential; printed:\n${all.slice(0, 400)}`);
+}
+
 // ---- 8. the oracle is not vacuous ----
 // ⛔ WITHOUT THIS THE WHOLE SUITE COULD PASS BY CALLING A LIBRARY THAT ANSWERS "fine" TO EVERYTHING.
 // "1800" is integer 0 written in two bytes: valid CBOR, not canonical.
