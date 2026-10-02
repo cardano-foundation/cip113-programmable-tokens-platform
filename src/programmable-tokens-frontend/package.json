@@ -44,7 +44,8 @@
     "test:cip21": "tsc lib/utils/cip21.ts --outDir .cip21-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node test-cip21.js",
     "check:cip21": "tsc lib/utils/cip21.ts --outDir .cip21-build --module commonjs --target es2022 --moduleResolution node --esModuleInterop --skipLibCheck && node scripts/cip21.mjs",
     "test:cip21canonical": "tsc lib/utils/cip21.ts lib/deployment/ceremony.ts --outDir .cip21can-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .cip21can-build && node test-cip21-canonical.js",
-    "test:cip21ref": "tsc lib/utils/cip21.ts lib/deployment/ceremony.ts lib/deployment/evaluate-request-log.ts --outDir .cip21ref-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .cip21ref-build && node test-cip21-reference.js"
+    "test:cip21ref": "tsc lib/utils/cip21.ts lib/deployment/ceremony.ts lib/deployment/evaluate-request-log.ts --outDir .cip21ref-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .cip21ref-build && node test-cip21-reference.js",
+    "test:resume-refscripts": "tsc lib/deployment/resume.ts --outDir .resumeref-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .resumeref-build && node test-resume-refscripts.js"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.15.0",
