@@ -73,8 +73,6 @@ build_network() {
     local NETWORK_UPPER=$(echo "$NETWORK" | tr '[:lower:]' '[:upper:]')
     local BASE_URL_VAR="NEXT_PUBLIC_BASE_URL_${NETWORK_UPPER}"
     local BASE_URL="${!BASE_URL_VAR:-}"
-    NEXT_PUBLIC_NETWORK="$NETWORK" npm run check:trusted-deployments
-
     # Build the Docker image
     docker build --push \
         --build-context deployment-records=../programmable-tokens-offchain-java/src/main/resources \

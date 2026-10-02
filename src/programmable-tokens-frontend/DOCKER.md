@@ -23,9 +23,9 @@ docker build \
 docker run --rm -p 3000:3000 cip113-frontend:preview
 ```
 
-The named context supplies the checked-in protocol deployment records. The build
-fails if they are missing or if the generated trusted-deployment catalog is stale;
-run `npm run generate:trusted-deployments` after adding a deployment record.
+The named context supplies checked-in protocol deployment records used by other
+frontend build paths. CMTA member-root review fetches deployment policies from the
+backend API at runtime, so a new deployment needs no frontend catalog update.
 
 Set `NEXT_PUBLIC_API_BASE_URL` to the backend origin reachable **from the user's
 browser**. The frontend adds `/api/v1` to requests; do not include that path in

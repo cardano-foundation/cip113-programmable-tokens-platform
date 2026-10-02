@@ -110,13 +110,11 @@ The backend serves the pinned CIP-113 core and module blueprints. Their source a
 The frontend obtains the active schema-3 deployment from the backend. It validates that record
 with the CIP-113 SDK and uses it directly; legacy deployment adapters are intentionally absent.
 
-Before signing a CMTA member-root update, the browser checks the token's registry NFT directly
-against the trusted deployments bundled into that frontend build. The bundle is generated from
-`../programmable-tokens-offchain-java/src/main/resources/protocol-bootstraps-<network>.json`.
-After recording a new deployment, run `npm run generate:trusted-deployments` in this directory
-and rebuild the frontend. `npm run build` and CI reject a missing or stale bundle. The Docker
-build requires the backend deployment records as a named `deployment-records` build context;
-`build-docker.sh` and the Docker workflow supply it.
+Before signing a CMTA member-root update, the browser gets the current registry policy from
+`/protocol/bootstrap` and indexed older policies from `/registry/protocols`. The backend is
+authoritative for deployment identity in this flow. The browser then checks the selected token's
+registry NFT, Global State, Merkle root, and unsigned transaction directly against chain data.
+Deployment changes no longer require regenerating a frontend registry-policy catalog.
 
 ### Modules
 
