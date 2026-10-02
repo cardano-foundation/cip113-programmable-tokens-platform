@@ -188,6 +188,43 @@ function describeRetryFault(info: {
   }
 }
 
+/**
+ * Lovelace per reference-script output. UNCHANGED at 20 ADA pending Giovanni's ruling.
+ *
+ * ⚑ WHY THIS IS A NAMED CONSTANT NOW. It was `20_000_000n as never` — and the cast was stale: the
+ * SDK declares `referenceScriptLovelace: bigint` as a required field, so the value IS honoured. The
+ * cast was hiding nothing and suggesting the field did not exist.
+ *
+ * ⚠ 20 ADA × 7 OUTPUTS IS 140 ADA LOCKED FOREVER. These outputs are paid to always_fail's address,
+ * so the ADA is unrecoverable by design. Measured against the committed blueprint at
+ * coinsPerUtxoByte = 4310, the actual min-UTxO per script is:
+ *
+ *   programmableLogicGlobal   334 B →  2.34 ADA      transfer         1993 B →  9.49 ADA
+ *   programmableLogicBase     564 B →  3.34 ADA      issuanceLogic    2128 B → 10.08 ADA
+ *   unfracking               1702 B →  8.24 ADA      upgradeMultisig  2791 B → 12.93 ADA
+ *   thirdParty               1773 B →  8.55 ADA      ------------------------------------
+ *                                                    total at min-UTxO      → 54.97 ADA
+ *
+ * ⛔ BUT THE SDK TAKES ONE FLAT VALUE FOR ALL SEVEN OUTPUTS, so the full 85 ADA saving is not
+ * reachable from here. The most this constant can do is drop to the LARGEST requirement plus a
+ * margin — upgradeMultisig's 12.93 ADA — giving 7 × ~14 = ~98 ADA, a saving of ~42 ADA. Getting the
+ * rest needs the SDK to size each output, either by computing min-UTxO per script or by passing
+ * Evolution's `autoMinUtxo` through.
+ *
+ * ⚑ EVOLUTION HAS THE MACHINERY AND IT IS OPT-IN, OFF BY DEFAULT. `autoMinUtxo` (per call or in
+ * build options) makes `payToAddress` raise a too-small amount to the minimum — `max(specified,
+ * required)`. It NEVER LOWERS an over-large one, so turning it on while still passing 20 ADA would
+ * change nothing at all.
+ *
+ * ⚠ AND min-UTxO IS CHECKED ONLY WHEN AN OUTPUT IS CREATED, so going to the exact minimum is not a
+ * future liability: a later rise in coinsPerUtxoByte cannot invalidate a UTxO that already exists.
+ * The 20 ADA was never too little either — the largest script needs 12.93 — so it is pure headroom.
+ *
+ * ⛔ THE FIGURES ABOVE ARE UNPARAMETERISED BLUEPRINT SIZES. Applying parameters adds bytes, so any
+ * reduction needs a margin and needs proving on preprod before it is used on mainnet.
+ */
+const REFERENCE_SCRIPT_LOVELACE = 20_000_000n;
+
 export default function BootstrapProtocolPage() {
   const network = getCardanoNetwork();
 
@@ -888,7 +925,7 @@ export default function BootstrapProtocolPage() {
              */
             referenceScriptAddress: planned.plan.addresses.issuanceCborHex as never,
             // ⚠ PER OUTPUT, not in total: seven scripts at 20 ADA each locks ~140 ADA.
-            referenceScriptLovelace: 20_000_000n as never,
+            referenceScriptLovelace: REFERENCE_SCRIPT_LOVELACE,
           }),
         {
           attempts: 3,
@@ -1217,10 +1254,12 @@ export default function BootstrapProtocolPage() {
         </label>
         <p className="text-xs text-dark-400">
           One per line: an <strong>address</strong> (preferred) or a payment key hash. Addresses
-          are checksummed, so a mangled one is refused on paste; a wrong key hash looks valid and
-          survives to the signing round. Script credentials are <strong>not currently
-          supported</strong> — the standard allows them, but every declared member signs at genesis
-          and a script cannot take part in that.
+          carry a checksum, so a <strong>mistyped</strong> one is refused on paste; a mistyped key
+          hash is 56 valid-looking characters and survives to the signing round. A stake part is
+          ignored — only the payment credential is stored, so an address whose payment and staking
+          keys come from different wallets is accepted and reduced correctly. Script credentials are{" "}
+          <strong>not currently supported</strong> — the standard allows them, but every declared
+          member signs at genesis and a script cannot take part in that.
         </p>
         <textarea
           id="multisig-members"
