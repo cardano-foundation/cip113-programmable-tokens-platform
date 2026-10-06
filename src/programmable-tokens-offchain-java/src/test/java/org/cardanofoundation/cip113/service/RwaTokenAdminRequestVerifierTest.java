@@ -237,6 +237,46 @@ class RwaTokenAdminRequestVerifierTest {
     }
 
     /**
+     * ⛔ A WALLET THAT HASHES BUT FORGETS THE FLAG MUST STILL AUTHENTICATE.
+     *
+     * <p>CIP-8 says a hashing producer MUST set `hashed: true`, and the flag is an unprotected
+     * header that implementations drop. The payload identifies the mode unambiguously on its own —
+     * it either equals the reconstructed bytes or their Blake2b-224 — so insisting on the flag
+     * turns a sloppy-but-honest wallet into a 401 that reads like a forged signature.
+     *
+     * <p>⚑ This is the case the mainnet error could not distinguish: on the deployed build the
+     * payload comparison ran BEFORE the hashed-header check, so hashed mode surfaced as
+     * "COSE payload mismatch" — the same message a genuinely different payload produces.
+     */
+    @Test
+    void hashedWithoutTheFlagIsStillAccepted() throws Exception {
+        long issued = System.currentTimeMillis();
+        long expires = issued + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS;
+        HttpHeaders hashed = signedHeaders("", "GET", PATH, issued, expires, true);
+        // Strip the flag the way a non-conformant wallet would never have set it.
+        hashed.set("X-CMTA-Signature", stripFlag(hashed.getFirst("X-CMTA-Signature")));
+        assertDoesNotThrow(() -> verify("", PATH, adminHash, hashed),
+                "the payload identifies hashed mode on its own; the flag is a hint, not the proof");
+    }
+
+    /**
+     * ⛔ AND A DIGEST OF SOMETHING ELSE IS STILL REFUSED, naming why.
+     *
+     * <p>Accepting a 28-byte payload because it "looks hashed" would be the actual hole. The
+     * digest is recomputed over what THIS server reconstructs, so a digest of any other message
+     * fails both comparisons — and the refusal says so rather than repeating "payload mismatch".
+     */
+    @Test
+    void aDigestOfADifferentPayloadIsRefusedAndSaysSo() throws Exception {
+        long issued = System.currentTimeMillis();
+        long expires = issued + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS;
+        // Signed for a DIFFERENT path, in hashed mode, then replayed against PATH.
+        HttpHeaders wrong = signedHeaders("", "GET",
+                PATH.replace("members", "update-member-root-hash"), issued, expires, true);
+        assertReason(() -> verify("", PATH, adminHash, wrong), "hashed a DIFFERENT payload");
+    }
+
+    /**
      * ⚑ FLIPPING THE FLAG IS A NUISANCE, NOT A FORGERY, and this pins that reading.
      *
      * <p>`hashed` lives in the UNPROTECTED header, so it is not covered by the signature — the
@@ -250,16 +290,18 @@ class RwaTokenAdminRequestVerifierTest {
         long issued = System.currentTimeMillis();
         long expires = issued + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS;
 
-        // honest hashed record, flag stripped in transit
-        HttpHeaders stripped = signedHeaders("", "GET", PATH, issued, expires, true);
-        stripped.set("X-CMTA-Signature",
-                stripFlag(stripped.getFirst("X-CMTA-Signature")));
-        assertStatus(HttpStatus.UNAUTHORIZED, () -> verify("", PATH, adminHash, stripped));
-
-        // honest plain record, flag added in transit
+        // ⚑ STRIPPING the flag from an honest hashed record is now TOLERATED, and that is the
+        // deliberate change: the payload identifies the mode, so dropping an unsigned hint cannot
+        // break an honest request. See hashedWithoutTheFlagIsStillAccepted.
+        //
+        // ADDING a flag to an honest PLAIN record still refuses — the payload is the reconstructed
+        // bytes, which are not their own digest. Per CIP-190 this is the nuisance direction: the
+        // honest signature simply fails to verify, and nothing is forged.
         HttpHeaders addedFlag = signedHeaders("", "GET", PATH, issued, expires, false);
         addedFlag.set("X-CMTA-Signature", addFlag(addedFlag.getFirst("X-CMTA-Signature")));
-        assertStatus(HttpStatus.UNAUTHORIZED, () -> verify("", PATH, adminHash, addedFlag));
+        assertDoesNotThrow(() -> verify("", PATH, adminHash, addedFlag),
+                "a spurious flag on a plain record is ignored because the payload still matches "
+                + "the reconstruction verbatim — the flag is never the thing trusted");
     }
 
     /** Rewrites a COSE_Sign1's unprotected header to drop `hashed`, leaving everything else. */

@@ -286,14 +286,45 @@ public class RwaTokenAdminRequestVerifier {
         // no room for confusion between the two modes: a Blake2b-224 digest is 28 bytes and the
         // reconstructed payload is a few hundred bytes of ASCII, so one can never be read as the
         // other.
-        boolean hashed = coseHashed(unprotected);
-        byte[] effectivePayload = hashed
-                ? com.bloxbean.cardano.client.crypto.Blake2bUtil.blake2bHash224(expectedPayload)
-                : expectedPayload;
-        if (!Arrays.equals(payload.getBytes(), effectivePayload)) {
-            throw unauthorized("COSE payload mismatch: the wallet signed different bytes than this "
-                    + "request reconstructs" + (hashed ? " (hashed mode)" : "")
-                    + " — audience, network, path, body or the window do not match what was signed");
+        byte[] digest = com.bloxbean.cardano.client.crypto.Blake2bUtil.blake2bHash224(expectedPayload);
+        boolean flagged = coseHashed(unprotected);
+        byte[] effectivePayload;
+        if (Arrays.equals(payload.getBytes(), expectedPayload)) {
+            effectivePayload = expectedPayload;                 // plain
+        } else if (Arrays.equals(payload.getBytes(), digest)) {
+            // ⛔ ACCEPTED EVEN WHEN THE FLAG IS ABSENT, deliberately. CIP-8 says a hashing producer
+            // MUST set `hashed: true`, and not all of them do — the flag is an unprotected header
+            // that some wallets drop. What identifies the mode unambiguously is the PAYLOAD
+            // ITSELF: it either equals the bytes we reconstructed, or it equals their
+            // Blake2b-224. There is no third reading, because a 28-byte digest cannot be
+            // mistaken for a few hundred bytes of ASCII.
+            //
+            // ⚑ AND THIS COSTS NOTHING IN SECURITY. The digest is computed HERE, over the payload
+            // THIS server reconstructed from the audience, network, path, body hash and window —
+            // never over anything the caller supplied. A caller who sends a digest of some other
+            // message simply fails both comparisons. Insisting on the flag would have turned a
+            // sloppy-but-honest wallet into a 401 that reads like a forged signature.
+            effectivePayload = digest;
+            if (!flagged) {
+                log.warn("CIP-8: wallet signed the Blake2b-224 digest but did not set "
+                        + "`hashed: true` in the unprotected header — accepted, since the payload "
+                        + "identifies the mode unambiguously, but the wallet is non-conformant");
+            }
+        } else {
+            // ⛔ NAME THE DISCRIMINATOR. "COSE payload mismatch" alone cost a round trip to
+            // mainnet: it is produced BOTH by hashed mode and by a genuinely different payload,
+            // and on the deployed build the payload comparison ran BEFORE the hashed-header check,
+            // so a hashed signature never reached the message that would have named it.
+            throw unauthorized("COSE payload mismatch: the wallet signed "
+                    + payload.getBytes().length + " bytes; this request reconstructs "
+                    + expectedPayload.length + " bytes"
+                    + (payload.getBytes().length == digest.length
+                        ? " and its length matches a Blake2b-224 digest, but NOT the digest of what "
+                          + "we reconstructed — so the wallet hashed a DIFFERENT payload"
+                        : "")
+                    + ". One of audience, network, path, body or the signing window differs from "
+                    + "what was signed. Audience must equal the frontend's API base URL plus "
+                    + "/api/v1, and network must match this deployment.");
         }
         Map protectedMap = strictMap(protectedBytes.getBytes());
         if (number(protectedMap.get(new UnsignedInteger(1))) != -8
