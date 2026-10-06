@@ -6520,6 +6520,43 @@ public class RwaTokenModuleHandler
             if (changes == null || changes.isEmpty()) {
                 return new TransactionContext<>(null, List.of(), true, null);
             }
+
+            // ⛔ A ROTATION IS A CHAIN OF EXACTLY ONE, AND THAT IS STRUCTURAL, NOT CONVENTIONAL.
+            //
+            // RotateAdmin is the only action here that needs a SECOND signature — global_state.ak
+            // demands both the outgoing and the incoming admin — so its transaction is handed to
+            // another human, signed elsewhere, and brought back. Everything about that hand-off
+            // assumes the bytes are fixed while it happens.
+            //
+            // Batching breaks it two different ways, and the second is the one that reads as
+            // harmless:
+            //   · mixed with other changes, every later body depends on THIS transaction's hash
+            //     (see the roll-forward below), so a witness collected out of band pins tx[0] and
+            //     nothing else — the operator would have to collect per-transaction, in order,
+            //     from a remote party who can only see one at a time;
+            //   · TWO rotations in one chain has the same defect AND is the case a rule phrased as
+            //     "not alongside any OTHER change" would wave through, which is why this is
+            //     written as "exactly one" rather than as a difference check.
+            //
+            // One transaction is also what makes a rotation atomic: there is no half-rotated state
+            // to recover from, because there is nothing to half-apply.
+            long rotations = changes.stream()
+                    .filter(c -> c != null && "RotateAdmin".equals(c.action()))
+                    .count();
+            if (rotations > 0 && changes.size() != 1) {
+                String others = changes.stream()
+                        .map(c -> c == null ? "null" : c.action())
+                        .collect(java.util.stream.Collectors.joining(", "));
+                return TransactionContext.typedError(
+                        "RotateAdmin must be the only change in its chain, and this chain has "
+                        + changes.size() + ": [" + others + "]. A rotation needs a second signature "
+                        + "from the incoming admin, collected out of band, and in a chain every "
+                        + "transaction after the first depends on the previous one's hash — so the "
+                        + "witness could only ever cover the first transaction. Submit the rotation "
+                        + "on its own, then apply the other change" + (changes.size() > 2 ? "s" : "")
+                        + ".");
+            }
+
             Optional<RwaTokenRegistrationEntity> regOpt =
                     registrationRepository.findByProgrammableTokenPolicyId(policyId);
             if (regOpt.isEmpty()) {

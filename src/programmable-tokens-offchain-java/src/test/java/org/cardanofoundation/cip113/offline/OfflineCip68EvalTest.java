@@ -1162,6 +1162,83 @@ public class OfflineCip68EvalTest {
     }
 
     /**
+     * T-098 — a rotation is a chain of EXACTLY one, and the refusal is proven in both shapes.
+     *
+     * <p>RotateAdmin is the only global-state action needing a second signature, collected out of
+     * band from the incoming admin. In a chain, every transaction after the first depends on the
+     * previous one's hash, so a witness gathered remotely can only ever cover {@code tx[0]} — the
+     * remote party cannot even see the rest.
+     *
+     * <p>⛔ THE SECOND CASE IS THE POINT. A rule phrased as "RotateAdmin may not appear alongside
+     * any OTHER change" is satisfied by {@code [RotateAdmin, RotateAdmin]}, which has exactly the
+     * defect the rule exists to prevent. That is why the implementation tests
+     * {@code changes.size() != 1} rather than comparing actions, and why this test asserts the
+     * two-rotation case explicitly rather than trusting the single-mixed case to cover it.
+     */
+    @Test
+    public void rwaTokenRotateAdminMustBeTheOnlyChangeInItsChain() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var boot = st.boot();
+        var handler = st.handler();
+        var policyId = st.built().programmableTokenPolicyId();
+
+        var adminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        var incomingPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ALICE.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+
+        java.util.function.Function<String, org.cardanofoundation.cip113.service.module
+                .RwaTokenModuleHandler.GsChangeSpec> rotate = pkh ->
+                new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec(
+                        "RotateAdmin", null, null, null, null, null, null, null, null, null, null,
+                        pkh, null);
+        var pause = new org.cardanofoundation.cip113.service.module
+                .RwaTokenModuleHandler.GsChangeSpec(
+                "PauseTransfers", Boolean.TRUE, null, null, null, null, null, null, null, null,
+                null, null, null);
+
+        // (a) a rotation mixed with another change
+        var mixed = handler.buildGlobalStateUpdateChain(
+                policyId, java.util.List.of(rotate.apply(incomingPkh), pause),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
+        Assertions.assertFalse(mixed.isSuccessful(),
+                "a rotation batched with another change must be refused");
+        Assertions.assertTrue(mixed.error().contains("RotateAdmin must be the only change"),
+                "the refusal must name the rule; got: " + mixed.error());
+        Assertions.assertTrue(mixed.error().contains("PauseTransfers"),
+                "the refusal must name what else was in the chain; got: " + mixed.error());
+
+        // (b) ⛔ TWO rotations — the case a difference check would permit.
+        var twice = handler.buildGlobalStateUpdateChain(
+                policyId, java.util.List.of(rotate.apply(incomingPkh), rotate.apply(adminPkh)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
+        Assertions.assertFalse(twice.isSuccessful(),
+                "two rotations in one chain must be refused — each later body depends on the "
+                + "previous transaction's hash, so one out-of-band witness cannot cover both");
+        Assertions.assertTrue(twice.error().contains("RotateAdmin must be the only change"),
+                "the refusal must name the rule; got: " + twice.error());
+
+        // (c) and a lone rotation still builds, or the rule has eaten the feature.
+        var lone = handler.buildGlobalStateUpdateChain(
+                policyId, java.util.List.of(rotate.apply(incomingPkh)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
+        Assertions.assertTrue(lone.isSuccessful(),
+                "a lone rotation must still build: " + lone.error());
+        Assertions.assertEquals(1, lone.metadata().size());
+
+        // (d) a multi-change chain WITHOUT a rotation is untouched — the rule is scoped.
+        var noRotate = handler.buildGlobalStateUpdateChain(
+                policyId, java.util.List.of(pause, pause),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
+        Assertions.assertTrue(noRotate.isSuccessful(),
+                "batching is still allowed for actions that need no second signature: "
+                + noRotate.error());
+    }
+
+    /**
      * A seizure actually validates on chain.
      *
      * <p>The RWA token's regulatory force-transfer path is CIP-113's
