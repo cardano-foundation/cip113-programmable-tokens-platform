@@ -132,14 +132,44 @@ class MintAttestationRequestVerifierTest {
         verifyNoInteractions(repo);
     }
 
+    /**
+     * ⚑ THE `hashed` FLAG IS ADVISORY HERE; THE PAYLOAD DECIDES. This REPLACES an earlier
+     * assertion that `hashed: true` must be refused outright.
+     *
+     * <p>Why it changed: refusing the mode made any wallet that chose to hash fail 100% of the
+     * time, and on the deployed build it surfaced as "COSE payload mismatch" — the payload
+     * comparison ran BEFORE the hashed-header check — which is the same message a genuinely
+     * different payload produces. That ambiguity cost a round trip to mainnet on 2026-10-06.
+     *
+     * <p>What the verifier now does: it compares the payload against the bytes it reconstructed
+     * AND against their Blake2b-224, and accepts whichever matches. The flag is not trusted in
+     * either direction, so a producer that hashes without setting it (CIP-8 says it MUST) and a
+     * producer that sets it without hashing both authenticate — in both cases there is a valid
+     * Ed25519 signature by the right key over exactly the bytes this request reconstructs, which
+     * is the only thing this check exists to establish.
+     *
+     * <p>⚠ DELIBERATE DEVIATION FROM A MUST, recorded so it is a decision and not a drift.
+     * CIP-190 says a verifier MUST substitute the digest when the flag is true. Ignoring a wrong
+     * hint when the payload speaks for itself means we accept records a strictly conformant
+     * verifier would reject. That is an interop asymmetry, not a weakening: CIP-190 itself notes
+     * the flag's malleability "is not an integrity surface … never a forgery". Nothing here
+     * accepts a signature over bytes we did not reconstruct.
+     *
+     * <p>Still refused: a non-boolean flag, which is a malformed record rather than a hint.
+     */
     @Test
-    void supportsCip8HashedFalseButRejectsTrueAndInvalidValues() throws Exception {
+    void cip8HashedFlagIsAdvisoryAndNonBooleansAreRefused() throws Exception {
+        // false, and true-without-hashing: both are honest signatures over the exact payload.
         assertDoesNotThrow(() -> verify(PATH, BODY, address, sign(payload(PATH), SimpleValue.FALSE)));
-        for (DataItem invalid : new DataItem[]{SimpleValue.TRUE, new UnicodeString("false"), new UnsignedInteger(0)}) {
+        assertDoesNotThrow(() -> verify(PATH, BODY, address, sign(payload(PATH), SimpleValue.TRUE)),
+                "a spurious `hashed: true` on a plain payload must not refuse an honest signature");
+        // ⛔ A non-boolean is malformed. Treating anything truthy as true would let an odd encoding
+        // pick the verification path.
+        for (DataItem invalid : new DataItem[]{new UnicodeString("false"), new UnsignedInteger(0)}) {
             HttpHeaders headers = sign(payload(PATH), invalid);
             assertStatus(HttpStatus.UNAUTHORIZED, () -> verify(PATH, BODY, address, headers));
         }
-        org.mockito.Mockito.verify(repo, times(1)).consume(any(), any());
+        org.mockito.Mockito.verify(repo, times(2)).consume(any(), any());
     }
 
     @Test
@@ -148,7 +178,14 @@ class MintAttestationRequestVerifierTest {
         expires = issued + 300_000;
         HttpHeaders expired = sign(payload(PATH), null);
         assertStatus(HttpStatus.UNAUTHORIZED, () -> verify(PATH, BODY, address, expired));
-        issued = System.currentTimeMillis() + 60_000;
+        // ⚠ 60s USED TO BE "THE FUTURE"; IT IS NOW ORDINARY CLOCK DRIFT. The forward tolerance
+        // moved from 30s to 120s (RwaTokenAdminRequestVerifier.MAX_CLOCK_AHEAD_MS) because a
+        // 30-second limit turned routine browser clock drift into an opaque 401. This case must
+        // therefore sit beyond the NEW tolerance, or it asserts nothing — it went green against
+        // the widened limit until the allowlist put it in CI and it failed here.
+        issued = System.currentTimeMillis()
+                + org.cardanofoundation.cip113.service.RwaTokenAdminRequestVerifier.MAX_CLOCK_AHEAD_MS
+                + 60_000;
         expires = issued + 300_000;
         HttpHeaders future = sign(payload(PATH), null);
         assertStatus(HttpStatus.UNAUTHORIZED, () -> verify(PATH, BODY, address, future));

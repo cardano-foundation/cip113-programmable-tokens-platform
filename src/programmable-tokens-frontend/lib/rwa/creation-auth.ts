@@ -1,6 +1,7 @@
 import { getCardanoNetwork } from "../utils/network";
 import { getApiBaseUrl } from "../api/client";
 import { bytesHex, hexBytes } from "./member-root";
+import { REQUEST_WINDOW_MS } from "./request-window";
 
 interface SignDataWallet {
   getUsedAddresses(): Promise<string[]>;
@@ -63,7 +64,7 @@ export async function signRwaCreationRequest(args: {
   crypto.getRandomValues(nonceBytes);
   const nonce = bytesHex(nonceBytes);
   const issued = Date.now();
-  const expires = issued + 300_000;
+  const expires = issued + REQUEST_WINDOW_MS;
   const bodyBytes = new TextEncoder().encode(args.serializedBody);
   const bodyDigest = bytesHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bodyBytes)));
   const network = getCardanoNetwork();
