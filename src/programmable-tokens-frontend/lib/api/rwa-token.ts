@@ -59,8 +59,9 @@ export interface RwaTokenGlobalState {
    *  mint/burn decision to. Rotatable via RotateMintingScript — that indirection is the
    *  CIP-113 upgrade path, since the proxy's own hash is frozen into the registry node. */
   mintingScriptCredentialHash: string;
-  /** One-way lock. Once true, BOTH the minting-authority rotation and the CIP-113
-   *  registry-node upgrade path are permanently frozen — no branch clears it. */
+  /** One-way lock. Once true, the minting-authority rotation, the CIP-113
+   *  registry-node upgrade path and SetMintableAmount are permanently frozen — no
+   *  branch clears it. */
   upgradesLocked: boolean;
 }
 
@@ -321,12 +322,16 @@ export interface GsChangeSpec {
      *  other withdraw-capable script silently disables every mint control. After rotating,
      *  confirm a mint lacking a power-user signature is REJECTED. */
     | "RotateMintingScript"
-    /** Irreversible. Permanently freezes BOTH the minting-authority rotation and the
-     *  CIP-113 registry-node upgrade path, so the token's mint and transfer rules become
-     *  final. Meaningful to holders precisely because an admin key compromise cannot undo
+    /** Irreversible. Permanently freezes the minting-authority rotation, the CIP-113
+     *  registry-node upgrade path and SetMintableAmount, so the token's mint and transfer
+     *  rules and its supply cap become final. Meaningful to holders precisely because an admin key compromise cannot undo
      *  it — and it also gives up the ability to patch a buggy authority, leaving
      *  DeactivateContract as the only remaining lever. Rejected if already locked. */
     | "LockUpgrades"
+    /** Admin-only. Sets the GlobalState `mintable_amount` (remaining supply headroom, not
+     *  total supply) to an absolute value >= 0. Rejected on chain once upgrades are locked,
+     *  and it cannot share a transaction with a mint. */
+    | "SetMintableAmount"
     /** Irreversible. Requires transfers to already be paused; afterwards the
      *  on-chain validator rejects every further spend of the global state. */
     | "DeactivateContract";
@@ -346,6 +351,8 @@ export interface GsChangeSpec {
   newAdminCredentialHashHex?: string;
   /** RotateMintingScript. 28-byte hex script hash of the new minting authority. */
   newMintingScriptCredentialHashHex?: string;
+  /** SetMintableAmount. Whole number in [0, Number.MAX_SAFE_INTEGER]; see lib/rwa/mintable-amount.ts. */
+  newMintableAmount?: number;
 }
 
 /** Build a chain of admin-signed GS update txs (one per change). Returns the

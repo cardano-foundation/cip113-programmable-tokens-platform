@@ -22,13 +22,12 @@
       "name": "rwa-token",
       "resource": "modules/rwa-token/plutus.json",
       "repository": "https://github.com/cardano-foundation/cpt-rwa-ch-de-cmta-reference",
-      "commit": "9761a05e5d7d298a940c990989438cc894a0dad5",
-      "commit_date": "2026-08-24T00:00:00Z",
+      "commit": "be4cce65ca1e2d225d4eba967fc99f3416cf67d7",
+      "commit_date": "2026-10-06T06:53:55+02:00",
       "aiken_compiler": "v1.1.23+8949565",
-      "sha256": "2f1f1799f499339dd9ecc9e0ae683bf9bdc77e5b9d5654e624f6e807f4185f48",
-      "verbatim_from_upstream": false,
-      "upstream_committed_sha256": "301b2d9f67b09aee84e3ce76555b35eda4c32e97c06ab8e9852bd509cbaae291",
-      "note": "NOT upstream's committed plutus.json. Upstream's is STALE: at this commit it does not reproduce from its own source -- global_state.global_state_spend_validator is committed as 57e2c6d5ca432b24871d113a1f0f4664ca4ea574d8ce892537356f49 (4901 bytes) where the source compiles to e720eb536b26eb8c639e96a17de4404ab4dbf18224ae9cc2242e13a9 (4698 bytes). plutus.json and validators/global_state.ak were last touched by the SAME commit, so the blueprint was committed without being regenerated after a final source edit. We ship the REBUILD, because the script that goes on chain must be the source that gets audited. Reproduce it by rebuilding upstream at this commit -- see docs/CONTRACTS.md. upstream_committed_sha256 records the stale bytes so it stays possible to tell whether upstream has since regenerated."
+      "sha256": "8997d9b71ab3f6894b70bac78e67db6723a1e24077ff89087c888abd87d17d5c",
+      "verbatim_from_upstream": true,
+      "note": "Upstream's committed plutus.json, byte for byte, and it reproduces from its own source at this commit (rebuilt with the pinned compiler: same sha256), so the earlier stale-blueprint exception no longer applies. Re-pinned from 9761a05 across 25 upstream commits plus SetMintableAmount (GlobalStateSpendAction 13). The one interface change: minting_authority takes 8 parameters, reference_asset_name having been dropped at 5033daa when the CIP-68 reference token became the (100)-prefix rule. GlobalStateDatum is structurally unchanged. Every rwa-token script hash changes, so tokens registered under 9761a05 are not buildable by this platform (docs/CONTRACTS.md: historical surfaces are not compatibility modes)."
     },
     {
       "name": "dummy",

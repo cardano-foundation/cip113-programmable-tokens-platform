@@ -199,6 +199,14 @@ public class RwaTokenController {
                     return ResponseEntity.badRequest().body(Map.of("error",
                             "member roots must be published through the reviewed members flow"));
                 }
+                Long newMintableAmount;
+                try {
+                    newMintableAmount = wholeLongOrNull(change.get("newMintableAmount"));
+                } catch (IllegalArgumentException | ArithmeticException e) {
+                    return ResponseEntity.badRequest().body(Map.of("error",
+                            "newMintableAmount must be a whole number between 0 and "
+                            + Long.MAX_VALUE + ": " + e.getMessage()));
+                }
                 changes.add(new RwaTokenModuleHandler.GsChangeSpec(
                         (String) change.get("action"),
                         (Boolean) change.get("transfersPaused"),
@@ -212,7 +220,8 @@ public class RwaTokenController {
                         (Boolean) change.get("requiresReceiverKycEnabled"),
                         (String) change.get("newMemberRootHashHex"),
                         (String) change.get("newAdminCredentialHashHex"),
-                        (String) change.get("newMintingScriptCredentialHashHex")
+                        (String) change.get("newMintingScriptCredentialHashHex"),
+                        newMintableAmount
                 ));
             }
 
@@ -238,6 +247,16 @@ public class RwaTokenController {
             log.error("rwa-token GS update chain failed for policy={}", policyId, e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
+    }
+
+    /** A JSON integer as a long, or null when absent. Jackson hands back Integer,
+     *  Long or BigInteger depending on magnitude; a fraction or an out-of-range
+     *  value must fail loudly rather than be truncated into a different amount. */
+    private static Long wholeLongOrNull(Object value) {
+        if (value == null) return null;
+        if (value instanceof Integer || value instanceof Long) return ((Number) value).longValue();
+        if (value instanceof java.math.BigInteger big) return big.longValueExact();
+        throw new IllegalArgumentException("expected a whole number, got: " + value);
     }
 
     /** The visible baseline and staged Veridian leaves. This read has no authority to publish. */

@@ -78,7 +78,9 @@ class RwaCip171ProvenanceServiceTest {
             assertEquals(0, ((BytesPlutusData) cmta.get(4)).getValue().length);
             var parameters = ((MapPlutusData) cmta.get(5)).getMap();
             assertEquals(10, parameters.size());
-            assertEquals(33, parameters.values().stream().mapToInt(v -> ((ListPlutusData) v).getPlutusDataList().size()).sum());
+            // 32 since upstream 5033daa dropped minting_authority's reference_asset_name
+            // (owner-approved requirement change, 2026-10-06 re-pin).
+            assertEquals(32, parameters.values().stream().mapToInt(v -> ((ListPlutusData) v).getPlutusDataList().size()).sum());
             assertEquals(1, ((MapPlutusData) core.get(5)).getMap().size());
             var gsHash = modules.getModuleValidator("rwa-token", "global_state.global_state_mint_validator.mint")
                     .orElseThrow().scriptHash();

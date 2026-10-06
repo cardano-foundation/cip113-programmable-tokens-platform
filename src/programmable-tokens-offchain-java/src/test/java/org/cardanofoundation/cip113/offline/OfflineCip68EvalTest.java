@@ -1068,6 +1068,111 @@ public class OfflineCip68EvalTest {
     }
 
     /**
+     * SetMintableAmount (GlobalStateSpendAction 13) builds AND validates: the admin
+     * raises and then lowers the cap in one chain, and the real spend validator
+     * accepts both — so the constructor index, the single Int field and the
+     * one-field datum rewrite all match the on-chain branch.
+     */
+    @Test
+    public void rwaTokenSetMintableAmountEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var adminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+
+        var result = st.handler().buildGlobalStateUpdateChain(
+                st.built().programmableTokenPolicyId(),
+                java.util.List.of(setMintable(5_000_000L), setMintable(0L)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, st.boot().params());
+        Assertions.assertTrue(result.isSuccessful(),
+                "SetMintableAmount chain build failed: " + result.error());
+        Assertions.assertEquals(2, result.metadata().size());
+
+        int evaluated = 0;
+        for (int i = 0; i < result.metadata().size(); i++) {
+            var tx = Transaction.deserialize(HexUtil.decodeHexString(result.metadata().get(i)));
+            evaluated += st.chain().reportAndCheckRedeemers("rwa-token/set-mintable[" + i + "]", tx);
+        }
+        Assertions.assertTrue(evaluated >= 2,
+                "each SetMintableAmount transaction must have run the global-state spend validator; "
+                + "only " + evaluated + " redeemers were genuinely evaluated");
+    }
+
+    /** A negative amount is refused before signing, naming the on-chain rule. */
+    @Test
+    public void rwaTokenSetMintableAmountRefusesNegative() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var adminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+
+        var result = st.handler().buildGlobalStateUpdateChain(
+                st.built().programmableTokenPolicyId(), java.util.List.of(setMintable(-1L)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, st.boot().params());
+        Assertions.assertFalse(result.isSuccessful(), "a negative mintable amount must be refused");
+        Assertions.assertTrue(result.error().contains("0 or more"), result.error());
+    }
+
+    /** After LockUpgrades the cap is final: a SetMintableAmount chained behind the
+     *  lock reads the rolled-forward (locked) datum and is refused before signing. */
+    @Test
+    public void rwaTokenSetMintableAmountRefusedOnceUpgradesAreLocked() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var adminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        var lock = new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec(
+                "LockUpgrades", null, null, null, null, null, null, null, null, null, null, null, null);
+
+        var result = st.handler().buildGlobalStateUpdateChain(
+                st.built().programmableTokenPolicyId(), java.util.List.of(lock, setMintable(42L)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, st.boot().params());
+        Assertions.assertFalse(result.isSuccessful(), "SetMintableAmount after LockUpgrades must be refused");
+        Assertions.assertTrue(result.error().contains("locked"), result.error());
+    }
+
+    /** A non-CIP-68 security asset name carrying the (100) prefix is refused at preflight,
+     *  before any funding is reserved: the contract rejects it at registration, after
+     *  genesis would already have landed. Paired with an otherwise-identical control. */
+    @Test
+    public void rwaTokenPreflightRefusesAReferencePrefixedAssetName() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var adminPkh = new Address(BootstrapFixture.ADMIN.baseAddress())
+                .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
+        java.util.function.Function<String, org.cardanofoundation.cip113.model.RwaTokenRegisterRequest> req =
+                name -> org.cardanofoundation.cip113.model.RwaTokenRegisterRequest.builder()
+                        .moduleId("rwa-token")
+                        .feePayerAddress(BootstrapFixture.ADMIN.baseAddress())
+                        .recipientAddress(BootstrapFixture.ADMIN.baseAddress())
+                        .assetName(name)
+                        .quantity("0")
+                        .initialMintQuantity("0")
+                        .adminPubKeyHash(adminPkh)
+                        .initialMintableAmount(1_000_000L)
+                        .bootstrapPowerUserPkh(adminPkh)
+                        .build();
+
+        String refused = st.handler().creationPreflight(req.apply("000643B0aabb"));
+        Assertions.assertNotNull(refused, "a (100)-prefixed security asset name must be refused");
+        Assertions.assertTrue(refused.contains("000643b0"), refused);
+
+        String control = st.handler().creationPreflight(req.apply("aabb"));
+        Assertions.assertTrue(control == null || !control.contains("000643b0"),
+                "an ordinary name must not trip the (100)-prefix guard: " + control);
+    }
+
+    private static org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec
+            setMintable(long amount) {
+        return new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec(
+                "SetMintableAmount", null, null, null, null, null, null, null, null, null, null,
+                null, null, amount);
+    }
+
+    /**
      * A seizure actually validates on chain.
      *
      * <p>The RWA token's regulatory force-transfer path is CIP-113's
