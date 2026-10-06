@@ -124,6 +124,85 @@ class RwaTokenAdminRequestVerifierTest {
         assertStatus(HttpStatus.UNAUTHORIZED, () -> verify("", PATH, adminHash, expired));
     }
 
+    /**
+     * ⛔ THE WINDOW HAS A HUMAN INSIDE IT. The frontend stamps `issued` BEFORE awaiting
+     * `signData`, so the clock is already running while the user reads a prompt. A software wallet
+     * signs in about a second; a hardware wallet puts a person, a scrolling confirmation and
+     * sometimes an unlock inside the same span.
+     *
+     * <p>⚑ That is why the old five-minute window survived thousands of hot-wallet runs and then
+     * answered 401 on mainnet for the same RWA tokenisation the first time a Ledger took its time
+     * (2026-10-06). The fix is not "retry faster".
+     */
+    @Test
+    void aHardwareWalletConfirmationHasTimeToFinish() throws Exception {
+        long now = System.currentTimeMillis();
+        // ⛔ SEVEN MINUTES, AND THE NUMBER IS THE POINT. It must sit OUTSIDE the old five-minute
+        // window and INSIDE the new one, or this test passes whether the fix is present or not.
+        // The first version used four minutes, which fits in both — it was green against the very
+        // bug it was written for, and only a mutation back to 300_000 exposed that.
+        long issued = now - 420_000;
+        HttpHeaders slow = signedHeaders("", "GET", PATH,
+                issued, issued + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS);
+        assertDoesNotThrow(() -> verify("", PATH, adminHash, slow),
+                "a four-minute hardware-wallet confirmation must still authenticate");
+
+        // ⚠ AND THE WINDOW STILL ENDS. Past it, the refusal must still come.
+        long old = now - RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS - 60_000;
+        HttpHeaders tooOld = signedHeaders("", "GET", PATH,
+                old, old + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS);
+        assertStatus(HttpStatus.UNAUTHORIZED, () -> verify("", PATH, adminHash, tooOld));
+    }
+
+    /**
+     * ⛔ EACH TIMING FAILURE MUST NAME ITSELF. All five window clauses used to collapse into
+     * "request signature expired or not yet valid", so an operator could not tell a slow device
+     * confirmation from a skewed clock from a client/server disagreement about the window length —
+     * three different problems with three different fixes. On mainnet the response body carried no
+     * message at all, and nothing logged it either.
+     */
+    @Test
+    void eachTimingFailureSaysWhichOneItWas() throws Exception {
+        long now = System.currentTimeMillis();
+
+        // (a) clock ahead of the server — NTP on the signing machine
+        long ahead = now + RwaTokenAdminRequestVerifier.MAX_CLOCK_AHEAD_MS + 60_000;
+        var future = signedHeaders("", "GET", PATH, ahead,
+                ahead + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS);
+        assertReason(() -> verify("", PATH, adminHash, future), "FUTURE");
+
+        // (b) aged out while the user approved on the device
+        long old = now - RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS - 60_000;
+        var aged = signedHeaders("", "GET", PATH, old,
+                old + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS);
+        assertReason(() -> verify("", PATH, adminHash, aged), "hardware wallet");
+
+        // (c) the client asked for a longer window than this server allows — the failure mode of
+        //     shipping the frontend half of this change without the backend half.
+        var tooLong = signedHeaders("", "GET", PATH, now,
+                now + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS + 60_000);
+        assertReason(() -> verify("", PATH, adminHash, tooLong), "disagree about the window");
+    }
+
+    /** ⚑ A 30-SECOND FORWARD TOLERANCE WAS A TRIPWIRE, not tolerance: ordinary browser clock drift
+     *  flipped this from working to failing with no code change and an opaque 401. */
+    @Test
+    void ordinaryClockDriftIsTolerated() throws Exception {
+        long skewed = System.currentTimeMillis() + 45_000;   // refused before this change
+        HttpHeaders headers = signedHeaders("", "GET", PATH, skewed,
+                skewed + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS);
+        assertDoesNotThrow(() -> verify("", PATH, adminHash, headers),
+                "45 seconds of forward clock drift is ordinary and must not read as a bad signature");
+    }
+
+    private static void assertReason(Runnable task, String mustContain) {
+        ResponseStatusException error = assertThrows(ResponseStatusException.class, task::run);
+        assertEquals(HttpStatus.UNAUTHORIZED, error.getStatusCode());
+        assertTrue(String.valueOf(error.getReason()).contains(mustContain),
+                "the refusal must say which timing check failed; expected it to mention '"
+                + mustContain + "' but got: " + error.getReason());
+    }
+
     private static void assertStatus(HttpStatus status, Runnable task) {
         ResponseStatusException error = assertThrows(ResponseStatusException.class, task::run);
         assertEquals(status, error.getStatusCode());

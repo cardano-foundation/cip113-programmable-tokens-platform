@@ -12,6 +12,7 @@ import co.nstant.in.cbor.model.UnicodeString;
 import co.nstant.in.cbor.model.UnsignedInteger;
 import com.bloxbean.cardano.client.util.HexUtil;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.crypto.digests.Blake2bDigest;
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.bouncycastle.crypto.signers.Ed25519Signer;
@@ -32,6 +33,7 @@ import java.time.Instant;
 import java.util.Arrays;
 
 /** CIP-30 signData authentication for off-chain CMTA admin API calls only. */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class RwaTokenAdminRequestVerifier {
@@ -89,15 +91,66 @@ public class RwaTokenAdminRequestVerifier {
 
     record RequestWindow(String nonce, long issued, long expires) { }
 
+    /**
+     * How long a signed request stays valid.
+     *
+     * ⛔ THIS WINDOW HAS A HUMAN INSIDE IT, AND THAT IS WHY IT WAS TOO SHORT. The frontend stamps
+     * `issued` BEFORE calling `signData`, so the clock starts before the user is even shown the
+     * prompt. A software wallet signs in about a second and the window never mattered — which is
+     * exactly why this survived thousands of successful runs. A HARDWARE wallet puts a person, a
+     * scrolling confirmation, and sometimes an unlock or a re-plug inside the same five minutes.
+     *
+     * ⚑ MEASURED CONSEQUENCE, mainnet, 2026-10-06: the same RWA tokenisation that had always
+     * worked from a hot wallet, and worked once from a Ledger that morning, started answering 401
+     * on `/rwa-token/build-chain`. Confirming fast enough was the difference, which is not a
+     * property anyone should have to rely on.
+     *
+     * ⚠ WIDENING THIS IS NOT THE REPLAY CONTROL BEING RELAXED. Replay is prevented by
+     * {@code nonces.consume(...)} — each nonce is single-use and the row carries the expiry, so a
+     * captured signature cannot be used twice regardless of this window. What the window bounds is
+     * how long an UNUSED captured signature stays spendable, and fifteen minutes of that is a
+     * deliberate trade for a signing flow a person can actually complete.
+     */
+    static final long REQUEST_WINDOW_MS = 900_000L;      // 15 min: a human with a device in hand
+
+    /**
+     * How far ahead of the server a client's clock may be.
+     *
+     * ⛔ 30 SECONDS WAS NOT TOLERANCE, IT WAS A TRIPWIRE. Browser clocks drift, and an NTP
+     * correction on either side flips this from working to failing with no code change and no
+     * diagnosis — the symptom is an opaque 401 that looks identical to a bad signature. Two
+     * minutes is still far tighter than the window itself, so it cannot be used to extend validity.
+     */
+    static final long MAX_CLOCK_AHEAD_MS = 120_000L;
+
     static RequestWindow requestWindow(HttpHeaders headers) {
         String nonce = required(headers, "X-CMTA-Nonce").toLowerCase(java.util.Locale.ROOT);
         if (!nonce.matches("[0-9a-f]{64}")) throw unauthorized("invalid request nonce");
         long issued = parseTime(required(headers, "X-CMTA-Issued"));
         long expires = parseTime(required(headers, "X-CMTA-Expires"));
         long now = System.currentTimeMillis();
-        if (issued > now + 30_000L || issued < now - 300_000L
-                || expires <= issued || expires > issued + 300_000L || expires < now) {
-            throw unauthorized("request signature expired or not yet valid");
+        // ⚑ EACH CLAUSE GETS ITS OWN MESSAGE. All five used to collapse into "expired or not yet
+        // valid", so an operator could not tell a slow device confirmation from a skewed clock from
+        // a malformed window — three different problems with three different fixes, and the only
+        // way to tell them apart was to read this source.
+        if (issued > now + MAX_CLOCK_AHEAD_MS) {
+            throw unauthorized("request was issued " + (issued - now) + "ms in the FUTURE; this "
+                    + "machine's clock is ahead of the server by more than "
+                    + MAX_CLOCK_AHEAD_MS + "ms — check NTP on the signing machine");
+        }
+        if (issued < now - REQUEST_WINDOW_MS) {
+            throw unauthorized("request was signed " + (now - issued) + "ms ago, older than the "
+                    + REQUEST_WINDOW_MS + "ms window — if you were confirming on a hardware "
+                    + "wallet, the signature aged out while you approved it; retry and confirm "
+                    + "without leaving the device idle");
+        }
+        if (expires <= issued || expires > issued + REQUEST_WINDOW_MS) {
+            throw unauthorized("request window is malformed: issued=" + issued + " expires="
+                    + expires + ", which is not a positive span of at most " + REQUEST_WINDOW_MS
+                    + "ms — the client and this server disagree about the window length");
+        }
+        if (expires < now) {
+            throw unauthorized("request signature expired " + (now - expires) + "ms ago");
         }
         return new RequestWindow(nonce, issued, expires);
     }
@@ -227,7 +280,15 @@ public class RwaTokenAdminRequestVerifier {
         catch (Exception e) { throw new IllegalStateException("SHA-256 unavailable", e); }
     }
 
+    /**
+     * ⛔ LOG IT. Spring omits a ResponseStatusException's reason from the response body unless
+     * `server.error.include-message` is set, and this class has sixteen distinct reasons. On
+     * mainnet that meant an operator saw `{"status":401,"error":"Unauthorized"}` and nothing else,
+     * while the server knew precisely which check failed. The reason was invisible on BOTH sides:
+     * nothing logged it either.
+     */
     static ResponseStatusException unauthorized(String reason) {
+        log.warn("CMTA request authentication REFUSED: {}", reason);
         return new ResponseStatusException(HttpStatus.UNAUTHORIZED, reason);
     }
 

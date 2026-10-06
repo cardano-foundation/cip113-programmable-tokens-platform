@@ -154,7 +154,14 @@ class RwaTokenCreationRequestVerifierTest {
         expires = issued + 300_000;
         HttpHeaders expired = sign(payload(PATH), null);
         assertStatus(HttpStatus.UNAUTHORIZED, () -> verify(PATH, BODY, address, expired));
-        issued = System.currentTimeMillis() + 60_000;
+        // ⚠ 60s USED TO BE "THE FUTURE"; IT IS NOW ORDINARY CLOCK DRIFT. The forward tolerance
+        // moved from 30s to 120s (RwaTokenAdminRequestVerifier.MAX_CLOCK_AHEAD_MS) because a
+        // 30-second limit turned routine browser clock drift into an opaque 401. This case must
+        // therefore sit beyond the NEW tolerance, or it asserts nothing — it went green against
+        // the widened limit until the allowlist put it in CI and it failed here.
+        issued = System.currentTimeMillis()
+                + org.cardanofoundation.cip113.service.RwaTokenAdminRequestVerifier.MAX_CLOCK_AHEAD_MS
+                + 60_000;
         expires = issued + 300_000;
         HttpHeaders future = sign(payload(PATH), null);
         assertStatus(HttpStatus.UNAUTHORIZED, () -> verify(PATH, BODY, address, future));
