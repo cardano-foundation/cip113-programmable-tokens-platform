@@ -45,7 +45,8 @@
     "test:modavail": "tsc lib/registry/available-modules.ts lib/utils/network.ts --outDir .modavail-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .modavail-build && node test-module-availability.js",
     "generate:trusted-deployments": "node scripts/generate-trusted-registry-deployments.mjs",
     "check:trusted-deployments": "node scripts/generate-trusted-registry-deployments.mjs --check",
-    "test:trusted-deployments": "node test-trusted-registry-deployments.mjs"
+    "test:trusted-deployments": "node test-trusted-registry-deployments.mjs",
+    "test:cip21ccl": "tsc lib/utils/cip21.ts lib/deployment/ceremony.ts lib/rwa/rotate-admin.ts lib/tx/hash.ts --outDir .cclguard-build --module es2022 --target es2022 --moduleResolution bundler --skipLibCheck && node scripts/fix-esm-specifiers.mjs .cclguard-build && node test-cip21-ccl.js"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "^0.15.0",
