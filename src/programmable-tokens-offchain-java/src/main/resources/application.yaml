@@ -18,6 +18,11 @@ network: mainnet
 wallet:
   mnemonic: ""
 
+programmable:
+  token:
+    default:
+      txHash: "bfefbd222e40d88f5d4454e92b24062533070f41a3e25c0a23383264650cdb72"
+
 blockfrost:
   url: https://cardano-mainnet.blockfrost.io/api/v0/
   key: ""
