@@ -27,6 +27,7 @@ import {
   AdminTokenInfo,
   RwaTokenCapability,
   hasRwaTokenCapability,
+  canAdministerRwaGlobalState,
 } from "@/lib/api/admin";
 import { getSigningEntityVkey } from "@/lib/api/keri";
 import { readGlobalState, updateGlobalState } from "@/lib/api/compliance";
@@ -64,9 +65,12 @@ export function GlobalStateSection({
   // rwa-token: BaFin's GS spend validator is admin-gated via the
   //   admin_credential_hash field of the datum — anyone with the ADMIN
   //   capability bit in the on-chain power-users LL counts as such.
+  // ⚑ ONE predicate, shared with AdminPanel's tab gate — see canAdministerRwaGlobalState. Gating
+  // on the ADMIN capability alone hid this panel from a rotated-in admin, who holds the live
+  // global-state credential and no power-user node.
   const manageableTokens = tokens.filter((t) => {
     if (t.moduleId === "rwa-token") {
-      return hasRwaTokenCapability(t, RwaTokenCapability.ADMIN);
+      return canAdministerRwaGlobalState(t);
     }
     return t.roles.includes("ISSUER_ADMIN") && t.moduleId === "kyc";
   });

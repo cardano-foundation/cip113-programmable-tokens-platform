@@ -55,6 +55,11 @@ export function hasRwaTokenCapability(
   return (cap & capabilities) !== 0;
 }
 
+// The global-state access decision lives in lib/rwa/admin-access.ts so it can be compiled and
+// tested on its own — see the note there about why it must not import `@/types/api`. Re-exported
+// here so existing call sites keep one import site.
+export { canAdministerRwaGlobalState, RWA_ADMIN_CAPABILITY } from "../rwa/admin-access";
+
 export interface AdminTokensResponse {
   adminPkh: string;
   tokens: AdminTokenInfo[];
