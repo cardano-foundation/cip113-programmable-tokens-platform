@@ -14,6 +14,7 @@
  *
  * Anything else means the view is wrong, and it is worth saying which way:
  *   · a `next` naming a key that is not present  → that node was never indexed
+ *     (but `next == MAX_NEXT` is the TERMINATOR, a value and not a node — see the walk below)
  *   · nodes present but never reached            → the chain skips them, or there are two chains
  *   · `next <= key`                              → impossible on chain; the data is not what it claims
  *   · no terminator                              → the walk ran out before the end of the list
@@ -88,6 +89,7 @@ export function walkRegistry(nodes: readonly RegistryNode[]): WalkResult {
     reached.add(cur.key);
     ordered.push(cur);
 
+    // A view that MATERIALISES the terminator as a node — we stepped into it deliberately below.
     if (cur.key === MAX_NEXT) {
       sawTerminator = true;
       break;
@@ -100,6 +102,34 @@ export function walkRegistry(nodes: readonly RegistryNode[]): WalkResult {
           On chain an insert must land strictly between two keys, so this ordering cannot have been
           produced by a valid transaction.`.replace(/\s+/g, ' '),
       });
+    }
+
+    // ⛔ THE END OF THE LIST IS A VALUE IN `next`, NOT A NODE. `MAX_NEXT` is thirty bytes of 0xff
+    // held by the LAST node's `next` field; no node is keyed by it. Confirmed against both live
+    // deployments on 2026-10-06 — mainnet returns
+    //   "" -> 01c24df7… -> b025efe5… -> ffff…ff        (3 nodes, tokenCount 2)
+    // and preprod the same shape with 10 — and neither has a node whose key is the marker.
+    //
+    // ⚑ THIS WAS A BUG, AND IT FIRED ON EVERY NETWORK, ALWAYS, ON THE LAST NODE. Without this
+    // branch the walk looked the marker up like any other key, found nothing, and reported
+    // `dangling` — with a message that then asserted something false: "That node exists on chain
+    // … so the indexer is behind or missed a block." The chain was intact; the walk's model of the
+    // terminator was wrong, and it accused the indexer of losing a block that was never missing.
+    //
+    // ⚠ AND THE TESTS AGREED WITH THE BUG. Every fixture in test-registry-walk.js fabricated a
+    // `node(MAX_NEXT, MAX_NEXT)` tail, so the suite was green against a list shape that does not
+    // occur. Test data that shares the implementation's assumption cannot test that assumption.
+    if (cur.next === MAX_NEXT) {
+      const materialised: RegistryNode | undefined = byKey.get(MAX_NEXT);
+      if (!materialised) {
+        // The ordinary case: the marker terminates the list and there is nothing to fetch.
+        sawTerminator = true;
+        break;
+      }
+      // Tolerated: if some view ever does hand us a node keyed by the marker, step INTO it rather
+      // than stopping short — stopping would leave it unvisited and report it as unreachable.
+      cur = materialised;
+      continue;
     }
 
     const next: RegistryNode | undefined = byKey.get(cur.next);

@@ -4,6 +4,16 @@
  * A check that cannot fail is worse than no check, because it also reports success. So every
  * assertion here breaks the list on purpose and demands the walk notice — an "intact list is
  * intact" test on its own would pass against a function that returned `intact: true` always.
+ *
+ * ⛔ AND EVERY FIXTURE HERE USED TO FABRICATE A TAIL NODE THAT DOES NOT EXIST. They each appended
+ * `node(MAX_NEXT, MAX_NEXT)`, because the walk assumed the end-of-list marker was a NODE. On chain
+ * it is a VALUE in the last node's `next`, and no node is keyed by it. So the suite was fully green
+ * against a list shape that never occurs, while the real page reported `dangling` on the last node
+ * of every deployment and blamed the indexer for a block it had not missed.
+ *
+ * ⚑ Test data that shares the implementation's assumption cannot test that assumption. The
+ * fixtures below now end the way the chain does, and `mainnetAsOfToday()` is the real list read
+ * off the live indexer so the shape is pinned to something nobody can quietly redefine.
  */
 const assert = require("node:assert");
 
@@ -19,9 +29,25 @@ const node = (key, next) => ({
   globalStatePolicyId: "",
 });
 
-/** A healthy three-token registry: sentinel -> A -> B -> C -> terminator. */
-const healthy = () => [
-  node("", A), node(A, B), node(B, C), node(C, MAX_NEXT), node(MAX_NEXT, MAX_NEXT),
+/**
+ * A healthy three-token registry: sentinel -> A -> B -> C, whose `next` is the marker.
+ *
+ * Note what is NOT here: a node keyed MAX_NEXT. That is the whole point.
+ */
+const healthy = () => [node("", A), node(A, B), node(B, C), node(C, MAX_NEXT)];
+
+/**
+ * The live mainnet registry, read from
+ * https://mainnet-indexer.programmabletokens.xyz/api/v1/registry/nodes/all?protocolParamsId=1
+ * on 2026-10-06 (registry policy 484e733d…, tokenCount 2). Three nodes, no materialised tail.
+ *
+ * This is the list that produced "This view of the registry is incomplete" in production.
+ */
+const mainnetAsOfToday = () => [
+  node("", "01c24df7941f8b5856762fcc8aa0bb61a8c24f0911ed6aef474034d0"),
+  node("01c24df7941f8b5856762fcc8aa0bb61a8c24f0911ed6aef474034d0",
+       "b025efe5b44b43ed154419c66b0efc9cf148fd98f464e261018c89e8"),
+  node("b025efe5b44b43ed154419c66b0efc9cf148fd98f464e261018c89e8", MAX_NEXT),
 ];
 
 async function main() {
@@ -40,7 +66,7 @@ async function main() {
 
   // ---- the shuffle test: order must come from `next`, never from a sort -----
   check("list order comes from the pointers, not from the input order", () => {
-    const shuffled = [node(C, MAX_NEXT), node("", A), node(MAX_NEXT, MAX_NEXT), node(B, C), node(A, B)];
+    const shuffled = [node(C, MAX_NEXT), node("", A), node(B, C), node(A, B)];
     const r = walkRegistry(shuffled);
     assert.ok(r.intact);
     assert.deepStrictEqual(tokensOf(r).map((n) => n.key), [A, B, C],
@@ -60,7 +86,7 @@ async function main() {
 
   check("a node present but unreachable is reported", () => {
     // C is in the set, but B points past it to the terminator.
-    const orphaned = [node("", A), node(A, B), node(B, MAX_NEXT), node(C, MAX_NEXT), node(MAX_NEXT, MAX_NEXT)];
+    const orphaned = [node("", A), node(A, B), node(B, MAX_NEXT), node(C, MAX_NEXT)];
     const r = walkRegistry(orphaned);
     assert.ok(!r.intact);
     assert.ok(r.problems.some((p) => p.kind === "unreachable"),
@@ -68,7 +94,7 @@ async function main() {
   });
 
   check("a backwards pointer is reported", () => {
-    const backwards = [node("", B), node(B, A), node(A, MAX_NEXT), node(MAX_NEXT, MAX_NEXT)];
+    const backwards = [node("", B), node(B, A), node(A, MAX_NEXT)];
     const r = walkRegistry(backwards);
     assert.ok(!r.intact);
     assert.ok(r.problems.some((p) => p.kind === "order"),
@@ -76,7 +102,7 @@ async function main() {
   });
 
   check("a cycle terminates the walk instead of hanging", () => {
-    const cyclic = [node("", A), node(A, B), node(B, A), node(MAX_NEXT, MAX_NEXT)];
+    const cyclic = [node("", A), node(A, B), node(B, A)];
     const r = walkRegistry(cyclic);
     assert.ok(!r.intact);
     assert.ok(r.problems.some((p) => p.kind === "cycle" || p.kind === "dangling"));
@@ -92,9 +118,47 @@ async function main() {
   });
 
   check("an empty registry is intact, not broken", () => {
-    const r = walkRegistry([node("", MAX_NEXT), node(MAX_NEXT, MAX_NEXT)]);
+    const r = walkRegistry([node("", MAX_NEXT)]);
     assert.ok(r.intact, `a protocol with no tokens must not look broken: ${r.problems.map((p) => p.kind)}`);
     assert.deepStrictEqual(tokensOf(r), []);
+  });
+
+  // ---- the production bug, pinned to the real list -------------------------
+  check("THE LIVE MAINNET LIST IS INTACT — the marker is a value, not a missing node", () => {
+    const r = walkRegistry(mainnetAsOfToday());
+    assert.ok(r.intact,
+      `the real mainnet registry must not read as broken, got: ` +
+      r.problems.map((p) => `${p.kind}: ${p.message}`).join(" | "));
+    assert.strictEqual(r.danglingFrom, null, "the last node must not be reported as dangling");
+    assert.deepStrictEqual(tokensOf(r).map((n) => n.key.slice(0, 8)), ["01c24df7", "b025efe5"]);
+  });
+
+  check("the last node of ANY list is not mistaken for a gap", () => {
+    const r = walkRegistry(healthy());
+    assert.ok(!r.problems.some((p) => p.kind === "dangling"),
+      "a list ending at the marker reported a dangling pointer");
+    // And the diagnosis the bug used to give must not appear for an intact list.
+    assert.ok(!r.problems.some((p) => /missed a block/.test(p.message)),
+      "an intact list must not accuse the indexer of missing a block");
+  });
+
+  check("a list with no terminator at all IS still reported", () => {
+    // C's next names a key nobody has, and it is not the marker — a genuine gap.
+    const truncated = [node("", A), node(A, B), node(B, C)];
+    const r = walkRegistry(truncated);
+    assert.ok(!r.intact, "a list whose last `next` names an absent key must not read as intact");
+    assert.ok(r.problems.some((p) => p.kind === "dangling"),
+      `expected dangling, got ${r.problems.map((p) => p.kind).join(", ")}`);
+  });
+
+  check("a materialised terminator node is tolerated, not called unreachable", () => {
+    // Some view may yet hand us the marker as a real node; stepping into it must VISIT it.
+    const withTail = [...healthy(), node(MAX_NEXT, MAX_NEXT)];
+    const r = walkRegistry(withTail);
+    assert.ok(r.intact,
+      `a materialised tail must still read as intact, got ${r.problems.map((p) => p.kind).join(", ")}`);
+    assert.ok(r.reached.has(MAX_NEXT), "the tail node must be reached, or it reports as unreachable");
+    assert.deepStrictEqual(tokensOf(r).map((n) => n.key), [A, B, C], "the tail is not a token");
   });
 
   if (failures > 0) throw new Error(`${failures} walk check(s) failed`);
