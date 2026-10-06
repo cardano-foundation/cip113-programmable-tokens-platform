@@ -3284,7 +3284,9 @@ public class RwaTokenModuleHandler
         if (utxos == null) {
             throw new BuildPreconditionException("power-users list lookup returned no result");
         }
-        return parseDenylist(policyId, listAddress, utxos);
+        // Structure only: see parseLinkedList. The PowerUser payload shape is the on-chain
+        // validator's business, and this walk only needs the keys and links to pick an anchor.
+        return parseLinkedList(policyId, listAddress, utxos, /*denylistPayload=*/ false);
     }
 
     /**
@@ -3327,6 +3329,26 @@ public class RwaTokenModuleHandler
     }
 
     static List<DenylistElement> parseDenylist(String policyId, String listAddress, List<Utxo> utxos) {
+        return parseLinkedList(policyId, listAddress, utxos, /*denylistPayload=*/ true);
+    }
+
+    /**
+     * The shared linked-list reader.
+     *
+     * <p>⚠ {@code denylistPayload} EXISTS BECAUSE THIS PARSER IS NOT AS GENERIC AS IT LOOKS. Almost
+     * all of it is structure that every one of these lists shares — a root exists, each element is
+     * {@code Element(data, link)}, the NFT name agrees with the element type, the links reach every
+     * element exactly once, the keys ascend, nothing is a donation to the script address. One check
+     * is not: the denylist's own payload is a single-field constructor, and a {@code PowerUser}
+     * carries a key AND a capabilities bitfield. Reusing the parser for the power-users list without
+     * this flag fails with "invalid Denylist payload" on the first element — found by the T-101
+     * end-to-end test, which is exactly what it was written to catch.
+     *
+     * <p>The payload is otherwise passed through opaquely, which is what lets AddPowerUser copy an
+     * existing element's payload verbatim rather than reinterpreting it.
+     */
+    static List<DenylistElement> parseLinkedList(String policyId, String listAddress,
+                                                 List<Utxo> utxos, boolean denylistPayload) {
         Map<String, DenylistElement> byKey = new HashMap<>();
         String nodePrefix = HexUtil.encodeHexString(LL_NODE_KEY_PREFIX);
         for (Utxo utxo : utxos) {
@@ -3367,7 +3389,8 @@ public class RwaTokenModuleHandler
                         || data.getData().getPlutusDataList().size() != 1) {
                     throw new IllegalArgumentException("NFT and ElementData type differ");
                 }
-                if (!key.isEmpty() && (!(data.getData().getPlutusDataList().getFirst() instanceof ConstrPlutusData payload)
+                if (denylistPayload && !key.isEmpty()
+                        && (!(data.getData().getPlutusDataList().getFirst() instanceof ConstrPlutusData payload)
                         || payload.getAlternative() != 0 || payload.getData().getPlutusDataList().size() != 1)) {
                     throw new IllegalArgumentException("invalid Denylist payload");
                 }
@@ -3747,10 +3770,17 @@ public class RwaTokenModuleHandler
             // when the anchor is the root, and a PowerUser when it is a node, and this code has no
             // business reinterpreting an existing power user's capabilities.
             boolean anchorIsRoot = anchorElement == null || anchorElement.isRoot();
+            // ⛔ UNWRAP, OR THE DATUM IS DOUBLE-WRAPPED. `linkedListElement` builds
+            // Element(ElementData(inner), link) — it wraps `inner` in the Root/Node constructor
+            // itself — while `DenylistElement.payload()` is the ALREADY-WRAPPED ElementData read
+            // off chain. Passing it straight back produced Element(Node(Node(PowerUser)), link),
+            // which the mint validator rejects with a bare EvaluationFailure that names no field.
+            // Found by the T-101 end-to-end test; the ordering unit test could never have seen it.
+            PlutusData anchorInner = anchorElement == null
+                    ? ConstrPlutusData.of(0)
+                    : ((ConstrPlutusData) anchorElement.payload()).getData().getPlutusDataList().getFirst();
             ConstrPlutusData updatedRootDatum = linkedListElement(
-                    anchorElement == null
-                            ? ConstrPlutusData.of(0)
-                            : (ConstrPlutusData) anchorElement.payload(),
+                    anchorInner,
                     optionSome(BytesPlutusData.of(newPowerUserKey)),
                     anchorIsRoot);
 

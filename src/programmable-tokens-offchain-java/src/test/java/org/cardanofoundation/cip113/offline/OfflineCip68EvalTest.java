@@ -1239,6 +1239,123 @@ public class OfflineCip68EvalTest {
     }
 
     /**
+     * T-101 end to end — a SECOND power user is added, and the real validator accepts it.
+     *
+     * <p>This is the half {@code PowerUserInsertionTest} deliberately could not cover: it tests the
+     * ordering decision in isolation, and the thing that actually had to work is a built transaction
+     * the validator accepts. The offline harness can do it — {@code rwaTokenUtxoProvider} already
+     * serves {@code findAllCurrentUtxosFromBlockfrost} and {@code findUtxosByPolicy}, which is what
+     * the list walk and the anchor poll need, so no extension was required after all.
+     *
+     * <p>⛔ WHAT A GREEN RESULT HERE MEANS, AND WHAT IT DOES NOT. The redeemer is evaluated by Aiken
+     * against a real script context, so the power-users mint and spend validators genuinely accept
+     * the spliced list. It does NOT prove a hardware wallet will sign it (T-095) and it does not
+     * submit anything (T-102). It does retire the reason T-102 was carrying this scope.
+     *
+     * <p>The first insertion is the one the old code could do. The SECOND is the one that was
+     * impossible, and it is the one a rotated-in admin needs: mint, burn and pause each check the
+     * caller's own node as a reference input, so without it a rotation is a dead end.
+     */
+    @Test
+    public void rwaTokenSecondPowerUserInsertionEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var chain = st.chain();
+        var handler = st.handler();
+        var policyId = st.built().programmableTokenPolicyId();
+
+        // Two distinct additional power users, derived so their keys differ from the admin's.
+        var second = com.bloxbean.cardano.client.account.Account.createFromMnemonic(
+                BootstrapFixture.NETWORK, BootstrapFixture.OFFLINE_DERIVATION_MNEMONIC, 2, 0);
+        var third = com.bloxbean.cardano.client.account.Account.createFromMnemonic(
+                BootstrapFixture.NETWORK, BootstrapFixture.OFFLINE_DERIVATION_MNEMONIC, 3, 0);
+
+        java.util.function.Function<com.bloxbean.cardano.client.account.Account, String> pkhOf =
+                acct -> HexUtil.encodeHexString(
+                        new com.bloxbean.cardano.client.address.Address(acct.baseAddress())
+                                .getPaymentCredentialHash().orElseThrow());
+
+        var secondPkh = pkhOf.apply(second);
+        var thirdPkh = pkhOf.apply(third);
+        Assertions.assertNotEquals(secondPkh, thirdPkh);
+
+        var puPolicy = st.registrations().get(policyId).getPowerUsersPolicyId();
+
+        // ⚑ GENESIS ALREADY ADDED ONE. buildFullRegistrationChain grants the bootstrap admin ALL
+        // capabilities as part of registration, so the list is root → Node(admin) before this test
+        // touches it — which means EVERY insertion below is already a "second or later" one, the
+        // case the v1 limitation blocked. Expectations are tracked as a sorted set rather than
+        // assumed, because the chain is key-ascending and these keys are derived, not chosen.
+        var adminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        var expected = new java.util.ArrayList<String>(List.of(adminPkh));
+        expected.sort(String::compareTo);
+        assertDenylistLinks(chain, puPolicy, List.copyOf(expected));
+
+        // ── insertion #1 (the list's SECOND node) ──
+        var first = handler.buildAddPowerUserTransaction(
+                policyId, secondPkh, 0b00001 /* ADMIN */, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertTrue(first.isSuccessful(),
+                "the first power-user insertion must still work: " + first.error());
+        var firstTx = Transaction.deserialize(HexUtil.decodeHexString(first.unsignedCborTx()));
+        Assertions.assertTrue(
+                chain.reportAndCheckRedeemers("rwa-token/add-power-user[1]", firstTx) > 0,
+                "the power-users validators did not run for the first insertion");
+        chain.submit(firstTx);
+        expected.add(secondPkh);
+        expected.sort(String::compareTo);
+        assertDenylistLinks(chain, puPolicy, List.copyOf(expected));
+
+        // ── insertion #2 (the list's THIRD node) ──
+        var secondAdd = handler.buildAddPowerUserTransaction(
+                policyId, thirdPkh, 0b00010 /* MINTER */, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertTrue(secondAdd.isSuccessful(),
+                "a SECOND power-user insertion must build — this is what the v1 limitation blocked, "
+                + "and what a rotated-in admin needs: " + secondAdd.error());
+        var secondTx = Transaction.deserialize(HexUtil.decodeHexString(secondAdd.unsignedCborTx()));
+        Assertions.assertTrue(
+                chain.reportAndCheckRedeemers("rwa-token/add-power-user[2]", secondTx) > 0,
+                "the power-users validators did not run for the second insertion, so acceptance is "
+                + "unproven");
+        chain.submit(secondTx);
+
+        // ⛔ AND THE SPLICE MUST NOT HAVE TRUNCATED THE LIST. The old code hardcoded the new node's
+        // link to None; inserting mid-list that way drops everything after the anchor from the chain
+        // while its NFT stays on chain. assertDenylistLinks walks root → … → tail and insists every
+        // expected key is reachable IN ORDER, which is exactly the property that would break.
+        //
+        // Reusing the denylist assertion is deliberate: both lists are the same
+        // linkedListElement(payload, link) structure, and a second copy of this walk would be a
+        // second place for it to be subtly wrong.
+        expected.add(thirdPkh);
+        expected.sort(String::compareTo);   // the chain is key-ascending
+        assertDenylistLinks(chain, puPolicy, List.copyOf(expected));
+
+        // And a third insertion, so "any position" is not just "one more than before".
+        var third3 = com.bloxbean.cardano.client.account.Account.createFromMnemonic(
+                BootstrapFixture.NETWORK, BootstrapFixture.OFFLINE_DERIVATION_MNEMONIC, 4, 0);
+        var thirdAddPkh = pkhOf.apply(third3);
+        var thirdAdd = handler.buildAddPowerUserTransaction(
+                policyId, thirdAddPkh, 0b00100, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertTrue(thirdAdd.isSuccessful(), "third insertion: " + thirdAdd.error());
+        var thirdTx = Transaction.deserialize(HexUtil.decodeHexString(thirdAdd.unsignedCborTx()));
+        Assertions.assertTrue(
+                chain.reportAndCheckRedeemers("rwa-token/add-power-user[3]", thirdTx) > 0);
+        chain.submit(thirdTx);
+        expected.add(thirdAddPkh);
+        expected.sort(String::compareTo);
+        assertDenylistLinks(chain, puPolicy, List.copyOf(expected));
+
+        // ⛔ A DUPLICATE IS REFUSED, not silently added twice.
+        var dup = handler.buildAddPowerUserTransaction(
+                policyId, secondPkh, 0b00001, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertFalse(dup.isSuccessful(), "adding an existing power user must be refused");
+        Assertions.assertTrue(String.valueOf(dup.error()).contains("already a power user"),
+                "the refusal must say why; got: " + dup.error());
+    }
+
+    /**
      * A seizure actually validates on chain.
      *
      * <p>The RWA token's regulatory force-transfer path is CIP-113's
