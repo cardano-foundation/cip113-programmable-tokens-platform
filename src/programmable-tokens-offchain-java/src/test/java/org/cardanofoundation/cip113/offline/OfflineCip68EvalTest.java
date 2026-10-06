@@ -1068,6 +1068,100 @@ public class OfflineCip68EvalTest {
     }
 
     /**
+     * T-093 — a REAL RotateAdmin transaction, built by cardano-client-lib, evaluated offline, and
+     * exported so the frontend's CIP-21 stack can be measured against bytes it has never seen.
+     *
+     * <p>Two things this proves that nothing else in the suite does.
+     *
+     * <p><b>The dual-signature branch is satisfiable.</b> {@code global_state.ak} calls
+     * {@code must_be_signed_by_credential} TWICE on this branch — the outgoing admin from the INPUT
+     * datum's {@code admin_credential_hash}, and the incoming {@code new_admin_credential_hash} —
+     * and both come from the body's {@code required_signers}. Evaluating the redeemer here runs the
+     * real validator against a real script context, so a green result means the branch accepts a
+     * transaction shaped the way the builder shapes it. Before this, the only evidence was reading
+     * the builder.
+     *
+     * <p><b>It is the only CCL-encoded transaction of this shape anywhere.</b> Every fixture the
+     * frontend's canonicaliser and CIP-21 walker have ever seen is EVOLUTION-built
+     * ({@code test-fixtures/real-preview-txs.json} is the bootstrap ceremony). This one carries
+     * {@code required_signers} with two entries — a Conway set that never appeared in a ceremony
+     * transaction — plus redeemers, collateral and an inline datum, written by cbor-java. The hex
+     * is dumped to {@code build/} for the frontend side of T-093; it is NOT asserted here, because
+     * what CIP-21 makes of it is the frontend's question.
+     *
+     * <p>⚠ The keys are {@code BootstrapFixture}'s test keys, so the exported fixture carries no
+     * operator material — which is what the epic requires of anything committed to this PUBLIC
+     * repository.
+     */
+    @Test
+    public void rwaTokenRotateAdminEvaluatesAndIsExportedForCip21() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var chain = st.chain();
+        var boot = st.boot();
+        var handler = st.handler();
+        var policyId = st.built().programmableTokenPolicyId();
+
+        var outgoingAdminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        // The incoming admin is a DIFFERENT real key, not a literal: required_signers must end up
+        // with two distinct entries or the dual-signature property is vacuous.
+        var incomingAdminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ALICE.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        Assertions.assertNotEquals(outgoingAdminPkh, incomingAdminPkh,
+                "the two admins must differ, or this test proves nothing about dual signing");
+
+        var rotate = new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec(
+                "RotateAdmin",
+                null, null, null, null, null, null, null, null, null, null,
+                incomingAdminPkh,   // newAdminCredentialHashHex
+                null);
+
+        var result = handler.buildGlobalStateUpdateChain(
+                policyId, java.util.List.of(rotate),
+                BootstrapFixture.ADMIN.baseAddress(), outgoingAdminPkh, boot.params());
+        Assertions.assertTrue(result.isSuccessful(),
+                "RotateAdmin build failed: " + result.error());
+        Assertions.assertEquals(1, result.metadata().size(),
+                "a rotation is ONE transaction — the one-change rule the epic makes structural");
+
+        var unsignedHex = result.metadata().get(0);
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(unsignedHex));
+
+        // ⛔ BOTH CREDENTIALS MUST BE DECLARED. Passing only the fee payer means
+        // new_admin_credential_hash never reaches extra_signatories and the branch cannot validate.
+        var declared = tx.getBody().getRequiredSigners().stream()
+                .map(HexUtil::encodeHexString)
+                .map(String::toLowerCase)
+                .toList();
+        Assertions.assertTrue(declared.contains(outgoingAdminPkh.toLowerCase()),
+                "required_signers is missing the OUTGOING admin: " + declared);
+        Assertions.assertTrue(declared.contains(incomingAdminPkh.toLowerCase()),
+                "required_signers is missing the INCOMING admin: " + declared);
+        Assertions.assertEquals(2, declared.size(),
+                "fee payer and outgoing admin are the same wallet here, so exactly two are expected; "
+                + "got " + declared);
+
+        // The validator itself, not our reading of it.
+        int evaluated = chain.reportAndCheckRedeemers("rwa-token/rotate-admin", tx);
+        Assertions.assertTrue(evaluated >= 1,
+                "the global-state spend validator did not actually run, so the dual-signature "
+                + "branch is unproven; redeemers evaluated: " + evaluated);
+
+        // Export for the frontend half of T-093. build/ is not committed; the epic says the
+        // committed fixture is built from throwaway keys, and these are exactly that.
+        var out = java.nio.file.Path.of("build", "rotate-admin-unsigned.hex");
+        java.nio.file.Files.createDirectories(out.getParent());
+        java.nio.file.Files.writeString(out, unsignedHex + System.lineSeparator());
+        System.out.println("[T-093] RotateAdmin unsigned CBOR -> " + out.toAbsolutePath()
+                + " (" + unsignedHex.length() + " hex chars)");
+        System.out.println("[T-093] required_signers = " + declared);
+        System.out.println("[T-093] outgoing=" + outgoingAdminPkh + " incoming=" + incomingAdminPkh);
+    }
+
+    /**
      * A seizure actually validates on chain.
      *
      * <p>The RWA token's regulatory force-transfer path is CIP-113's
