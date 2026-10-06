@@ -1356,6 +1356,116 @@ public class OfflineCip68EvalTest {
     }
 
     /**
+     * ⛔ A MINT MUST BE HARDWARE-WALLET SIGNABLE, AND THE SORTABLE FIELDS ARE WHY.
+     *
+     * <p>Asked for operationally on 2026-10-06: an issuer was about to mint shares on MAINNET with
+     * a Ledger, and the worry was that the device would compute a different transaction hash and
+     * the mint would fail.
+     *
+     * <p>A Ledger does not sign the bytes it is sent. It reconstructs the transaction BODY
+     * canonically and signs ITS OWN serialisation (CIP-21), so any field whose map keys we emit out
+     * of order makes the returned witness apply to a body we never submit. The device reports only
+     * "hash mismatch". ⚠ And unlike the admin-rotation path, NO mint path canonicalises — every
+     * mint call site goes straight to `wallet.signTx`, which only WARNS.
+     *
+     * <p>⚑ THE FIELDS THAT CAN BE WRONG ARE THE SORTABLE ONES, and this protocol's mint carries all
+     * three: a `mint` map (TWO policies on a registration), a `withdrawals` map (TWO entries — this
+     * protocol withdraws zero from script credentials to invoke them), and a multiasset map in the
+     * outputs. An unsorted `mint` map is exactly what broke the genesis ceremony on 2026-10-01.
+     *
+     * <p>⚑ WHY THAT BUG DOES NOT TRANSFER: the ceremony's transaction was built by the EVOLUTION
+     * SDK. A mint is built by cardano-client-lib on the backend, and for `rwa-token` it cannot be
+     * anything else — `MintSection.sdkAvailableForSelected` excludes the module outright, and the
+     * attestation variant posts to `/keri/mint-attestations/.../build-chain`, so both are CCL. This
+     * test therefore pins the builder that actually signs on mainnet.
+     */
+    @Test
+    public void rwaTokenMintBodiesAreHardwareWalletCanonical() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var handler = st.handler();
+        var policyId = st.built().programmableTokenPolicyId();
+        var reg = st.registrations().get(policyId);
+
+        var mint = new org.cardanofoundation.cip113.model.MintTokenRequest(
+                BootstrapFixture.ADMIN.baseAddress(), policyId,
+                reg.getSecurityAssetNameHex(), "500",
+                BootstrapFixture.ALICE.baseAddress(), null, null);
+        var mintResult = handler.buildMintTransaction(mint, st.boot().params());
+        Assertions.assertTrue(mintResult.isSuccessful(), "mint build: " + mintResult.error());
+
+        for (var entry : java.util.Map.of(
+                "registration", st.built().registrationCborHex(),
+                "mint", mintResult.unsignedCborTx()).entrySet()) {
+            String label = entry.getKey();
+            var tx = Transaction.deserialize(HexUtil.decodeHexString(entry.getValue()));
+            var body = tx.getBody();
+
+            // ── the mint map ──
+            var policies = body.getMint() == null ? java.util.List.<String>of()
+                    : body.getMint().stream().map(ma -> ma.getPolicyId()).toList();
+            assertAscending(label + "/mint policy ids", policies);
+            // Every multiasset inside it, too: an unsorted asset name is the same defect one level
+            // down, and a single-asset policy hides it.
+            if (body.getMint() != null) {
+                for (var ma : body.getMint()) {
+                    assertAscending(label + "/mint asset names of " + ma.getPolicyId().substring(0, 12),
+                            ma.getAssets().stream()
+                                    .map(a -> HexUtil.encodeHexString(a.getNameAsBytes())).toList());
+                }
+            }
+
+            // ── the withdrawals map ──
+            // ⚠ COMPARE THE RAW BYTES, NOT THE BECH32. CIP-21 sorts the CBOR MAP KEYS, which are
+            // reward-address byte strings; bech32 is a different alphabet with a different
+            // collation, so comparing the human-readable form reports a false mismatch. Measured:
+            // these two withdrawals are correctly byte-ascending and bech32-DESCENDING, so the
+            // first version of this assertion raised a false alarm on a transaction that is fine.
+            var withdrawals = body.getWithdrawals() == null ? java.util.List.<String>of()
+                    : body.getWithdrawals().stream()
+                            .map(w -> HexUtil.encodeHexString(
+                                    new com.bloxbean.cardano.client.address.Address(
+                                            w.getRewardAddress()).getBytes()))
+                            .toList();
+            assertAscending(label + "/withdrawal reward addresses (hex of the CBOR key)", withdrawals);
+
+            // ── every output's multiasset ──
+            for (int i = 0; i < body.getOutputs().size(); i++) {
+                var value = body.getOutputs().get(i).getValue();
+                if (value == null || value.getMultiAssets() == null) continue;
+                assertAscending(label + "/output[" + i + "] policy ids",
+                        value.getMultiAssets().stream().map(ma -> ma.getPolicyId()).toList());
+            }
+
+            // ⛔ ONE REQUIRED SIGNER, WHICH IS WHAT MAKES THE MISSING partialSign SAFE.
+            // MintSection calls wallet.signTx(cbor) with no partialSign, and CIP-30 says a wallet
+            // must then provide EVERY required signature or refuse outright. That is fine only
+            // while the sole required signer is the admin operating the page. If a mint ever
+            // declares a second one, that call site needs partialSign=true first.
+            var signers = body.getRequiredSigners() == null ? java.util.List.<byte[]>of()
+                    : body.getRequiredSigners();
+            Assertions.assertEquals(1, signers.size(),
+                    label + " declares " + signers.size() + " required signers; MintSection signs "
+                    + "without partialSign, so a wallet that cannot supply all of them refuses the "
+                    + "whole transaction");
+
+            Assertions.assertTrue(tx.serialize().length < 16384,
+                    label + " exceeds the ledger's 16384-byte limit");
+        }
+    }
+
+    /** Fails naming the pair that is out of order, because "not sorted" is not actionable. */
+    private static void assertAscending(String what, java.util.List<String> keys) {
+        for (int i = 1; i < keys.size(); i++) {
+            Assertions.assertTrue(keys.get(i - 1).compareTo(keys.get(i)) < 0,
+                    what + " is not ascending at entry " + i + ": '" + keys.get(i - 1) + "' then '"
+                    + keys.get(i) + "'. A hardware wallet re-sorts map keys and hashes a DIFFERENT "
+                    + "body, so the witness it returns does not apply to the transaction we submit "
+                    + "— and the device reports only a hash mismatch.");
+        }
+    }
+
+    /**
      * A seizure actually validates on chain.
      *
      * <p>The RWA token's regulatory force-transfer path is CIP-113's
