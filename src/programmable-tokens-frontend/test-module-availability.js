@@ -266,6 +266,25 @@ async function main() {
     assert.deepStrictEqual(onMainnet, ["rwa-token"]);
   });
 
+  // ⛔ THE DEAD MODULE PICKERS STAY DELETED. components/register/registration-form.tsx and
+  // components/mint/{mint-form,module-selector}.tsx were exported, mounted by no page, and each
+  // chose a module with no allowlist check — registration-form even branched on
+  // `moduleId === 'freeze-and-seize'`. Unreachable is not the same as safe: they were one import
+  // from being another ungated path. If one comes back it must come back gated, which is what
+  // this check is here to force someone to notice.
+  check("no ungated module picker has been reintroduced", () => {
+    for (const gone of [
+      "components/register/registration-form.tsx",
+      "components/register/validator-triple-selector.tsx",
+      "components/mint/mint-form.tsx",
+      "components/mint/module-selector.tsx",
+    ]) {
+      assert.ok(!fs.existsSync(gone),
+        `${gone} is back — it chose a module with no network gate; if it is wanted again, route ` +
+        `its choice through isFlowOffered/isModuleAllowedOnNetwork and update this check`);
+    }
+  });
+
   check('the one mainnet flow is the one named "RWA Token (German & Swiss profiles)"', () => {
     const src = read("lib/registration/flows/rwa-token-flow.tsx");
     assert.match(src, /name:\s*'RWA Token \(German & Swiss profiles\)'/);
