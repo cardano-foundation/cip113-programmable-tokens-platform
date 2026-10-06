@@ -20,8 +20,23 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { truncateAddress } from "@/lib/utils/format";
 import { loadRegistry, entryMatches, type RegistryEntry, type RegistryView } from "@/lib/registry/load";
 import { LABELLED_MODULES, moduleLabel } from "@/lib/registry/modules";
+import { allowedModules } from "@/lib/registry/available-modules";
+import { getCardanoNetwork } from "@/lib/utils/network";
 import { isHookSet } from "@/lib/registry/walk";
 import { MAX_NEXT, SENTINEL_KEY } from "@/lib/registry/types";
+
+/**
+ * The type chips offered on this network.
+ *
+ * ⚠ CHIPS ONLY — THE ROWS ARE NOT FILTERED. The registry's own promise, in the header above, is
+ * "every programmable token registered against this protocol", and the chain view exists precisely
+ * to show when the on-chain list disagrees with the table. Dropping rows whose module is not
+ * offered here would make both of those lie: a node that IS on chain would be invisible, and the
+ * integrity banner would be comparing a filtered table against an unfiltered walk. So a module
+ * mainnet does not offer gets no chip — nothing is advertised that cannot be registered — while
+ * anything actually on chain is still shown, which is the only honest answer for a chain explorer.
+ */
+const FILTER_MODULES = allowedModules(getCardanoNetwork(), LABELLED_MODULES);
 
 const HOOKS = [
   { field: "mintingLogicScript", label: "minting" },
@@ -121,7 +136,7 @@ export default function RegistryPage() {
           </label>
 
           <div className="flex flex-wrap gap-1.5">
-            {LABELLED_MODULES.map((id) => {
+            {FILTER_MODULES.map((id) => {
               const l = moduleLabel(id);
               const on = types.has(id);
               return (

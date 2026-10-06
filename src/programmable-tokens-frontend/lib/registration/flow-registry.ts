@@ -4,6 +4,8 @@
  */
 
 import type { RegistrationFlow } from '@/types/registration';
+import { getCardanoNetwork } from '@/lib/utils/network';
+import { isModuleAllowedOnNetwork } from '@/lib/registry/available-modules';
 
 // ============================================================================
 // Flow Enablement Utilities
@@ -45,6 +47,14 @@ function getFlowEnvVar(flowId: string): string | undefined {
 }
 
 export function isFlowEnabled(flowId: string, defaultValue: boolean = true): boolean {
+  // ⛔ THE NETWORK ALLOWLIST IS A FLOOR AND COMES FIRST. A flag cannot turn a module back on for a
+  // network that does not offer it — see lib/registry/available-modules.ts. This also means the
+  // build-time `flow.enabled` is already false on mainnet, so the `getAllFlows()` fallback taken
+  // in select-module-step.tsx when /api/config does not answer cannot re-expose a hidden module.
+  if (!isModuleAllowedOnNetwork(getCardanoNetwork(), flowId)) {
+    return false;
+  }
+
   const envValue = getFlowEnvVar(flowId);
 
   console.log(`[Flow Registry] Checking ${flowId}: envValue="${envValue}", default=${defaultValue}`);

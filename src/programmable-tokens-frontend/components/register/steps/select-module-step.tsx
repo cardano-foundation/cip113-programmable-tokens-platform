@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { getAllFlows } from '@/lib/registration/flow-registry';
+import { getCardanoNetwork } from '@/lib/utils/network';
+import { isModuleAllowedOnNetwork } from '@/lib/registry/available-modules';
 import type { StepComponentProps, ModuleSelectionData, RegistrationFlow } from '@/types/registration';
 
 interface SelectModuleStepProps extends StepComponentProps<ModuleSelectionData, ModuleSelectionData> {}
@@ -30,6 +32,13 @@ export function SelectModuleStep({
           // Get all flows and apply runtime config
           const allFlows = getAllFlows(true); // Include all flows
           const enabledFlows = allFlows.filter(flow => {
+            // ⛔ THE NETWORK ALLOWLIST IS CHECKED HERE TOO, AFTER the runtime merge, and not
+            // because /api/config forgot to — it applies the same floor. This is the layer that
+            // reads `getAllFlows(true)`, i.e. flows whose build-time `enabled` was deliberately
+            // bypassed, and it then lets the response widen the set. A response from an older
+            // image, a cached one, or a hand-rolled proxy would otherwise be enough to put a
+            // hidden module on screen. See lib/registry/available-modules.ts.
+            if (!isModuleAllowedOnNetwork(getCardanoNetwork(), flow.id)) return false;
             const runtimeEnabled = config.flows[flow.id];
             // Runtime config overrides build-time config
             return runtimeEnabled !== undefined ? runtimeEnabled : flow.enabled;
