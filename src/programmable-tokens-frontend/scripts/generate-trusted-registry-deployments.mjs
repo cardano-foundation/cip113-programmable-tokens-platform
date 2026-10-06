@@ -11,6 +11,16 @@ const destination = join(frontend, "lib/rwa/trusted-registry-deployments.generat
 // deployment, and a local chain has no trusted registry to anchor to. It must still be a KEY.
 const networks = ["preview", "preprod", "mainnet", "devnet"];
 const required = new Set(["preview", "preprod"]);
+// ⛔ WHICH NETWORKS MUST BE ANCHORED FOR A BUILD TO BE ALLOWED. Separate from `required`, which
+// governs whether the SOURCE RECORD may be missing.
+//
+// ⚠ devnet IS DELIBERATELY ABSENT, and leaving it out of this set was a regression caught by an
+// adversarial review. `protocol-bootstraps-devnet.json` is legitimately `[]` — a local chain has
+// no trusted registry to anchor to, as the comment above says — but once `prebuild` started
+// running this check, `NEXT_PUBLIC_NETWORK=devnet npm run build` went from working to refusing.
+// A devnet build is not a deployment and has nothing to verify member roots against, so it is not
+// held to this bar.
+const anchorRequired = new Set(["preview", "preprod", "mainnet"]);
 const hash28 = /^[0-9a-f]{56}$/i;
 const hash32 = /^[0-9a-f]{64}$/i;
 
@@ -53,7 +63,7 @@ export function checkTrustedDeployments(sourceDir, outputPath, selectedNetwork) 
   }
   if (selectedNetwork) {
     if (!networks.includes(selectedNetwork)) throw new Error(`Unsupported Cardano network: ${selectedNetwork}`);
-    if (load(selectedNetwork, sourceDir).length === 0) {
+    if (anchorRequired.has(selectedNetwork) && load(selectedNetwork, sourceDir).length === 0) {
       // ⛔ REFUSING IS THE DEFAULT AND IT IS CORRECT. With no recorded deployment there is no
       // registry policy to anchor CMTA member-root verification to, so TRUSTED_REGISTRY_DEPLOYMENTS
       // is empty for this network and review-root-tx.ts cannot verify anything. Failing here beats

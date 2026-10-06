@@ -8,6 +8,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Shield, Wallet } from "lucide-react";
 import { getAdminTokens, AdminTokenInfo, extractPkhFromAddress } from "@/lib/api/admin";
+import { getCardanoNetwork } from "@/lib/utils/network";
+import { isModuleAllowedOnNetwork } from "@/lib/registry/available-modules";
 
 const AdminPanelDynamic = dynamicImport(
   () => import("@/components/admin").then((mod) => ({ default: mod.AdminPanel })),
@@ -52,7 +54,23 @@ export default function AdminPageContent() {
           const pkh = await extractPkhFromAddress(addr);
           if (pkh) {
             const response = await getAdminTokens(pkh);
-            setAdminTokens(response.tokens);
+            // ⛔ "EVERYTHING ELSE MUST BE HIDDEN" COVERS OPERATING A TOKEN, NOT ONLY REGISTERING
+            // ONE. Giovanni, 2026-10-06. The registration gate gates the WIZARD; this gates the
+            // admin surface, and an adversarial review found the gap between them: a mainnet
+            // `dummy` or `freeze-and-seize` token — reachable without this frontend, via the SDK
+            // or any other client, because the chain does not honour a build-time allowlist —
+            // would still be minted, burned, seized and denylisted from /admin.
+            //
+            // ⚠ AND `dummy` MINTING SKIPS THE ROLE CHECK BY DESIGN. MintSection treats
+            // `moduleId === "dummy"` as open mint, so on mainnet any connected wallet could mint
+            // such a token. Filtering here is one gate that covers Mint, Burn, Blacklist, Seize
+            // and Global State at once, rather than five independent ones.
+            const network = getCardanoNetwork();
+            setAdminTokens(
+              response.tokens.filter((token) =>
+                isModuleAllowedOnNetwork(network, token.moduleId ?? "")
+              )
+            );
           }
         }
       } catch (error) {

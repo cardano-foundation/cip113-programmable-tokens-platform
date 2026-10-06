@@ -35,11 +35,15 @@ jobs:
       matrix:
         # All three build on a push to main and on `all`, symmetrically.
         #
-        # ⚠ A :mainnet IMAGE DOES NOT MEAN MAINNET WORKS. protocol-bootstraps-mainnet.json is still
-        # an empty list — the protocol has never been bootstrapped on mainnet — so the backend runs
-        # there with cip113.allow-no-deployment=true and refuses every protocol OPERATION. The image
-        # is built and publishable; the deployment behind it is not yet a thing. Do not read a green
-        # build here as readiness.
+        # ⚑ MAINNET IS BOOTSTRAPPED SINCE 2026-10-06 (genesis bfefbd22…, reference scripts
+        # 6f251261…), so protocol-bootstraps-mainnet.json is a real record and the note that used
+        # to sit here — "the protocol has never been bootstrapped on mainnet" — is retired. The
+        # trusted CMTA catalog is anchored for all three networks; `npm run
+        # check:trusted-deployments` passes for each without an override.
+        #
+        # ⚠ A :mainnet IMAGE STILL OFFERS ONE MODULE ONLY. lib/registry/available-modules.ts
+        # allows `rwa-token` (CMTA · eWpG) on mainnet and refuses dummy, freeze-and-seize, kyc and
+        # kyc-extended — in code, at build time, so no FLOW_* flag can widen it.
         network: [preview, preprod, mainnet]
         include:
           - network: preview
@@ -52,13 +56,15 @@ jobs:
             api_base_url_default: https://preprod-indexer.programmabletokens.xyz
           - network: mainnet
             blockfrost_url: https://cardano-mainnet.blockfrost.io/api/v0
-            # ⚠ mainnet has no recorded deployment yet, so there is no trusted CMTA catalog to
-            # build against. Allowed ONLY so the BOOTSTRAP CEREMONY image can exist: that page
-            # builds every transaction from the bundled blueprint and talks only to the chain, so
-            # it needs neither the backend nor a CMTA anchor. Such an image MUST run with
-            # FLOW_SECURITY_TOKEN_ENABLED=false. Set this back to "false" once mainnet is
-            # bootstrapped and the catalog is real.
-            allow_no_trusted_deployment: "true"
+            # ⛔ BACK TO "false", AS THE NOTE THAT STOOD HERE ASKED FOR. The override existed only
+            # so a BOOTSTRAP CEREMONY image could be built before mainnet had a deployment — that
+            # page builds every transaction from the bundled blueprint and needs no CMTA anchor.
+            # Mainnet was bootstrapped on 2026-10-06 and the catalog now names its registry policy
+            # (484e733d…), so the guard can do its job again: with "false", a mainnet image whose
+            # trusted catalog has gone empty or stale FAILS THE BUILD instead of shipping a CMTA
+            # module that cannot verify a member root. Verified: `NEXT_PUBLIC_NETWORK=mainnet
+            # npm run check:trusted-deployments` passes with no override.
+            allow_no_trusted_deployment: "false"
             api_base_url_default: https://mainnet-indexer.programmabletokens.xyz
 
     steps:
