@@ -50,6 +50,7 @@ import { Badge } from "@/components/ui/badge";
 import { useWallet } from "@/hooks/use-wallet";
 import { getCardanoNetwork } from "@/lib/utils/network";
 import { transactionHash, verifyWitnessSet, type VerifiedWitness } from "@/lib/tx/hash";
+import { decodeRotationIntent } from "@/lib/rwa/rotate-admin";
 import { summariseTransaction, type TxSummary } from "@/lib/tx/summary";
 import { asWitnessSetHex } from "@/lib/tx/hash";
 import { paymentCredentialHash } from "@easy1staking/cip113-sdk-ts";
@@ -92,7 +93,28 @@ export default function SignPage() {
     [myCredentials],
   );
 
+
   const clean = txHex.replace(/\s+/g, "").toLowerCase();
+
+  /**
+   * Is this an RWA admin rotation, and if so what does it do?
+   *
+   * ⛔ WITHOUT THIS THE INCOMING ADMIN PASTES A HEX BLOB INTO A WALLET. A rotation is the one
+   * action here whose MEANING a signer needs to see: it moves control of a security token.
+   *
+   * ⚑ The reassuring half, so the warning below is read correctly: nobody can be tricked into
+   * rotating a token to a THIRD party. `global_state.ak` requires a signature by
+   * `new_admin_credential_hash`, so if that credential is not yours, your signature is not the one
+   * the transaction needs and it cannot validate. What this catches is the mistake that IS
+   * reachable — signing a rotation of the wrong token, or one where you are the OUTGOING admin and
+   * did not realise it.
+   *
+   * Null for everything that is not a rotation, which is most of what this page signs.
+   */
+  const rotation = useMemo(
+    () => (clean.length > 0 ? decodeRotationIntent(clean) : null),
+    [clean],
+  );
 
   const parsed = useMemo(() => {
     if (!clean) return null;
@@ -416,6 +438,58 @@ export default function SignPage() {
               <p className="text-[10px] uppercase tracking-wider text-dark-400">Transaction hash</p>
               <p className="mt-1 break-all font-mono text-base text-primary-400">{parsed.hash}</p>
             </div>
+
+            {rotation && (
+              <div className="rounded border border-amber-500/40 bg-amber-500/10 p-4 space-y-2">
+                <p className="text-sm font-semibold text-amber-200">
+                  This transfers administrative control of a programmable token.
+                </p>
+                <dl className="space-y-1 text-xs">
+                  <div>
+                    <dt className="text-[10px] uppercase tracking-wider text-amber-200/70">
+                      global state policy id
+                    </dt>
+                    <dd className="break-all font-mono text-amber-100">
+                      {rotation.globalStatePolicyId ?? "could not be read from this transaction"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[10px] uppercase tracking-wider text-amber-200/70">
+                      control moves TO
+                    </dt>
+                    <dd className="break-all font-mono text-amber-100">
+                      {rotation.newAdminCredentialHash}
+                      {myKeyHashes.includes(rotation.newAdminCredentialHash) && (
+                        <span className="ml-2 text-green-300">— this is your wallet</span>
+                      )}
+                    </dd>
+                  </div>
+                  {rotation.otherRequiredSigners.length > 0 && (
+                    <div>
+                      <dt className="text-[10px] uppercase tracking-wider text-amber-200/70">
+                        also required to sign
+                      </dt>
+                      <dd className="break-all font-mono text-amber-100">
+                        {rotation.otherRequiredSigners.join(", ")}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+                {/* ⛔ SAY IT WHEN IT IS NOT THEIRS. If the incoming credential is not one this
+                    wallet holds, the signer is the OUTGOING admin — they are giving control away,
+                    not receiving it — or they are signing for the wrong token entirely. Both are
+                    worth stopping for, and neither is visible in a hash. */}
+                {myKeyHashes.length > 0 &&
+                  !myKeyHashes.includes(rotation.newAdminCredentialHash) && (
+                    <p className="text-xs text-amber-100">
+                      The incoming credential is <strong>not</strong> one this wallet holds. If you
+                      are the current administrator, signing this gives that control away. If you
+                      expected to be receiving control, stop — this is the wrong transaction or the
+                      wrong wallet.
+                    </p>
+                  )}
+              </div>
+            )}
 
             <dl className="grid grid-cols-2 gap-x-6 gap-y-1 pt-2 text-xs sm:grid-cols-3">
               <Fact label="Inputs" value={String(parsed.summary.inputCount)} />

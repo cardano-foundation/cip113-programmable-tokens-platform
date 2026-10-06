@@ -93,3 +93,120 @@ export function prepareRotation(unsignedCborHex: string): PreparedRotation {
     bodyWasAlreadyCanonical: canonicalHex === clean,
   };
 }
+
+/** The constructor index of `RotateAdmin` in `GlobalStateSpendAction`. */
+const GS_ACTION_ROTATE_ADMIN = 9;
+
+/** "GlobalState" — the asset name of the NFT that marks the global-state UTxO. */
+const GLOBAL_STATE_ASSET_NAME_HEX = "476c6f62616c5374617465";
+
+/**
+ * Hex out of whatever the decoder hands back for a policy id or asset name.
+ *
+ * ⚠ THESE ARE Map KEYS AND THEY ARE NOT STRINGS. A `MultiAsset` decodes as a `Map` whose policy
+ * keys are byte arrays and whose inner keys are `{_tag: "AssetName", bytes}` objects, so
+ * `Object.entries` sees nothing and `String(key)` yields JSON. Reading them as strings is how this
+ * silently returned null for a transaction that plainly carried the NFT.
+ */
+function hexOf(value: unknown): string | null {
+  if (value instanceof Uint8Array) return Buffer.from(value).toString("hex");
+  if (typeof value === "string") return value;
+  // ⚠ THE FIELD NAME DEPENDS ON THE NEWTYPE, and guessing one of them costs a silent null:
+  // `PolicyId` and `KeyHash` carry `.hash`, `AssetName` carries `.bytes`, and both are byte arrays
+  // rather than hex strings. Measured against a real decoded transaction — reading only `.bytes`
+  // made this return null for an output that plainly held the NFT.
+  const inner = (value as { bytes?: unknown; hash?: unknown } | null);
+  for (const candidate of [inner?.bytes, inner?.hash]) {
+    if (typeof candidate === "string") return candidate;
+    if (candidate instanceof Uint8Array) return Buffer.from(candidate).toString("hex");
+  }
+  return null;
+}
+
+/** What a rotation transaction is asking for, read out of the transaction itself. */
+export interface RotationIntent {
+  /** The credential the rotation moves authority TO, from the redeemer the validator reads. */
+  readonly newAdminCredentialHash: string;
+  /** The global-state NFT's policy id, from the output the redeemer points at. Null if unreadable. */
+  readonly globalStatePolicyId: string | null;
+  /** Everyone else the transaction requires — in a two-signer rotation, the outgoing admin. */
+  readonly otherRequiredSigners: readonly string[];
+}
+
+/**
+ * Decode a rotation so a human can see what they are signing.
+ *
+ * ⛔ FROM THE REDEEMER, NOT FROM THE OUTPUT DATUM. The redeemer is what
+ * `global_state.ak` actually reads to decide who must sign — it compares
+ * `new_admin_credential_hash` against `extra_signatories`. The output datum carries the same value,
+ * but it is the builder's claim about the result; the redeemer is the validator's input. If the two
+ * ever disagreed, the redeemer is the one that decides whether the transaction validates.
+ *
+ * ⚑ WHY THIS EXISTS AT ALL: without it the incoming admin is pasting a hex blob into a wallet. The
+ * reassuring part is that they cannot be tricked into rotating to a THIRD party — the validator
+ * requires a signature by `new_admin_credential_hash`, so if that is not them, their signature is
+ * not the one needed and the transaction cannot validate. What this catches is the mistake that is
+ * actually reachable: signing a rotation of the WRONG TOKEN.
+ *
+ * Returns null when the transaction is not a rotation, which is the normal answer on `/sign` — the
+ * page signs whatever it is given, and most of that is not this.
+ */
+export function decodeRotationIntent(cborHex: string): RotationIntent | null {
+  let tx: ReturnType<typeof Transaction.fromCBORBytes>;
+  try {
+    tx = Transaction.fromCBORBytes(Buffer.from(cborHex.trim(), "hex"));
+  } catch {
+    return null;
+  }
+
+  const redeemers = (tx.witnessSet as { redeemers?: { value?: unknown } } | undefined)?.redeemers?.value;
+  if (!(redeemers instanceof Map)) return null;
+
+  const asNumber = (v: unknown): number | null =>
+    typeof v === "bigint" ? Number(v) : typeof v === "number" ? v : null;
+
+  for (const entry of redeemers.values()) {
+    const data = (entry as { data?: { index?: unknown; fields?: unknown[] } }).data;
+    if (!data || !Array.isArray(data.fields)) continue;
+    // Constr(0, [Int(globalStateOutputIndex), Constr(action, …)])
+    const action = data.fields[1] as { index?: unknown; fields?: unknown[] } | undefined;
+    if (!action || asNumber(action.index) !== GS_ACTION_ROTATE_ADMIN) continue;
+    const raw = action.fields?.[0];
+    if (!(raw instanceof Uint8Array)) continue;
+    const newAdminCredentialHash = Buffer.from(raw).toString("hex").toLowerCase();
+
+    const outputIndex = asNumber(data.fields[0]);
+    let globalStatePolicyId: string | null = null;
+    try {
+      const outputs = (tx.body as unknown as { outputs?: readonly unknown[] }).outputs ?? [];
+      const out = outputIndex === null ? undefined : outputs[outputIndex];
+      // The global-state UTxO holds exactly one NFT, asset name "GlobalState", and its policy id is
+      // what identifies this token's global state. Matching on the asset name as well means a
+      // change of output shape yields null rather than some other policy id confidently displayed.
+      const multiAsset = (out as {
+        assets?: { multiAsset?: { map?: unknown } };
+      } | undefined)?.assets?.multiAsset?.map;
+      if (multiAsset instanceof Map) {
+        for (const [policyKey, names] of multiAsset.entries()) {
+          const policyId = hexOf(policyKey);
+          if (!policyId || !/^[0-9a-f]{56}$/i.test(policyId)) continue;
+          const assetNames =
+            names instanceof Map ? [...names.keys()].map(hexOf) : [];
+          if (assetNames.includes(GLOBAL_STATE_ASSET_NAME_HEX)) {
+            globalStatePolicyId = policyId.toLowerCase();
+            break;
+          }
+        }
+      }
+    } catch {
+      globalStatePolicyId = null;
+    }
+
+    const otherRequiredSigners = requiredSignersOf(cborHex).filter(
+      (s) => s !== newAdminCredentialHash
+    );
+
+    return { newAdminCredentialHash, globalStatePolicyId, otherRequiredSigners };
+  }
+  return null;
+}

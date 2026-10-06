@@ -166,6 +166,58 @@ async function main() {
     assert.ok(saw, "a ceremony genesis declares no rotation signers and must not be accepted here");
   });
 
+  console.log("\n--- T-097: the decode a human reads before signing ---");
+
+  const { decodeRotationIntent } = await import("./.cclguard-build/rwa/rotate-admin.js");
+
+  check("a rotation is recognised, and the new admin comes from the REDEEMER", () => {
+    const intent = decodeRotationIntent(cclHex);
+    assert.ok(intent, "the fixture IS a rotation and must be recognised");
+    assert.match(intent.newAdminCredentialHash, /^[0-9a-f]{56}$/);
+    // ⛔ FROM THE REDEEMER, NOT THE OUTPUT DATUM. The redeemer is what global_state.ak reads to
+    // decide who must sign; the datum is the builder's claim about the result. The incoming admin
+    // must therefore appear in required_signers — if it did not, the transaction could not validate.
+    assert.ok(
+      requiredSignersOf(cclHex).includes(intent.newAdminCredentialHash),
+      "the decoded incoming admin must be one of the required signers, or the decode is reading "
+      + "the wrong field");
+  });
+
+  check("the outgoing admin is the OTHER required signer", () => {
+    const intent = decodeRotationIntent(cclHex);
+    assert.strictEqual(intent.otherRequiredSigners.length, 1,
+      "two-signer rotation: exactly one other party");
+    assert.ok(!intent.otherRequiredSigners.includes(intent.newAdminCredentialHash));
+    assert.deepStrictEqual(
+      [...intent.otherRequiredSigners, intent.newAdminCredentialHash].sort(),
+      [...requiredSignersOf(cclHex)].sort(),
+      "the decode must account for every required signer, not drop one");
+  });
+
+  check("the global-state policy id is read, matched on the GlobalState asset name", () => {
+    const intent = decodeRotationIntent(cclHex);
+    assert.match(intent.globalStatePolicyId, /^[0-9a-f]{56}$/,
+      "null here means the output navigation broke — PolicyId carries .hash, AssetName carries "
+      + ".bytes, and reading only one of them returns null for a transaction that has the NFT");
+  });
+
+  check("a transaction that is NOT a rotation decodes to null, not to a guess", () => {
+    const notRotation = fs.readFileSync("test-fixtures/ceremony-genesis-unsorted-mint.hex", "utf8").trim();
+    assert.strictEqual(decodeRotationIntent(notRotation), null);
+    assert.strictEqual(decodeRotationIntent("a0"), null, "garbage must not throw out of /sign");
+    assert.strictEqual(decodeRotationIntent(""), null);
+  });
+
+  check("/sign renders the decode and warns when the incoming credential is not yours", () => {
+    const sign = fs.readFileSync("app/sign/page.tsx", "utf8");
+    assert.match(sign, /decodeRotationIntent/);
+    assert.match(sign, /transfers administrative control/i);
+    assert.match(sign, /control moves TO/);
+    // The warning is the half that catches a reachable mistake; without it the panel is decoration.
+    assert.match(sign, /!myKeyHashes\.includes\(rotation\.newAdminCredentialHash\)/,
+      "the page must say plainly when the incoming credential is not one this wallet holds");
+  });
+
   console.log("\n--- T-096: the rotation card collects WITNESSES, never a signed transaction ---");
 
   // ⚑ Source assertions, narrow on purpose: the behaviour of prepareRotation, the witness merge and
