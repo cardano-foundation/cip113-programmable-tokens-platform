@@ -166,6 +166,48 @@ async function main() {
     assert.ok(saw, "a ceremony genesis declares no rotation signers and must not be accepted here");
   });
 
+  console.log("\n--- T-096: the rotation card collects WITNESSES, never a signed transaction ---");
+
+  // ⚑ Source assertions, narrow on purpose: the behaviour of prepareRotation, the witness merge and
+  // the quorum are tested elsewhere (above, and in the ceremony's own suites). What these defend is
+  // that the component still routes through them instead of growing its own copy — which is exactly
+  // what it had before: a paste box feeding submit with no merge step.
+  const gs = fs.readFileSync("components/admin/GlobalStateSection.tsx", "utf8");
+
+  check("the old pass-a-signed-transaction flow is GONE, not left beside the new one", () => {
+    for (const dead of ["rotatePartialCbor", "rotatePastedCbor", "handleRotateCounterSign"]) {
+      assert.doesNotMatch(gs, new RegExp(dead),
+        `${dead} is still present — the flow that hands a SIGNED transaction to a second wallet is `
+        + "the thing this ticket removed, and leaving it beside the new path means it can still run");
+    }
+  });
+
+  check("it canonicalises through prepareRotation before anything is shown or shared", () => {
+    assert.match(gs, /prepareRotation\(unsignedCborTxs\[0\]\)/);
+    // The build handler must not take a signature; the outgoing admin signs through the panel like
+    // everyone else, so there is one artefact type and one code path.
+    const build = gs.slice(gs.indexOf("handleRotateBuild"), gs.indexOf("handleRotateSubmit"));
+    assert.doesNotMatch(build, /signTx/,
+      "building must not sign — a signature taken before the hand-off is a second code path");
+  });
+
+  check("the signer list comes from the TRANSACTION, not from a hardcoded two", () => {
+    assert.match(gs, /memberKeyHashes=\{rotatePrepared\.requiredSigners\}/);
+    assert.doesNotMatch(gs, /requiredSigners\.length\s*===\s*2/,
+      "required_signers is THREE whenever the connected wallet is not the datum's admin");
+  });
+
+  check("assembly preserves the body and submission goes through the backend", () => {
+    assert.match(gs, /assembleUpgradeTx\(rotatePrepared\.canonicalHex, rotateCosign\.witnesses\)/);
+    assert.match(gs, /submitTokenChain\(\[signed\]\)/);
+  });
+
+  check("submit is blocked until every declared credential has signed", () =>
+    assert.match(gs, /disabled=\{rotateBusy \|\| !rotateCosign\.complete\}/));
+
+  check("the card says where to get the incoming admin's key hash", () =>
+    assert.match(gs, /\/sign/, "the prerequisite must be stated, not assumed"));
+
   console.log("\n--- FAIL-FIRST: the guard must actually refuse something ---");
 
   // A guard that is a no-op on every real input is indistinguishable from `(x) => x`. These two
