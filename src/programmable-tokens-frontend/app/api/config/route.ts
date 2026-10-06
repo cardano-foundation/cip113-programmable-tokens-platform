@@ -8,7 +8,7 @@
 
 import { NextResponse } from 'next/server';
 import { getCardanoNetwork } from '@/lib/utils/network';
-import { isModuleAllowedOnNetwork } from '@/lib/registry/available-modules';
+import { gateFlowFlags } from '@/lib/registry/available-modules';
 
 export const dynamic = 'force-dynamic'; // Disable caching
 
@@ -28,18 +28,15 @@ export async function GET() {
   };
 
   // ⛔ AND THEN THE NETWORK ALLOWLIST, which no flag can override. On mainnet this answers `false`
-  // for every module but the CMTA/eWpG security standard, whatever the ConfigMap says — a flag
-  // that was never set, or set to `true` by a copied testnet environment, must not put a template
-  // module in front of someone on mainnet. See lib/registry/available-modules.ts.
-  const config = {
-    network,
-    flows: Object.fromEntries(
-      Object.entries(flows).map(([id, enabled]) => [
-        id,
-        enabled && isModuleAllowedOnNetwork(network, id),
-      ])
-    ),
-  };
+  // for every module but "RWA Token (German & Swiss profiles)", whatever the ConfigMap says — a
+  // flag that was never set, or set to `true` by a copied testnet environment, must not put a
+  // template module in front of someone on mainnet.
+  //
+  // ⚑ THE INTERSECTION ITSELF LIVES IN lib/registry/available-modules.ts AND IS TESTED THERE. It
+  // used to be inline here, defended only by a regex over this file's text — and an adversarial
+  // review broke it by moving the gated expression into an unused field and returning the ungated
+  // one, with the suite green and this endpoint serving dummy:true on mainnet.
+  const config = { network, flows: gateFlowFlags(network, flows) };
 
   return NextResponse.json(config);
 }

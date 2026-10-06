@@ -22,6 +22,8 @@ import type {
 } from '@/types/registration';
 import { createInitialWizardState } from '@/types/registration';
 import { getFlow } from '@/lib/registration/flow-registry';
+import { getCardanoNetwork } from '@/lib/utils/network';
+import { isModuleAllowedOnNetwork } from '@/lib/registry/available-modules';
 import { clearRegistrationCip170Storage } from '@/lib/rwa/mint-recovery-storage';
 import { resetRegistrationRun } from '@/lib/rwa/registration-run';
 
@@ -31,6 +33,27 @@ import { resetRegistrationRun } from '@/lib/rwa/registration-run';
 
 const STORAGE_KEY = 'registration-wizard-state';
 const VOLATILE_CIP170_FLOWS = new Set(['rwa-token', 'kyc', 'kyc-extended']);
+
+/**
+ * Saved state that must be thrown away rather than offered back.
+ *
+ * Two reasons, and the second was found by an adversarial review:
+ *
+ *  1. a CIP-170 volatile flow, which was already handled here; and
+ *  2. ⛔ A FLOW THIS NETWORK DOES NOT OFFER. `lib/registry/available-modules.ts` hides `dummy`
+ *     and `freeze-and-seize` on mainnet — and the set this context PERSISTS is everything outside
+ *     VOLATILE_CIP170_FLOWS, i.e. exactly those two. So on mainnet the resume feature could only
+ *     ever restore a forbidden module, and it did: "Resume Registration?" → the full dummy wizard,
+ *     signing and submission included, without the picker ever running.
+ *
+ * `getFlow` now refuses a forbidden id too, so the wizard cannot render one. This is the other
+ * half: without it the user is offered a Resume that silently leads nowhere.
+ */
+function mustDiscardSavedFlow(flowId: string | null | undefined): boolean {
+  if (!flowId) return false;
+  if (VOLATILE_CIP170_FLOWS.has(flowId)) return true;
+  return !isModuleAllowedOnNetwork(getCardanoNetwork(), flowId);
+}
 
 // ============================================================================
 // Reducer
@@ -296,7 +319,7 @@ export function RegistrationWizardProvider({ children }: WizardProviderProps) {
       return;
     }
 
-    if (state.flowId && VOLATILE_CIP170_FLOWS.has(state.flowId)) {
+    if (mustDiscardSavedFlow(state.flowId)) {
       localStorage.removeItem(STORAGE_KEY);
       return;
     }
@@ -389,7 +412,7 @@ export function RegistrationWizardProvider({ children }: WizardProviderProps) {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (!saved) return false;
       const parsed = JSON.parse(saved) as WizardState;
-      if (parsed.flowId && VOLATILE_CIP170_FLOWS.has(parsed.flowId)) {
+      if (mustDiscardSavedFlow(parsed.flowId)) {
         localStorage.removeItem(STORAGE_KEY);
         return false;
       }
@@ -457,7 +480,7 @@ export function useWizardResume(): {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (!saved) return false;
       const parsed = JSON.parse(saved) as WizardState;
-      if (parsed.flowId && VOLATILE_CIP170_FLOWS.has(parsed.flowId)) {
+      if (mustDiscardSavedFlow(parsed.flowId)) {
         localStorage.removeItem(STORAGE_KEY);
         return false;
       }
@@ -473,7 +496,7 @@ export function useWizardResume(): {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (!saved) return null;
       const parsed = JSON.parse(saved) as WizardState;
-      if (parsed.flowId && VOLATILE_CIP170_FLOWS.has(parsed.flowId)) {
+      if (mustDiscardSavedFlow(parsed.flowId)) {
         localStorage.removeItem(STORAGE_KEY);
         return null;
       }
