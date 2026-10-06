@@ -3268,6 +3268,64 @@ public class RwaTokenModuleHandler
         return parseDenylist(policyId, listAddress, utxos);
     }
 
+    /**
+     * The power-users list, read and ordered the same way the denylist is.
+     *
+     * ⚑ ONE PARSER FOR BOTH LISTS, because they ARE the same structure: both are
+     * {@code linkedListElement(payload, link)} chains keyed by {@code "Node" ++ hash}, and
+     * {@link #parseDenylist} never interprets the payload — it takes {@code fields.get(0)} opaquely
+     * and validates only the things that are true of every one of these lists: a root exists, the
+     * links reach every element exactly once, the keys ascend, and nothing is a donation to the
+     * script address. Writing a second copy for the power users would have been a second place for
+     * the sortedness and cycle checks to be subtly different.
+     */
+    private List<DenylistElement> readPowerUsers(String policyId, String listAddress) {
+        List<Utxo> utxos = utxoProvider.findAllCurrentUtxosFromBlockfrost(listAddress);
+        if (utxos == null) {
+            throw new BuildPreconditionException("power-users list lookup returned no result");
+        }
+        return parseDenylist(policyId, listAddress, utxos);
+    }
+
+    /**
+     * The element a new key must be inserted AFTER: the last one whose key sorts below it.
+     *
+     * ⛔ THIS IS THE WHOLE OF THE "v1 limitation" THAT USED TO SIT IN AddPowerUser. The validator
+     * never required the root — it derives the anchor from the input it is given — so inserting
+     * anywhere was always possible on chain, and the off-chain code simply always handed it the
+     * root. That worked for exactly one insertion and silently produced an invalid second one.
+     *
+     * @return the covering element, or null when {@code key} is already in the list.
+     */
+    private static DenylistElement coveringAnchor(List<DenylistElement> elements, byte[] key) {
+        int i = coveringIndex(elements.stream().map(DenylistElement::keyHex).toList(),
+                HexUtil.encodeHexString(key));
+        return i < 0 ? null : elements.get(i);
+    }
+
+    /**
+     * The index of the element a new key must be inserted after, or -1 if the key is already there.
+     *
+     * <p>Separated from {@link #coveringAnchor} so the decision is testable without a chain: the
+     * list's own element type is package-private and carries UTxOs, and the rule being tested is
+     * purely about key order.
+     *
+     * @param keyHexesInListOrder the keys as the walk returned them — root (empty string) first,
+     *                            then ascending. {@link #parseDenylist} has already proven they
+     *                            ascend and that the links reach each one exactly once.
+     */
+    public static int coveringIndex(List<String> keyHexesInListOrder, String newKeyHex) {
+        byte[] key = HexUtil.decodeHexString(newKeyHex);
+        int anchor = 0;   // the root covers an empty list
+        for (int i = 1; i < keyHexesInListOrder.size(); i++) {
+            int cmp = compareUnsigned(HexUtil.decodeHexString(keyHexesInListOrder.get(i)), key);
+            if (cmp == 0) return -1;   // already present
+            if (cmp > 0) break;        // this one sorts above the new key: the previous is the anchor
+            anchor = i;
+        }
+        return anchor;
+    }
+
     static List<DenylistElement> parseDenylist(String policyId, String listAddress, List<Utxo> utxos) {
         Map<String, DenylistElement> byKey = new HashMap<>();
         String nodePrefix = HexUtil.encodeHexString(LL_NODE_KEY_PREFIX);
@@ -3533,10 +3591,10 @@ public class RwaTokenModuleHandler
      *  outputs back to the LL spend address — the updated root (now pointing at
      *  the new node) and the new node itself.
      *
-     *  <p>v1 limitation: only handles the very first insertion (anchor = root).
-     *  Subsequent insertions would need to walk the existing chain to find the
-     *  correct anchor based on lexicographic key order — TODO when more than
-     *  one power user exists. */
+     *  <p>Inserts at ANY position (T-101, 2026-10-06). The covering anchor is found by walking
+     *  the authenticated list; the new node takes over the anchor's link and the anchor points at
+     *  the new node. The validator always supported this — it derives the anchor from the input it
+     *  spends — so the old "first insertion only" limit was purely off-chain. */
     public TransactionContext<Void> buildAddPowerUserTransaction(
             String policyId,
             String powerUserPkhHex,
@@ -3592,15 +3650,40 @@ public class RwaTokenModuleHandler
             // provided we use them directly (genesis tx isn't on chain yet so the
             // poll-by-policy paths would time out). Otherwise fall back to on-chain
             // discovery — the admin-page "Sync to chain" button uses that path.
+            // ⛔ THE ANCHOR, NOT ALWAYS THE ROOT. This is the "v1 limitation" that made a rotation
+            // a dead end: the incoming admin holds the credential and needs a power-user node
+            // before they can mint, burn or pause, and a second insertion always built an invalid
+            // transaction because it asked the validator to append after the root when the new key
+            // did not belong there.
+            //
+            // The validator never required the root — it derives the anchor from the input it is
+            // spending. So the fix is entirely off-chain: walk the authenticated list and pick the
+            // element the new key sorts after.
+            //
+            // ⚠ The chain-mode override stays exactly as it was. buildFullRegistrationChain passes
+            // the root straight out of the genesis tx's outputs, because at that point the list is
+            // EMPTY (the root covers everything) and nothing is on chain to read.
             Utxo puRoot = overridePuRoot;
+            DenylistElement anchorElement = null;
             if (puRoot == null) {
-                puRoot = pollForFirstUtxoByPolicy(reg.getPowerUsersPolicyId(),
+                // Wait for the root to exist at all, then read the whole list rather than
+                // taking the first thing the poll returns.
+                Utxo probe = pollForFirstUtxoByPolicy(reg.getPowerUsersPolicyId(),
                         "power-users linked-list root NFT", java.time.Duration.ofSeconds(90));
-                if (puRoot == null) {
+                if (probe == null) {
                     return TransactionContext.typedError(
                             "power-users linked-list root NFT not found on chain after 90s — " +
                             "genesis tx may still be propagating; try the 'Sync to chain' button on the admin page in a minute");
                 }
+                List<DenylistElement> elements =
+                        readPowerUsers(reg.getPowerUsersPolicyId(), puSpendAddress.getAddress());
+                anchorElement = coveringAnchor(elements, newPowerUserKey);
+                if (anchorElement == null) {
+                    return TransactionContext.typedError(
+                            "this wallet is already a power user of " + policyId
+                            + " — use its existing entry rather than adding a second one");
+                }
+                puRoot = anchorElement.utxo();
             }
 
             Utxo gsUtxo = overrideGsUtxo;
@@ -3649,16 +3732,31 @@ public class RwaTokenModuleHandler
             // shape checks to the mint validator.
             ConstrPlutusData rootSpendRedeemer = ConstrPlutusData.of(0);
 
-            // Updated root datum: same Root payload, link now points at new node's key.
+            // ⛔ SPLICE, DO NOT APPEND. The new node takes over the anchor's old link and the
+            // anchor points at the new node, so the chain stays sorted and nothing is orphaned:
+            //
+            //     before:  anchor ──────────────────────────────> anchor.link
+            //     after:   anchor ──> new node ──> anchor.link
+            //
+            // The old code hardcoded `optionNone()` for the new node — correct ONLY when the
+            // anchor was the tail, which is only ever true of the first insertion. Inserting in
+            // the middle that way would have DROPPED every element after the anchor from the list
+            // while leaving their NFTs on chain.
+            //
+            // The anchor's payload is copied verbatim rather than rebuilt: it is the Root payload
+            // when the anchor is the root, and a PowerUser when it is a node, and this code has no
+            // business reinterpreting an existing power user's capabilities.
+            boolean anchorIsRoot = anchorElement == null || anchorElement.isRoot();
             ConstrPlutusData updatedRootDatum = linkedListElement(
-                    ConstrPlutusData.of(0),
+                    anchorElement == null
+                            ? ConstrPlutusData.of(0)
+                            : (ConstrPlutusData) anchorElement.payload(),
                     optionSome(BytesPlutusData.of(newPowerUserKey)),
-                    /*isRoot=*/ true);
+                    anchorIsRoot);
 
-            // New node datum: Node(PowerUser{...}), link = None (it's the tail).
             ConstrPlutusData newNodeDatum = linkedListElement(
                     powerUserData(newPowerUserKey, capabilities),
-                    optionNone(),
+                    anchorElement == null ? optionNone() : anchorElement.link(),
                     /*isRoot=*/ false);
 
             // Asset for the new node NFT (asset name = "Node" ++ pkh).
@@ -3684,8 +3782,18 @@ public class RwaTokenModuleHandler
             // datum-less (the mint receiver) and one with the datum — which
             // caused appended_node_output_index=1 to point at the datum-less
             // output and the script to error decoding it as a PowerUser.
+            // ⚠ The anchor's OWN asset name, not the root's. The root's name is empty; a node's is
+            // "Node" ++ key. Re-emitting the root's NFT while spending a node would burn one NFT
+            // and conjure another, and the mint validator would refuse — but only after the
+            // operator had signed.
             Value rootOutputValue = oneNftValue(puPolicyId,
-                    Asset.builder().name("0x").value(BigInteger.ONE).build());
+                    Asset.builder()
+                            .name("0x" + (anchorElement == null || anchorElement.isRoot()
+                                    ? ""
+                                    : HexUtil.encodeHexString(
+                                            concat(LL_NODE_KEY_PREFIX,
+                                                    HexUtil.decodeHexString(anchorElement.keyHex())))))
+                            .value(BigInteger.ONE).build());
 
             Tx tx = new Tx()
                     .collectFrom(puRoot, rootSpendRedeemer)
