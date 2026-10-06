@@ -224,6 +224,20 @@ public class RwaTokenAdminRequestVerifier {
         return map;
     }
 
+    /**
+     * The CIP-8 `hashed` flag from the unprotected header: absent means false.
+     *
+     * ⚠ Strict about the TYPE. A non-boolean here is a malformed record rather than a hint, and
+     * silently treating anything truthy as `true` would let an odd encoding pick the verification
+     * path. Only the two CBOR simple values are accepted.
+     */
+    private static boolean coseHashed(Map unprotected) {
+        DataItem flag = unprotected.get(new UnicodeString("hashed"));
+        if (flag == null || SimpleValue.FALSE.equals(flag)) return false;
+        if (SimpleValue.TRUE.equals(flag)) return true;
+        throw unauthorized("COSE `hashed` header is not a boolean");
+    }
+
     private static long number(DataItem item) {
         if (!(item instanceof co.nstant.in.cbor.model.Number number)) throw unauthorized("invalid COSE number");
         return number.getValue().longValueExact();
@@ -248,8 +262,39 @@ public class RwaTokenAdminRequestVerifier {
                 || !(parts.get(1) instanceof Map unprotected)
                 || !(parts.get(2) instanceof ByteString payload)
                 || !(parts.get(3) instanceof ByteString signature)
-                || signature.getBytes().length != 64
-                || !Arrays.equals(payload.getBytes(), expectedPayload)) throw unauthorized("COSE payload mismatch");
+                || signature.getBytes().length != 64) throw unauthorized("invalid COSE_Sign1");
+
+        // ⛔ CIP-8 `hashed` MODE, WHICH THIS VERIFIER USED TO REJECT OUTRIGHT — a spec violation.
+        // CIP-190: "Verifiers MUST inspect the unprotected header for `hashed` and, when its value
+        // is true, perform this substitution before strict Ed25519 verification."
+        //
+        // CIP-8 requires the hash in two cases, neither of which we control: when the payload is
+        // too large for the device's signing buffer, and when it contains characters the device
+        // cannot display. Both are properties of the WALLET AND FIRMWARE, not of our request — we
+        // cannot opt in or out. Refusing it meant any wallet that chose to hash failed 100% of the
+        // time, with "unsupported COSE headers", which reads like a broken signature.
+        //
+        // ⚑ AND THE MALLEABILITY WORRY IS ANSWERED, not waved away. The flag sits in the
+        // UNPROTECTED header, so it is not covered by the signature — the obvious question is
+        // whether an attacker can flip it. CIP-190 settles it: "its malleability is not an
+        // integrity surface: flipping the flag in transit changes which bytes the verifier
+        // reconstructs as Sig_structure[3], so verification of an honest signature simply fails —
+        // a denial-of-service-grade nuisance, never a forgery."
+        //
+        // That holds HERE specifically because the digest below is computed over OUR OWN
+        // reconstructed `expectedPayload`, never over anything the caller supplied. There is also
+        // no room for confusion between the two modes: a Blake2b-224 digest is 28 bytes and the
+        // reconstructed payload is a few hundred bytes of ASCII, so one can never be read as the
+        // other.
+        boolean hashed = coseHashed(unprotected);
+        byte[] effectivePayload = hashed
+                ? com.bloxbean.cardano.client.crypto.Blake2bUtil.blake2bHash224(expectedPayload)
+                : expectedPayload;
+        if (!Arrays.equals(payload.getBytes(), effectivePayload)) {
+            throw unauthorized("COSE payload mismatch: the wallet signed different bytes than this "
+                    + "request reconstructs" + (hashed ? " (hashed mode)" : "")
+                    + " — audience, network, path, body or the window do not match what was signed");
+        }
         Map protectedMap = strictMap(protectedBytes.getBytes());
         if (number(protectedMap.get(new UnsignedInteger(1))) != -8
                 || !(protectedMap.get(new UnicodeString("address")) instanceof ByteString signedAddress)
@@ -257,16 +302,18 @@ public class RwaTokenAdminRequestVerifier {
                 || unprotected.get(new UnsignedInteger(2)) != null
                 || unprotected.get(new UnicodeString("address")) != null
                 || unprotected.get(new UnsignedInteger(1)) != null
-                || protectedMap.get(new UnicodeString("hashed")) != null
-                || (unprotected.get(new UnicodeString("hashed")) != null
-                    && !SimpleValue.FALSE.equals(unprotected.get(new UnicodeString("hashed"))))) {
+                // CIP-8 puts `hashed` in the UNPROTECTED header; one in the protected map is
+                // not a conformant record, and accepting it there would mean two places to read
+                // the same flag from.
+                || protectedMap.get(new UnicodeString("hashed")) != null) {
             throw unauthorized("unsupported COSE headers");
         }
         Array structure = new Array()
                 .add(new UnicodeString("Signature1"))
                 .add(new ByteString(protectedBytes.getBytes()))
                 .add(new ByteString(new byte[0]))
-                .add(new ByteString(expectedPayload));
+                // The digest in hashed mode, the payload otherwise — CIP-190's Sig_structure[3].
+                .add(new ByteString(effectivePayload));
         byte[] message = encode(structure);
         Ed25519Signer verifier = new Ed25519Signer();
         verifier.init(false, new Ed25519PublicKeyParameters(cosePublicKey(keyHex), 0));

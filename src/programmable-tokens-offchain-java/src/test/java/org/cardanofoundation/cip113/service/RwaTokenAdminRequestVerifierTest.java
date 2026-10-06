@@ -6,6 +6,7 @@ import co.nstant.in.cbor.model.ByteString;
 import co.nstant.in.cbor.model.DataItem;
 import co.nstant.in.cbor.model.Map;
 import co.nstant.in.cbor.model.NegativeInteger;
+import co.nstant.in.cbor.model.SimpleValue;
 import co.nstant.in.cbor.model.UnicodeString;
 import co.nstant.in.cbor.model.UnsignedInteger;
 import com.bloxbean.cardano.client.util.HexUtil;
@@ -65,8 +66,25 @@ class RwaTokenAdminRequestVerifierTest {
 
     private HttpHeaders signedHeaders(String body, String method, String path,
                                       long issued, long expires) throws Exception {
-        byte[] payload = RwaTokenAdminRequestVerifier.payload("preview", GS, method, path,
+        return signedHeaders(body, method, path, issued, expires, /*hashed=*/ false);
+    }
+
+    /**
+     * ⛔ `hashed` IS THE WALLET'S CHOICE, NOT OURS, which is why it must be TESTED and not merely
+     * reasoned about. CIP-8 requires the Blake2b-224 digest in two cases we do not control: a
+     * payload too large for the device's signing buffer, and a payload containing characters the
+     * device cannot display. Both are properties of the wallet and firmware. This verifier used to
+     * reject the mode outright, so any wallet that chose it failed 100% of the time with
+     * "unsupported COSE headers" — which reads like a broken signature, not an unsupported option.
+     */
+    private HttpHeaders signedHeaders(String body, String method, String path,
+                                      long issued, long expires, boolean hashed) throws Exception {
+        byte[] reconstructed = RwaTokenAdminRequestVerifier.payload("preview", GS, method, path,
                 body, NONCE, issued, expires).getBytes(StandardCharsets.UTF_8);
+        // In hashed mode the COSE payload slot AND Sig_structure[3] both carry the digest.
+        byte[] payload = hashed
+                ? com.bloxbean.cardano.client.crypto.Blake2bUtil.blake2bHash224(reconstructed)
+                : reconstructed;
         byte[] protectedBytes = encode(new Map()
                 .put(new UnsignedInteger(1), new NegativeInteger(-8))
                 .put(new UnicodeString("address"), new ByteString(address)));
@@ -79,9 +97,13 @@ class RwaTokenAdminRequestVerifierTest {
         signer.init(true, privateKey);
         signer.update(structure, 0, structure.length);
         byte[] signature = signer.generateSignature();
+        Map unprotectedHeaders = new Map();
+        if (hashed) {
+            unprotectedHeaders.put(new UnicodeString("hashed"), SimpleValue.TRUE);
+        }
         byte[] sign1 = encode(new Array()
                 .add(new ByteString(protectedBytes))
-                .add(new Map())
+                .add(unprotectedHeaders)
                 .add(new ByteString(payload))
                 .add(new ByteString(signature)));
         byte[] key = encode(new Map()
@@ -193,6 +215,74 @@ class RwaTokenAdminRequestVerifierTest {
                 skewed + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS);
         assertDoesNotThrow(() -> verify("", PATH, adminHash, headers),
                 "45 seconds of forward clock drift is ordinary and must not read as a bad signature");
+    }
+
+    /**
+     * A wallet that signs the Blake2b-224 digest must authenticate, and the flag must be honoured
+     * rather than trusted: the digest is recomputed over the payload THIS server reconstructs.
+     */
+    @Test
+    void cip8HashedModeAuthenticates() throws Exception {
+        long issued = System.currentTimeMillis();
+        HttpHeaders hashed = signedHeaders("", "GET", PATH, issued,
+                issued + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS, true);
+        assertDoesNotThrow(() -> verify("", PATH, adminHash, hashed),
+                "CIP-190: a verifier MUST honour `hashed` in the unprotected header");
+
+        // ⛔ AND IT STILL BINDS THE REQUEST. Hashed mode must not become a way to sign one thing
+        // and send another: the digest is over our reconstruction, so a changed body still fails.
+        assertStatus(HttpStatus.UNAUTHORIZED, () -> verify("changed", PATH, adminHash, hashed));
+        assertStatus(HttpStatus.UNAUTHORIZED,
+                () -> verify("", PATH.replace("members", "update-member-root-hash"), adminHash, hashed));
+    }
+
+    /**
+     * ⚑ FLIPPING THE FLAG IS A NUISANCE, NOT A FORGERY, and this pins that reading.
+     *
+     * <p>`hashed` lives in the UNPROTECTED header, so it is not covered by the signature — the
+     * obvious worry is whether an attacker can flip it. CIP-190: "its malleability is not an
+     * integrity surface: flipping the flag in transit changes which bytes the verifier
+     * reconstructs as Sig_structure[3], so verification of an honest signature simply fails — a
+     * denial-of-service-grade nuisance, never a forgery." Both directions must therefore REFUSE.
+     */
+    @Test
+    void flippingTheHashedFlagBreaksVerificationRatherThanForgingIt() throws Exception {
+        long issued = System.currentTimeMillis();
+        long expires = issued + RwaTokenAdminRequestVerifier.REQUEST_WINDOW_MS;
+
+        // honest hashed record, flag stripped in transit
+        HttpHeaders stripped = signedHeaders("", "GET", PATH, issued, expires, true);
+        stripped.set("X-CMTA-Signature",
+                stripFlag(stripped.getFirst("X-CMTA-Signature")));
+        assertStatus(HttpStatus.UNAUTHORIZED, () -> verify("", PATH, adminHash, stripped));
+
+        // honest plain record, flag added in transit
+        HttpHeaders addedFlag = signedHeaders("", "GET", PATH, issued, expires, false);
+        addedFlag.set("X-CMTA-Signature", addFlag(addedFlag.getFirst("X-CMTA-Signature")));
+        assertStatus(HttpStatus.UNAUTHORIZED, () -> verify("", PATH, adminHash, addedFlag));
+    }
+
+    /** Rewrites a COSE_Sign1's unprotected header to drop `hashed`, leaving everything else. */
+    private static String stripFlag(String sign1Hex) throws Exception {
+        return rewriteUnprotected(sign1Hex, new Map());
+    }
+
+    /** Rewrites a COSE_Sign1's unprotected header to add `hashed: true`. */
+    private static String addFlag(String sign1Hex) throws Exception {
+        return rewriteUnprotected(sign1Hex,
+                new Map().put(new UnicodeString("hashed"), SimpleValue.TRUE));
+    }
+
+    private static String rewriteUnprotected(String sign1Hex, Map replacement) throws Exception {
+        var items = co.nstant.in.cbor.CborDecoder.decode(HexUtil.decodeHexString(sign1Hex));
+        Array sign1 = (Array) items.get(0);
+        var parts = sign1.getDataItems();
+        byte[] rebuilt = encode(new Array()
+                .add(parts.get(0))
+                .add(replacement)
+                .add(parts.get(2))
+                .add(parts.get(3)));
+        return HexUtil.encodeHexString(rebuilt);
     }
 
     private static void assertReason(Runnable task, String mustContain) {
