@@ -22,12 +22,12 @@
     {
       "name": "rwa-token",
       "repository": "https://github.com/cardano-foundation/cpt-rwa-ch-de-cmta-reference",
-      "commit": "9761a05e5d7d298a940c990989438cc894a0dad5",
+      "commit": "be4cce65ca1e2d225d4eba967fc99f3416cf67d7",
       "resource": "modules/rwa-token/plutus.json",
       "source_path": "",
       "environment": "",
       "aiken_compiler": "v1.1.23+8949565",
-      "rebuilt_sha256": "2f1f1799f499339dd9ecc9e0ae683bf9bdc77e5b9d5654e624f6e807f4185f48"
+      "rebuilt_sha256": "8997d9b71ab3f6894b70bac78e67db6723a1e24077ff89087c888abd87d17d5c"
     }
   ]
 }

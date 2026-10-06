@@ -881,23 +881,14 @@ public class RwaTokenModuleHandler
                     }
                     Cip68Metadata metadata = objectMapper.readValue(cip68Json, Cip68Metadata.class);
 
-                    // The stake half must hash to GlobalState's admin_credential_hash.
-                    //
-                    // The 2026-08-21 upstream tightened `reference_nft_output_is_pinned`: it
-                    // dropped the programmable-logic-base payment check and replaced it with
-                    // `credential_hash(owner) == admin_credential_hash`, plus a requirement
-                    // that the output carry NONE of the RWA token. So the owner is no
-                    // longer "whatever stake credential the admin's wallet happens to use" —
-                    // it is specifically the credential GlobalState names as admin, the same
-                    // hash `must_be_signed_by_credential` checks.
-                    //
-                    // Those are different values for an ordinary base address: its delegation
-                    // credential is the STAKE key hash, while admin_credential_hash is the
-                    // PAYMENT/signing one. Passing the former is what made every CIP-68
-                    // registration fail with
-                    //   reference_nft_output_is_pinned(...) ? False
-                    // Read it from the datum rather than from the request, so this is exactly
-                    // the value the validator compares against.
+                    // The stake half is the metadata authority: whoever holds it updates the
+                    // CIP-68 datum later (base-layer owner consent). Since upstream f9d6bea
+                    // `cip68_output_is_pinned` only requires SOME inline stake credential — the
+                    // metadata authority may differ from the admin — and the output must carry
+                    // nothing but ADA and the one (100) token. The platform keeps the admin
+                    // as authority, using admin_credential_hash from the datum (the PAYMENT/
+                    // signing hash, not the wallet's stake key), so the admin who signs every
+                    // other GlobalState action is also the one who can update metadata.
                     byte[] regAdminCredentialHash =
                             ((BytesPlutusData) gsFields.get(GS_IDX_ADMIN_CREDENTIAL_HASH)).getValue();
                     // The payment credential is now unconstrained by the contract, but keeping
@@ -2593,6 +2584,18 @@ public class RwaTokenModuleHandler
                         request.getInitialMintableAmount());
             }
 
+            // The (100) prefix marks the CIP-68 reference (metadata) token, which the contract
+            // exempts from the supply cap and the transfer gates. Registration therefore rejects
+            // a security asset carrying it (minting_authority: `expect !cip68.is_protected`).
+            // Refuse here, BEFORE genesis consumes the bootstrap UTxO and mints the GS and list
+            // NFTs — otherwise genesis lands and only the registration transaction fails. A raw
+            // prefix check on purpose: on chain a bare 4-byte `000643b0` is protected too.
+            if (securityAssetNameHex.toLowerCase(java.util.Locale.ROOT).startsWith("000643b0")) {
+                return TransactionContext.typedError("assetName " + securityAssetNameHex
+                        + " starts with the CIP-68 (100) reference-token prefix 000643b0, which the "
+                        + "rwa-token contract reserves for metadata and refuses as a security asset name.");
+            }
+
             // 1. Select a pure-ADA bootstrap UTxO from the admin's wallet. Its
             // OutputReference is the one-shot nonce for the GS mint + both LL mints.
             // Use the backend's current UTxO view. A cached unspent bootstrap
@@ -2684,13 +2687,10 @@ public class RwaTokenModuleHandler
                     protocolParams.registry().scriptHash(), powerUsersPolicyId,
                     HexUtil.encodeHexString(mintingLogicScript.getScriptHash()),
                     issuancePolicyId,
-                    // plb_script_hash was dropped upstream on 2026-08-21 — nine parameters
-                    // now, not ten. See RwaTokenScriptBuilderService.
+                    // Eight parameters: plb_script_hash and reference_asset_name are both
+                    // gone upstream. See RwaTokenScriptBuilderService.
                     HexUtil.encodeHexString(denylistSpendScript.getScriptHash()),
-                    powerUserListScriptHash,
-                    // (100) when this token is CIP-68, else the security name itself, which
-                    // is the contract's documented way to switch CIP-68 off.
-                    RwaTokenScriptBuilderService.referenceAssetNameFor(securityAssetNameHex));
+                    powerUserListScriptHash);
             String mintingAuthorityHash = HexUtil.encodeHexString(mintingAuthorityScript.getScriptHash());
 
             // 4. Build the remaining spend script and derive its address.
@@ -3158,6 +3158,10 @@ public class RwaTokenModuleHandler
     private static final int GS_ACTION_LOCK_UPGRADES = 11;
     /** Moved from 10 to 12 at the current pin. */
     private static final int GS_ACTION_DEACTIVATE_CONTRACT = 12;
+    /** Appended (so nothing above moved). Admin-only absolute write of
+     *  {@code mintable_amount}, bounded to [0, 2^63-1] on chain and closed by
+     *  LockUpgrades. */
+    private static final int GS_ACTION_SET_MINTABLE_AMOUNT = 13;
 
     // ── Minting PROXY withdraw redeemer ──────────────────────────────────────
     //
@@ -4525,6 +4529,16 @@ public class RwaTokenModuleHandler
                 request.setAssetName(request.getAssetName().trim());
             }
 
+            // The same (100)-prefix refusal as genesis, hoisted so the prepared/attestation
+            // flow refuses before a funding UTxO is reserved. With CIP-68 on, the name is
+            // relabelled to (333) first, so it can only match when CIP-68 is off.
+            if (request.getCip68Metadata() == null && request.getAssetName() != null
+                    && request.getAssetName().toLowerCase(java.util.Locale.ROOT).startsWith("000643b0")) {
+                return ("assetName " + request.getAssetName() + " starts with the CIP-68 (100) "
+                        + "reference-token prefix 000643b0, which the rwa-token contract reserves "
+                        + "for metadata and refuses as a security asset name.");
+            }
+
             // Same derivation buildGlobalStateInitTransaction and phase 2 use; hoisted
             // here so the mint preconditions can check it. Kept null-only (not
             // blank-aware) so it stays byte-identical to the other two call sites.
@@ -5356,7 +5370,7 @@ public class RwaTokenModuleHandler
             List<PlutusData> gsFields = parseGsFields(gsUtxo);
             long currentMintable = ((BigIntPlutusData) gsFields.get(GS_IDX_MINTABLE_AMOUNT)).getValue().longValueExact();
             PlutusData newGsDatum = applyMintableDelta(gsFields, burnQuantity.longValueExact());
-            long newMintable = currentMintable + burnQuantity.longValueExact();
+            long newMintable = Math.addExact(currentMintable, burnQuantity.longValueExact());
 
             // ── 4b. Receiver-KYC gate on the partial-burn continuation ─────
             // A PARTIAL burn leaves a token-bearing continuation output, which
@@ -6493,7 +6507,8 @@ public class RwaTokenModuleHandler
                                                     // "SetRequiresSenderKyc" | "SetRequiresReceiverKyc" |
                                                     // "UpdateMemberRootHash" | "RotateAdmin" |
                                                     // "RotateMintingScript" | "LockUpgrades" (no fields; irreversible) |
-                                                    // "DeactivateContract" (no fields; irreversible)
+                                                    // "DeactivateContract" (no fields; irreversible) |
+                                                    // "SetMintableAmount"
             Boolean transfersPaused,                // PauseTransfers
             String newSecurityInfoHex,              // ModifySecurityInfo (CBOR-encoded Data)
             String trustedVkeyHex,                  // AddTrustedEntity / RemoveTrustedEntity (32-byte hex)
@@ -6505,8 +6520,23 @@ public class RwaTokenModuleHandler
             Boolean requiresReceiverKycEnabled,     // SetRequiresReceiverKyc
             String newMemberRootHashHex,            // UpdateMemberRootHash — if null, backend uses current local
             String newAdminCredentialHashHex,       // RotateAdmin (28-byte hex)
-            String newMintingScriptCredentialHashHex // RotateMintingScript (28-byte hex)
-    ) {}
+            String newMintingScriptCredentialHashHex, // RotateMintingScript (28-byte hex)
+            Long newMintableAmount                  // SetMintableAmount (>= 0)
+    ) {
+        /** The shape before SetMintableAmount existed; every other action leaves
+         *  {@code newMintableAmount} null. */
+        public GsChangeSpec(String action, Boolean transfersPaused, String newSecurityInfoHex,
+                            String trustedVkeyHex, String trustedMetadataHex, String trustedOldVkeyHex,
+                            String trustedNewVkeyHex, String trustedNewMetadataHex,
+                            Boolean requiresSenderKycEnabled, Boolean requiresReceiverKycEnabled,
+                            String newMemberRootHashHex, String newAdminCredentialHashHex,
+                            String newMintingScriptCredentialHashHex) {
+            this(action, transfersPaused, newSecurityInfoHex, trustedVkeyHex, trustedMetadataHex,
+                    trustedOldVkeyHex, trustedNewVkeyHex, trustedNewMetadataHex,
+                    requiresSenderKycEnabled, requiresReceiverKycEnabled, newMemberRootHashHex,
+                    newAdminCredentialHashHex, newMintingScriptCredentialHashHex, null);
+        }
+    }
 
     /** Build N chained admin-signed txs, one per change. tx[i+1] mempool-chains
      *  off tx[i]'s GS UTxO output. Returns the unsigned CBORs in order. */
@@ -7136,11 +7166,35 @@ public class RwaTokenModuleHandler
                 out.newDatum = replaceGsField(f, GS_IDX_MINTING_SCRIPT_CREDENTIAL_HASH,
                         BytesPlutusData.of(newMintingScriptHash));
             }
+            case "SetMintableAmount" -> {
+                // Absolute write of the remaining supply headroom (not total supply), so
+                // a value below what is already minted is valid and just stops minting.
+                // On chain: admin-signed, 0 <= v <= 2^63-1, rejected once upgrades are
+                // locked. The upper bound needs no check here: it is Long.MAX_VALUE.
+                Long amount = change.newMintableAmount();
+                if (amount == null) {
+                    out.error = "SetMintableAmount requires newMintableAmount"; return out;
+                }
+                if (amount < 0) {
+                    out.error = "SetMintableAmount: newMintableAmount must be 0 or more, got "
+                            + amount + " (global_state.ak: `new_mintable_amount >= 0`).";
+                    return out;
+                }
+                if (boolFromConstr(f.get(GS_IDX_UPGRADES_LOCKED))) {
+                    out.error = "SetMintableAmount: upgrades are permanently locked for this token "
+                            + "(LockUpgrades has already been executed), which also makes the "
+                            + "mintable amount final. It now changes only through mint and burn.";
+                    return out;
+                }
+                PlutusData value = BigIntPlutusData.of(BigInteger.valueOf(amount));
+                out.actionRedeemer = ConstrPlutusData.of(GS_ACTION_SET_MINTABLE_AMOUNT, value);
+                out.newDatum = replaceGsField(f, GS_IDX_MINTABLE_AMOUNT, value);
+            }
             case "LockUpgrades" -> {
                 // NULLARY, like DeactivateContract. Sets `upgrades_locked` = True, which
-                // no branch ever clears: it permanently freezes BOTH the minting-authority
-                // rotation and the CIP-113 registry-node update path (transfer and
-                // third-party logic). That is the on-chain form of "this token's rules can
+                // no branch ever clears: it permanently freezes the minting-authority
+                // rotation, SetMintableAmount, and the CIP-113 registry-node update path
+                // (transfer and third-party logic). That is the on-chain form of "this token's rules can
                 // no longer change", and it is meaningful to holders precisely BECAUSE an
                 // admin key compromise cannot undo it.
                 //
@@ -8070,10 +8124,20 @@ public class RwaTokenModuleHandler
      *  mintable_amount negative. */
     private static PlutusData applyMintableDelta(List<PlutusData> gsFields, long delta) {
         if (!(gsFields.get(GS_IDX_MINTABLE_AMOUNT) instanceof BigIntPlutusData bi)) {
-            throw new BuildPreconditionException("GS datum field 1 (mintable_amount) is not an Int");
+            throw new BuildPreconditionException("GS datum field 2 (mintable_amount) is not an Int");
         }
         long current = bi.getValue().longValueExact();
-        long updated = current + delta;
+        long updated;
+        try {
+            updated = Math.addExact(current, delta);
+        } catch (ArithmeticException overflow) {
+            // On chain the field is an unbounded Int, so a burn on a cap set near 2^63-1 by
+            // SetMintableAmount is VALID there; only this platform's long cannot hold the
+            // result. Say so rather than wrap negative into the misleading error below.
+            throw new BuildPreconditionException("mintable_amount " + current + " + " + delta
+                    + " exceeds what this platform can represent (2^63-1). Lower the cap with "
+                    + "SetMintableAmount first, then retry.");
+        }
         if (updated < 0) {
             throw new BuildPreconditionException(
                     "mint quantity exceeds remaining mintable_amount (" + current + ")");
@@ -8161,8 +8225,9 @@ public class RwaTokenModuleHandler
              *  delegates every mint/burn decision to. The admin panel needs it to show
              *  which rules are in force, and to show a rotation taking effect. */
             String mintingScriptCredentialHash,
-            /** One-way upgrade lock. Once true, both the minting-authority rotation and
-             *  the CIP-113 registry-node upgrade path are frozen permanently. The UI
+            /** One-way upgrade lock. Once true, the minting-authority rotation, the
+             *  CIP-113 registry-node upgrade path and SetMintableAmount are frozen
+             *  permanently. The UI
              *  needs it to hide actions that can no longer be applied. */
             boolean upgradesLocked
     ) {}

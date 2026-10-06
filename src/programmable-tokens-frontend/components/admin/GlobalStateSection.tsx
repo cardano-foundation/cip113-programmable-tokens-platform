@@ -38,6 +38,7 @@ import {
   type GsChangeSpec,
   type SubmitChainPartialFailure,
 } from "@/lib/api/rwa-token";
+import { parseMintableAmountInput, setMintableAmountChange } from "@/lib/rwa/mintable-amount";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
 import { useToast } from "@/components/ui/use-toast";
 import { getExplorerTxUrl } from "@/lib/utils";
@@ -631,6 +632,7 @@ function RwaTokenGlobalStatePanel({
   const [transfersPaused, setTransfersPaused] = useState(false);
   const [requiresReceiverKyc, setRequiresReceiverKyc] = useState(false);
   const [requiresSenderKyc, setRequiresSenderKyc] = useState(false);
+  const [mintableAmountInput, setMintableAmountInput] = useState("");
   const [securityInfo, setSecurityInfo] = useState("");
   const [trustedEntities, setTrustedEntities] = useState<string[]>([]);
   const [newEntityInput, setNewEntityInput] = useState("");
@@ -673,6 +675,7 @@ function RwaTokenGlobalStatePanel({
       setTransfersPaused(next.transfersPaused);
       setRequiresReceiverKyc(next.requiresReceiverKyc);
       setRequiresSenderKyc(next.requiresSenderKyc);
+      setMintableAmountInput(String(next.mintableAmount));
       setSecurityInfo(next.securityInfoHex ?? "");
       setTrustedEntities([...next.trustedEntityVkeys]);
       setTrustedUpdates([]);
@@ -725,9 +728,23 @@ function RwaTokenGlobalStatePanel({
       : isHex(securityInfo)
         ? cborDataError(securityInfo)
         : null;
+  // SetMintableAmount — editable only while upgrades are unlocked: LockUpgrades
+  // makes the cap final on chain, so the input is not even offered afterwards.
+  const mintableEditable = !!onchain && !onchain.upgradesLocked;
+  // Only an EDITED value is validated. The on-chain value can legitimately exceed what the
+  // input accepts (burns lift it past MAX_SAFE_INTEGER), and pre-filling the box with it
+  // must not block Save for every other staged change.
+  const mintableTouched = mintableEditable && !!onchain
+    && mintableAmountInput !== String(onchain.mintableAmount);
+  const mintableParse = parseMintableAmountInput(mintableAmountInput);
+  const mintableChange = mintableTouched && onchain
+    ? setMintableAmountChange(mintableAmountInput, onchain.mintableAmount)
+    : null;
+  const mintableAmountError = mintableTouched && !mintableParse.ok ? mintableParse.error : null;
   const deactivated = onchain?.deactivated ?? false;
   const hasChanges = pauseChanged || requiresChanged || senderKycChanged || securityChanged
-    || trustedAdded.length > 0 || trustedRemoved.length > 0 || trustedUpdates.length > 0;
+    || trustedAdded.length > 0 || trustedRemoved.length > 0 || trustedUpdates.length > 0
+    || mintableChange !== null;
 
   /** Each staged change as (spec, human label). The labels are kept alongside so a
    *  partial submit failure can name WHICH change failed and which ones landed —
@@ -800,6 +817,7 @@ function RwaTokenGlobalStatePanel({
         label: `Set requires-receiver-KYC ${requiresReceiverKyc ? "on" : "off"}`,
       });
     }
+    if (mintableChange) changes.push(mintableChange);
     return changes;
   };
 
@@ -868,6 +886,10 @@ function RwaTokenGlobalStatePanel({
   const handleSave = async () => {
     if (securityInfoError) {
       setError(`Security info: ${securityInfoError}`);
+      return;
+    }
+    if (mintableAmountError) {
+      setError(`Mintable amount: ${mintableAmountError}`);
       return;
     }
     await runChain(buildChangeList(), "Global state updated");
@@ -942,8 +964,8 @@ function RwaTokenGlobalStatePanel({
   };
 
   // Irreversible, and broader than it looks: it freezes the minting-authority
-  // rotation AND the CIP-113 registry-node upgrade path (transfer + third-party
-  // logic) in one flag that no branch ever clears. Own control, own confirmation.
+  // rotation, the CIP-113 registry-node upgrade path (transfer + third-party
+  // logic) AND SetMintableAmount in one flag that no branch ever clears. Own control, own confirmation.
   const [showLockUpgrades, setShowLockUpgrades] = useState(false);
   const [lockConfirm, setLockConfirm] = useState("");
   const LOCK_PHRASE = "LOCK UPGRADES";
@@ -1252,9 +1274,33 @@ function RwaTokenGlobalStatePanel({
         {senderKycChanged && <p className="mt-1 text-xs text-amber-400">Will submit: SetRequiresSenderKyc</p>}
       </div>
 
-      {/* mintable_amount (read-only — there's no direct update action) */}
-      <ReadOnlyField label="mintable_amount (no direct update — decremented by MintSecurity)"
-                     value={String(onchain.mintableAmount)} />
+      {/* mintable_amount — admin-settable via SetMintableAmount until LockUpgrades */}
+      {mintableEditable ? (
+        <div>
+          <label className="block text-sm font-medium text-white mb-2">Mintable amount</label>
+          <Input
+            inputMode="numeric"
+            value={mintableAmountInput}
+            onChange={(e) => setMintableAmountInput(e.target.value)}
+            disabled={busy}
+          />
+          <p className="mt-1.5 text-xs text-dark-400">
+            Remaining supply headroom, not total supply: minting lowers it and burning raises
+            it. Setting it below what is already minted simply stops further minting. Must be
+            0 or more. Locking upgrades makes it final.
+          </p>
+          {mintableAmountError ? (
+            <p className="mt-1 text-xs text-red-400">{mintableAmountError}</p>
+          ) : mintableChange ? (
+            <p className="mt-1 text-xs text-amber-400">
+              Will submit: SetMintableAmount (on chain now: {onchain.mintableAmount})
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <ReadOnlyField label="mintable_amount (final — upgrades are locked; changes only by mint and burn)"
+                       value={String(onchain.mintableAmount)} />
+      )}
 
       {/* security_info */}
       <div>
@@ -1502,7 +1548,7 @@ function RwaTokenGlobalStatePanel({
           type="button"
           variant="primary"
           onClick={handleSave}
-          disabled={busy || !hasChanges || !!securityInfoError}
+          disabled={busy || !hasChanges || !!securityInfoError || !!mintableAmountError}
         >
           {busy ? "Building + signing…" : hasChanges ? "Save & submit chain" : "No changes"}
         </Button>
@@ -1712,8 +1758,9 @@ function RwaTokenGlobalStatePanel({
 
         {onchain?.upgradesLocked ? (
           <p className="text-xs text-amber-300">
-            Upgrades are permanently locked for this token. The minting authority and the
-            transfer-logic scripts can no longer be changed by any action.
+            Upgrades are permanently locked for this token. The minting authority, the
+            transfer-logic scripts and the mintable amount can no longer be changed by any
+            admin action.
           </p>
         ) : !showRotateMinting ? (
           <Button
@@ -1792,8 +1839,9 @@ function RwaTokenGlobalStatePanel({
           ) : (
             <div className="p-4 rounded-lg border border-red-500/50 bg-red-500/10 space-y-3">
               <p className="text-xs text-red-200">
-                This freezes BOTH the minting authority and the CIP-113 transfer-logic
-                upgrade path. Nothing clears the flag afterwards — that is the point: the
+                This freezes the minting authority, the CIP-113 transfer-logic upgrade
+                path and the mintable amount (afterwards it changes only by mint and
+                burn). Nothing clears the flag afterwards — that is the point: the
                 token&apos;s rules become final in a way an admin key compromise cannot undo.
               </p>
               <p className="text-xs text-red-200">

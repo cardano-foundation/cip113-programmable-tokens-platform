@@ -14,7 +14,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.cardanofoundation.cip113.model.ModuleValidator;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
-import org.cardanofoundation.cip113.util.Cip68;
 import org.springframework.stereotype.Service;
 
 import java.math.BigInteger;
@@ -97,23 +96,6 @@ public class RwaTokenScriptBuilderService {
         }
     }
 
-    /**
-     * The CIP-68 {@code (100)} reference-NFT asset name for a security asset, or the
-     * security asset name itself when the token is not CIP-68.
-     *
-     * <p>That fallback is the contract's own documented way to switch CIP-68 OFF: the
-     * authority's allowlist matches the security-asset arm first, so an equal
-     * {@code reference_asset_name} makes the reference arm unreachable and no second name
-     * can ever be minted under the issuance policy. Passing something arbitrary instead
-     * would leave a second, unreachable-by-design name that the contract would
-     * nonetheless accept at quantity 1.
-     */
-    public static String referenceAssetNameFor(String securityAssetNameHex) {
-        return Cip68.hasLabel(securityAssetNameHex)
-                ? Cip68.referenceNameFor(securityAssetNameHex)
-                : securityAssetNameHex;
-    }
-
     /** Policy id of a script, with the same unreachable-checked-exception reasoning as
      *  {@link #hashHex}. */
     private static String policyId(PlutusScript script) {
@@ -187,8 +169,7 @@ public class RwaTokenScriptBuilderService {
         PlutusScript mintingAuthority = buildMintingAuthorityScript(
                 securityAssetNameHex, globalStatePolicyId, registryPolicyId, powerUsersPolicyId,
                 hashHex(mintingLogicProxy),
-                expectedIssuancePolicyId, denylistScriptHash, powerUserListScriptHash,
-                referenceAssetNameFor(securityAssetNameHex));
+                expectedIssuancePolicyId, denylistScriptHash, powerUserListScriptHash);
 
         PlutusScript globalStateSpend = buildGlobalStateSpendScript(
                 securityAssetNameHex, expectedIssuancePolicyId, globalStatePolicyId, powerUserListScriptHash);
@@ -329,10 +310,11 @@ public class RwaTokenScriptBuilderService {
      * withdraw-0 needs no signature at all. Verify after every rotation with a smoke
      * test that a mint lacking a power-user signature is REJECTED.
      */
-    /** {@code plb_script_hash} is GONE as of the 2026-08-21 upstream (nine parameters, not
-     *  ten). The destination checks no longer assert the programmable-logic base
-     *  themselves — CIP-113's own base layer already confines the token there, so
-     *  re-asserting it here bought nothing and cost a parameter. */
+    /** Eight parameters. {@code plb_script_hash} went on 2026-08-21 (CIP-113's base layer
+     *  already confines the token), and {@code reference_asset_name} went at upstream
+     *  5033daa: the CIP-68 reference NFT is now recognised by its {@code (100)} prefix
+     *  ({@code 000643b0}) rather than an exact compile-time name, so a non-CIP-68 token
+     *  switches CIP-68 off simply by never minting a {@code (100)} name. */
     public PlutusScript buildMintingAuthorityScript(String securityAssetNameHex,
                                                     String globalStatePolicyId,
                                                     String registryPolicyId,
@@ -340,8 +322,7 @@ public class RwaTokenScriptBuilderService {
                                                     String mintingLogicScriptCredentialHash,
                                                     String expectedIssuancePolicyId,
                                                     String denylistScriptHash,
-                                                    String powerUserListScriptHash,
-                                                    String referenceAssetNameHex) {
+                                                    String powerUserListScriptHash) {
         ModuleValidator contract = getContract("minting_authority.minting_authority_validator.withdraw");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
@@ -351,8 +332,7 @@ public class RwaTokenScriptBuilderService {
                 BytesPlutusData.of(HexUtil.decodeHexString(mintingLogicScriptCredentialHash)),
                 BytesPlutusData.of(HexUtil.decodeHexString(expectedIssuancePolicyId)),
                 BytesPlutusData.of(HexUtil.decodeHexString(denylistScriptHash)),
-                BytesPlutusData.of(HexUtil.decodeHexString(powerUserListScriptHash)),
-                BytesPlutusData.of(HexUtil.decodeHexString(referenceAssetNameHex))
+                BytesPlutusData.of(HexUtil.decodeHexString(powerUserListScriptHash))
         );
         return applyParameters(contract, params, "minting_authority");
     }

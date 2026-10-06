@@ -75,24 +75,21 @@ shasum -a 256 plutus.json
 # verifies the release archive's checksum and source commit before building.
 ```
 
-### rwa-token — a rebuild, not upstream's file
+### rwa-token — verbatim upstream
 
-**Upstream's committed `plutus.json` at this commit is stale**, so we do not ship it. At
-`9761a05e`, `global_state.global_state_spend_validator` is committed as
-`57e2c6d5…` (4901 bytes) while the source compiles to `e720eb53…` (4698 bytes) — the
-blueprint and `validators/global_state.ak` were last touched by the *same* commit, so it was
-committed without being regenerated after a final source edit.
-
-We ship the **rebuild**, on the principle that the script that goes on chain must be the
-source that gets audited.
+Pinned at `be4cce65` (2026-10-06), which adds the `SetMintableAmount` GlobalState action.
+At this commit upstream's committed `plutus.json` reproduces from its own source, so we ship
+it byte for byte. The earlier pin, `9761a05e`, was an exception: its committed blueprint was
+stale, so we shipped a rebuild instead. If you ever adopt a commit whose blueprint does not
+reproduce, ship the rebuild and record upstream's bytes in `upstream_committed_sha256`.
 
 ```bash
 git clone https://github.com/cardano-foundation/cpt-rwa-ch-de-cmta-reference /tmp/rwa
-cd /tmp/rwa && git checkout 9761a05e5d7d298a940c990989438cc894a0dad5
+cd /tmp/rwa && git checkout be4cce65ca1e2d225d4eba967fc99f3416cf67d7
 
-shasum -a 256 plutus.json     # upstream's STALE file: 301b2d9f…
+shasum -a 256 plutus.json     # upstream's committed file: 8997d9b7…
 aiken build
-shasum -a 256 plutus.json     # the rebuild we ship:   2f1f1799…
+shasum -a 256 plutus.json     # the rebuild — identical:   8997d9b7…
 ```
 
 For a release check, run `python3 scripts/verify-cip171-sources.py` with Python
@@ -106,10 +103,6 @@ The verifier checks both source dependency declarations and the lock, places the
 verified archive in Aiken's versioned package cache, and requires the lock to stay
 unchanged during the build. An external verifier should check this archive too,
 because a version tag alone does not guarantee immutable content.
-
-`contracts-pin.json` records `upstream_committed_sha256` alongside ours, so it stays possible
-to tell whether upstream has since regenerated. If `301b2d9f…` ever changes, check whether
-their blueprint now reproduces — and if it does, drop the exception and ship theirs verbatim.
 
 ## Adopting a new upstream revision
 
