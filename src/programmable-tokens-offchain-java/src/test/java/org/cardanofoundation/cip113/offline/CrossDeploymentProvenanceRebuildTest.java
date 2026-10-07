@@ -181,23 +181,44 @@ class CrossDeploymentProvenanceRebuildTest {
         var answer = new java.util.concurrent.atomic.AtomicReference<java.util.Optional<com.fasterxml.jackson.databind.JsonNode>>(
                 java.util.Optional.empty());
 
-        // TTL of 1ms: the point is that it EXPIRES, not how long it takes.
-        var client = new org.cardanofoundation.cip113.cip171.UplcLinkClient(
-                org.springframework.web.reactive.function.client.WebClient.builder(), "http://unused", true, 1000, 1) {
-            @Override
-            protected java.util.Optional<com.fasterxml.jackson.databind.JsonNode> fetch(String hash) {
-                calls.incrementAndGet();
-                return answer.get();
-            }
-        };
+        // ⛔ TWO CLIENTS, BECAUSE ONE TTL CANNOT SERVE BOTH ASSERTIONS. This test wants two
+        // opposite things: that an immediate retry is served from the negative cache, and that the
+        // entry EXPIRES. A single 1ms TTL made those race — the "immediate" retry only counts as
+        // immediate if it happens inside 1ms, and on a loaded CI runner it does not.
+        //
+        // ⚠ MEASURED: it failed exactly that way on main at 85dbe97 (run 37466795987,
+        // "expected: <1> but was: <2>" at the cached-retry assertion) while passing locally and on
+        // the commit either side of it. A flake in an allowlisted suite is worse than a missing
+        // test, because it teaches people to re-run CI instead of reading it.
+        //
+        // So: a long TTL proves the cache HOLDS, a 1ms TTL proves it EXPIRES, and neither
+        // assertion depends on how fast the machine is.
+        java.util.function.LongFunction<org.cardanofoundation.cip113.cip171.UplcLinkClient> clientWithTtl =
+                ttlMs -> new org.cardanofoundation.cip113.cip171.UplcLinkClient(
+                        org.springframework.web.reactive.function.client.WebClient.builder(),
+                        "http://unused", true, 1000, ttlMs) {
+                    @Override
+                    protected java.util.Optional<com.fasterxml.jackson.databind.JsonNode> fetch(String hash) {
+                        calls.incrementAndGet();
+                        return answer.get();
+                    }
+                };
 
-        assertTrue(client.byHash("aa").isEmpty(), "nothing published yet");
+        // ---- the negative cache HOLDS (TTL far longer than this test can take) ----
+        var holding = clientWithTtl.apply(600_000L);
+        assertTrue(holding.byHash("aa").isEmpty(), "nothing published yet");
         assertEquals(1, calls.get(), "the first lookup must actually ask");
 
-        assertTrue(client.byHash("aa").isEmpty());
+        assertTrue(holding.byHash("aa").isEmpty());
         assertEquals(1, calls.get(),
                 "an immediate retry must be served from the negative cache — otherwise every page "
                         + "load hammers the registry for a record that is not there yet");
+
+        // ---- and it EXPIRES (fresh client, 1ms TTL, so the sleep cannot be too short) ----
+        calls.set(0);
+        var client = clientWithTtl.apply(1L);
+        assertTrue(client.byHash("aa").isEmpty(), "still nothing published");
+        assertEquals(1, calls.get());
 
         Thread.sleep(5); // past the 1ms TTL
 

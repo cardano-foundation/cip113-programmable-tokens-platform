@@ -1068,6 +1068,294 @@ public class OfflineCip68EvalTest {
     }
 
     /**
+     * T-093 — a REAL RotateAdmin transaction, built by cardano-client-lib, evaluated offline, and
+     * exported so the frontend's CIP-21 stack can be measured against bytes it has never seen.
+     *
+     * <p>Two things this proves that nothing else in the suite does.
+     *
+     * <p><b>The dual-signature branch is satisfiable.</b> {@code global_state.ak} calls
+     * {@code must_be_signed_by_credential} TWICE on this branch — the outgoing admin from the INPUT
+     * datum's {@code admin_credential_hash}, and the incoming {@code new_admin_credential_hash} —
+     * and both come from the body's {@code required_signers}. Evaluating the redeemer here runs the
+     * real validator against a real script context, so a green result means the branch accepts a
+     * transaction shaped the way the builder shapes it. Before this, the only evidence was reading
+     * the builder.
+     *
+     * <p><b>It is the only CCL-encoded transaction of this shape anywhere.</b> Every fixture the
+     * frontend's canonicaliser and CIP-21 walker have ever seen is EVOLUTION-built
+     * ({@code test-fixtures/real-preview-txs.json} is the bootstrap ceremony). This one carries
+     * {@code required_signers} with two entries — a Conway set that never appeared in a ceremony
+     * transaction — plus redeemers, collateral and an inline datum, written by cbor-java. The hex
+     * is dumped to {@code build/} for the frontend side of T-093; it is NOT asserted here, because
+     * what CIP-21 makes of it is the frontend's question.
+     *
+     * <p>⚠ The keys are {@code BootstrapFixture}'s test keys, so the exported fixture carries no
+     * operator material — which is what the epic requires of anything committed to this PUBLIC
+     * repository.
+     */
+    @Test
+    public void rwaTokenRotateAdminEvaluatesAndIsExportedForCip21() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var chain = st.chain();
+        var boot = st.boot();
+        var handler = st.handler();
+        var policyId = st.built().programmableTokenPolicyId();
+
+        var outgoingAdminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        // The incoming admin is a DIFFERENT real key, not a literal: required_signers must end up
+        // with two distinct entries or the dual-signature property is vacuous.
+        var incomingAdminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ALICE.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        Assertions.assertNotEquals(outgoingAdminPkh, incomingAdminPkh,
+                "the two admins must differ, or this test proves nothing about dual signing");
+
+        var rotate = new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec(
+                "RotateAdmin",
+                null, null, null, null, null, null, null, null, null, null,
+                incomingAdminPkh,   // newAdminCredentialHashHex
+                null);
+
+        var result = handler.buildGlobalStateUpdateChain(
+                policyId, java.util.List.of(rotate),
+                BootstrapFixture.ADMIN.baseAddress(), outgoingAdminPkh, boot.params());
+        Assertions.assertTrue(result.isSuccessful(),
+                "RotateAdmin build failed: " + result.error());
+        Assertions.assertEquals(1, result.metadata().size(),
+                "a rotation is ONE transaction — the one-change rule the epic makes structural");
+
+        var unsignedHex = result.metadata().get(0);
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(unsignedHex));
+
+        // ⛔ BOTH CREDENTIALS MUST BE DECLARED. Passing only the fee payer means
+        // new_admin_credential_hash never reaches extra_signatories and the branch cannot validate.
+        var declared = tx.getBody().getRequiredSigners().stream()
+                .map(HexUtil::encodeHexString)
+                .map(String::toLowerCase)
+                .toList();
+        Assertions.assertTrue(declared.contains(outgoingAdminPkh.toLowerCase()),
+                "required_signers is missing the OUTGOING admin: " + declared);
+        Assertions.assertTrue(declared.contains(incomingAdminPkh.toLowerCase()),
+                "required_signers is missing the INCOMING admin: " + declared);
+        Assertions.assertEquals(2, declared.size(),
+                "fee payer and outgoing admin are the same wallet here, so exactly two are expected; "
+                + "got " + declared);
+
+        // The validator itself, not our reading of it.
+        int evaluated = chain.reportAndCheckRedeemers("rwa-token/rotate-admin", tx);
+        Assertions.assertTrue(evaluated >= 1,
+                "the global-state spend validator did not actually run, so the dual-signature "
+                + "branch is unproven; redeemers evaluated: " + evaluated);
+
+        // Export for the frontend half of T-093. build/ is not committed; the epic says the
+        // committed fixture is built from throwaway keys, and these are exactly that.
+        var out = java.nio.file.Path.of("build", "rotate-admin-unsigned.hex");
+        java.nio.file.Files.createDirectories(out.getParent());
+        java.nio.file.Files.writeString(out, unsignedHex + System.lineSeparator());
+        System.out.println("[T-093] RotateAdmin unsigned CBOR -> " + out.toAbsolutePath()
+                + " (" + unsignedHex.length() + " hex chars)");
+        System.out.println("[T-093] required_signers = " + declared);
+        System.out.println("[T-093] outgoing=" + outgoingAdminPkh + " incoming=" + incomingAdminPkh);
+    }
+
+    /**
+     * T-098 — a rotation is a chain of EXACTLY one, and the refusal is proven in both shapes.
+     *
+     * <p>RotateAdmin is the only global-state action needing a second signature, collected out of
+     * band from the incoming admin. In a chain, every transaction after the first depends on the
+     * previous one's hash, so a witness gathered remotely can only ever cover {@code tx[0]} — the
+     * remote party cannot even see the rest.
+     *
+     * <p>⛔ THE SECOND CASE IS THE POINT. A rule phrased as "RotateAdmin may not appear alongside
+     * any OTHER change" is satisfied by {@code [RotateAdmin, RotateAdmin]}, which has exactly the
+     * defect the rule exists to prevent. That is why the implementation tests
+     * {@code changes.size() != 1} rather than comparing actions, and why this test asserts the
+     * two-rotation case explicitly rather than trusting the single-mixed case to cover it.
+     */
+    @Test
+    public void rwaTokenRotateAdminMustBeTheOnlyChangeInItsChain() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var boot = st.boot();
+        var handler = st.handler();
+        var policyId = st.built().programmableTokenPolicyId();
+
+        var adminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        var incomingPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ALICE.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+
+        java.util.function.Function<String, org.cardanofoundation.cip113.service.module
+                .RwaTokenModuleHandler.GsChangeSpec> rotate = pkh ->
+                new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec(
+                        "RotateAdmin", null, null, null, null, null, null, null, null, null, null,
+                        pkh, null);
+        var pause = new org.cardanofoundation.cip113.service.module
+                .RwaTokenModuleHandler.GsChangeSpec(
+                "PauseTransfers", Boolean.TRUE, null, null, null, null, null, null, null, null,
+                null, null, null);
+
+        // (a) a rotation mixed with another change
+        var mixed = handler.buildGlobalStateUpdateChain(
+                policyId, java.util.List.of(rotate.apply(incomingPkh), pause),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
+        Assertions.assertFalse(mixed.isSuccessful(),
+                "a rotation batched with another change must be refused");
+        Assertions.assertTrue(mixed.error().contains("RotateAdmin must be the only change"),
+                "the refusal must name the rule; got: " + mixed.error());
+        Assertions.assertTrue(mixed.error().contains("PauseTransfers"),
+                "the refusal must name what else was in the chain; got: " + mixed.error());
+
+        // (b) ⛔ TWO rotations — the case a difference check would permit.
+        var twice = handler.buildGlobalStateUpdateChain(
+                policyId, java.util.List.of(rotate.apply(incomingPkh), rotate.apply(adminPkh)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
+        Assertions.assertFalse(twice.isSuccessful(),
+                "two rotations in one chain must be refused — each later body depends on the "
+                + "previous transaction's hash, so one out-of-band witness cannot cover both");
+        Assertions.assertTrue(twice.error().contains("RotateAdmin must be the only change"),
+                "the refusal must name the rule; got: " + twice.error());
+
+        // (c) and a lone rotation still builds, or the rule has eaten the feature.
+        var lone = handler.buildGlobalStateUpdateChain(
+                policyId, java.util.List.of(rotate.apply(incomingPkh)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
+        Assertions.assertTrue(lone.isSuccessful(),
+                "a lone rotation must still build: " + lone.error());
+        Assertions.assertEquals(1, lone.metadata().size());
+
+        // (d) a multi-change chain WITHOUT a rotation is untouched — the rule is scoped.
+        var noRotate = handler.buildGlobalStateUpdateChain(
+                policyId, java.util.List.of(pause, pause),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
+        Assertions.assertTrue(noRotate.isSuccessful(),
+                "batching is still allowed for actions that need no second signature: "
+                + noRotate.error());
+    }
+
+    /**
+     * T-101 end to end — a SECOND power user is added, and the real validator accepts it.
+     *
+     * <p>This is the half {@code PowerUserInsertionTest} deliberately could not cover: it tests the
+     * ordering decision in isolation, and the thing that actually had to work is a built transaction
+     * the validator accepts. The offline harness can do it — {@code rwaTokenUtxoProvider} already
+     * serves {@code findAllCurrentUtxosFromBlockfrost} and {@code findUtxosByPolicy}, which is what
+     * the list walk and the anchor poll need, so no extension was required after all.
+     *
+     * <p>⛔ WHAT A GREEN RESULT HERE MEANS, AND WHAT IT DOES NOT. The redeemer is evaluated by Aiken
+     * against a real script context, so the power-users mint and spend validators genuinely accept
+     * the spliced list. It does NOT prove a hardware wallet will sign it (T-095) and it does not
+     * submit anything (T-102). It does retire the reason T-102 was carrying this scope.
+     *
+     * <p>The first insertion is the one the old code could do. The SECOND is the one that was
+     * impossible, and it is the one a rotated-in admin needs: mint, burn and pause each check the
+     * caller's own node as a reference input, so without it a rotation is a dead end.
+     */
+    @Test
+    public void rwaTokenSecondPowerUserInsertionEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ADMIN.baseAddress());
+        var chain = st.chain();
+        var handler = st.handler();
+        var policyId = st.built().programmableTokenPolicyId();
+
+        // Two distinct additional power users, derived so their keys differ from the admin's.
+        var second = com.bloxbean.cardano.client.account.Account.createFromMnemonic(
+                BootstrapFixture.NETWORK, BootstrapFixture.OFFLINE_DERIVATION_MNEMONIC, 2, 0);
+        var third = com.bloxbean.cardano.client.account.Account.createFromMnemonic(
+                BootstrapFixture.NETWORK, BootstrapFixture.OFFLINE_DERIVATION_MNEMONIC, 3, 0);
+
+        java.util.function.Function<com.bloxbean.cardano.client.account.Account, String> pkhOf =
+                acct -> HexUtil.encodeHexString(
+                        new com.bloxbean.cardano.client.address.Address(acct.baseAddress())
+                                .getPaymentCredentialHash().orElseThrow());
+
+        var secondPkh = pkhOf.apply(second);
+        var thirdPkh = pkhOf.apply(third);
+        Assertions.assertNotEquals(secondPkh, thirdPkh);
+
+        var puPolicy = st.registrations().get(policyId).getPowerUsersPolicyId();
+
+        // ⚑ GENESIS ALREADY ADDED ONE. buildFullRegistrationChain grants the bootstrap admin ALL
+        // capabilities as part of registration, so the list is root → Node(admin) before this test
+        // touches it — which means EVERY insertion below is already a "second or later" one, the
+        // case the v1 limitation blocked. Expectations are tracked as a sorted set rather than
+        // assumed, because the chain is key-ascending and these keys are derived, not chosen.
+        var adminPkh = HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(BootstrapFixture.ADMIN.baseAddress())
+                        .getPaymentCredentialHash().orElseThrow());
+        var expected = new java.util.ArrayList<String>(List.of(adminPkh));
+        expected.sort(String::compareTo);
+        assertDenylistLinks(chain, puPolicy, List.copyOf(expected));
+
+        // ── insertion #1 (the list's SECOND node) ──
+        var first = handler.buildAddPowerUserTransaction(
+                policyId, secondPkh, 0b00001 /* ADMIN */, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertTrue(first.isSuccessful(),
+                "the first power-user insertion must still work: " + first.error());
+        var firstTx = Transaction.deserialize(HexUtil.decodeHexString(first.unsignedCborTx()));
+        Assertions.assertTrue(
+                chain.reportAndCheckRedeemers("rwa-token/add-power-user[1]", firstTx) > 0,
+                "the power-users validators did not run for the first insertion");
+        chain.submit(firstTx);
+        expected.add(secondPkh);
+        expected.sort(String::compareTo);
+        assertDenylistLinks(chain, puPolicy, List.copyOf(expected));
+
+        // ── insertion #2 (the list's THIRD node) ──
+        var secondAdd = handler.buildAddPowerUserTransaction(
+                policyId, thirdPkh, 0b00010 /* MINTER */, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertTrue(secondAdd.isSuccessful(),
+                "a SECOND power-user insertion must build — this is what the v1 limitation blocked, "
+                + "and what a rotated-in admin needs: " + secondAdd.error());
+        var secondTx = Transaction.deserialize(HexUtil.decodeHexString(secondAdd.unsignedCborTx()));
+        Assertions.assertTrue(
+                chain.reportAndCheckRedeemers("rwa-token/add-power-user[2]", secondTx) > 0,
+                "the power-users validators did not run for the second insertion, so acceptance is "
+                + "unproven");
+        chain.submit(secondTx);
+
+        // ⛔ AND THE SPLICE MUST NOT HAVE TRUNCATED THE LIST. The old code hardcoded the new node's
+        // link to None; inserting mid-list that way drops everything after the anchor from the chain
+        // while its NFT stays on chain. assertDenylistLinks walks root → … → tail and insists every
+        // expected key is reachable IN ORDER, which is exactly the property that would break.
+        //
+        // Reusing the denylist assertion is deliberate: both lists are the same
+        // linkedListElement(payload, link) structure, and a second copy of this walk would be a
+        // second place for it to be subtly wrong.
+        expected.add(thirdPkh);
+        expected.sort(String::compareTo);   // the chain is key-ascending
+        assertDenylistLinks(chain, puPolicy, List.copyOf(expected));
+
+        // And a third insertion, so "any position" is not just "one more than before".
+        var third3 = com.bloxbean.cardano.client.account.Account.createFromMnemonic(
+                BootstrapFixture.NETWORK, BootstrapFixture.OFFLINE_DERIVATION_MNEMONIC, 4, 0);
+        var thirdAddPkh = pkhOf.apply(third3);
+        var thirdAdd = handler.buildAddPowerUserTransaction(
+                policyId, thirdAddPkh, 0b00100, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertTrue(thirdAdd.isSuccessful(), "third insertion: " + thirdAdd.error());
+        var thirdTx = Transaction.deserialize(HexUtil.decodeHexString(thirdAdd.unsignedCborTx()));
+        Assertions.assertTrue(
+                chain.reportAndCheckRedeemers("rwa-token/add-power-user[3]", thirdTx) > 0);
+        chain.submit(thirdTx);
+        expected.add(thirdAddPkh);
+        expected.sort(String::compareTo);
+        assertDenylistLinks(chain, puPolicy, List.copyOf(expected));
+
+        // ⛔ A DUPLICATE IS REFUSED, not silently added twice.
+        var dup = handler.buildAddPowerUserTransaction(
+                policyId, secondPkh, 0b00001, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertFalse(dup.isSuccessful(), "adding an existing power user must be refused");
+        Assertions.assertTrue(String.valueOf(dup.error()).contains("already a power user"),
+                "the refusal must say why; got: " + dup.error());
+    }
+
+    /**
      * A seizure actually validates on chain.
      *
      * <p>The RWA token's regulatory force-transfer path is CIP-113's

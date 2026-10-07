@@ -1,6 +1,7 @@
 import { apiGet, apiPostRaw } from "./client";
 import { bytesHex } from "../rwa/member-root";
 import { payerAddressHex } from "../rwa/creation-auth";
+import { REQUEST_WINDOW_MS } from "../rwa/request-window";
 
 export interface MintAttestationRequest {
   requestId?: string;
@@ -62,7 +63,7 @@ export async function signMintRequest(rawApi: unknown, payer: string, path: stri
   crypto.getRandomValues(nonceBytes);
   const nonce = bytesHex(nonceBytes);
   const issued = Date.now();
-  const expires = issued + 300_000;
+  const expires = issued + REQUEST_WINDOW_MS;
   const bodyDigest = bytesHex(new Uint8Array(await crypto.subtle.digest(
     "SHA-256", new TextEncoder().encode(body))));
   const payload = "CIP-170 mint API v1\n"

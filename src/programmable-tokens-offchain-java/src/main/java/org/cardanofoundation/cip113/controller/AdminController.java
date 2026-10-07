@@ -27,6 +27,9 @@ import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
 import org.cardanofoundation.cip113.service.ProtocolBootstrapService;
 import org.cardanofoundation.cip113.service.ProtocolDeploymentResolver;
 import org.cardanofoundation.cip113.service.UtxoProvider;
+import org.cardanofoundation.cip113.service.module.ModuleHandlerFactory;
+import org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler;
+import org.cardanofoundation.cip113.service.module.context.RwaTokenContext;
 import org.cardanofoundation.cip113.util.BalanceValueHelper;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -57,6 +60,8 @@ public class AdminController {
     private final ProtocolDeploymentResolver protocolDeploymentResolver;
     private final ProgrammableTokenRegistryRepository programmableTokenRepo;
     private final UtxoProvider utxoProvider;
+    /** ⚠ prototype-scoped, so it is resolved per call through the factory, never injected. */
+    private final ModuleHandlerFactory handlerFactory;
     private final AppConfig.Network network;
 
     /**
@@ -287,11 +292,17 @@ public class AdminController {
             //                       (BaFin denylist mutations are admin-only
             //                       per the on-chain mint script).
             int caps = pu.getCapabilities();
-            boolean isOnChainAdmin = pkh.equals(token.getIssuerAdminPkh());
-            boolean hasAdminCap = (caps & 0b00001) != 0;
-            List<String> roles = new java.util.ArrayList<>();
-            if (isOnChainAdmin || hasAdminCap) roles.add("ISSUER_ADMIN");
-            if (hasAdminCap) roles.add("BLACKLIST_MANAGER");
+            // ⛔ THE GS ADMIN COMES FROM THE CHAIN, NOT FROM THE ROW. `issuerAdminPkh` is the
+            // REGISTRATION-TIME issuer admin and is a SCRIPT PARAMETER — every
+            // `buildIssuerAdminScript` call derives a hash that is already on chain from it, so it
+            // must never be rewritten. It is NOT the rotatable authority. The rotatable one is
+            // `admin_credential_hash` in the global-state datum, which `RotateAdmin` changes and
+            // which nothing off chain records (there is no indexer-side RotateAdmin handler, and
+            // syncing the row at submit time would record a rotation that may never confirm).
+            //
+            // Reading the row here granted ISSUER_ADMIN to whoever registered the token FOREVER,
+            // and withheld it from the admin who actually holds the credential after a rotation.
+            List<String> roles = rwaRoles(pkh, liveGsAdmin(token.getProgrammableTokenPolicyId()), caps);
 
             AdminTokenDetails details = new AdminTokenDetails(
                     token.getDenylistPolicyId(),
@@ -302,6 +313,53 @@ public class AdminController {
             tokenMap.put(policyId, new AdminTokenInfo(
                     policyId, assetName, assetNameDisplay,
                     moduleId, roles, details, pu.getCapabilities()));
+        }
+
+        // 5b. ⛔ THE LIVE GLOBAL-STATE ADMIN, EVEN WITH NO POWER-USER ROW.
+        //
+        // Step 5 enumerates solely from `findByPowerUserPkh`, so a wallet with no power-user row
+        // saw NOTHING — and `isOnChainAdmin` above is computed INSIDE that loop, so it could only
+        // ever upgrade the roles of a row that already existed; it could never surface a token.
+        //
+        // That is precisely the state a rotation leaves the incoming admin in: they hold
+        // `admin_credential_hash` in the datum and no node in the power-users list, because
+        // `buildAddPowerUserTransaction` can still only insert the FIRST node. So a successful
+        // rotation handed over a token its new owner could not see.
+        //
+        // ⚠ What they get is HONEST, not complete: global-state actions are theirs, but mint, burn
+        // and pause each require the caller's OWN power-user node as a reference input on chain, so
+        // those stay unavailable until a node exists. `rwaTokenCapabilities = 0` says exactly that,
+        // and the frontend is responsible for showing the reason rather than hiding the action.
+        //
+        // ⚠ Cost: one global-state read per RWA registration not already in the map. There is no
+        // indexed admin-credential column to query, and `readGlobalState` goes to the UTxO
+        // provider. Fine at today's handful of RWA tokens; if this list grows, index the credential
+        // rather than widening the loop.
+        for (RwaTokenRegistrationEntity token : rwaTokenRegistrationRepo.findAll()) {
+            String policyId = token.getProgrammableTokenPolicyId();
+            if (policyId == null || tokenMap.containsKey(policyId)) continue;
+            if (!pkh.equalsIgnoreCase(liveGsAdmin(policyId))) continue;
+
+            Optional<ProgrammableTokenRegistryEntity> registryEntry =
+                    programmableTokenRepo.findByPolicyId(policyId);
+            String assetName = registryEntry.map(ProgrammableTokenRegistryEntity::getAssetName).orElse("");
+            if (assetName == null) assetName = "";
+
+            tokenMap.put(policyId, new AdminTokenInfo(
+                    policyId, assetName, hexToString(assetName),
+                    "rwa-token",
+                    // Same decision as step 5, so the two paths cannot drift. caps = 0 because
+                    // there is no power-user node; the roles come from holding the credential.
+                    rwaRoles(pkh, pkh, 0),
+                    new AdminTokenDetails(
+                            token.getDenylistPolicyId(),
+                            token.getIssuerAdminPkh(),
+                            null,
+                            token.getGlobalStatePolicyId()),
+                    0));
+            log.info("rwa-token {} surfaced for {} as the LIVE global-state admin with no "
+                    + "power-user node: global-state actions available, mint/burn/pause are not",
+                    policyId, pkh);
         }
 
         // 6. For dummy tokens - include ALL registered dummy tokens (anyone can mint)
@@ -451,6 +509,62 @@ public class AdminController {
             String adminPkh,
             List<AdminTokenInfo> tokens
     ) {
+    }
+
+    /**
+     * Which roles a wallet holds over an RWA token — THE authority decision, in one pure place.
+     *
+     * ⛔ `issuerAdminPkh` IS NOT A PARAMETER HERE, AND THAT IS THE POINT. It used to be: the role
+     * was granted by comparing the wallet against the registration row, so whoever registered the
+     * token kept ISSUER_ADMIN forever and a rotated-in admin never got it. Making the row
+     * unreachable from this function is a stronger guarantee than a test asserting it is unused —
+     * there is no code path by which a stale row can influence the answer.
+     *
+     * <p>Two independent grounds, deliberately OR-ed:
+     * <ul>
+     *   <li>holding the live global-state credential — every global-state action is gated on it,
+     *       and `RotateAdmin` is what moves it;</li>
+     *   <li>holding the ADMIN capability in the on-chain power-users list — which is what mint,
+     *       burn and pause actually check, via the caller's own node as a reference input.</li>
+     * </ul>
+     *
+     * <p>BLACKLIST_MANAGER follows either ground, because denylist mutations are admin-gated by the
+     * on-chain mint script against the same credential.
+     *
+     * @param liveGsAdmin the datum's `admin_credential_hash`, or null when it could not be read —
+     *                    null withholds the role, never grants it.
+     */
+    public static List<String> rwaRoles(String pkh, String liveGsAdmin, int capabilities) {
+        boolean isLiveGsAdmin = pkh != null && pkh.equalsIgnoreCase(liveGsAdmin);
+        boolean hasAdminCap = (capabilities & 0b00001) != 0;
+        List<String> roles = new java.util.ArrayList<>();
+        if (isLiveGsAdmin || hasAdminCap) roles.add("ISSUER_ADMIN");
+        if (isLiveGsAdmin || hasAdminCap) roles.add("BLACKLIST_MANAGER");
+        return roles;
+    }
+
+    /**
+     * The global-state datum's `admin_credential_hash` for a policy, or null if it cannot be read.
+     *
+     * ⛔ NULL MEANS "DO NOT GRANT", NEVER "GRANT". A chain read can fail — the provider is
+     * unreachable, the GS NFT is not indexed yet, the datum has an unexpected field count. Every
+     * caller compares a wallet's key hash against this value, and `pkh.equalsIgnoreCase(null)` is
+     * false, so a failed read withholds authority instead of handing it out. An operator seeing a
+     * token vanish from /admin is a visible, recoverable problem; the inverse is not.
+     */
+    private String liveGsAdmin(String policyId) {
+        try {
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
+                    .getHandler("rwa-token", RwaTokenContext.emptyContext());
+            return handler.readGlobalState(policyId)
+                    .map(RwaTokenModuleHandler.GlobalStateData::adminCredentialHash)
+                    .orElse(null);
+        } catch (Exception e) {
+            log.warn("could not read the live global-state admin for {}: {} — withholding admin "
+                    + "authority rather than falling back to the registration row",
+                    policyId, e.getMessage());
+            return null;
+        }
     }
 
     public record AdminTokenInfo(

@@ -1,3 +1,16 @@
+server:
+  error:
+    # ⛔ WITHOUT THIS A 401 CARRIES NO REASON. ResponseStatusException's reason is dropped from the
+    # body unless this is set (Spring's default is `never`), and RwaTokenAdminRequestVerifier has
+    # sixteen distinct ones. On mainnet 2026-10-06 an operator saw
+    # {"status":401,"error":"Unauthorized"} and nothing else while the server knew exactly which
+    # check had failed — and nothing logged it either, so the reason was invisible on BOTH sides.
+    #
+    # ⚠ These reasons are diagnostic, not secret: "signature expired", "signer address differs",
+    # "clock is ahead". They describe the CALLER'S OWN request. Nothing here reveals server state,
+    # and the alternative is operators guessing between sixteen causes on a mainnet issuance.
+    include-message: always
+
 spring:
   flyway:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/cip113}
@@ -17,6 +30,11 @@ network: mainnet
 
 wallet:
   mnemonic: ""
+
+programmable:
+  token:
+    default:
+      txHash: "bfefbd222e40d88f5d4454e92b24062533070f41a3e25c0a23383264650cdb72"
 
 blockfrost:
   url: https://cardano-mainnet.blockfrost.io/api/v0/

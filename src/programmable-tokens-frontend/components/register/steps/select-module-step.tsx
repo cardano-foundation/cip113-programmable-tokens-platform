@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { getAllFlows } from '@/lib/registration/flow-registry';
+import { getCardanoNetwork } from '@/lib/utils/network';
+import { isFlowOffered } from '@/lib/registry/available-modules';
 import type { StepComponentProps, ModuleSelectionData, RegistrationFlow } from '@/types/registration';
 
 interface SelectModuleStepProps extends StepComponentProps<ModuleSelectionData, ModuleSelectionData> {}
@@ -21,29 +23,36 @@ export function SelectModuleStep({
   useEffect(() => {
     // Fetch runtime config and filter flows
     async function loadFlows() {
+      // ⛔ `isFlowOffered` IS THE MERGE, and it lives in lib/registry/available-modules.ts so it
+      // can be tested. It checks the network allowlist BEFORE reading the runtime value, which
+      // matters here specifically: this component asks for flows with their build-time `enabled`
+      // deliberately bypassed and then lets the response decide, so a response from an older
+      // image, a cached one, or a hand-rolled proxy would otherwise be enough to put a hidden
+      // module on screen.
+      //
+      // ⚑ AND ALL THREE BRANCHES GO THROUGH IT, including the two fallbacks. They used to call
+      // `getAllFlows()` and lean on each flow's build-time `enabled`, which is a SECOND copy of
+      // the decision — one an adversarial review broke while this suite stayed green. `null` for
+      // the runtime flags makes `isFlowOffered` fall back to `enabled` itself, so the fallback
+      // keeps its meaning and gains the floor.
+      const network = getCardanoNetwork();
+      const offered = (runtimeFlags: Record<string, boolean | undefined> | null) =>
+        getAllFlows(true).filter((flow) => isFlowOffered(network, flow, runtimeFlags));
+
       try {
         // Fetch runtime config from API
         const response = await fetch('/api/config');
         if (response.ok) {
           const config = await response.json();
-
-          // Get all flows and apply runtime config
-          const allFlows = getAllFlows(true); // Include all flows
-          const enabledFlows = allFlows.filter(flow => {
-            const runtimeEnabled = config.flows[flow.id];
-            // Runtime config overrides build-time config
-            return runtimeEnabled !== undefined ? runtimeEnabled : flow.enabled;
-          });
-
-          setFlows(enabledFlows);
+          setFlows(offered(config.flows));
         } else {
           // Fallback to build-time config
-          setFlows(getAllFlows());
+          setFlows(offered(null));
         }
       } catch (error) {
         console.error('Failed to load runtime config, using build-time config:', error);
         // Fallback to build-time config
-        setFlows(getAllFlows());
+        setFlows(offered(null));
       } finally {
         setIsLoadingConfig(false);
       }

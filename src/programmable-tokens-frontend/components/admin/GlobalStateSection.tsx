@@ -27,7 +27,11 @@ import {
   AdminTokenInfo,
   RwaTokenCapability,
   hasRwaTokenCapability,
+  canAdministerRwaGlobalState,
 } from "@/lib/api/admin";
+import { CosignaturePanel, type CosignatureState } from "@/components/deployment/cosignature-panel";
+import { prepareRotation, type PreparedRotation } from "@/lib/rwa/rotate-admin";
+import { assembleUpgradeTx } from "@/lib/upgrade/witness";
 import { getSigningEntityVkey } from "@/lib/api/keri";
 import { readGlobalState, updateGlobalState } from "@/lib/api/compliance";
 import {
@@ -64,9 +68,12 @@ export function GlobalStateSection({
   // rwa-token: BaFin's GS spend validator is admin-gated via the
   //   admin_credential_hash field of the datum — anyone with the ADMIN
   //   capability bit in the on-chain power-users LL counts as such.
+  // ⚑ ONE predicate, shared with AdminPanel's tab gate — see canAdministerRwaGlobalState. Gating
+  // on the ADMIN capability alone hid this panel from a rotated-in admin, who holds the live
+  // global-state credential and no power-user node.
   const manageableTokens = tokens.filter((t) => {
     if (t.moduleId === "rwa-token") {
-      return hasRwaTokenCapability(t, RwaTokenCapability.ADMIN);
+      return canAdministerRwaGlobalState(t);
     }
     return t.roles.includes("ISSUER_ADMIN") && t.moduleId === "kyc";
   });
@@ -960,20 +967,25 @@ function RwaTokenGlobalStatePanel({
     }
   };
 
-  // ── D2: RotateAdmin (dual-signature, two-step) ────────────────────────────
-  // global_state.ak requires BOTH `must_be_signed_by_credential(input_datum
-  // .admin_credential_hash)` AND `must_be_signed_by_credential(new_admin_
-  // credential_hash)`. The backend already declares both in required_signers, so
-  // this is a ledger-level requirement, not just a Plutus one — a single-wallet
-  // signature is rejected at submit with MissingRequiredSigners.
+  // ── T-096/T-097: RotateAdmin — witness-only collection, same machinery as the ceremony ──
   //
-  // One browser session holds one wallet at a time, so rotation is an explicit
-  // two-step: the outgoing admin partial-signs, the resulting CBOR is handed to
-  // the incoming admin (in-app after connecting their wallet, or copied out of
-  // band), and only the fully co-signed transaction is submitted.
+  // global_state.ak calls must_be_signed_by_credential TWICE on this branch: the OUTGOING admin
+  // from the input datum, and the INCOMING new_admin_credential_hash. The backend declares both in
+  // required_signers, so it is a LEDGER requirement too — one signature is rejected at submit with
+  // MissingRequiredSigners before the script even runs.
+  //
+  // ⛔ WHY THIS NO LONGER PASSES A SIGNED TRANSACTION AROUND. The previous flow signed, then handed
+  // the SIGNED transaction to a second wallet to sign again. That is not hardware-safe and it could
+  // not use /sign at all: /sign hands back a `cbor<transaction_witness_set>`, by design, and the old
+  // paste box fed whatever it was given straight to submit with no merge step — so a witness pasted
+  // there would have submitted a witness set as a transaction.
+  //
+  // Now: canonicalise ONCE (prepareRotation), collect WITNESSES from everyone the transaction itself
+  // says must sign, and assemble at the end. No wallet is ever asked to re-sign a transaction that
+  // already carries witnesses, and the remote admin needs nothing but /sign.
   const [rotateNewAdmin, setRotateNewAdmin] = useState("");
-  const [rotatePartialCbor, setRotatePartialCbor] = useState<string | null>(null);
-  const [rotatePastedCbor, setRotatePastedCbor] = useState("");
+  const [rotatePrepared, setRotatePrepared] = useState<PreparedRotation | null>(null);
+  const [rotateCosign, setRotateCosign] = useState<CosignatureState>({ witnesses: [], complete: false });
   const [rotateBusy, setRotateBusy] = useState(false);
   const [rotateError, setRotateError] = useState<string | null>(null);
   const [rotateTxHash, setRotateTxHash] = useState<string | null>(null);
@@ -982,17 +994,19 @@ function RwaTokenGlobalStatePanel({
 
   const resetRotate = () => {
     setRotateNewAdmin("");
-    setRotatePartialCbor(null);
-    setRotatePastedCbor("");
+    setRotatePrepared(null);
+    setRotateCosign({ witnesses: [], complete: false });
     setRotateError(null);
     setRotateTxHash(null);
   };
 
-  /** Step 1 — build the RotateAdmin tx and add the CURRENT admin's signature.
-   *  `partialSign = true` matters: the transaction is knowingly incomplete at
-   *  this point, and a wallet asked to fully sign would refuse. */
-  const handleRotateBuildAndSign = async () => {
-    if (!wallet) { setRotateError("Connect a wallet first"); return; }
+  /**
+   * Build, then canonicalise, then stop.
+   *
+   * No signature is taken here. The outgoing admin is just another required signer and signs
+   * through the same panel as the incoming one, so there is one code path and one kind of artefact.
+   */
+  const handleRotateBuild = async () => {
     if (!rotateNewAdminValid) {
       setRotateError("New admin credential hash must be 28 bytes (56 hex characters)");
       return;
@@ -1003,13 +1017,11 @@ function RwaTokenGlobalStatePanel({
       const { unsignedCborTxs } = await buildGlobalStateUpdateChain(policyId, adminAddress, [
         { action: "RotateAdmin", newAdminCredentialHashHex: rotateNewAdmin.trim().toLowerCase() },
       ]);
-      const partial = await wallet.signTx(unsignedCborTxs[0], true);
-      setRotatePartialCbor(partial);
-      showToast({
-        title: "Signed by the current admin",
-        description: "Now collect the incoming admin's signature.",
-        variant: "default",
-      });
+      // ⛔ ONCE, HERE, BEFORE ANYTHING IS SHOWN OR SHARED. A canonical body can hash differently
+      // from what the backend built, so the canonical form must be the only form anyone sees —
+      // otherwise a witness taken against the pre-canonical bytes targets a hash we never submit.
+      setRotatePrepared(prepareRotation(unsignedCborTxs[0]));
+      setRotateCosign({ witnesses: [], complete: false });
     } catch (e) {
       setRotateError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1017,37 +1029,16 @@ function RwaTokenGlobalStatePanel({
     }
   };
 
-  /** Step 2a — the incoming admin counter-signs with the wallet connected now.
-   *  Requires them to have switched wallets in the connector first; the merge in
-   *  `assembleSignedTxPreservingBody` unions the two witness sets rather than
-   *  replacing the first. */
-  const handleRotateCounterSign = async () => {
-    if (!wallet || !rotatePartialCbor) return;
+  /** Assemble the collected witnesses onto the canonical body and submit. */
+  const handleRotateSubmit = async () => {
+    if (!rotatePrepared) return;
     setRotateBusy(true);
     setRotateError(null);
     try {
-      const cosigned = await wallet.signTx(rotatePartialCbor, true);
-      setRotatePartialCbor(cosigned);
-      showToast({
-        title: "Counter-signed",
-        description: "Both signatures collected — you can submit now.",
-        variant: "success",
-      });
-    } catch (e) {
-      setRotateError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRotateBusy(false);
-    }
-  };
-
-  /** Step 3 — submit. Goes through the backend's submit endpoint (same path the
-   *  change chain uses) rather than the wallet's, so the transaction is not
-   *  bounced by a wallet backend that dislikes multi-witness admin txs. */
-  const handleRotateSubmit = async (cborHex: string) => {
-    setRotateBusy(true);
-    setRotateError(null);
-    try {
-      const submit = await submitTokenChain([cborHex]);
+      // Body, redeemers and datums are copied verbatim; only the vkey witness array grows, so
+      // script_data_hash and every signature already attached stay valid.
+      const signed = assembleUpgradeTx(rotatePrepared.canonicalHex, rotateCosign.witnesses);
+      const submit = await submitTokenChain([signed]);
       if (submit.error) throw new Error(submit.error);
       setRotateTxHash(submit.txHashes[0] ?? null);
       showToast({
@@ -1060,11 +1051,9 @@ function RwaTokenGlobalStatePanel({
       const failure = parseSubmitChainFailure(e);
       setRotateError(
         failure.error.includes("MissingRequiredSigners")
-          ? "Rejected: MissingRequiredSigners — the transaction is still missing one of "
-            + "the two required signatures. Both the outgoing and the incoming admin "
-            + "must sign before it can be submitted."
-          : failure.error,
-      );
+          ? "Rejected: MissingRequiredSigners — the transaction is still short of a required "
+            + "signature. Every credential listed above must sign before it can be submitted."
+          : failure.error);
     } finally {
       setRotateBusy(false);
     }
@@ -1589,9 +1578,10 @@ function RwaTokenGlobalStatePanel({
         </div>
         <p className="text-xs text-dark-400">
           Moves <span className="font-mono">admin_credential_hash</span> to a new credential.
-          The contract requires <strong>both</strong> the outgoing and the incoming admin to
-          sign, so this is a two-step flow: sign here, then have the new admin counter-sign.
-          A single signature is rejected at submit with{" "}
+          The contract requires <strong>both</strong> the outgoing and the incoming admin to sign.
+          Build it, then collect a signature from every credential listed below — your own with the
+          connected wallet, the incoming admin&apos;s from{" "}
+          <span className="font-mono">/sign</span>. A single signature is rejected at submit with{" "}
           <span className="font-mono">MissingRequiredSigners</span>.
         </p>
         {onchain.adminCredentialHash && (
@@ -1604,7 +1594,7 @@ function RwaTokenGlobalStatePanel({
             <p className="text-xs font-mono text-green-400 break-all">{rotateTxHash}</p>
             <Button type="button" variant="outline" size="sm" onClick={resetRotate}>Done</Button>
           </div>
-        ) : !rotatePartialCbor ? (
+        ) : !rotatePrepared ? (
           <>
             <Input
               value={rotateNewAdmin}
@@ -1617,61 +1607,55 @@ function RwaTokenGlobalStatePanel({
                 Must be exactly 56 hex characters (a 28-byte payment key hash).
               </p>
             )}
+            {/* ⚑ The prerequisite nothing used to state. /sign already displays the connected
+                wallet's payment key hash, so the incoming admin can read it there and send it —
+                there is no need for a second exchange mechanism, only for saying where to look. */}
+            <p className="text-[11px] text-dark-400">
+              Need the incoming admin&apos;s credential hash? Ask them to open{" "}
+              <a href="/sign" target="_blank" rel="noreferrer" className="text-primary-400 underline">
+                /sign
+              </a>{" "}
+              and send you the payment key hash it shows for their wallet.
+            </p>
             <Button
               type="button"
               variant="outline"
               size="sm"
-              onClick={handleRotateBuildAndSign}
+              onClick={handleRotateBuild}
               disabled={rotateBusy || busy || !rotateNewAdminValid}
             >
-              {rotateBusy ? "Building + signing…" : "1. Build & sign as current admin"}
+              {rotateBusy ? "Building…" : "Build the rotation"}
             </Button>
           </>
         ) : (
           <div className="space-y-3">
-            <div className="p-3 rounded-lg border border-blue-500/40 bg-blue-500/10 space-y-2">
-              <p className="text-xs text-blue-300 font-semibold">
-                2. Collect the incoming admin&apos;s signature
+            <ReadOnlyField label="transaction hash — confirm this with the incoming admin" value={rotatePrepared.txHash} mono />
+            {!rotatePrepared.bodyWasAlreadyCanonical && (
+              <p className="text-xs text-amber-300">
+                The transaction body was re-encoded canonically for hardware-wallet signing, so its
+                hash differs from the one the backend built. The hash above is the one that will be
+                submitted, and the only one any signature may be taken against.
               </p>
-              <p className="text-[11px] text-blue-200/80">
-                Either connect the new admin&apos;s wallet in the header and press
-                &quot;Counter-sign&quot;, or copy this partially signed transaction, have them sign
-                it elsewhere, and paste the result below.
-              </p>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    navigator.clipboard?.writeText(rotatePartialCbor).then(
-                      () => showToast({ title: "Copied", description: "Partially signed CBOR copied to clipboard", variant: "default" }),
-                      () => showToast({ title: "Copy failed", description: "Select and copy the text manually", variant: "error" }),
-                    );
-                  }}
-                >
-                  <Copy className="h-3.5 w-3.5 mr-1" /> Copy CBOR
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={handleRotateCounterSign}
-                  disabled={rotateBusy}
-                >
-                  Counter-sign with connected wallet
-                </Button>
-              </div>
-              <p className="text-[10px] font-mono text-dark-400 break-all max-h-24 overflow-y-auto">
-                {rotatePartialCbor}
-              </p>
-            </div>
+            )}
 
-            <Input
-              value={rotatePastedCbor}
-              onChange={(e) => setRotatePastedCbor(e.target.value)}
-              placeholder="…or paste the counter-signed CBOR here"
-              disabled={rotateBusy}
+            {/* ⛔ WITNESSES, NEVER A SIGNED TRANSACTION. The panel verifies each one against this
+                body with Ed25519 and tracks which declared credential it belongs to, so a witness
+                for the wrong transaction or from the wrong key is named rather than counted. It
+                also pushes the unsigned transaction to the relay and offers a /sign?tx=<id> link,
+                which is how the incoming admin gets it without a hex blob over chat.
+
+                memberKeyHashes comes from the TRANSACTION, not from a hardcoded two: the backend
+                declares fee payer + outgoing admin + incoming admin, deduplicated, so it is three
+                whenever the connected wallet is not the datum's admin. */}
+            <CosignaturePanel
+              unsignedCbor={rotatePrepared.canonicalHex}
+              memberKeyHashes={rotatePrepared.requiredSigners}
+              onChange={setRotateCosign}
+              signSelf={
+                wallet
+                  ? () => wallet.signTx(rotatePrepared.canonicalHex, true)
+                  : undefined
+              }
             />
 
             <div className="flex items-center gap-2">
@@ -1679,11 +1663,14 @@ function RwaTokenGlobalStatePanel({
                 type="button"
                 variant="primary"
                 size="sm"
-                onClick={() => handleRotateSubmit(
-                  rotatePastedCbor.trim() ? rotatePastedCbor.trim() : rotatePartialCbor)}
-                disabled={rotateBusy}
+                onClick={handleRotateSubmit}
+                disabled={rotateBusy || !rotateCosign.complete}
               >
-                {rotateBusy ? "Submitting…" : "3. Submit"}
+                {rotateBusy
+                  ? "Submitting…"
+                  : rotateCosign.complete
+                    ? "Submit the rotation"
+                    : `Waiting for ${rotatePrepared.requiredSigners.length - rotateCosign.witnesses.length} more signature(s)`}
               </Button>
               <Button type="button" variant="ghost" size="sm" onClick={resetRotate} disabled={rotateBusy}>
                 Cancel

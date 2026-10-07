@@ -14,6 +14,8 @@ import {
   AdminTokenInfo,
   RwaTokenCapability,
   hasRwaTokenCapability,
+
+  canAdministerRwaGlobalState,
 } from "@/lib/api/admin";
 import { cn } from "@/lib/utils";
 
@@ -97,9 +99,29 @@ export function AdminPanel({ tokens, adminAddress }: AdminPanelProps) {
   // One list, two consumers — the Global State tab's availability and the CMTAT
   // link strip below. Derived once so the two cannot drift into disagreeing about
   // which tokens this wallet can administer.
-  const rwaTokenAdminTokens = tokens.filter((t) =>
-    hasRwaTokenCapability(t, RwaTokenCapability.ADMIN)
+  // ⚑ THE SAME PREDICATE GlobalStateSection USES, imported rather than restated. This was two
+  // copies with a comment warning they must not drift; they then drifted in the way that mattered
+  // most — both tested the ADMIN CAPABILITY, so a rotated-in admin who holds the live global-state
+  // credential and has no power-user node saw the token listed with no Global State tab.
+  const rwaTokenAdminTokens = tokens.filter(canAdministerRwaGlobalState);
+
+  // ⛔ SAY WHY AN ACTION IS UNAVAILABLE, rather than showing an empty picker.
+  //
+  // These are RWA tokens where this wallet holds the LIVE global-state credential and has NO
+  // power-user node — the exact state a RotateAdmin leaves the incoming admin in. Global-state
+  // actions are theirs; mint, burn, blacklist and seize are not, because each checks the CALLER'S
+  // OWN node as a reference input on chain, and the node cannot be granted yet
+  // (buildAddPowerUserTransaction only inserts the first one — T-101).
+  //
+  // Without this the tab renders, the token selector is empty, and nothing explains the difference
+  // between "you have no tokens" and "you have this token but not this power".
+  const capabilityGapTokens = tokens.filter(
+    (t) =>
+      t.moduleId === "rwa-token" &&
+      t.roles.includes("ISSUER_ADMIN") &&
+      (t.rwaTokenCapabilities ?? 0) === 0
   );
+  const NODE_BACKED_TABS: AdminTab[] = ["mint", "burn", "blacklist", "seize"];
   const hasRwaTokenAdminTokens = rwaTokenAdminTokens.length > 0;
 
   const availableTabs = tabs.filter((tab) => {
@@ -201,6 +223,23 @@ export function AdminPanel({ tokens, adminAddress }: AdminPanelProps) {
         <p className="text-sm text-dark-400 mb-6">
           {tabs.find((t) => t.id === activeTab)?.description}
         </p>
+
+        {capabilityGapTokens.length > 0 && NODE_BACKED_TABS.includes(activeTab) && (
+          <div className="mb-6 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
+            <p className="text-sm font-medium text-amber-200">
+              {capabilityGapTokens.length === 1
+                ? `You are the administrator of ${capabilityGapTokens[0].assetNameDisplay || capabilityGapTokens[0].policyId.slice(0, 12)}, but this action is not available to you yet.`
+                : `You administer ${capabilityGapTokens.length} tokens where this action is not available to you yet.`}
+            </p>
+            <p className="mt-2 text-xs leading-relaxed text-amber-200/80">
+              Minting, burning, freezing and seizing are checked on chain against your own entry in
+              the token&apos;s power-users list, which is separate from the administrator credential
+              you hold. Global State actions work now; these need an entry to be added for you
+              first. If ownership of this token was just transferred to you, ask the previous
+              administrator to add you as a power user.
+            </p>
+          </div>
+        )}
 
         {/* Tab Content */}
         {activeTab === "mint" && (

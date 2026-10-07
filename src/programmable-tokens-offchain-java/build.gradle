@@ -114,6 +114,11 @@ ext.ciTestPatterns = [
 		'*IssuancePolicyIdTest',
 		'*TransactionDeserializationTest',
 		'*Cip68Test',
+		// Offline, mock-backed CIP-30/COSE authentication checks. Added 2026-10-06: the window
+		// logic they pin is what answered 401 on a mainnet issuance, and it was not in CI.
+		'*RwaTokenAdminRequestVerifierTest',
+		'*RwaTokenCreationRequestVerifierTest',
+		'*MintAttestationRequestVerifierTest',
 		'*ConditionalBeanWiringTest',
 		'*RegistryCredentialCrossCheckTest',
 		'*ShippedDispatcherDerivationTest',
