@@ -3,7 +3,6 @@ package org.cardanofoundation.cip113.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.cardanofoundation.cip113.entity.*;
 import org.cardanofoundation.cip113.repository.*;
-import org.cardanofoundation.cip113.service.module.Cip170MintChildBuilder;
 import org.cardanofoundation.cip113.service.module.ModuleHandlerFactory;
 import org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler;
 import org.junit.jupiter.api.*;
@@ -50,7 +49,6 @@ class InitialMintAttestationStoreTest {
     @Autowired ProgrammableTokenRegistryRepository tokenRegistry;
     @MockBean RwaTokenCreationService creation;
     @MockBean ModuleHandlerFactory handlers;
-    @MockBean Cip170MintChildBuilder childBuilder;
     @MockBean RwaTokenModuleHandler handler;
     @MockBean MintAttestationService mints;
     @MockBean ProtocolDeploymentResolver protocols;
@@ -58,7 +56,9 @@ class InitialMintAttestationStoreTest {
     @BeforeEach void setup() throws Exception {
         intents.deleteAll(); funding.deleteAll(); genesis.deleteAll();
         registrations.deleteAll(); snapshots.deleteAll(); powerUsers.deleteAll(); tokenRegistry.deleteAll();
-        when(mints.fields(any())).thenReturn(fields(false)); when(mints.attestation(any())).thenReturn(attestation(chain(false)));
+        when(mints.fields(any())).thenReturn(fields(false)); when(mints.txAttestation(any())).thenReturn(
+                org.cardanofoundation.cip113.model.Cip170AttestationData.attestTx(APPROVAL.signerAid()));
+        when(mints.networkMagic()).thenReturn(MAGIC);
         var deployment = deployment(); when(protocols.resolve(DEPLOYMENT)).thenReturn(deployment);
         when(handlers.getHandler(eq("rwa-token"), any())).thenReturn(handler);
     }
@@ -91,7 +91,10 @@ class InitialMintAttestationStoreTest {
         return store.prepare(i, plan());
     }
     void anchored() throws Exception {
-        prepared("intent"); var owner = mintStore.claimAnchor("intent"); mintStore.saveAnchor("intent", owner, "1", "{}");
+        prepared("intent");
+        // The wallet anchored the CIP-170 v1.1 transaction seal over the frozen registration.
+        var i = intents.findById("intent").orElseThrow(); i.setDigest(sealDigest(chain(false))); intents.saveAndFlush(i);
+        var owner = mintStore.claimAnchor("intent"); mintStore.saveAnchor("intent", owner, "1", "{}");
     }
     @Test void previewCapturesRowsButRollsBackEveryCanonicalSideEffect() throws Exception {
         var built = chain(false);
@@ -101,7 +104,8 @@ class InitialMintAttestationStoreTest {
                 built.programmableTokenPolicyId(), built.denylistPolicyId(), built.powerUsersPolicyId(),
                 built.genesisTxHash(), built.addPowerUserTxHash(), built.cmtaProvenanceTxHash(),
                 built.issuanceProvenanceTxHash(), built.publishScriptsTxHash(), built.registrationTxHash(), null, null, null);
-        when(creation.buildPrepared(any(), any(), any(), isNull(), any())).thenAnswer(a -> {
+        when(creation.buildPrepared(any(), any(), any(),
+                eq(org.cardanofoundation.cip113.model.Cip170AttestationData.attestTx(APPROVAL.signerAid())), any())).thenAnswer(a -> {
             assertTrue(genesis.existsById(GS), "preview must reserve bootstrap before constructing the chain");
             assertTrue(funding.existsById(BOOTSTRAP.toLowerCase() + "#0"),
                     "preview must reserve pinned funding before constructing the chain");
@@ -121,7 +125,7 @@ class InitialMintAttestationStoreTest {
             funding.saveAndFlush(sideEffect());
             return prefix;
         });
-        var preview = store.preview(registration(false), deployment(), plan(), Instant.now().plusSeconds(600));
+        var preview = store.preview(registration(false), deployment(), plan(), APPROVAL.signerAid(), Instant.now().plusSeconds(600));
         assertEquals(prefix.registrationTxHash(), preview.prefix().registrationTxHash());
         assertTrue(preview.snapshotJson().contains(POLICY));
         assertFalse(registrations.existsByProgrammableTokenPolicyId(POLICY));
@@ -142,24 +146,24 @@ class InitialMintAttestationStoreTest {
     @Test void failedBuilderRollsBackSideEffectsWithoutPublishingChain() throws Exception {
         anchored(); var claim = store.claimBuild("intent");
         doAnswer(a -> { funding.saveAndFlush(sideEffect()); throw new IllegalStateException("evaluation failed"); })
-                .when(handler).completeInitialMintChain(any(), any(), any(), any(), any());
+                .when(handler).completeInitialMintChain(any(), any(), any());
         assertThrows(IllegalStateException.class, () -> store.build("intent", claim.owner()));
         assertFalse(funding.existsById("side-effect")); assertNull(store.get("intent").getInitialChainJson());
         mintStore.releaseBuild("intent", claim.owner()); assertEquals("ANCHORED", store.get("intent").getStatus());
     }
     @Test void publicationCommitsWholeChainAndSideEffectsAndRecoveryNeverRebuilds() throws Exception {
         anchored(); var expected = chain(false);
-        doAnswer(a -> { funding.saveAndFlush(sideEffect()); return expected; }).when(handler).completeInitialMintChain(any(), any(), any(), any(), any());
+        doAnswer(a -> { funding.saveAndFlush(sideEffect()); return expected; }).when(handler).completeInitialMintChain(any(), any(), any());
         var claim = store.claimBuild("intent"); assertEquals(expected, store.build("intent", claim.owner()));
         assertTrue(funding.existsById("side-effect")); assertEquals("BUILT", store.get("intent").getStatus());
         var i = intents.findById("intent").orElseThrow(); i.setExpiresAt(Instant.now().minusSeconds(10)); intents.saveAndFlush(i);
         assertEquals(expected, store.claimBuild("intent").chain());
         assertThrows(RuntimeException.class, () -> store.release("intent"));
-        verify(handler, times(1)).completeInitialMintChain(any(), any(), any(), any(), any());
+        verify(handler, times(1)).completeInitialMintChain(any(), any(), any());
     }
     @Test void finalValidationFailureRollsBackEvenSuccessfulBuilderSideEffects() throws Exception {
         anchored(); var claim = store.claimBuild("intent");
-        doAnswer(a -> { funding.saveAndFlush(sideEffect()); return chain(true); }).when(handler).completeInitialMintChain(any(), any(), any(), any(), any());
+        doAnswer(a -> { funding.saveAndFlush(sideEffect()); return chain(true); }).when(handler).completeInitialMintChain(any(), any(), any());
         assertThrows(IllegalArgumentException.class, () -> store.build("intent", claim.owner()));
         assertFalse(funding.existsById("side-effect")); assertNull(store.get("intent").getInitialChainJson());
     }
@@ -217,7 +221,7 @@ class InitialMintAttestationStoreTest {
     }
     private void publishedWithExpiredUnstartedChain() throws Exception {
         anchored();
-        when(handler.completeInitialMintChain(any(), any(), any(), any(), any())).thenReturn(chain(false));
+        when(handler.completeInitialMintChain(any(), any(), any())).thenReturn(chain(false));
         var claim = store.claimBuild("intent"); store.build("intent", claim.owner());
         when(bfBackendService.getBlockService().getLatestBlock().isSuccessful()).thenReturn(true);
         when(bfBackendService.getBlockService().getLatestBlock().getValue().getHash()).thenReturn("ab".repeat(32));
@@ -299,6 +303,29 @@ class InitialMintAttestationStoreTest {
         var recovery = store.recovery(store.get("intent"));
         assertEquals("UNKNOWN", recovery.status()); assertTrue(recovery.reason().contains("finite validity"));
         assertThrows(RuntimeException.class, () -> store.archiveExpired("intent"));
+    }
+    @Test void legacyBuiltChainWithChildStaysRecoverable() throws Exception {
+        prepared("intent");
+        var legacy = legacyChain(false);
+        var i = intents.findById("intent").orElseThrow();
+        i.setDigest(legacyAttestation(legacy).digest());
+        i.setDocumentJson(id.veridian.signify.cesr.Serder.dumps(MintTxHashPayload.signed(legacy.registrationTxHash())));
+        i.setInitialChainJson(mapper.writeValueAsString(legacy)); i.setStatus("BUILT");
+        i.setUnsignedCbor(legacy.registrationCborHex()); i.setTransactionHash(legacy.registrationTxHash());
+        intents.saveAndFlush(i);
+        assertEquals(legacy, store.chain(store.get("intent")));
+        assertEquals(legacy, store.claimBuild("intent").chain());
+        when(bfBackendService.getBlockService().getLatestBlock().isSuccessful()).thenReturn(true);
+        when(bfBackendService.getBlockService().getLatestBlock().getValue().getHash()).thenReturn("ab".repeat(32));
+        when(bfBackendService.getBlockService().getLatestBlock().getValue().getSlot()).thenReturn(1_000_000_000L);
+        when(bfBackendService.getTransactionService().getTransaction(anyString()).code()).thenReturn(404);
+        when(bfBackendService.getUtxoService().getUtxos(PAYER, 100, 1).isSuccessful()).thenReturn(true);
+        when(bfBackendService.getUtxoService().getUtxos(PAYER, 100, 1).getValue()).thenReturn(java.util.List.of());
+        // Only the child is confirmed: recovery must count it, so the chain is PARTIAL rather than unknown.
+        confirmedTransaction(legacy.attestationTxHash());
+        var recovery = store.recovery(store.get("intent"));
+        assertEquals("PARTIAL", recovery.status()); assertFalse(recovery.canStartNewPolicy());
+        verify(handler, never()).completeInitialMintChain(any(), any(), any());
     }
     private void changeGenesisTtl(long ttl) throws Exception {
         var saved = store.get("intent");

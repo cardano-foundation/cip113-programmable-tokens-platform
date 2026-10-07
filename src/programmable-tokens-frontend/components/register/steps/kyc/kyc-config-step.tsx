@@ -26,6 +26,7 @@ import { waitForTxConfirmation } from '@/lib/utils/tx-confirmation';
 import { toCip68Wire } from '@/lib/utils/cip68-wire';
 import type { StepComponentProps, CIP68MetadataFormData } from '@/types/registration';
 import { logError } from '@/lib/utils/error-message';
+import { transactionHash } from '@/lib/tx/hash';
 import { mintRecoveryStorage, scanWalletInitialMintAttempts,
   removeInitialMintAttempt, withRegistrationLock,
   type SavedInitialMintAttempt } from '@/lib/rwa/mint-recovery-storage';
@@ -557,12 +558,6 @@ export function KycConfigStep({
       if (!Array.isArray(signedCbors) || signedCbors.length !== totalTxs ||
           signedCbors.some(cbor => typeof cbor !== 'string' || !/^(?:[0-9a-fA-F]{2})+$/.test(cbor)))
         throw new Error('Saved registration signatures are invalid; inspect this attempt before resuming');
-      if (submissionKey && !savedSignatures)
-        mintRecoveryStorage.setItem(`${submissionKey}-signed`, JSON.stringify(signedCbors));
-      // Replay the complete immutable signed chain. The backend skips only
-      // transactions it can positively confirm in a block; a stored cursor is
-      // useful for display, but cannot prove earlier mempool acceptance survived.
-      const cursor = 0;
       const expectedHashes = [chain.genesisTxHash, chain.addPowerUserTxHash,
         chain.cmtaProvenanceTxHash, chain.issuanceProvenanceTxHash,
         ...(chain.publishScriptsTxHash ? [chain.publishScriptsTxHash] : []),
@@ -572,6 +567,18 @@ export function KycConfigStep({
         ...(chain.registerThirdPartyTransferLogicTxHash ? [chain.registerThirdPartyTransferLogicTxHash] : [])];
       if (expectedHashes.length !== totalTxs)
         throw new Error('Saved registration chain hashes do not match its transactions');
+      // The KERI seal binds the registration's exact hash (CIP-170 ATTEST_TX), and every later
+      // transaction spends its predecessor's hash: a wallet that re-encoded a body breaks both.
+      signedCbors.forEach((cbor, index) => {
+        if (transactionHash(cbor) !== expectedHashes[index].toLowerCase())
+          throw new Error(`Signed ${chainTxs[index].name} transaction does not match the approved hash; do not submit this chain`);
+      });
+      if (submissionKey && !savedSignatures)
+        mintRecoveryStorage.setItem(`${submissionKey}-signed`, JSON.stringify(signedCbors));
+      // Replay the complete immutable signed chain. The backend skips only
+      // transactions it can positively confirm in a block; a stored cursor is
+      // useful for display, but cannot prove earlier mempool acceptance survived.
+      const cursor = 0;
 
       const pendingBase: PendingRegistrationChain = {
         chain, signedCbors, expectedHashes, names: chainTxs.map(t => t.name),

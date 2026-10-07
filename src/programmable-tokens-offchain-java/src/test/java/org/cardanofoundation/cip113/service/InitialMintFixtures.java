@@ -20,6 +20,8 @@ final class InitialMintFixtures {
     static final String PAYER = AddressProvider.getBaseAddress(Credential.fromKey(ADMIN), Credential.fromKey("18".repeat(28)), Networks.preview()).getAddress();
     static final String DEST = AddressProvider.getBaseAddress(Credential.fromScript(PLB), Credential.fromKey("18".repeat(28)), Networks.preview()).getAddress();
     static final Cip170AttestationData APPROVAL = new Cip170AttestationData("E" + "a".repeat(43), "E" + "b".repeat(43), "1", "1.0");
+    /** Preview network magic, matching {@link #fields}. */
+    static final long MAGIC = 2L;
     static final Cip68Metadata METADATA = new Cip68Metadata("Initial", "First mint", "INI", 0, null, null);
     static RwaTokenModuleHandler.GenesisPlan plan() { return new RwaTokenModuleHandler.GenesisPlan(GS, POLICY,
             List.of(Utxo.builder().txHash(BOOTSTRAP).outputIndex(0).address(PAYER).amount(List.of(Amount.ada(100))).build())); }
@@ -55,7 +57,21 @@ final class InitialMintFixtures {
                         .multiAssets(List.of(MultiAsset.builder().policyId(POLICY).assets(List.of(securityAssets.getLast())).build())).build()).build());
         return tx;
     }
-    static Cip170AttestationData attestation(RwaTokenModuleHandler.ChainBuildResult chain) {
+    /** The registration as an ATTEST_TX creation freezes it: a 60 ADA fee-payer reserve and the signer's label-170 record. */
+    static Transaction attestedRegistrationTx(String previousHash, boolean cip68) throws Exception {
+        var tx = registrationTx(previousHash, cip68);
+        tx.getBody().getOutputs().getFirst().getValue().setCoin(BigInteger.valueOf(
+                org.cardanofoundation.cip113.service.module.ReservedFeePayerOutput.REGISTRATION_RESERVE_LOVELACE));
+        var aux = AuxiliaryData.builder().metadata(org.cardanofoundation.cip113.service.module.MintAttestationMetadata
+                .toMetadata(Cip170AttestationData.attestTx(APPROVAL.signerAid()))).build();
+        tx.setAuxiliaryData(aux); tx.getBody().setAuxiliaryDataHash(aux.getAuxiliaryDataHash());
+        return tx;
+    }
+    static String sealDigest(RwaTokenModuleHandler.ChainBuildResult chain) {
+        return TxAttestationSeal.digest(chain.registrationTxHash(), MAGIC);
+    }
+    /** Retired child-profile ATTEST for a legacy chain. */
+    static Cip170AttestationData legacyAttestation(RwaTokenModuleHandler.ChainBuildResult chain) {
         return new Cip170AttestationData(APPROVAL.signerAid(), MintTxHashPayload.digest(chain.registrationTxHash()), "1", "1.0");
     }
     static Transaction child(Transaction registration) throws Exception {
@@ -71,7 +87,16 @@ final class InitialMintFixtures {
                 .put("d", MintTxHashPayload.digest(registrationHash)).put("s", "1")
                 .put("v", MetadataBuilder.createMap().put("v", "1.0"));
     }
+    /** An ATTEST_TX creation: the certificate transaction spends the registration's reserved output 0. */
     static RwaTokenModuleHandler.ChainBuildResult chain(boolean cip68) throws Exception {
+        var g = tx(BOOTSTRAP, false); var p = tx(hash(g), false); var c = tx(hash(p), true); var i = tx(hash(c), true);
+        var r = attestedRegistrationTx(hash(i), cip68); var cert = tx(hash(r), false);
+        return new RwaTokenModuleHandler.ChainBuildResult(g.serializeToHex(), p.serializeToHex(), c.serializeToHex(), i.serializeToHex(), null,
+                r.serializeToHex(), null, cert.serializeToHex(), null, GS, POLICY, "19".repeat(28), "1a".repeat(28),
+                hash(g), hash(p), hash(c), hash(i), null, hash(r), null, hash(cert), null);
+    }
+    /** A chain built under the retired child profile, as already-BUILT intents still store it. */
+    static RwaTokenModuleHandler.ChainBuildResult legacyChain(boolean cip68) throws Exception {
         var g = tx(BOOTSTRAP, false); var p = tx(hash(g), false); var c = tx(hash(p), true); var i = tx(hash(c), true);
         var r = registrationTx(hash(i), cip68); var child = child(r); var cert = tx(hash(child), false);
         return new RwaTokenModuleHandler.ChainBuildResult(g.serializeToHex(), p.serializeToHex(), c.serializeToHex(), i.serializeToHex(), null,

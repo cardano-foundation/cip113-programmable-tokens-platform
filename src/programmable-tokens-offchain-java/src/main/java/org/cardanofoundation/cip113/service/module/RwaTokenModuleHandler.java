@@ -1188,11 +1188,16 @@ public class RwaTokenModuleHandler
 
             if (preparedGenesis != null) {
                 if (!willMint) throw new IllegalStateException("Prepared initial mint requires a first mint");
-                // This output is reserved for the subsequent CIP-170 transaction and
-                // the two optional stake-certificate transactions. It has no assets,
-                // datum, or reference script, so the child can spend it exclusively.
+                if (initialMintAttestation == null || !initialMintAttestation.isAttestTx())
+                    throw new IllegalStateException("Prepared initial mint requires the CIP-170 ATTEST_TX signer");
+                // This output is reserved for the two optional stake-certificate transactions.
+                // It has no assets, datum, or reference script, so the first certificate
+                // transaction can spend it exclusively.
                 tx = tx.payToAddress(request.getFeePayerAddress(),
-                        List.of(Amount.lovelace(BigInteger.valueOf(60_000_000L))));
+                        List.of(Amount.lovelace(BigInteger.valueOf(ReservedFeePayerOutput.REGISTRATION_RESERVE_LOVELACE))));
+                // CIP-170 v1.1: the registration names its KERI signer; the wallet then
+                // anchors the seal over this transaction's own hash.
+                MintAttestationMetadata.attach(tx, initialMintAttestation);
             }
             Utxo firstUtxo = feePayerUtxos.getFirst();
             var txContext = quickTxBuilder.compose(tx)
@@ -4341,43 +4346,29 @@ public class RwaTokenModuleHandler
         this.initialMintExpiresAt = java.util.Objects.requireNonNull(expiresAt);
     }
 
-    /** Append the KERI-approved metadata child and any certificate suffix to a
-     * frozen registration prefix. The registration itself is never rebuilt here. */
+    /** Append the certificate suffix to a frozen, ATTEST_TX-carrying registration prefix.
+     * The registration itself is never rebuilt here. */
     public ChainBuildResult completeInitialMintChain(ChainBuildResult prefix,
-            String feePayerAddress, ProtocolBootstrapParams protocolParams,
-            org.cardanofoundation.cip113.model.Cip170AttestationData attestation,
-            Cip170MintChildBuilder childBuilder) throws Exception {
+            String feePayerAddress, ProtocolBootstrapParams protocolParams) throws Exception {
         if (prefix == null || prefix.registrationCborHex() == null || prefix.registrationTxHash() == null
                 || prefix.attestationCborHex() != null || prefix.registerTransferLogicCborHex() != null)
             throw new IllegalArgumentException("Expected an unpublished initial-mint prefix");
         Transaction registration = Transaction.deserialize(HexUtil.decodeHexString(prefix.registrationCborHex()));
         if (!prefix.registrationTxHash().equals(TransactionUtil.getTxHash(registration.serialize())))
             throw new IllegalStateException("Frozen registration hash differs from its CBOR");
-        Integer reservedIndex = null;
-        for (int n = 0; n < registration.getBody().getOutputs().size(); n++) {
-            var out = registration.getBody().getOutputs().get(n);
-            if (out.getValue() != null && BigInteger.valueOf(60_000_000L).equals(out.getValue().getCoin())
-                    && Cip170MintChildBuilder.fundingOutput(registration, prefix.registrationTxHash(),
-                    feePayerAddress, 60_000_000L, n) != null) {
-                if (reservedIndex != null) throw new IllegalStateException("Registration has multiple reserved attestation outputs");
-                reservedIndex = n;
-            }
-        }
-        if (reservedIndex == null) throw new IllegalStateException("Registration has no reserved attestation output");
-        Transaction child = childBuilder.build(feePayerAddress, prefix.registrationCborHex(), attestation,
-                60_000_000L, reservedIndex);
-        checkedTxSize("mintAttestation", child);
-        String childCbor = child.serializeToHex();
-        String childHash = TransactionUtil.getTxHash(child.serialize());
+        int reservedIndex = ReservedFeePayerOutput.registrationReserveIndex(registration,
+                prefix.registrationTxHash(), feePayerAddress);
+        // Built from the reserved index itself: the registration's change output also pays
+        // the fee payer and must not be picked up by an address search.
+        Utxo reserved = ReservedFeePayerOutput.fundingOutput(registration, prefix.registrationTxHash(),
+                feePayerAddress, ReservedFeePayerOutput.REGISTRATION_RESERVE_LOVELACE, reservedIndex);
 
         String certCbor = null, certHash = null, thirdPartyCbor = null, thirdPartyHash = null;
         try {
-            Utxo childChange = findOutputAtAddress(child, childHash, feePayerAddress,
-                    BigInteger.valueOf(5_500_000L));
-            if (childChange != null) {
-                hybridUtxoSupplier.add(childChange);
+            if (reserved != null) {
+                hybridUtxoSupplier.add(reserved);
                 var cert = buildRegisterTransferLogicTransaction(prefix.programmableTokenPolicyId(),
-                        feePayerAddress, protocolParams, childChange, true);
+                        feePayerAddress, protocolParams, reserved, true);
                 if (cert.isSuccessful()) {
                     certCbor = cert.unsignedCborTx();
                     Transaction certTx = Transaction.deserialize(HexUtil.decodeHexString(certCbor));
@@ -4405,12 +4396,12 @@ public class RwaTokenModuleHandler
         }
         return new ChainBuildResult(prefix.genesisCborHex(), prefix.addPowerUserCborHex(),
                 prefix.cmtaProvenanceCborHex(), prefix.issuanceProvenanceCborHex(),
-                prefix.publishScriptsCborHex(), prefix.registrationCborHex(), childCbor,
+                prefix.publishScriptsCborHex(), prefix.registrationCborHex(), null,
                 certCbor, thirdPartyCbor, prefix.globalStatePolicyId(),
                 prefix.programmableTokenPolicyId(), prefix.denylistPolicyId(),
                 prefix.powerUsersPolicyId(), prefix.genesisTxHash(), prefix.addPowerUserTxHash(),
                 prefix.cmtaProvenanceTxHash(), prefix.issuanceProvenanceTxHash(),
-                prefix.publishScriptsTxHash(), prefix.registrationTxHash(), childHash,
+                prefix.publishScriptsTxHash(), prefix.registrationTxHash(), null,
                 certHash, thirdPartyHash);
     }
 

@@ -7,22 +7,30 @@ import com.bloxbean.cardano.client.transaction.spec.Transaction;
 import com.bloxbean.cardano.client.transaction.spec.TransactionOutput;
 import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
 import com.bloxbean.cardano.client.util.HexUtil;
-import org.cardanofoundation.cip113.model.Cip170AttestationData;
 import org.cardanofoundation.cip113.model.MintAttestationRequest;
 import org.cardanofoundation.cip113.model.RwaTokenRegisterRequest;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
 import org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler;
-import org.cardanofoundation.cip113.service.module.Cip170MintChildBuilder;
+import org.cardanofoundation.cip113.service.module.ReservedFeePayerOutput;
 import org.cardanofoundation.cip113.util.Cip68;
 import java.math.BigInteger;
 import java.util.*;
 
-/** First-mint registration allows its directory NFT and optional CIP-68 pair, nothing else. */
+/**
+ * First-mint registration allows its directory NFT and optional CIP-68 pair, nothing else. The registration
+ * carries the CIP-170 v1.1 ATTEST_TX record; no other transaction in the chain carries label 170.
+ */
 public final class InitialMintTransactionValidator {
     private InitialMintTransactionValidator() {}
+
+    /**
+     * @param signerAid    AID named by the registration's ATTEST_TX record (always required)
+     * @param sealDigest   transaction seal anchored for the registration, or null before it is computed
+     * @param networkMagic network magic the seal was computed for
+     */
     public static void validate(RwaTokenModuleHandler.ChainBuildResult result, MintAttestationRequest fields,
             RwaTokenRegisterRequest registration, RwaTokenModuleHandler.GenesisPlan plan,
-            ProtocolBootstrapParams deployment, Cip170AttestationData attestation) throws Exception {
+            ProtocolBootstrapParams deployment, String signerAid, String sealDigest, long networkMagic) throws Exception {
         if (!Objects.equals(result.programmableTokenPolicyId(), fields.tokenPolicyId())
                 || !Objects.equals(plan.programmableTokenPolicyId(), fields.tokenPolicyId())
                 || !Objects.equals(plan.globalStatePolicyId(), result.globalStatePolicyId()))
@@ -34,7 +42,9 @@ public final class InitialMintTransactionValidator {
         add(chain, result.issuanceProvenanceCborHex(), result.issuanceProvenanceTxHash());
         if (result.publishScriptsCborHex() != null) add(chain, result.publishScriptsCborHex(), result.publishScriptsTxHash());
         add(chain, result.registrationCborHex(), result.registrationTxHash());
-        if (attestation != null) add(chain, result.attestationCborHex(), result.attestationTxHash());
+        int registrationIndex = chain.size() - 1;
+        if (result.attestationCborHex() != null || result.attestationTxHash() != null)
+            throw new IllegalArgumentException("ATTEST_TX creation must not contain a CIP-170 child transaction");
         if (result.registerTransferLogicCborHex() != null) add(chain, result.registerTransferLogicCborHex(), result.registerTransferLogicTxHash());
         if (result.registerThirdPartyTransferLogicCborHex() != null)
             add(chain, result.registerThirdPartyTransferLogicCborHex(), result.registerThirdPartyTransferLogicTxHash());
@@ -54,37 +64,27 @@ public final class InitialMintTransactionValidator {
                     || !Arrays.equals(aux.getAuxiliaryDataHash(), chain.get(n).getBody().getAuxiliaryDataHash()))
                 throw new IllegalArgumentException("Final creation chain lost required CIP-171 record");
         }
-        for (var tx : chain) {
-            if (!TransactionUtil.getTxHash(tx.serialize()).equals(result.attestationTxHash()) && tx.getAuxiliaryData() != null
-                    && tx.getAuxiliaryData().getMetadata() != null && tx.getAuxiliaryData().getMetadata().get(BigInteger.valueOf(170)) != null)
-                throw new IllegalArgumentException("Initial mint attestation must be on the child transaction only");
+        for (int n = 0; n < chain.size(); n++) {
+            var aux = chain.get(n).getAuxiliaryData();
+            if (n != registrationIndex && aux != null && aux.getMetadata() != null
+                    && aux.getMetadata().get(BigInteger.valueOf(170)) != null)
+                throw new IllegalArgumentException("Initial mint attestation must be on the registration only");
         }
-        if (attestation != null) {
-            if (!MintTxHashPayload.digest(result.registrationTxHash()).equals(attestation.digest()))
-                throw new IllegalArgumentException("CIP-170 digest does not bind frozen registration hash");
-            Transaction child = Transaction.deserialize(HexUtil.decodeHexString(result.attestationCborHex()));
-            if (child.getBody().getInputs() == null || child.getBody().getInputs().size() != 1
-                    || !result.registrationTxHash().equals(child.getBody().getInputs().getFirst().getTransactionId()))
-                throw new IllegalArgumentException("CIP-170 child must exclusively spend the registration");
-            int fundingIndex = child.getBody().getInputs().getFirst().getIndex();
-            Transaction mint = Transaction.deserialize(HexUtil.decodeHexString(result.registrationCborHex()));
-            if (Cip170MintChildBuilder.fundingOutput(mint, result.registrationTxHash(),
-                    fields.feePayerAddress(), 60_000_000L, fundingIndex) == null)
-                throw new IllegalArgumentException("CIP-170 child must spend reserved plain fee-payer output");
-            if (child.getBody().getMint() != null && !child.getBody().getMint().isEmpty())
-                throw new IllegalArgumentException("CIP-170 child must not mint assets");
-            MintAttestedTransactionValidator.validateAttestation(child, attestation);
-        } else if (result.attestationCborHex() != null || result.attestationTxHash() != null)
-            throw new IllegalArgumentException("Unattested creation must not contain a CIP-170 child");
-        if (Cip170MintChildBuilder.fundingOutput(
-                Transaction.deserialize(HexUtil.decodeHexString(result.registrationCborHex())),
-                result.registrationTxHash(), fields.feePayerAddress(), 60_000_000L, null) == null)
-            throw new IllegalArgumentException("Registration has no plain output reserved for CIP-170 child");
+        Transaction mint = chain.get(registrationIndex);
+        if (sealDigest != null && !TxAttestationSeal.digest(result.registrationTxHash(), networkMagic).equals(sealDigest))
+            throw new IllegalArgumentException("CIP-170 transaction seal does not bind the frozen registration");
+        int reserved = ReservedFeePayerOutput.registrationReserveIndex(mint, result.registrationTxHash(), fields.feePayerAddress());
+        if (registrationIndex + 1 < chain.size()) {
+            var spent = chain.get(registrationIndex + 1).getBody().getInputs().stream()
+                    .filter(input -> input.getTransactionId().equals(result.registrationTxHash())).toList();
+            if (spent.size() != 1 || spent.getFirst().getIndex() != reserved)
+                throw new IllegalArgumentException("Certificate transaction must spend only the registration's reserved output");
+        }
         validateRegistration(Transaction.deserialize(HexUtil.decodeHexString(result.registrationCborHex())), fields,
-                registration, deployment.registry().scriptHash(), deployment.programmableLogicBase().scriptHash(), attestation);
+                registration, deployment.registry().scriptHash(), deployment.programmableLogicBase().scriptHash(), signerAid);
     }
     static void validateRegistration(Transaction tx, MintAttestationRequest fields, RwaTokenRegisterRequest registration,
-            String directoryPolicy, String programmableLogicHash, Cip170AttestationData attestation) throws Exception {
+            String directoryPolicy, String programmableLogicHash, String signerAid) throws Exception {
         String policy = fields.tokenPolicyId();
         Map<String, BigInteger> expectedMint = new HashMap<>();
         expectedMint.put(directoryPolicy + ":" + policy, BigInteger.ONE);
@@ -126,9 +126,7 @@ public final class InitialMintTransactionValidator {
         if (!delivered.equals(new BigInteger(fields.quantity())) || referenceName != null && !BigInteger.ONE.equals(referenceDelivered))
             throw new IllegalArgumentException("Initial mint output quantities differ from approval");
         if (tx.getBody().getTtl() <= 0) throw new IllegalArgumentException("Initial mint must have finite expiry");
-        if (tx.getAuxiliaryData() != null && tx.getAuxiliaryData().getMetadata() != null
-                && tx.getAuxiliaryData().getMetadata().get(BigInteger.valueOf(170)) != null)
-            throw new IllegalArgumentException("Registration mint must not embed CIP-170 metadata");
+        MintAttestedTransactionValidator.requireAttestTx(tx, signerAid);
     }
     private static boolean sameAddress(String a, String b) { return Arrays.equals(new Address(a).getBytes(), new Address(b).getBytes()); }
     private static void add(List<Transaction> chain, String cbor, String hash) throws Exception {

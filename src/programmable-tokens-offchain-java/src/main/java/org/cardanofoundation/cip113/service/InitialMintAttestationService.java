@@ -66,6 +66,7 @@ public class InitialMintAttestationService {
                     || !mapper.readTree(saved.getInitialRegistrationJson()).equals(mapper.readTree(mapper.writeValueAsBytes(registration))))
                 throw new IllegalArgumentException("requestId already belongs to different frozen creation settings");
             if (Set.of("RELEASED", "ARCHIVED_EXPIRED").contains(saved.getStatus())) throw new ResponseStatusException(HttpStatus.GONE, "This attempt was released; use a new requestId");
+            MintAttestationService.requireCurrentProfile(saved);
             return view(saved);
         }
         var params = protocols.resolve(null);
@@ -73,17 +74,20 @@ public class InitialMintAttestationService {
         var handler = (RwaTokenModuleHandler) handlers.getHandler("rwa-token", RwaTokenContext.emptyContext());
         var plan = handler.planGenesis(registration, params);
         Instant expiresAt = Instant.now().plusSeconds(1800);
-        // The preview transaction is rollback-only. This freezes the exact
-        // registration CBOR before the remote signer sees its hash.
-        var preview = store.preview(mapper.readValue(mapper.writeValueAsBytes(registration),
-                RwaTokenRegisterRequest.class), params, plan, expiresAt);
         String asset = registration.getCip68Metadata() == null ? registration.getAssetName()
                 : Cip68.labeledAssetName(Cip68.uncappedUserTokenLabel(), registration.getAssetName());
         var fields = mints.normalize(new MintAttestationRequest(input.sessionId(), config().get("network"),
                 params.txHash(), plan.programmableTokenPolicyId(), asset, registration.getInitialMintQuantity(),
                 registration.getFeePayerAddress(), registration.getRecipientAddress(), null));
+        // The registration names its KERI signer (CIP-170 ATTEST_TX), so the session is bound first.
+        var session = mints.boundSession(fields);
+        long magic = mints.networkMagic();
+        // The preview transaction is rollback-only. This freezes the exact
+        // registration CBOR before the remote signer sees its hash.
+        var preview = store.preview(mapper.readValue(mapper.writeValueAsBytes(registration),
+                RwaTokenRegisterRequest.class), params, plan, session.getAid(), expiresAt);
         InitialMintTransactionValidator.validate(preview.prefix(), fields, registration,
-                plan, params, null);
+                plan, params, session.getAid(), null, magic);
         Instant mintDeadline = mints.targetDeadline(Transaction.deserialize(
                 HexUtil.decodeHexString(preview.prefix().registrationCborHex())));
         Instant genesisDeadline = mints.targetDeadline(Transaction.deserialize(
@@ -91,7 +95,6 @@ public class InitialMintAttestationService {
         if (genesisDeadline.isBefore(mintDeadline)) mintDeadline = genesisDeadline;
         if (!mintDeadline.isAfter(Instant.now().plusSeconds(120)))
             throw new IllegalArgumentException("Initial mint transaction validity is too short for Veridian approval; prepare a new registration");
-        var session = mints.boundSession(fields);
         var intent = new MintAttestationIntentEntity();
         intent.setId(input.requestId()); intent.setSessionId(input.sessionId());
         intent.setWalletAid(session.getAid()); intent.setIssuerAid(transport.issuerAid());
@@ -103,10 +106,10 @@ public class InitialMintAttestationService {
         intent.setInitialPlanJson(mapper.writeValueAsString(plan));
         intent.setInitialPrefixJson(mapper.writeValueAsString(preview.prefix()));
         intent.setInitialSnapshotJson(preview.snapshotJson());
-        var document = MintTxHashPayload.signed(preview.prefix().registrationTxHash());
-        intent.setDigest(MintTxHashPayload.digest(preview.prefix().registrationTxHash()));
+        var document = TxAttestationSeal.signed(preview.prefix().registrationTxHash(), magic);
+        intent.setDigest((String) document.get("d"));
         intent.setDocumentJson(Serder.dumps(document));
-        intent.setPreimage(MintTxHashPayload.preimage(preview.prefix().registrationTxHash()));
+        intent.setPreimage(TxAttestationSeal.preimage(preview.prefix().registrationTxHash(), magic));
         transport.prepareExchange(intent, document);
         return view(store.prepare(intent, plan));
     }
@@ -115,6 +118,7 @@ public class InitialMintAttestationService {
         var intent = authenticate(id, "anchor", body, headers);
         requireActive(intent);
         if ("BUILT".equals(intent.getStatus())) return view(intent);
+        MintAttestationService.requireCurrentProfile(intent);
         requireSession(intent);
         if (Set.of("ANCHORED", "BUILDING").contains(intent.getStatus())) {
             MintAttestationStore.unexpired(intent); return view(intent);
@@ -133,6 +137,7 @@ public class InitialMintAttestationService {
         requireActive(intent);
         // A saved chain may already be partly submitted. Recovery never rechecks spent bootstrap inputs or expiry.
         if ("BUILT".equals(intent.getStatus())) return store.chain(intent);
+        MintAttestationService.requireCurrentProfile(intent);
         requireSession(intent);
         verifyAnchor(intent);
         var claim = store.claimBuild(id);
@@ -146,6 +151,7 @@ public class InitialMintAttestationService {
         requireActive(intent);
         // A completed chain remains recoverable after the approval expires.
         if ("BUILT".equals(intent.getStatus())) return store.chain(intent);
+        MintAttestationService.requireCurrentProfile(intent);
         requireSession(intent);
         if (!Set.of("ANCHORED", "BUILDING").contains(intent.getStatus())) {
             String owner = mintStore.claimAnchor(id);
@@ -158,6 +164,7 @@ public class InitialMintAttestationService {
         // Another request may have completed the chain while the Veridian wait was in progress.
         intent = store.get(id);
         if ("BUILT".equals(intent.getStatus())) return store.chain(intent);
+        MintAttestationService.requireCurrentProfile(intent);
         requireSession(intent);
         verifyAnchor(intent);
         var claim = store.claimBuild(id);
@@ -218,8 +225,9 @@ public class InitialMintAttestationService {
         if (!mints.targetDeadline(Transaction.deserialize(HexUtil.decodeHexString(prefix.genesisCborHex())))
                 .isAfter(Instant.now().plusSeconds(120)))
             throw new IllegalStateException("Frozen genesis is near expiry; prepare a new registration");
-        if (!Objects.equals(intent.getDigest(), MintTxHashPayload.digest(prefix.registrationTxHash()))
-                || !Objects.equals(intent.getDocumentJson(), Serder.dumps(MintTxHashPayload.signed(prefix.registrationTxHash()))))
+        long magic = mints.networkMagic();
+        if (!Objects.equals(intent.getDigest(), TxAttestationSeal.digest(prefix.registrationTxHash(), magic))
+                || !Objects.equals(intent.getDocumentJson(), Serder.dumps(TxAttestationSeal.signed(prefix.registrationTxHash(), magic))))
             throw new IllegalStateException("Saved creation approval payload differs from frozen mint hash");
         var plan = mapper.readValue(intent.getInitialPlanJson(), RwaTokenModuleHandler.GenesisPlan.class);
         var registration = mapper.readValue(intent.getInitialRegistrationJson(), RwaTokenRegisterRequest.class);
@@ -228,7 +236,7 @@ public class InitialMintAttestationService {
             throw new IllegalStateException("Frozen protocol deployment is unavailable");
         try {
             InitialMintTransactionValidator.validate(prefix, mints.fields(intent), registration,
-                    plan, params, null);
+                    plan, params, intent.getWalletAid(), intent.getDigest(), magic);
         } catch (IllegalArgumentException changed) {
             throw new IllegalStateException("Frozen registration settings differ from the signed mint", changed);
         }

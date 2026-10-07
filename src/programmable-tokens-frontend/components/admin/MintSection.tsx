@@ -433,7 +433,8 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
     }).then(record => {
       if (controller.signal.aborted) return;
       setTxHash(record.chain.mintTxHash);
-      setConfirmedAttestationHash(record.chain.attestationTxHash);
+      // ATTEST_TX mints carry their CIP-170 record themselves; retired-profile records have a child.
+      setConfirmedAttestationHash(record.chain.attestationTxHash ?? record.chain.mintTxHash);
       setMintConfirmed(true);
       setRecoveryId(null);
       setStep("success");
@@ -443,7 +444,9 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
         sessionStorage.removeItem('mint-keri-request-id');
       }
       setPendingIntentId(null);
-      showToast({ title: "Mint Complete", description: "The mint and CIP-170 attestation are confirmed.", variant: "success" });
+      showToast({ title: "Mint Complete", description: record.chain.attestationTxHash
+        ? "The mint and CIP-170 attestation are confirmed."
+        : "The attested mint, carrying its CIP-170 record, is confirmed.", variant: "success" });
       void refreshRwaTokenGs();
     }).catch(error => {
       if (controller.signal.aborted) return;
@@ -668,9 +671,13 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           if (!currentWallet()) return;
           setIsBuilding(false);
           setIsSigning(true);
-          const signedCbors = await wallet.signTxs([chain.mintCborHex, chain.attestationCborHex], true);
+          // CIP-170 ATTEST_TX: the mint carries its own label-170 record, so there is one
+          // transaction. A chain built under the retired profile still has its child.
+          const unsigned = chain.attestationCborHex
+            ? [chain.mintCborHex, chain.attestationCborHex] : [chain.mintCborHex];
+          const signedCbors = await wallet.signTxs(unsigned, true);
           if (!currentWallet()) return;
-          if (signedCbors.length !== 2) throw new Error("Wallet did not sign both mint transactions");
+          if (signedCbors.length !== unsigned.length) throw new Error("Wallet did not sign every mint transaction");
           recoveryRecord = { payer: feePayerAddress, chain, signed: signedCbors,
             quantity, assetName: selectedToken.assetName,
             confirmation: { phase: 'signed', submissions: 0 } };
@@ -734,6 +741,8 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
           errorMessage = error.message;
         }
       }
+      // build-chain rejects an approved-but-unbuilt attempt from the retired child profile.
+      if (intent) errorMessage = retireAttempt(errorMessage) ?? errorMessage;
 
       showToast({
         title: intent && recoveryId
@@ -833,6 +842,17 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
   // ── Attestation Anchoring ────────────────────────────────────────────────
 
+  /** A saved attempt that predates in-transaction attestation must never be resumed. */
+  const retireAttempt = (message: string): string | null => {
+    if (!message.includes("RETIRED_ATTESTATION_PROFILE")) return null;
+    sessionStorage.removeItem("mint-keri-request-id");
+    sessionStorage.removeItem("mint-keri-intent-id");
+    setMintIntent(null);
+    setMintIntentRequest(null);
+    setPendingIntentId(null);
+    return "This approval was prepared with a retired attestation format. Start the attestation again; Veridian will ask once more.";
+  };
+
   const handleAttestation = async () => {
     if (!selectedToken) return;
     const attemptWallet = mintWalletRef.current;
@@ -875,7 +895,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
 
       showToast({
         title: "KERI Approval Recorded",
-        description: "Veridian approved the frozen mint transaction hash. Building its CIP-170 child...",
+        description: "Veridian anchored the frozen mint transaction hash. Preparing the attested mint for signing...",
         variant: "success",
       });
 
@@ -888,6 +908,7 @@ export function MintSection({ tokens, feePayerAddress }: MintSectionProps) {
       if (error instanceof Error) {
         errorMessage = error.message;
       }
+      errorMessage = retireAttempt(errorMessage) ?? errorMessage;
       setAttestError(errorMessage);
     } finally {
       if (currentAttempt()) setIsBuilding(false);

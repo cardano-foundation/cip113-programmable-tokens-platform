@@ -183,6 +183,27 @@ async function main() {
   const conflictReload = harness(unexpected.record());
   await assert.rejects(conflictReload.run(), /unexpected transaction hashes/);
   assert.equal(conflictReload.events.length, 0);
-  console.log('PASS admin mint orchestrator: pending, exact confirmation, legacy/reload, partial replay, invalid, network outage, persisted budget, crash, wallet abort, ownership, and hash mismatch');
+  // CIP-170 ATTEST_TX: the mint carries its own attestation, so the record holds one transaction.
+  const single = () => ({ payer: 'wallet-a', chain: { mintTxHash: hashes[0], attestationTxHash: null },
+    signed: [signed[0]], confirmation: { phase: 'signed', submissions: 0 } });
+  const singleObs = status => ({ transactions: [{ hash: hashes[0], status, reason: '' }] });
+  assert.deepEqual(validateSavedMint(single()), [hashes[0].toLowerCase()]);
+  assert.deepEqual(validateSavedMint({ ...single(), chain: { mintTxHash: hashes[0] } }), [hashes[0].toLowerCase()]);
+  assert.throws(() => validateSavedMint({ ...single(), signed: [signed[1]] }), /does not match/);
+  assert.throws(() => validateSavedMint({ ...single(), signed: [...signed] }), /invalid/);
+  const oneTx = harness(single(), [singleObs('NOT_INDEXED'), singleObs('CONFIRMED')]);
+  oneTx.ports.check = async expected => {
+    assert.deepEqual(expected, [hashes[0]]); oneTx.events.push('check');
+    return oneTx.events.filter(e => e === 'check').length === 1 ? singleObs('NOT_INDEXED') : singleObs('CONFIRMED');
+  };
+  await oneTx.run();
+  assert.deepEqual(oneTx.submissions, [[signed[0]]]);
+  assert.ok(oneTx.messages.some(message => /attested mint/.test(message)));
+  assert.equal(oneTx.record(), null);
+  const oneLegacyShape = harness(single());
+  oneLegacyShape.ports.check = async () => ({ transactions: [
+    { hash: hashes[0], status: 'CONFIRMED' }, { hash: hashes[1], status: 'CONFIRMED' }] });
+  await assert.rejects(oneLegacyShape.run(), /does not match/);
+  console.log('PASS admin mint orchestrator: pending, exact confirmation, legacy/reload, partial replay, invalid, network outage, persisted budget, crash, wallet abort, ownership, hash mismatch, and single-transaction ATTEST_TX');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

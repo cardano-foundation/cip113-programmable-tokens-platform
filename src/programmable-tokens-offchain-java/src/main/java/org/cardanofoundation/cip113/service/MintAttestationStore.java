@@ -106,17 +106,6 @@ public class MintAttestationStore {
         return cbor;
     }
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public String publishChild(String id, String owner, String cbor, String transactionHash) {
-        var i = locked(id); owner(i, owner, "BUILDING");
-        if (i.getUnsignedCbor() == null || i.getTransactionHash() == null
-                || cbor == null || !cbor.matches("(?:[a-fA-F0-9]{2})+")
-                || transactionHash == null || !transactionHash.matches("[a-f0-9]{64}"))
-            throw new IllegalArgumentException("Invalid mint attestation child");
-        i.setAttestationCbor(cbor); i.setAttestationTxHash(transactionHash);
-        i.setStatus("BUILT"); clearClaim(i);
-        return cbor;
-    }
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void releaseBuild(String id, String owner) {
         var i = locked(id);
         if (Objects.equals(owner, i.getClaimOwner()) && "BUILDING".equals(i.getStatus())) {

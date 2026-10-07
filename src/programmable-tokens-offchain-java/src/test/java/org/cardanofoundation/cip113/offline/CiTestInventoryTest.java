@@ -44,8 +44,10 @@ class CiTestInventoryTest {
     private static final Path BUILD_FILE = Path.of("build.gradle");
     private static final Path TEST_ROOT = Path.of("src/test/java");
 
-    /** Every test class in the tree, as of 2026-10-01 (counted, not guessed). Bump deliberately, never reflexively. */
-    private static final int EXPECTED_TEST_CLASS_COUNT = 100;
+    /** Every test class in the tree, as of 2026-10-07 (counted, not guessed). Bump deliberately, never reflexively.
+     *  100 → 102: offline TxAttestationSealTest and MintAttestationMetadataTest (CIP-170 ATTEST_TX).
+     *  102 → 103: offline Cip170AuthBeginTest (AUTH_BEGIN announces label 170). */
+    private static final int EXPECTED_TEST_CLASS_COUNT = 103;
 
     /** Why the rest are out: they submit transactions, need a database, or need a live backend. */
     private static final String NOT_IN_CI_REASON =
