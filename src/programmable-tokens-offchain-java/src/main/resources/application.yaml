@@ -80,9 +80,16 @@ keri:
   booturl: ${KERI_BOOT_URL:http://localhost:3903}
   identifier:
     bran: ${KERI_BRAN:0BDF2TpptgqcDE5IQUF1H}
+    # ⛔ name AND registry-name ARE A PAIR — set both or neither. They name an identifier on the
+    # KERI agent and the credential registry that identifier owns, and they have moved together
+    # before: identity/kyc-registry became identity2/kyc-registry2. Until now only `name` had a
+    # placeholder, so a deployment could pin half the pair and end up with an identifier pointed
+    # at a registry it does not own — which fails at the KERI agent, not here, and says nothing
+    # about configuration. Reported from the cardano-production chart, 2026-09-29, where pinning
+    # KERI_IDENTIFIER_NAME=identity against a current image would have done exactly that.
     name: ${KERI_IDENTIFIER_NAME:identity2}
     role: agent
-    registry-name: kyc-registry2
+    registry-name: ${KERI_REGISTRY_NAME:kyc-registry2}
   schema:
     base-url: https://cred-issuance.dev.ecosyseng.cf-deployments.org/oobi/
     schemas:
