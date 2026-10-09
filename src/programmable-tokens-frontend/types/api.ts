@@ -121,6 +121,8 @@ export interface Cip170AttestationData {
   digest: string;
   seqNumber: string;
   cipVersion: string;
+  /** Absent means ATTEST. ATTEST_TX (CIP-170 v1.1) has no digest or seqNumber. */
+  type?: 'ATTEST' | 'ATTEST_TX';
 }
 
 export interface MintTokenRequest {

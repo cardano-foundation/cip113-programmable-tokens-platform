@@ -76,4 +76,76 @@ class MintAttestedTransactionValidatorTest {
                 transaction(DEST, BigInteger.TEN, BigInteger.TEN, "E" + "c".repeat(43)),
                 intent(DEST, "10"), ATTESTATION));
     }
+
+    /** A mint whose label 170 is the given record (null = no auxiliary data). */
+    private static String attestTxMint(com.bloxbean.cardano.client.metadata.MetadataMap record) throws Exception {
+        var asset = Asset.builder().name("0x" + ASSET).value(BigInteger.TEN).build();
+        var output = TransactionOutput.builder().address(DEST)
+                .value(Value.builder().coin(BigInteger.valueOf(2_000_000))
+                        .multiAssets(List.of(MultiAsset.builder().policyId(POLICY).assets(List.of(asset)).build())).build()).build();
+        var body = TransactionBody.builder()
+                .inputs(List.of(TransactionInput.builder().transactionId("55".repeat(32)).index(0).build()))
+                .outputs(List.of(output)).fee(BigInteger.valueOf(200_000))
+                .mint(List.of(MultiAsset.builder().policyId(POLICY).assets(List.of(asset)).build())).build();
+        var tx = Transaction.builder().body(body).witnessSet(new TransactionWitnessSet()).isValid(true).build();
+        if (record != null) {
+            var metadata = MetadataBuilder.createMetadata();
+            metadata.put(170L, record);
+            var auxiliary = AuxiliaryData.builder().metadata(metadata).build();
+            tx.setAuxiliaryData(auxiliary); body.setAuxiliaryDataHash(auxiliary.getAuxiliaryDataHash());
+        }
+        return tx.serializeToHex();
+    }
+    private static com.bloxbean.cardano.client.metadata.MetadataMap record(String t, String aid, String version) {
+        var signers = MetadataBuilder.createList(); signers.add(aid);
+        return recordWithI(t, signers, version);
+    }
+    private static com.bloxbean.cardano.client.metadata.MetadataMap recordWithI(String t, Object i, String version) {
+        var v = MetadataBuilder.createMap(); v.put("v", version);
+        var r = MetadataBuilder.createMap(); r.put("t", t); r.put("v", v);
+        if (i instanceof String text) r.put("i", text);
+        else r.put("i", (com.bloxbean.cardano.client.metadata.MetadataList) i);
+        return r;
+    }
+
+    @Test void acceptsExactAttestTxMintAndItsSeal() throws Exception {
+        String aid = ATTESTATION.signerAid();
+        String cbor = attestTxMint(record("ATTEST_TX", aid, "1.1"));
+        String hash = MintAttestedTransactionValidator.validateAttestTx(cbor, intent(DEST, "10"), aid, null, 2L);
+        assertEquals(hash, MintAttestedTransactionValidator.validateAttestTx(cbor, intent(DEST, "10"), aid,
+                TxAttestationSeal.digest(hash, 2L), 2L));
+    }
+
+    @Test void rejectsAttestTxForAnotherSignerShapeVersionOrSeal() throws Exception {
+        String aid = ATTESTATION.signerAid();
+        var intent = intent(DEST, "10");
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(null), intent, aid, null, 2L));
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(record("ATTEST_TX", "E" + "c".repeat(43), "1.1")), intent, aid, null, 2L));
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(record("ATTEST", aid, "1.1")), intent, aid, null, 2L));
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(record("ATTEST_TX", aid, "1.0")), intent, aid, null, 2L));
+        var withDigest = record("ATTEST_TX", aid, "1.1"); withDigest.put("d", ATTESTATION.digest());
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(withDigest), intent, aid, null, 2L));
+        var withSequence = record("ATTEST_TX", aid, "1.1"); withSequence.put("s", "1");
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(withSequence), intent, aid, null, 2L));
+        // i must be the CIP-170 list form holding exactly the approving AID.
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(recordWithI("ATTEST_TX", aid, "1.1")), intent, aid, null, 2L));
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(recordWithI("ATTEST_TX", MetadataBuilder.createList(), "1.1")), intent, aid, null, 2L));
+        var twoSigners = MetadataBuilder.createList(); twoSigners.add(aid); twoSigners.add("E" + "c".repeat(43));
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(recordWithI("ATTEST_TX", twoSigners, "1.1")), intent, aid, null, 2L));
+        String cbor = attestTxMint(record("ATTEST_TX", aid, "1.1"));
+        String hash = MintAttestedTransactionValidator.validateAttestTx(cbor, intent, aid, null, 2L);
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                cbor, intent, aid, TxAttestationSeal.digest(hash, 764824073L), 2L));
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                cbor, intent, aid, TxAttestationSeal.digest("ff".repeat(32), 2L), 2L));
+    }
 }

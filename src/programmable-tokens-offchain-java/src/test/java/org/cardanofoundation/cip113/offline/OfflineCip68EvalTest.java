@@ -2495,8 +2495,8 @@ public class OfflineCip68EvalTest {
                 HandlerFixtures.OBJECT_MAPPER.writeValueAsString(registerRequest),
                 org.cardanofoundation.cip113.model.RwaTokenRegisterRequest.class);
         org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GenesisPlan approvedPlan = null;
-        var approval = new org.cardanofoundation.cip113.model.Cip170AttestationData(
-                "E" + "a".repeat(43), "E" + "b".repeat(43), "a", "1.0");
+        // CIP-170 v1.1: the prepared registration names its KERI signer in label 170 (ATTEST_TX).
+        var approval = org.cardanofoundation.cip113.model.Cip170AttestationData.attestTx("E" + "a".repeat(43));
         if (attestInitialMint) {
             approvedPlan = handler.planGenesis(registerRequest, boot.params());
             Assertions.assertTrue(registrations.isEmpty(), "planning must not create registration state");
@@ -2514,19 +2514,19 @@ public class OfflineCip68EvalTest {
                 // An attested attempt must never choose another bootstrap when its pinned state differs.
                 var wrongPolicy = new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GenesisPlan(
                         approvedPlan.globalStatePolicyId(), "ff".repeat(28), approvedPlan.funding());
-                handler.usePreparedGenesis(wrongPolicy, null, java.time.Instant.now().plusSeconds(1800));
+                handler.usePreparedGenesis(wrongPolicy, approval, java.time.Instant.now().plusSeconds(1800));
                 var rejectedPolicy = handler.buildFullRegistrationChain(registerRequest, boot.params());
                 Assertions.assertFalse(rejectedPolicy.isSuccessful());
                 Assertions.assertTrue(registrations.isEmpty(), "policy mismatch must not create registration state");
                 String fundingRef = bootstrap.getTxHash() + "#" + bootstrap.getOutputIndex();
                 fundingReservations.put(fundingRef, "ee".repeat(28));
-                handler.usePreparedGenesis(approvedPlan, null, java.time.Instant.now().plusSeconds(1800));
+                handler.usePreparedGenesis(approvedPlan, approval, java.time.Instant.now().plusSeconds(1800));
                 var rejectedOwner = handler.buildFullRegistrationChain(registerRequest, boot.params());
                 Assertions.assertFalse(rejectedOwner.isSuccessful());
                 Assertions.assertTrue(registrations.isEmpty(), "foreign reservation must not create registration state");
                 fundingReservations.put(fundingRef, approvedPlan.globalStatePolicyId());
             }
-            handler.usePreparedGenesis(approvedPlan, null, java.time.Instant.now().plusSeconds(1800));
+            handler.usePreparedGenesis(approvedPlan, approval, java.time.Instant.now().plusSeconds(1800));
         }
         var chainResult = handler.buildFullRegistrationChain(registerRequest, boot.params());
         Assertions.assertTrue(chainResult.isSuccessful(),
@@ -2579,14 +2579,10 @@ public class OfflineCip68EvalTest {
 
         var built = chainResult.metadata();
         if (attestInitialMint) {
-            approval = new org.cardanofoundation.cip113.model.Cip170AttestationData(
-                    "E" + "a".repeat(43),
-                    org.cardanofoundation.cip113.service.MintTxHashPayload.digest(built.registrationTxHash()),
-                    "a", "1.0");
-            var childBuilder = new org.cardanofoundation.cip113.service.module.Cip170MintChildBuilder(
-                    chain.quickTxBuilderOver(hybridUtxoSupplier));
-            built = handler.completeInitialMintChain(built, BootstrapFixture.ADMIN.baseAddress(),
-                    boot.params(), approval, childBuilder);
+            long magic = org.cardanofoundation.cip113.service.TxAttestationSeal.magic("devnet");
+            String seal = org.cardanofoundation.cip113.service.TxAttestationSeal.digest(built.registrationTxHash(), magic);
+            built = handler.completeInitialMintChain(built, BootstrapFixture.ADMIN.baseAddress(), boot.params());
+            Assertions.assertNull(built.attestationCborHex(), "an ATTEST_TX creation has no CIP-170 child");
             chainResult = org.cardanofoundation.cip113.model.TransactionContext.ok(built.genesisCborHex(), built);
             String approvedAsset = metadata == null ? BASE_ASSET_NAME_HEX
                     : Cip68.labeledAssetName(Cip68.uncappedUserTokenLabel(), BASE_ASSET_NAME_HEX);
@@ -2597,7 +2593,7 @@ public class OfflineCip68EvalTest {
                     approvedPlan.programmableTokenPolicyId(), approvedAsset, initialMintQuantity,
                     BootstrapFixture.ADMIN.baseAddress(), recipientAddress, destination);
             org.cardanofoundation.cip113.service.InitialMintTransactionValidator.validate(
-                    built, fields, frozenRequest, approvedPlan, boot.params(), approval);
+                    built, fields, frozenRequest, approvedPlan, boot.params(), approval.signerAid(), seal, magic);
         }
         // Exercise the same final-chain funding audit the controller runs after the
         // builder. It must recognize chained outputs and protocol inputs while

@@ -39,7 +39,7 @@ class InitialMintAttestationServiceTest {
         when(protocols.resolve(any())).thenReturn(params);
         when(handlers.getHandler(eq("rwa-token"), any())).thenReturn(handler);
         when(handler.planGenesis(any(), any())).thenReturn(InitialMintFixtures.plan());
-        when(store.preview(any(), any(), any(), any())).thenAnswer(a -> {
+        when(store.preview(any(), any(), any(), any(), any())).thenAnswer(a -> {
             RwaTokenRegisterRequest r = a.getArgument(0);
             var built = InitialMintFixtures.chain(r.getCip68Metadata() != null);
             var prefix = new RwaTokenModuleHandler.ChainBuildResult(built.genesisCborHex(), built.addPowerUserCborHex(),
@@ -59,6 +59,7 @@ class InitialMintAttestationServiceTest {
         when(mints.boundSession(any())).thenReturn(KycSessionEntity.builder().sessionId("session").aid("E" + "a".repeat(43)).credentialAid("credential").build());
         when(mints.fields(any())).thenAnswer(a -> mapper.readValue(((MintAttestationIntentEntity)a.getArgument(0)).getFieldsJson(), MintAttestationRequest.class));
         when(mints.targetDeadline(any())).thenReturn(Instant.now().plusSeconds(900));
+        when(mints.networkMagic()).thenReturn(InitialMintFixtures.MAGIC);
         when(verifier.audience()).thenReturn("https://api.example/api/v1");
         when(transport.issuerAid()).thenReturn("E" + "b".repeat(43));
         doAnswer(a -> { ((MintAttestationIntentEntity)a.getArgument(0)).setWalletKelFloor("0"); return null; }).when(transport).prepareExchange(any(), any());
@@ -82,9 +83,10 @@ class InitialMintAttestationServiceTest {
         var view = service.prepare(prepareBody(registration()), new HttpHeaders());
         assertEquals(ID, view.intentId()); assertEquals(POLICY, view.fields().tokenPolicyId());
         assertEquals("PREPARED", view.status()); assertEquals("NOT_BUILT", view.submissionStatus());
-        assertEquals(MintTxHashPayload.digest(InitialMintFixtures.chain(false).registrationTxHash()), saved.getDigest());
-        assertEquals(Set.of("d", "txHash"), mapper.readTree(saved.getDocumentJson()).properties().stream()
-                .map(java.util.Map.Entry::getKey).collect(java.util.stream.Collectors.toSet()));
+        assertEquals(InitialMintFixtures.sealDigest(InitialMintFixtures.chain(false)), saved.getDigest());
+        assertEquals(List.of("d", "t", "n", "txHash"), mapper.readTree(saved.getDocumentJson()).properties().stream()
+                .map(java.util.Map.Entry::getKey).toList());
+        verify(store).preview(any(), any(), any(), eq("E" + "a".repeat(43)), any());
         assertEquals(InitialMintFixtures.chain(false).registrationTxHash(), mapper.readTree(saved.getDocumentJson()).get("txHash").asText());
         assertFalse(saved.getDocumentJson().contains("session"));
         assertNotEquals(saved.getPreimage(), saved.getDocumentJson());
@@ -106,7 +108,7 @@ class InitialMintAttestationServiceTest {
         assertTrue(view.fields().assetName().startsWith("0014df10"));
         var doc = mapper.readTree(saved.getDocumentJson());
         assertEquals(InitialMintFixtures.chain(true).registrationTxHash(), doc.get("txHash").asText());
-        assertEquals(2, doc.size());
+        assertEquals(4, doc.size());
     }
     @Test void rejectsZeroSupplyAndRawClientAttestationBeforeReservations() throws Exception {
         var zero = registration(); zero.setInitialMintQuantity("0");
@@ -124,6 +126,9 @@ class InitialMintAttestationServiceTest {
     }
     @Test void builtRecoveryRetainsExactChainAfterExpiryWithoutKeriOrUtxoChecks() throws Exception {
         service.prepare(prepareBody(registration()), new HttpHeaders());
+        // A chain built under the retired child profile must stay recoverable.
+        saved.setDocumentJson(id.veridian.signify.cesr.Serder.dumps(MintTxHashPayload.signed(saved.getTransactionHash() != null
+                ? saved.getTransactionHash() : InitialMintFixtures.chain(false).registrationTxHash())));
         saved.setStatus("BUILT"); saved.setExpiresAt(Instant.now().minusSeconds(100));
         var chain = mock(RwaTokenModuleHandler.ChainBuildResult.class);
         when(store.chain(saved)).thenReturn(chain);
@@ -181,6 +186,9 @@ class InitialMintAttestationServiceTest {
     }
     @Test void combinedBuiltRetryAfterExpiryReturnsStoredChainWithoutKeri() throws Exception {
         service.prepare(prepareBody(registration()), new HttpHeaders());
+        // A chain built under the retired child profile must stay recoverable.
+        saved.setDocumentJson(id.veridian.signify.cesr.Serder.dumps(MintTxHashPayload.signed(saved.getTransactionHash() != null
+                ? saved.getTransactionHash() : InitialMintFixtures.chain(false).registrationTxHash())));
         saved.setStatus("BUILT"); saved.setExpiresAt(Instant.now().minusSeconds(1));
         var chain = mock(RwaTokenModuleHandler.ChainBuildResult.class);
         when(store.chain(saved)).thenReturn(chain);
@@ -278,4 +286,19 @@ class InitialMintAttestationServiceTest {
         verify(mintStore, never()).claimAnchor(any()); verify(store, never()).claimBuild(any());
     }
 
+    @Test void retiredProfileRejectedBeforeDispatch() throws Exception {
+        service.prepare(prepareBody(registration()), new HttpHeaders());
+        saved.setDocumentJson(id.veridian.signify.cesr.Serder.dumps(MintTxHashPayload.signed(saved.getTransactionHash() != null
+                ? saved.getTransactionHash() : InitialMintFixtures.chain(false).registrationTxHash())));
+        when(store.find(ID)).thenReturn(Optional.of(saved));
+        assertThrows(RetiredAttestationProfileException.class, () -> service.prepare(prepareBody(registration()), new HttpHeaders()));
+        assertThrows(RetiredAttestationProfileException.class, () -> service.anchor(ID, action(PAYER), new HttpHeaders()));
+        assertThrows(RetiredAttestationProfileException.class, () -> service.approveAndBuild(ID, action(PAYER), new HttpHeaders()));
+        saved.setStatus("ANCHORED");
+        assertThrows(RetiredAttestationProfileException.class, () -> service.finalizeCreation(ID, action(PAYER), new HttpHeaders()));
+        assertThrows(RetiredAttestationProfileException.class, () -> service.approveAndBuild(ID, action(PAYER), new HttpHeaders()));
+        verify(mintStore, never()).claimAnchor(any());
+        verify(transport, never()).sendAndWait(any(), anyBoolean());
+        verify(store, never()).claimBuild(any());
+    }
 }

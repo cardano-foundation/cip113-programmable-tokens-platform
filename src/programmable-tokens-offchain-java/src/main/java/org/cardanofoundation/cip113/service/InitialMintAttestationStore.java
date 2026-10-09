@@ -21,7 +21,6 @@ import org.cardanofoundation.cip113.repository.RwaTokenRegistrationRepository;
 import org.cardanofoundation.cip113.repository.ProgrammableTokenRegistryRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenMemberRootSnapshotRepository;
 import org.cardanofoundation.cip113.repository.RwaTokenPowerUserRepository;
-import org.cardanofoundation.cip113.service.module.Cip170MintChildBuilder;
 import org.cardanofoundation.cip113.service.module.ModuleHandlerFactory;
 import org.cardanofoundation.cip113.service.module.context.RwaTokenContext;
 import org.cardanofoundation.cip113.model.bootstrap.ProtocolBootstrapParams;
@@ -54,7 +53,6 @@ public class InitialMintAttestationStore {
     private final ProgrammableTokenRegistryRepository tokenRegistry;
     private final RwaTokenCreationService creation;
     private final ModuleHandlerFactory handlers;
-    private final Cip170MintChildBuilder childBuilder;
     private final PlatformTransactionManager transactionManager;
     private final MintAttestationService mints;
     private final ProtocolDeploymentResolver protocols;
@@ -71,7 +69,7 @@ public class InitialMintAttestationStore {
     /** Build a deterministic registration prefix in a transaction that cannot commit.
      * Only detached row values leave the preview; no canonical registration rows do. */
     public Preview preview(RwaTokenRegisterRequest request, ProtocolBootstrapParams params,
-            RwaTokenModuleHandler.GenesisPlan plan, Instant expiresAt) {
+            RwaTokenModuleHandler.GenesisPlan plan, String signerAid, Instant expiresAt) {
         var tx = new TransactionTemplate(transactionManager);
         tx.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         tx.setTimeout(120);
@@ -81,7 +79,8 @@ public class InitialMintAttestationStore {
                 // them inside this rollback-only transaction so its checks see
                 // the same plan that will be claimed durably by prepare().
                 reserve(plan);
-                var prefix = creation.buildPrepared(request, params, plan, null, expiresAt);
+                var prefix = creation.buildPrepared(request, params, plan,
+                        org.cardanofoundation.cip113.model.Cip170AttestationData.attestTx(signerAid), expiresAt);
                 String policy = plan.programmableTokenPolicyId();
                 var registration = registrations.findByProgrammableTokenPolicyId(policy)
                         .orElseThrow(() -> new IllegalStateException("Preview produced no registration row"));
@@ -164,11 +163,11 @@ public class InitialMintAttestationStore {
         var staged = mapper.readValue(i.getInitialSnapshotJson(), StagedRows.class);
         materialize(prefix, staged, request, plan, fields);
         var handler = (RwaTokenModuleHandler) handlers.getHandler("rwa-token", RwaTokenContext.emptyContext());
-        var result = handler.completeInitialMintChain(prefix, request.getFeePayerAddress(),
-                params, mints.attestation(i), childBuilder);
-        // Validate against the original request and the exact frozen registration.
+        var result = handler.completeInitialMintChain(prefix, request.getFeePayerAddress(), params);
+        // Validate against the original request, the exact frozen registration and the anchored seal.
         var frozen = mapper.readValue(i.getInitialRegistrationJson(), RwaTokenRegisterRequest.class);
-        InitialMintTransactionValidator.validate(result, fields, frozen, plan, params, mints.attestation(i));
+        InitialMintTransactionValidator.validate(result, fields, frozen, plan, params,
+                mints.txAttestation(i).signerAid(), i.getDigest(), mints.networkMagic());
         requireOwner(i, owner); MintAttestationStore.unexpired(i);
         i.setInitialChainJson(mapper.writeValueAsString(result));
         i.setUnsignedCbor(result.registrationCborHex()); i.setTransactionHash(result.registrationTxHash());
