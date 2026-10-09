@@ -7,10 +7,10 @@ The optional Veridian step attests the **exact Cardano transaction** of a mint, 
 The mint transaction itself carries the attestation record at metadata label 170:
 
 ```json
-{"170": {"t": "ATTEST_TX", "i": "<Veridian wallet AID>", "v": {"v": "1.1"}}}
+{"170": {"t": "ATTEST_TX", "i": ["<Veridian wallet AID>"], "v": {"v": "1.1"}}}
 ```
 
-The record contains no digest and no KEL sequence number. A transaction cannot contain a digest of its own ID, because the ID covers the auxiliary-data hash. The record only names the signer; the KEL carries the proof. For an initial mint, the record is on the registration transaction. No other transaction in the chain carries label 170.
+CIP-170 allows `i` to be a single AID or a list of distinct AIDs when several signers attest the same transaction. This platform always writes the list form with exactly one signer: the approving wallet. The record contains no digest and no KEL sequence number. A transaction cannot contain a digest of its own ID, because the ID covers the auxiliary-data hash. The record only names the signer; the KEL carries the proof. For an initial mint, the record is on the registration transaction. No other transaction in the chain carries label 170.
 
 ## What Veridian anchors
 
@@ -28,10 +28,10 @@ After the backend verifies the accepted KERI event, the frozen mint is the final
 
 ## Verification
 
-1. Find label 170 with `t` equal to `ATTEST_TX`, keys exactly `t`, `i` and `v`, and `v.v` equal to `1.1`. Check that the transaction body commits to the auxiliary data.
+1. Find label 170 with `t` equal to `ATTEST_TX` and `v.v` equal to `1.1` or later (see the CIP-170 [Versioning](https://github.com/cardano-foundation/CIPs/blob/c0e677d6ed67ab34ce22228a7d1ac0dc7298768c/CIP-0170/README.md#versioning) section; the platform's own validator requires exactly `1.1`). Accept `i` as a single AID or a list. The platform's own validator is stricter and requires keys exactly `t`, `i` and `v`, with `i` a one-element list. CIP-170 itself also allows an optional `s` hint: a string, or a list of the same length as `i`. Check that the transaction body commits to the auxiliary data.
 2. Take the transaction ID from the chain; do not re-encode the body.
 3. Rebuild the compact UTF-8 preimage `{"d":"############################################","t":"cardano-tx-attest","n":<magic>,"txHash":"<id>"}` with no whitespace and no trailing newline. Calculate the BLAKE3-256 CESR `E` SAID.
-4. Resolve AID `170.i`, verify its KEL, and find an event whose seals include exactly that SAID.
+4. For each AID in `170.i`, resolve it, verify its KEL, and find an event whose seals include exactly that SAID. Report the result per AID.
 5. Report the transaction's `is_valid` flag. Verify the signer's credential authority and revocation status separately. The attestation proves that the AID controller approved this transaction ID; it does not by itself prove that the same entity held the Cardano signing key.
 
 ## Known deviations from CIP-170 v1.1
@@ -49,5 +49,7 @@ Initial CMTA preparation reserves a pinned funding plan and privately saves a by
 Before submitting, the browser checks that every signed transaction still has its approved hash, then saves the entire signed chain in persistent local storage scoped to the fee-payer wallet. Resume sends those same bytes again, including after the tab closes. The submission API skips an earlier transaction only when the configured chain backend returns its exact hash in a block with `validContract=true`; an absent, pending, invalid, or ambiguous lookup cannot establish success. An HTTP 200 can mean submission was accepted while a transaction remains unconfirmed. The browser retains the signed bytes until the API reports every expected hash confirmed and valid. If a response is lost, Resume may need to wait until earlier transactions are indexed. A backend that omits `validContract` cannot use this confirmation shortcut, so the issuer must reconcile that attempt with chain records before replacing it.
 
 Earlier versions attested a mint through a separate child transaction carrying `ATTEST` with `d` = SAID of `{d, txHash}`. Mints and chains already built that way stay readable and recoverable, including their child transaction. An attempt prepared that way but not yet built is rejected with `RETIRED_ATTESTATION_PROFILE` (HTTP 410) before any Veridian request. The admin form then clears the saved attempt; for an initial mint, cancel the attempt to release its reservations and prepare again.
+
+An attempt prepared or anchored while `i` was still written as a plain string (before the list form) fails validation when it is built. Cancel it and prepare again.
 
 Unattested mints and zero-supply registrations keep their existing transaction paths. The old `/keri/mint-attestations/documents/{digest}` endpoints serve only legacy intent-profile records; transaction attestations do not require them.

@@ -1,5 +1,6 @@
 package org.cardanofoundation.cip113.offline;
 
+import com.bloxbean.cardano.client.metadata.MetadataList;
 import com.bloxbean.cardano.client.metadata.MetadataMap;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.cardanofoundation.cip113.model.Cip170AttestationData;
@@ -20,7 +21,9 @@ class MintAttestationMetadataTest {
                 .get(BigInteger.valueOf(170));
         assertEquals(List.of("t", "i", "v"), record.keys().stream().map(Object::toString).toList());
         assertEquals("ATTEST_TX", record.get("t"));
-        assertEquals(AID, record.get("i"));
+        var signers = (MetadataList) record.get("i");
+        assertEquals(1, signers.size());
+        assertEquals(AID, signers.getValueAt(0));
         assertEquals("1.1", ((MetadataMap) record.get("v")).get("v"));
     }
 

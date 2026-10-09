@@ -1,6 +1,7 @@
 package org.cardanofoundation.cip113.service;
 
 import com.bloxbean.cardano.client.address.Address;
+import com.bloxbean.cardano.client.metadata.MetadataList;
 import com.bloxbean.cardano.client.metadata.MetadataMap;
 import com.bloxbean.cardano.client.transaction.spec.Transaction;
 import com.bloxbean.cardano.client.transaction.util.TransactionUtil;
@@ -19,7 +20,7 @@ public final class MintAttestedTransactionValidator {
     private MintAttestedTransactionValidator() {}
 
     /**
-     * CIP-170 v1.1: the mint itself carries exactly {@code 170: {t: ATTEST_TX, i: expectedAid, v: {v: "1.1"}}}.
+     * CIP-170 v1.1: the mint itself carries exactly {@code 170: {t: ATTEST_TX, i: [expectedAid], v: {v: "1.1"}}}.
      * When {@code sealDigest} is given it must be the transaction seal over this mint's own ID.
      */
     public static String validateAttestTx(String cbor, MintAttestationRequest intent, String expectedAid,
@@ -94,7 +95,7 @@ public final class MintAttestedTransactionValidator {
             throw new IllegalArgumentException("approved recipient does not receive minted quantity");
     }
 
-    /** Exactly the ATTEST_TX record for {@code expectedAid}, committed to by the body's auxiliary-data hash. */
+    /** Exactly the ATTEST_TX record {@code i: [expectedAid]}, committed to by the body's auxiliary-data hash. */
     static void requireAttestTx(Transaction tx, String expectedAid) {
         var auxiliary = tx.getAuxiliaryData();
         if (expectedAid == null || expectedAid.isBlank())
@@ -107,7 +108,9 @@ public final class MintAttestedTransactionValidator {
         // Metadata maps are written in canonical CBOR key order, so compare key sets, not order.
         if (!Set.of("t", "i", "v").equals(root.keys().stream().map(Object::toString).collect(Collectors.toSet()))
                 || !Cip170AttestationData.ATTEST_TX.equals(root.get("t"))
-                || !expectedAid.equals(root.get("i")))
+                || !(root.get("i") instanceof MetadataList signers)
+                || signers.size() != 1
+                || !expectedAid.equals(signers.getValueAt(0)))
             throw new IllegalArgumentException("CIP-170 ATTEST_TX differs from the approving identity");
         if (!(root.get("v") instanceof MetadataMap version)
                 || !Set.of("v").equals(version.keys().stream().map(Object::toString).collect(Collectors.toSet()))

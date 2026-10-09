@@ -97,8 +97,14 @@ class MintAttestedTransactionValidatorTest {
         return tx.serializeToHex();
     }
     private static com.bloxbean.cardano.client.metadata.MetadataMap record(String t, String aid, String version) {
+        var signers = MetadataBuilder.createList(); signers.add(aid);
+        return recordWithI(t, signers, version);
+    }
+    private static com.bloxbean.cardano.client.metadata.MetadataMap recordWithI(String t, Object i, String version) {
         var v = MetadataBuilder.createMap(); v.put("v", version);
-        var r = MetadataBuilder.createMap(); r.put("t", t); r.put("i", aid); r.put("v", v);
+        var r = MetadataBuilder.createMap(); r.put("t", t); r.put("v", v);
+        if (i instanceof String text) r.put("i", text);
+        else r.put("i", (com.bloxbean.cardano.client.metadata.MetadataList) i);
         return r;
     }
 
@@ -127,6 +133,14 @@ class MintAttestedTransactionValidatorTest {
         var withSequence = record("ATTEST_TX", aid, "1.1"); withSequence.put("s", "1");
         assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
                 attestTxMint(withSequence), intent, aid, null, 2L));
+        // i must be the CIP-170 list form holding exactly the approving AID.
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(recordWithI("ATTEST_TX", aid, "1.1")), intent, aid, null, 2L));
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(recordWithI("ATTEST_TX", MetadataBuilder.createList(), "1.1")), intent, aid, null, 2L));
+        var twoSigners = MetadataBuilder.createList(); twoSigners.add(aid); twoSigners.add("E" + "c".repeat(43));
+        assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
+                attestTxMint(recordWithI("ATTEST_TX", twoSigners, "1.1")), intent, aid, null, 2L));
         String cbor = attestTxMint(record("ATTEST_TX", aid, "1.1"));
         String hash = MintAttestedTransactionValidator.validateAttestTx(cbor, intent, aid, null, 2L);
         assertThrows(IllegalArgumentException.class, () -> MintAttestedTransactionValidator.validateAttestTx(
