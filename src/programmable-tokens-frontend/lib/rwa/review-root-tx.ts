@@ -1,4 +1,5 @@
 import * as cbor from "cbor";
+import { RewardAccount } from "@evolution-sdk/evolution";
 import { getCardanoNetwork } from "../utils/network";
 import { bytesHex, computeMemberRoot, hexBytes, type MemberLeaf } from "./member-root";
 
@@ -46,8 +47,14 @@ function inlineDatumFields(output: CborMap, fieldCount: number): unknown[] {
   if (fields.length !== fieldCount) throw new Error(`Unexpected ${fieldCount}-field datum layout`);
   return fields;
 }
-function datumFields(output: CborMap): unknown[] { return inlineDatumFields(output, 14); }
-function rootFromFields(fields: unknown[]): string { return bytesHex(asBytes(fields[8], "member root")); }
+// PR #29 GlobalStateDatum: 15 fields; the frozen core is 0–4 (0 = the GS logic hash).
+const GS_FIELDS = 15;
+const GS_IDX_LOGIC = 0;
+const GS_IDX_ADMIN = 2;
+const GS_IDX_MEMBER_ROOT = 10;
+const GS_IDX_NETWORK = 13;
+function datumFields(output: CborMap): unknown[] { return inlineDatumFields(output, GS_FIELDS); }
+function rootFromFields(fields: unknown[]): string { return bytesHex(asBytes(fields[GS_IDX_MEMBER_ROOT], "member root")); }
 function assetAmount(output: CborMap, policy: string, assetName: string): number {
   const value = asArray(output.get(1), "GS value");
   const assets = asMap(value[1], "GS assets");
@@ -210,6 +217,11 @@ function assertAdminAdaOutput(value: unknown, adminHash: string, network: string
     throw new Error(`${label} ADA value must be nonnegative`);
 }
 
+/**
+ * PR #29: GlobalState is spent through the unparameterised proxy (whose redeemer is IGNORED) and
+ * governed by a withdrawal of the logic in datum field 0, which carries
+ * GlobalStateSpendRedeemer { output 0, UpdateMemberRootHash(root) }. Exactly those two redeemers.
+ */
 function checkRootRedeemer(witnesses: CborMap, inputIndex: number, root: string): void {
   const value = witnesses.get(5);
   let entries: unknown[];
@@ -222,10 +234,18 @@ function checkRootRedeemer(witnesses: CborMap, inputIndex: number, root: string)
   } else {
     entries = asArray(value, "redeemers");
   }
-  if (entries.length !== 1) throw new Error("Expected exactly one GS spending redeemer");
-  const [tag, index, data] = asArray(entries[0], "GS spending redeemer");
-  if (asInt(tag, "redeemer tag") !== 0 || asInt(index, "redeemer index") !== inputIndex)
+  if (entries.length !== 2)
+    throw new Error("Expected exactly the GS proxy spend and the GS logic withdrawal redeemers");
+  const parsed = entries.map((entry) => asArray(entry, "redeemer"));
+  const spend = parsed.filter(([tag]) => asInt(tag, "redeemer tag") === 0);
+  const reward = parsed.filter(([tag]) => asInt(tag, "redeemer tag") === 3);
+  if (spend.length !== 1 || reward.length !== 1)
+    throw new Error("Expected one spending and one reward redeemer");
+  if (asInt(spend[0][1], "redeemer index") !== inputIndex)
     throw new Error("Redeemer is not attached to the GS input");
+  if (asInt(reward[0][1], "reward redeemer index") !== 0)
+    throw new Error("The GS logic redeemer is not on the only withdrawal");
+  const data = reward[0][2];
   if (!(data instanceof cbor.Tagged) || data.tag !== 121)
     throw new Error("Unexpected GS redeemer constructor");
   const fields = asArray(data.value, "GS redeemer fields");
@@ -237,6 +257,26 @@ function checkRootRedeemer(witnesses: CborMap, inputIndex: number, root: string)
   const actionFields = asArray(action.value, "UpdateMemberRootHash fields");
   if (actionFields.length !== 1 || bytesHex(asBytes(actionFields[0], "redeemer root")) !== root)
     throw new Error("GS redeemer commits a different member root");
+}
+
+/** Exactly one withdrawal: the GS logic the LIVE datum names in field 0, for its whole reward
+ *  balance (ledger rule; read independently from Blockfrost, 404 = unregistered/empty = 0). */
+async function checkLogicWithdrawal(body: CborMap, liveFields: unknown[], network: string): Promise<void> {
+  const withdrawals = body.get(5);
+  if (!(withdrawals instanceof Map) || withdrawals.size !== 1)
+    throw new Error("Expected exactly one withdrawal: the GS logic's");
+  const [[accountValue, amountValue]] = Array.from(withdrawals.entries());
+  const account = asBytes(accountValue, "withdrawal reward account");
+  const expectedHeader = 0xf0 | (network === "mainnet" ? 1 : 0);
+  const logic = bytesHex(asBytes(liveFields[GS_IDX_LOGIC], "live GS logic hash"));
+  if (account.length !== 29 || account[0] !== expectedHeader || bytesHex(account.slice(1)) !== logic)
+    throw new Error("The withdrawal is not the live GS logic's reward account");
+  const bech32 = RewardAccount.toBech32(RewardAccount.fromHex(bytesHex(account)));
+  const response = await blockfrostResponse(`/accounts/${bech32}`, "GS logic reward account lookup");
+  const balance = response.status === 404 ? 0
+    : Number((await response.json() as { withdrawable_amount?: string }).withdrawable_amount ?? "0");
+  if (asInt(amountValue, "withdrawal amount") !== balance)
+    throw new Error("The GS logic withdrawal does not take its whole reward balance");
 }
 
 /** Refuse to ask the wallet to sign until independently sourced chain state,
@@ -264,7 +304,7 @@ export async function reviewMemberRootTransaction(args: {
   if (registeredGsPolicy !== args.gsPolicyId.toLowerCase())
     throw new Error("Selected token is registered under a different GS policy");
   const live = await chainGs(args.gsPolicyId);
-  if (asInt(live.fields[11], "GS network ID") !== networkId)
+  if (asInt(live.fields[GS_IDX_NETWORK], "GS network ID") !== networkId)
     throw new Error("Frontend network does not match the live CMTA GS network ID");
   const expectedBaseline = computeMemberRoot(args.baseline, args.tokenPolicyId, networkId);
   if (live.root !== expectedBaseline || live.root !== args.baselineRootHash.toLowerCase())
@@ -282,13 +322,15 @@ export async function reviewMemberRootTransaction(args: {
 
   const tx = txFromHex(args.unsignedCborTx);
   const body = asMap(tx[0], "transaction body");
-  const allowedFields = new Set([0, 1, 2, 3, 8, 11, 13, 14, 15, 16, 17, 18]);
+  // 5 = withdrawals: the GS logic withdrawal (PR #29). 18 = reference inputs (its script).
+  const allowedFields = new Set([0, 1, 2, 3, 5, 8, 11, 13, 14, 15, 16, 17, 18]);
   for (const field of body.keys()) if (!allowedFields.has(asInt(field, "transaction field")))
     throw new Error(`Unexpected transaction body field ${String(field)}`);
   const inputs = asArray(body.get(0), "transaction inputs");
   const inputRefs = inputs.map(inputIdentity);
   if (inputRefs.length !== 2 || !inputRefs.some((input) => inputRef(input) === live.ref))
     throw new Error("Transaction does not spend exactly the live GS UTxO and one funding input");
+  await checkLogicWithdrawal(body, live.fields, network);
   checkRootRedeemer(asMap(tx[1], "witness set"), sortedInputRefs(inputRefs).indexOf(live.ref), newRoot);
   const outputs = asArray(body.get(1), "transaction outputs");
   if (outputs.length < 1 || outputs.length > 2) throw new Error("Unexpected transaction outputs");
@@ -302,11 +344,11 @@ export async function reviewMemberRootTransaction(args: {
   const newFields = datumFields(continuing);
   if (rootFromFields(newFields) !== newRoot) throw new Error("Transaction commits a different member root");
   for (let i = 0; i < newFields.length; i++) {
-    if (i === 8) continue;
+    if (i === GS_IDX_MEMBER_ROOT) continue;
     if (!cbor.encodeCanonical(newFields[i]).equals(cbor.encodeCanonical(live.fields[i])))
       throw new Error(`Transaction changes GS field ${i}`);
   }
-  if (bytesHex(asBytes(live.fields[3], "live admin hash")) !== args.adminHash.toLowerCase())
+  if (bytesHex(asBytes(live.fields[GS_IDX_ADMIN], "live admin hash")) !== args.adminHash.toLowerCase())
     throw new Error("Connected wallet is not the current GS admin");
   const signers = asArray(body.get(14), "required signers");
   if (signers.length !== 1 || bytesHex(asBytes(signers[0], "required signer")) !== args.adminHash.toLowerCase())

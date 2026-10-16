@@ -4,11 +4,13 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { PageContainer } from "@/components/layout/page-container";
 import { Card } from "@/components/ui/card";
+import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, Plus, Trash2, ShieldCheck, ArrowLeft } from "lucide-react";
 import Link from "next/link";
+import { IssueAttestationSection } from "@/components/admin/IssueAttestationSection";
 import {
   listDenylist,
   addDenylistEntry,
@@ -105,9 +107,12 @@ export default function RwaTokenAdminPage() {
           )}
         </div>
 
-        <MemberRootHashSection policyId={policyId} />
-        <PowerUsersSection policyId={policyId} />
-        <DenylistSection policyId={policyId} />
+        <Tabs storageKey="rwa-admin-tab" items={[
+          { id: "members", label: "Members", content: <MemberRootHashSection policyId={policyId} /> },
+          { id: "attestations", label: "Attestations", content: <IssueAttestationSection policyId={policyId} /> },
+          { id: "power-users", label: "Power users", content: <PowerUsersSection policyId={policyId} /> },
+          { id: "denylist", label: "Denylist", content: <DenylistSection policyId={policyId} /> },
+        ]} />
       </div>
     </PageContainer>
   );

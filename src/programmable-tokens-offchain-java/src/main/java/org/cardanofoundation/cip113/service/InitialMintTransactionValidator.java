@@ -36,6 +36,16 @@ public final class InitialMintTransactionValidator {
                 || !Objects.equals(plan.globalStatePolicyId(), result.globalStatePolicyId()))
             throw new IllegalArgumentException("Final creation policy differs from approved policy");
         List<Transaction> chain = new ArrayList<>();
+        // Since 63fad89 the chain starts with a preGenesis tx (register + publish the GlobalState
+        // logic). Whether one is REQUIRED is decided by the persisted plan, never by the chain: a
+        // plan that carries preGenesis funding must produce one; a plan without it is pre-63fad89
+        // and must not (InitialMintAttestationStore.build refuses such plans before getting here).
+        boolean preGenesisPlan = plan.preGenesisFunding() != null && !plan.preGenesisFunding().isEmpty();
+        if (preGenesisPlan != (result.preGenesisCborHex() != null || result.preGenesisTxHash() != null))
+            throw new IllegalArgumentException(preGenesisPlan ? "Creation chain is missing its preGenesis transaction"
+                    : "Creation chain carries a preGenesis transaction its plan did not fund");
+        if (preGenesisPlan) add(chain, result.preGenesisCborHex(), result.preGenesisTxHash());
+        int genesisIndex = chain.size();
         add(chain, result.genesisCborHex(), result.genesisTxHash());
         add(chain, result.addPowerUserCborHex(), result.addPowerUserTxHash());
         add(chain, result.cmtaProvenanceCborHex(), result.cmtaProvenanceTxHash());
@@ -49,7 +59,8 @@ public final class InitialMintTransactionValidator {
         if (result.registerThirdPartyTransferLogicCborHex() != null)
             add(chain, result.registerThirdPartyTransferLogicCborHex(), result.registerThirdPartyTransferLogicTxHash());
         var bootstrap = plan.funding().getFirst();
-        if (chain.getFirst().getBody().getInputs().stream().noneMatch(input -> input.getTransactionId().equals(bootstrap.getTxHash())
+        if (preGenesisPlan) validatePreGenesis(chain.getFirst(), chain.get(genesisIndex), plan);
+        if (chain.get(genesisIndex).getBody().getInputs().stream().noneMatch(input -> input.getTransactionId().equals(bootstrap.getTxHash())
                 && input.getIndex() == bootstrap.getOutputIndex())) throw new IllegalArgumentException("Genesis does not spend pinned bootstrap");
         for (int n = 1; n < chain.size(); n++) {
             var previous = chain.get(n - 1);
@@ -58,7 +69,7 @@ public final class InitialMintTransactionValidator {
                     && input.getIndex() >= 0 && input.getIndex() < previous.getBody().getOutputs().size()))
                 throw new IllegalArgumentException("Final creation chain does not spend predecessor " + (n - 1));
         }
-        for (int n : List.of(2, 3)) {
+        for (int n : List.of(genesisIndex + 2, genesisIndex + 3)) {
             var aux = chain.get(n).getAuxiliaryData();
             if (aux == null || aux.getMetadata() == null || aux.getMetadata().get(BigInteger.valueOf(1984)) == null
                     || !Arrays.equals(aux.getAuxiliaryDataHash(), chain.get(n).getBody().getAuxiliaryDataHash()))
@@ -128,6 +139,31 @@ public final class InitialMintTransactionValidator {
         if (tx.getBody().getTtl() <= 0) throw new IllegalArgumentException("Initial mint must have finite expiry");
         MintAttestedTransactionValidator.requireAttestTx(tx, signerAid);
     }
+    /** preGenesis spends only its own funding (never a genesis input — above all never the
+     *  bootstrap), cannot outlive genesis, and carries no CIP-170 or CIP-171 metadata. */
+    private static void validatePreGenesis(Transaction preGenesis, Transaction genesis,
+                                           RwaTokenModuleHandler.GenesisPlan plan) {
+        var own = new java.util.HashSet<String>();
+        plan.preGenesisFunding().forEach(u -> own.add(u.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + u.getOutputIndex()));
+        var genesisFunding = new java.util.HashSet<String>();
+        plan.funding().forEach(u -> genesisFunding.add(u.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + u.getOutputIndex()));
+        var body = preGenesis.getBody();
+        var spent = new ArrayList<com.bloxbean.cardano.client.transaction.spec.TransactionInput>(body.getInputs());
+        if (body.getCollateral() != null) spent.addAll(body.getCollateral());
+        for (var input : spent) {
+            String ref = input.getTransactionId().toLowerCase(java.util.Locale.ROOT) + "#" + input.getIndex();
+            if (!own.contains(ref) || genesisFunding.contains(ref))
+                throw new IllegalArgumentException("preGenesis spends an input outside its own funding: " + ref);
+        }
+        long ttl = body.getTtl(), genesisTtl = genesis.getBody().getTtl();
+        if (ttl <= 0 || genesisTtl <= 0 || ttl > genesisTtl)
+            throw new IllegalArgumentException("preGenesis validity must be finite and end no later than genesis");
+        var aux = preGenesis.getAuxiliaryData();
+        if (aux != null && aux.getMetadata() != null && (aux.getMetadata().get(BigInteger.valueOf(170)) != null
+                || aux.getMetadata().get(BigInteger.valueOf(1984)) != null))
+            throw new IllegalArgumentException("preGenesis must not carry CIP-170 or CIP-171 metadata");
+    }
+
     private static boolean sameAddress(String a, String b) { return Arrays.equals(new Address(a).getBytes(), new Address(b).getBytes()); }
     private static void add(List<Transaction> chain, String cbor, String hash) throws Exception {
         if (cbor == null || hash == null) throw new IllegalArgumentException("Required creation transaction missing");

@@ -181,8 +181,11 @@ public class RwaTokenAllowlistService {
         } catch (com.bloxbean.cardano.client.exception.CborDeserializationException e) {
             throw new IllegalStateException("GS datum cannot be decoded", e);
         }
-        if (!(datum instanceof ConstrPlutusData gs) || gs.getData().getPlutusDataList().size() != 14
-                || !(gs.getData().getPlutusDataList().get(8) instanceof BytesPlutusData root)) {
+        // PR #29 v1 layout: 15 fields, member_root_hash at index 10 (see RwaTokenModuleHandler's
+        // GS_IDX_* constants, which are the source of truth for the layout).
+        if (!(datum instanceof ConstrPlutusData gs) || gs.getAlternative() != 0
+                || gs.getData().getPlutusDataList().size() != 15
+                || !(gs.getData().getPlutusDataList().get(10) instanceof BytesPlutusData root)) {
             throw new IllegalStateException("GS datum has an unexpected layout");
         }
         return root.getValue();

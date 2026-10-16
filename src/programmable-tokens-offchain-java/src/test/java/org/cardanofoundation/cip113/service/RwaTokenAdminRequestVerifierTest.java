@@ -335,6 +335,28 @@ class RwaTokenAdminRequestVerifierTest {
                 + mustContain + "' but got: " + error.getReason());
     }
 
+    /** PR #29: publish-gs-logic and rotate-gs-logic/register record pending registry state, so
+     *  they are admin-signed — the signed-request path allow-list must admit them, and nothing else. */
+    private static String gsLogicPayload(String path) {
+        return RwaTokenAdminRequestVerifier.payload("preview", "cd".repeat(28), "POST", path,
+                "payer=x\ncap=4096\n", "11".repeat(32), 1, 2);
+    }
+
+    @Test
+    void admitsTheGsLogicAdminPaths() {
+        String policy = "ab".repeat(28);
+        assertTrue(gsLogicPayload("/rwa-token/" + policy + "/publish-gs-logic").contains("/publish-gs-logic\n"));
+        assertTrue(gsLogicPayload("/rwa-token/" + policy + "/rotate-gs-logic/register").contains("/rotate-gs-logic/register\n"));
+    }
+
+    @Test
+    void stillRefusesEveryOtherGsLogicPath() {
+        String policy = "ab".repeat(28);
+        assertThrows(ResponseStatusException.class, () -> gsLogicPayload("/rwa-token/" + policy + "/rotate-gs-logic"));
+        assertThrows(ResponseStatusException.class, () -> gsLogicPayload("/rwa-token/" + policy + "/lock-upgrades"));
+        assertThrows(ResponseStatusException.class, () -> gsLogicPayload("/rwa-token/" + policy + "/publish-gs-logic/../members"));
+    }
+
     private static void assertStatus(HttpStatus status, Runnable task) {
         ResponseStatusException error = assertThrows(ResponseStatusException.class, task::run);
         assertEquals(status, error.getStatusCode());

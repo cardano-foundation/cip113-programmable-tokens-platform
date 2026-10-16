@@ -61,6 +61,8 @@ public class RwaTokenCreationService {
             throw new BuildFailed(result.error() == null ? "chain build failed" : result.error());
         var meta = result.metadata();
         List<String> txs = new ArrayList<>();
+        // preGenesis FIRST: genesis spends its change, so the audit below must have seen its outputs.
+        if (meta.preGenesisCborHex() != null) txs.add(meta.preGenesisCborHex());
         txs.add(meta.genesisCborHex());
         txs.add(meta.addPowerUserCborHex());
         txs.add(meta.cmtaProvenanceCborHex());
@@ -71,8 +73,13 @@ public class RwaTokenCreationService {
         if (meta.registerTransferLogicCborHex() != null) txs.add(meta.registerTransferLogicCborHex());
         if (meta.registerThirdPartyTransferLogicCborHex() != null)
             txs.add(meta.registerThirdPartyTransferLogicCborHex());
-        Set<String> pinned = plan == null ? null : plan.funding().stream()
-                .map(u -> ref(u.getTxHash(), u.getOutputIndex())).collect(java.util.stream.Collectors.toSet());
+        Set<String> pinned = null;
+        if (plan != null) {
+            pinned = plan.funding().stream().map(u -> ref(u.getTxHash(), u.getOutputIndex()))
+                    .collect(java.util.stream.Collectors.toCollection(HashSet::new));
+            if (plan.preGenesisFunding() != null)
+                for (var u : plan.preGenesisFunding()) pinned.add(ref(u.getTxHash(), u.getOutputIndex()));
+        }
         reserveExternalWalletInputs(txs, request.getFeePayerAddress(), meta.globalStatePolicyId(), pinned);
         return meta;
     }

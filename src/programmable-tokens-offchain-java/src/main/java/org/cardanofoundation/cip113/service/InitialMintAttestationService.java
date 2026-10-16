@@ -93,6 +93,11 @@ public class InitialMintAttestationService {
         Instant genesisDeadline = mints.targetDeadline(Transaction.deserialize(
                 HexUtil.decodeHexString(preview.prefix().genesisCborHex())));
         if (genesisDeadline.isBefore(mintDeadline)) mintDeadline = genesisDeadline;
+        if (preview.prefix().preGenesisCborHex() != null) {
+            Instant preGenesisDeadline = mints.targetDeadline(Transaction.deserialize(
+                    HexUtil.decodeHexString(preview.prefix().preGenesisCborHex())));
+            if (preGenesisDeadline.isBefore(mintDeadline)) mintDeadline = preGenesisDeadline;
+        }
         if (!mintDeadline.isAfter(Instant.now().plusSeconds(120)))
             throw new IllegalArgumentException("Initial mint transaction validity is too short for Veridian approval; prepare a new registration");
         var intent = new MintAttestationIntentEntity();
@@ -225,11 +230,18 @@ public class InitialMintAttestationService {
         if (!mints.targetDeadline(Transaction.deserialize(HexUtil.decodeHexString(prefix.genesisCborHex())))
                 .isAfter(Instant.now().plusSeconds(120)))
             throw new IllegalStateException("Frozen genesis is near expiry; prepare a new registration");
+        // The chain's FIRST tx: preGenesis must still be able to land before anything else is signed.
+        if (prefix.preGenesisCborHex() != null && !mints.targetDeadline(Transaction.deserialize(
+                HexUtil.decodeHexString(prefix.preGenesisCborHex()))).isAfter(Instant.now().plusSeconds(120)))
+            throw new IllegalStateException("Frozen preGenesis is near expiry; prepare a new registration");
         long magic = mints.networkMagic();
         if (!Objects.equals(intent.getDigest(), TxAttestationSeal.digest(prefix.registrationTxHash(), magic))
                 || !Objects.equals(intent.getDocumentJson(), Serder.dumps(TxAttestationSeal.signed(prefix.registrationTxHash(), magic))))
             throw new IllegalStateException("Saved creation approval payload differs from frozen mint hash");
         var plan = mapper.readValue(intent.getInitialPlanJson(), RwaTokenModuleHandler.GenesisPlan.class);
+        // Before the generic "settings differ" wrapper below, which would hide the real reason.
+        if (plan.preGenesisFunding() == null || plan.preGenesisFunding().isEmpty())
+            throw new IllegalStateException(RwaTokenModuleHandler.PRE_63FAD89_PLAN);
         var registration = mapper.readValue(intent.getInitialRegistrationJson(), RwaTokenRegisterRequest.class);
         var params = protocols.resolve(mints.fields(intent).protocolTxHash());
         if (params == null || !Objects.equals(params.txHash(), mints.fields(intent).protocolTxHash()))
@@ -259,6 +271,7 @@ public class InitialMintAttestationService {
         if (!Set.of("BUILT", "ARCHIVED_EXPIRED").contains(i.getStatus())) return Map.of();
         var c = store.chain(i);
         Map<String, String> hashes = new LinkedHashMap<>();
+        if (c.preGenesisTxHash() != null) hashes.put("preGenesis", c.preGenesisTxHash());
         hashes.put("genesis", c.genesisTxHash()); hashes.put("addPowerUser", c.addPowerUserTxHash());
         hashes.put("cmtaProvenance", c.cmtaProvenanceTxHash()); hashes.put("issuanceProvenance", c.issuanceProvenanceTxHash());
         if (c.publishScriptsTxHash() != null) hashes.put("publishScripts", c.publishScriptsTxHash());

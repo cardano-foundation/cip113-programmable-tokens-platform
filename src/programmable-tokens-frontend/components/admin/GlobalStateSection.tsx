@@ -39,7 +39,13 @@ import {
   submitTokenChain,
   parseSubmitChainFailure,
   getRwaTokenGlobalState,
+  buildPublishGsLogicTx,
+  buildRegisterGsLogicTx,
+  buildRotateGsLogicTx,
+  buildLockUpgradesTx,
+  gsLogicAdminBody,
   type GsChangeSpec,
+  type RwaGsLogicStatus,
   type SubmitChainPartialFailure,
 } from "@/lib/api/rwa-token";
 import { useProtocolVersion } from "@/contexts/protocol-version-context";
@@ -48,6 +54,7 @@ import { getExplorerTxUrl } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 import type { GlobalStateAction, GlobalStateData } from "@/types/compliance";
 import { logError } from '@/lib/utils/error-message';
+import { signRwaAdminRequest } from "@/lib/rwa/admin-auth";
 
 interface GlobalStateSectionProps {
   tokens: AdminTokenInfo[];
@@ -612,7 +619,7 @@ function RwaTokenGlobalStatePanel({
   adminAddress,
   signingEntityVkey,
 }: { policyId: string; adminAddress: string; signingEntityVkey: string | null }) {
-  const { wallet } = useWallet();
+  const { wallet, rawApi } = useWallet();
   const { toast: showToast } = useToast();
 
   // On-chain (source of truth on load + after Refresh / save)
@@ -632,6 +639,9 @@ function RwaTokenGlobalStatePanel({
     mintingScriptCredentialHash: string | null;
     /** One-way: once locked, neither the authority nor the transfer logic can change. */
     upgradesLocked: boolean;
+    /** PR #29: the GlobalState logic in force, its cap, and whether its reference script is published. */
+    gsLogic: RwaGsLogicStatus | null;
+    globalStatePolicyId: string | null;
   } | null>(null);
 
   // Editable mirror — initialised from on-chain, modified by user
@@ -674,6 +684,8 @@ function RwaTokenGlobalStatePanel({
         upgradesLocked: gs.upgradesLocked ?? false,
         trustedEntityVkeys: gs.trustedEntityVkeys ?? [],
         adminCredentialHash: gs.adminCredentialHash ?? null,
+        gsLogic: gs.gsLogic ?? null,
+        globalStatePolicyId: gs.globalStatePolicyId ?? null,
       };
       setOnchain(next);
       // Reset editable mirror to chain values
@@ -930,6 +942,11 @@ function RwaTokenGlobalStatePanel({
   const MINTING_HASH_RE = /^[0-9a-f]{56}$/;
   const newMintingScriptValid = MINTING_HASH_RE.test(newMintingScript.trim().toLowerCase());
 
+  /** The only authority the backend accepts: this token's own derivation (Addendum I6). */
+  const derivedAuthority = onchain?.gsLogic?.derivedMintingAuthorityHash ?? null;
+  const authorityIsDerived = !!derivedAuthority
+    && derivedAuthority === (onchain?.mintingScriptCredentialHash ?? "").toLowerCase();
+
   const handleRotateMintingScript = async () => {
     if (!newMintingScriptValid) return;
     const ok = await runChain(
@@ -953,17 +970,124 @@ function RwaTokenGlobalStatePanel({
   // logic) in one flag that no branch ever clears. Own control, own confirmation.
   const [showLockUpgrades, setShowLockUpgrades] = useState(false);
   const [lockConfirm, setLockConfirm] = useState("");
-  const LOCK_PHRASE = "LOCK UPGRADES";
+  /** The confirmation is the token's policy id itself — the backend checks it too. */
+  const LOCK_PHRASE = policyId;
+  const [lockPlan, setLockPlan] = useState<{ unsignedCborTx: string; warnings: string[] } | null>(null);
+
+  /** Sign one admin transaction with the connected wallet and submit it. */
+  const runSingleTx = async (unsignedCborTx: string, successTitle: string): Promise<boolean> => {
+    if (!wallet) { setError("Connect a wallet first"); return false; }
+    try {
+      const signed = await wallet.signTx(unsignedCborTx, true);
+      const submit = await submitTokenChain([signed]);
+      if (submit.error) throw new Error(submit.error);
+      setSubmittedHashes(submit.txHashes);
+      showToast({ title: successTitle, description: "1 transaction submitted", variant: "success" });
+      setTimeout(() => { refresh(); }, 10_000);
+      return true;
+    } catch (e) {
+      const failure = parseSubmitChainFailure(e);
+      setError(failure.error);
+      showToast({ title: "Submit failed", description: failure.error, variant: "error" });
+      return false;
+    }
+  };
+
+  /** Step 1 of locking: the backend runs the pre-lock checks and returns warnings to read first. */
+  const handlePrepareLock = async () => {
+    if (lockConfirm.trim().toLowerCase() !== LOCK_PHRASE.toLowerCase()) return;
+    setBusy(true); setError(null);
+    try {
+      setLockPlan(await buildLockUpgradesTx(policyId, adminAddress, lockConfirm.trim()));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleLockUpgrades = async () => {
-    if (lockConfirm.trim() !== LOCK_PHRASE) return;
-    const ok = await runChain(
-      [{ spec: { action: "LockUpgrades" }, label: "Lock upgrades permanently (irreversible)" }],
-      "Upgrades locked permanently",
-    );
+    if (!lockPlan) return;
+    setBusy(true);
+    const ok = await runSingleTx(lockPlan.unsignedCborTx, "Upgrades locked permanently");
+    setBusy(false);
     if (ok) {
       setShowLockUpgrades(false);
       setLockConfirm("");
+      setLockPlan(null);
+    }
+  };
+
+  // ── PR #29: GlobalState logic — publish, supply headroom, rotate to a new datum cap ──
+  const gsLogic = onchain?.gsLogic ?? null;
+  /** The publish and register endpoints RECORD pending state, so the live GS admin authorises
+   *  each call with a CIP-30 signed request (the same mechanism as the members flow). */
+  const adminHeaders = async (path: string, key: "logic" | "cap", value: string) => {
+    if (!rawApi || !onchain?.globalStatePolicyId || !onchain.adminCredentialHash)
+      throw new Error("Connect the GS admin wallet first");
+    return signRwaAdminRequest({ rawApi, policyId, gsPolicyId: onchain.globalStatePolicyId,
+      adminHash: onchain.adminCredentialHash, method: "POST", path,
+      canonicalBody: gsLogicAdminBody(adminAddress, key, value) });
+  };
+  const handlePublishGsLogic = async () => {
+    setBusy(true); setError(null);
+    try {
+      const headers = await adminHeaders(`/rwa-token/${policyId}/publish-gs-logic`, "logic", "-");
+      const { unsignedCborTx } = await buildPublishGsLogicTx(policyId, adminAddress, headers);
+      await runSingleTx(unsignedCborTx, "GlobalState logic published");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const [newMintable, setNewMintable] = useState("");
+  const newMintableValid = /^[0-9]+$/.test(newMintable.trim())
+    && BigInt(newMintable.trim()) <= 9223372036854775807n
+    // Numerically, so "007" over an on-chain 7 is not a (paid, no-op) change.
+    && (onchain?.mintableAmount == null || BigInt(newMintable.trim()) !== BigInt(onchain.mintableAmount));
+  const handleSetMintable = async () => {
+    if (!newMintableValid) return;
+    const ok = await runChain([{ spec: { action: "SetMintableAmount", newMintableAmount: newMintable.trim() },
+      label: `Set the remaining mintable amount to ${newMintable.trim()}` }], "Mintable amount updated");
+    if (ok) setNewMintable("");
+  };
+
+  const [newCap, setNewCap] = useState("");
+  const [rotationStatus, setRotationStatus] = useState<string | null>(null);
+  /** The target logic step 1 returned (derived by the backend from the token + new cap). */
+  const [rotationTarget, setRotationTarget] = useState<{ cap: number; logicHash: string } | null>(null);
+  const newCapNumber = Number(newCap);
+  const minCap = gsLogic ? gsLogic.datumBytes + gsLogic.headroomBytes : 0;
+  const newCapValid = !!gsLogic && Number.isInteger(newCapNumber) && newCapNumber >= minCap
+    && newCapNumber <= gsLogic.maxCapLimit && newCapNumber !== gsLogic.maxDatumBytes;
+  const rotationStep = async (step: 1 | 2 | 3) => {
+    if (!newCapValid) return;
+    setBusy(true); setError(null);
+    try {
+      if (step === 1) {
+        const headers = await adminHeaders(`/rwa-token/${policyId}/rotate-gs-logic/register`, "cap", String(newCapNumber));
+        const r = await buildRegisterGsLogicTx(policyId, adminAddress, newCapNumber, headers);
+        setRotationTarget({ cap: newCapNumber, logicHash: r.logicHash });
+        if (r.alreadyRegistered || !r.unsignedCborTx) setRotationStatus(`Step 1 done: ${r.logicHash.slice(0, 12)}… is already registered`);
+        else if (await runSingleTx(r.unsignedCborTx, "New GlobalState logic registered"))
+          setRotationStatus("Step 1 submitted — wait for it to confirm, then publish (step 2)");
+      } else if (step === 2) {
+        if (!rotationTarget || rotationTarget.cap !== newCapNumber)
+          throw new Error("Run step 1 (register) for this cap first");
+        const headers = await adminHeaders(`/rwa-token/${policyId}/publish-gs-logic`, "logic", rotationTarget.logicHash);
+        const { unsignedCborTx } = await buildPublishGsLogicTx(policyId, adminAddress, headers, rotationTarget.logicHash);
+        if (await runSingleTx(unsignedCborTx, "New GlobalState logic published"))
+          setRotationStatus("Step 2 submitted — wait for it to confirm, then rotate (step 3)");
+      } else {
+        const { unsignedCborTx } = await buildRotateGsLogicTx(policyId, adminAddress, newCapNumber);
+        if (await runSingleTx(unsignedCborTx, "GlobalState logic rotated")) { setRotationStatus(null); setNewCap(""); }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1241,9 +1365,32 @@ function RwaTokenGlobalStatePanel({
         {senderKycChanged && <p className="mt-1 text-xs text-amber-400">Will submit: SetRequiresSenderKyc</p>}
       </div>
 
-      {/* mintable_amount (read-only — there's no direct update action) */}
-      <ReadOnlyField label="mintable_amount (no direct update — decremented by MintSecurity)"
-                     value={String(onchain.mintableAmount)} />
+      {/* mintable_amount — SetMintableAmount. It must be the ONLY change in its transaction, so it
+          has its own Update button instead of joining the save below. */}
+      {onchain.upgradesLocked ? (
+        <ReadOnlyField label="Mintable amount (final — upgrades are locked)" value={String(onchain.mintableAmount)} />
+      ) : (
+        <div>
+          <label htmlFor="rwa-mintable-amount" className="block text-sm font-medium text-white mb-2">
+            Mintable amount
+          </label>
+          <div className="flex items-center gap-2">
+            <input id="rwa-mintable-amount" type="text" inputMode="numeric" value={newMintable}
+              onChange={(e) => setNewMintable(e.target.value)}
+              placeholder={String(onchain.mintableAmount)}
+              className="w-full px-3 py-2 rounded bg-black/40 border border-white/15 text-sm font-mono" />
+            <Button type="button" variant="outline" size="sm" onClick={handleSetMintable}
+              disabled={busy || !newMintableValid}>Update</Button>
+          </div>
+          <p className="text-xs text-white/60 mt-1">
+            Current: {onchain.mintableAmount}. This is the REMAINING headroom (absolute, not a delta and not total
+            supply); mints lower it, burns raise it.
+            {gsLogic?.circulatingSupply != null && <> Circulating supply: {gsLogic.circulatingSupply}
+              {newMintableValid && <> → max total = {(BigInt(gsLogic.circulatingSupply) + BigInt(newMintable.trim())).toString()}</>}.</>}
+            {" "}Submitted on its own transaction.
+          </p>
+        </div>
+      )}
 
       {/* security_info */}
       <div>
@@ -1707,33 +1854,21 @@ function RwaTokenGlobalStatePanel({
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => setShowRotateMinting(true)}
-            disabled={busy}
+            onClick={() => { setNewMintingScript(derivedAuthority ?? ""); setShowRotateMinting(true); }}
+            disabled={busy || !derivedAuthority || authorityIsDerived}
+            title={authorityIsDerived ? "The installed authority is already this token's own" : undefined}
           >
-            Rotate the minting authority…
+            {authorityIsDerived ? "Minting authority is this token's own" : "Rotate to this token's own minting authority…"}
           </Button>
         ) : (
           <div className="p-4 rounded-lg border border-white/15 bg-white/5 space-y-3">
             <p className="text-xs text-amber-300">
-              This is not verified on chain. The proxy checks only that the script you name
-              here withdraws — it cannot check that the script actually enforces anything.
-              Pointing it at any other withdraw-capable script in this deployment silently
-              disables every mint control, and the failure is silent and fails OPEN. After
-              rotating, confirm that a mint lacking a power-user signature is REJECTED, for
-              all five power-user roles.
+              Only this token&apos;s own minting authority — derived from its parameters — can be
+              installed: the chain checks nothing about the target beyond &quot;it withdraws&quot;, so any
+              other script could silently disable every mint control. This restores it after a
+              rotation made outside this platform.
             </p>
-            <input
-              type="text"
-              value={newMintingScript}
-              onChange={(e) => setNewMintingScript(e.target.value)}
-              placeholder="new minting authority script hash (56 hex chars)"
-              className="w-full px-3 py-2 rounded bg-black/40 border border-white/15 text-sm font-mono"
-            />
-            {newMintingScript.trim() !== "" && !newMintingScriptValid && (
-              <p className="text-xs text-red-400">
-                Must be exactly 56 lower-case hex characters (a 28-byte script hash).
-              </p>
-            )}
+            <p className="text-xs text-white/60 font-mono break-all">target: {newMintingScript}</p>
             <div className="flex items-center gap-2">
               <Button
                 type="button"
@@ -1757,6 +1892,59 @@ function RwaTokenGlobalStatePanel({
           </div>
         )}
       </div>
+
+      {lockPlan && lockPlan.warnings.length > 0 && (
+        <div className="p-3 rounded-lg border border-amber-500/40 bg-amber-500/10 space-y-1">
+          <p className="text-xs font-medium text-amber-200">Read before locking:</p>
+          {lockPlan.warnings.map((w) => <p key={w} className="text-xs text-amber-200">• {w}</p>)}
+        </div>
+      )}
+
+      {/* ── PR #29: GlobalState logic & supply cap ────────────────────────── */}
+      {gsLogic && (
+        <div className="pt-4 border-t border-white/10 space-y-3">
+          <span className="text-sm font-medium text-white/80">GlobalState logic &amp; supply cap</span>
+          <p className="text-xs text-white/40 font-mono break-all">
+            logic: {gsLogic.logicHash} · datum {gsLogic.datumBytes} B of {gsLogic.maxDatumBytes ?? "?"} B
+          </p>
+          {!gsLogic.logicKnown && <p className="text-xs text-red-400">
+            This GlobalState names a logic this platform did not build; every write is refused.</p>}
+          {gsLogic.logicKnown && !gsLogic.logicRefPublished && (
+            <div className="p-3 rounded-lg border border-amber-500/40 bg-amber-500/10 space-y-2">
+              <p className="text-xs text-amber-200">
+                Publish the GlobalState logic before the first GlobalState change. Its ≈25 ADA reference
+                output is locked <strong>permanently</strong> at an unspendable address, so no wallet sweep
+                can ever break GlobalState writes.
+              </p>
+              <Button type="button" variant="outline" size="sm" onClick={handlePublishGsLogic} disabled={busy}>
+                Publish GlobalState logic (≈25 ADA, locked permanently)
+              </Button>
+            </div>
+          )}
+          {!onchain?.upgradesLocked && gsLogic.logicKnown && (
+            <div className="space-y-2">
+              <p className="text-xs text-white/60">
+                Rotate the GlobalState logic to a different datum cap: three admin transactions (register,
+                publish, rotate), each confirmed before the next. The new cap must be between {minCap} and{" "}
+                {gsLogic.maxCapLimit} bytes{gsLogic.maxDatumBytes === gsLogic.maxCapLimit
+                  ? " — this token is already at the maximum, so it can only move to a SMALLER cap" : ""}.
+              </p>
+              <input type="number" value={newCap} onChange={(e) => setNewCap(e.target.value)}
+                placeholder={`new cap (${minCap}–${gsLogic.maxCapLimit})`}
+                className="w-full px-3 py-2 rounded bg-black/40 border border-white/15 text-sm font-mono" />
+              <div className="flex items-center gap-2">
+                {[1, 2, 3].map((n) => (
+                  <Button key={n} type="button" variant="outline" size="sm" disabled={busy || !newCapValid}
+                    onClick={() => rotationStep(n as 1 | 2 | 3)}>
+                    {n === 1 ? "1. Register" : n === 2 ? "2. Publish (≈25 ADA, locked)" : "3. Rotate"}
+                  </Button>
+                ))}
+              </div>
+              {rotationStatus && <p className="text-xs text-white/60">{rotationStatus}</p>}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Danger zone — lock upgrades ───────────────────────────────────── */}
       {!onchain?.upgradesLocked && (
@@ -1789,7 +1977,7 @@ function RwaTokenGlobalStatePanel({
                 decommissioning it. Lock only when the deployment is final.
               </p>
               <label className="block text-xs text-white/60">
-                Type <span className="font-mono font-semibold">{LOCK_PHRASE}</span> to confirm:
+                Type this token&apos;s policy id <span className="font-mono font-semibold break-all">{LOCK_PHRASE}</span> to confirm:
               </label>
               <input
                 type="text"
@@ -1799,21 +1987,34 @@ function RwaTokenGlobalStatePanel({
                 className="w-full px-3 py-2 rounded bg-black/40 border border-red-500/40 text-sm font-mono"
               />
               <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="sm"
-                  onClick={handleLockUpgrades}
-                  disabled={busy || lockConfirm.trim() !== LOCK_PHRASE}
-                  className="bg-red-600 hover:bg-red-500"
-                >
-                  Lock upgrades permanently
-                </Button>
+                {!lockPlan ? (
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    onClick={handlePrepareLock}
+                    disabled={busy || lockConfirm.trim().toLowerCase() !== LOCK_PHRASE.toLowerCase()}
+                    className="bg-red-600 hover:bg-red-500"
+                  >
+                    Check and prepare the lock
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    onClick={handleLockUpgrades}
+                    disabled={busy}
+                    className="bg-red-600 hover:bg-red-500"
+                  >
+                    Sign and lock upgrades permanently
+                  </Button>
+                )}
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
-                  onClick={() => { setShowLockUpgrades(false); setLockConfirm(""); }}
+                  onClick={() => { setShowLockUpgrades(false); setLockConfirm(""); setLockPlan(null); }}
                   disabled={busy}
                 >
                   Cancel

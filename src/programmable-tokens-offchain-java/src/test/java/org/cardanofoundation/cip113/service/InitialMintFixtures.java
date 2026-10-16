@@ -23,8 +23,21 @@ final class InitialMintFixtures {
     /** Preview network magic, matching {@link #fields}. */
     static final long MAGIC = 2L;
     static final Cip68Metadata METADATA = new Cip68Metadata("Initial", "First mint", "INI", 0, null, null);
+    /** The wallet output that funds the preGenesis tx (since 63fad89), disjoint from genesis funding. */
+    static final String PRE_GENESIS_FUNDING = "1b".repeat(32);
     static RwaTokenModuleHandler.GenesisPlan plan() { return new RwaTokenModuleHandler.GenesisPlan(GS, POLICY,
+            List.of(Utxo.builder().txHash(BOOTSTRAP).outputIndex(0).address(PAYER).amount(List.of(Amount.ada(100))).build()),
+            List.of(Utxo.builder().txHash(PRE_GENESIS_FUNDING).outputIndex(0).address(PAYER).amount(List.of(Amount.ada(50))).build())); }
+    /** A plan persisted before 63fad89: no preGenesis funding. */
+    static RwaTokenModuleHandler.GenesisPlan legacyPlan() { return new RwaTokenModuleHandler.GenesisPlan(GS, POLICY,
             List.of(Utxo.builder().txHash(BOOTSTRAP).outputIndex(0).address(PAYER).amount(List.of(Amount.ada(100))).build())); }
+    /** Genesis: spends the bootstrap AND the preGenesis change (output 0). */
+    static Transaction genesisTx(Transaction preGenesis) throws Exception {
+        var g = tx(BOOTSTRAP, false);
+        g.getBody().setInputs(new ArrayList<>(List.of(g.getBody().getInputs().getFirst(),
+                TransactionInput.builder().transactionId(hash(preGenesis)).index(0).build())));
+        return g;
+    }
     static MintAttestationRequest fields(boolean cip68) { return new MintAttestationRequest("session", "preview", DEPLOYMENT,
             POLICY, cip68 ? Cip68.labeledAssetName(Cip68.uncappedUserTokenLabel(), ASSET) : ASSET, "10", PAYER, PAYER, DEST); }
     static RwaTokenRegisterRequest registration(boolean cip68) { return RwaTokenRegisterRequest.builder().moduleId("rwa-token")
@@ -89,6 +102,16 @@ final class InitialMintFixtures {
     }
     /** An ATTEST_TX creation: the certificate transaction spends the registration's reserved output 0. */
     static RwaTokenModuleHandler.ChainBuildResult chain(boolean cip68) throws Exception {
+        var pre = tx(PRE_GENESIS_FUNDING, false);
+        var g = genesisTx(pre); var p = tx(hash(g), false); var c = tx(hash(p), true); var i = tx(hash(c), true);
+        var r = attestedRegistrationTx(hash(i), cip68); var cert = tx(hash(r), false);
+        return new RwaTokenModuleHandler.ChainBuildResult(g.serializeToHex(), p.serializeToHex(), c.serializeToHex(), i.serializeToHex(), null,
+                r.serializeToHex(), null, cert.serializeToHex(), null, GS, POLICY, "19".repeat(28), "1a".repeat(28),
+                hash(g), hash(p), hash(c), hash(i), null, hash(r), null, hash(cert), null,
+                pre.serializeToHex(), hash(pre));
+    }
+    /** The pre-63fad89 ATTEST_TX chain (no preGenesis), as frozen rows from before the pin store it. */
+    static RwaTokenModuleHandler.ChainBuildResult chainWithoutPreGenesis(boolean cip68) throws Exception {
         var g = tx(BOOTSTRAP, false); var p = tx(hash(g), false); var c = tx(hash(p), true); var i = tx(hash(c), true);
         var r = attestedRegistrationTx(hash(i), cip68); var cert = tx(hash(r), false);
         return new RwaTokenModuleHandler.ChainBuildResult(g.serializeToHex(), p.serializeToHex(), c.serializeToHex(), i.serializeToHex(), null,

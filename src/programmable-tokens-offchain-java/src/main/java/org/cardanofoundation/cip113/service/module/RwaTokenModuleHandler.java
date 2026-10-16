@@ -18,6 +18,7 @@ import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.MapPlutusData;
 import com.bloxbean.cardano.client.plutus.spec.PlutusData;
 import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
+import com.bloxbean.cardano.client.plutus.spec.PlutusV3Script;
 import com.bloxbean.cardano.client.metadata.MetadataBuilder;
 import com.bloxbean.cardano.client.metadata.MetadataList;
 import com.bloxbean.cardano.client.plutus.spec.Redeemer;
@@ -46,6 +47,7 @@ import org.cardanofoundation.cip113.entity.RwaTokenPowerUserEntity;
 import org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity;
 import org.cardanofoundation.cip113.model.BurnTokenRequest;
 import org.cardanofoundation.cip113.model.CmtaAttestation;
+import org.cardanofoundation.cip113.model.GsLogicEntry;
 import org.cardanofoundation.cip113.model.MintTokenRequest;
 import org.cardanofoundation.cip113.model.RwaTokenRegisterRequest;
 import org.cardanofoundation.cip113.model.TransactionContext;
@@ -236,6 +238,22 @@ public class RwaTokenModuleHandler
 
     /** Asset name of the marker — {@code "REF"}, hex-encoded. */
     private static final String REF_SCRIPT_MARKER_ASSET_NAME_HEX = "524546";
+
+    /**
+     * Enterprise address of {@code ScriptAny []} — "any one of no conditions", which nothing can
+     * satisfy — so an output there can never be spent (plan Addendum I10, user decision). The
+     * GlobalState LOGIC reference script lives here: if it were spendable, an accidental spend
+     * (a wallet's coin selection, a "recover my ADA" sweep) would stall every GlobalState write
+     * until it was republished. The ≈25 ADA it carries is therefore locked permanently.
+     */
+    String unspendableRefScriptAddress() {
+        try {
+            var never = new com.bloxbean.cardano.client.transaction.spec.script.ScriptAny();
+            return AddressProvider.getEntAddress(never, network.getCardanoNetwork()).getAddress();
+        } catch (Exception e) {
+            throw new IllegalStateException("could not derive the always-fail reference-script address", e);
+        }
+    }
 
     /** Minting policy for the marker: a native script requiring the fee payer's own
      *  payment key. That key already signs the publish transaction (it spends the
@@ -443,8 +461,25 @@ public class RwaTokenModuleHandler
             // touches nearly all of it: the proxy and authority both withdraw, the
             // transfer and third-party scripts go into the registry node, and the GS
             // spend script is needed when the registration carries a first mint.
+            // The token's own genesis cap, never the default: the GS logic (and the GS mint policy
+            // it is checked against) is parameterised on it.
+            var capRow = registrationRepository.findByGlobalStatePolicyId(gsPolicy);
+            int genesisCap;
+            if (capRow.isPresent()) {
+                genesisCap = genesisCapOf(capRow.get());
+            } else if (context.getGlobalStateInitTxInput() != null
+                    && gsPolicy.equals(scriptBuilder.buildGlobalStateMintScript(context.getGlobalStateInitTxInput(),
+                            RwaTokenScriptBuilderService.DEFAULT_MAX_GS_DATUM_BYTES).getPolicyId())) {
+                genesisCap = RwaTokenScriptBuilderService.DEFAULT_MAX_GS_DATUM_BYTES;
+            } else {
+                // Fail closed: a guessed cap would derive a different logic than the one deployed.
+                return TransactionContext.typedError("cannot determine this token's GlobalState datum cap: "
+                        + "no registration row for GlobalState policy " + gsPolicy
+                        + " and the default cap does not reproduce it");
+            }
             RwaTokenScriptBuilderService.RwaTokenScripts scripts = scriptBuilder.resolveScripts(
-                    securityAssetNameHex, gsPolicy, puPolicy, context.getDenylistPolicyId(), protocolParams);
+                    securityAssetNameHex, gsPolicy, puPolicy, context.getDenylistPolicyId(), protocolParams,
+                    genesisCap);
             PlutusScript mintingLogicScript = scripts.mintingLogicProxy();
             PlutusScript mintingAuthorityScript = scripts.mintingAuthority();
             PlutusScript transferLogicScript = scripts.transferLogic();
@@ -784,7 +819,8 @@ public class RwaTokenModuleHandler
             byte[] mintPuNodeKey = null;            // its linked-list node key (= what must sign)
             Utxo mintDenylistNode = null;           // denylist-absence covering element for the recipient
             PlutusData mintNewGsDatum = null;       // GS datum with mintable_amount decremented
-            PlutusScript mintGsSpendScript = null;
+            GsWitness mintGsWitness = null;
+            CoreWithdrawal mintGsLogicWithdrawal = null;
             Long mintCurrentMintable = null;
             boolean mintNeedsRecipientProof = false;
             String mintMpfProofCborHex = null;
@@ -850,7 +886,15 @@ public class RwaTokenModuleHandler
                 mintCurrentMintable = ((BigIntPlutusData) gsFields.get(GS_IDX_MINTABLE_AMOUNT))
                         .getValue().longValueExact();
                 mintNewGsDatum = applyMintableDelta(gsFields, -mintQuantity.longValueExact());
-                mintGsSpendScript = scripts.globalStateSpend();
+                // The registration chain is the one path that may spend against a logic whose
+                // reference script is still PENDING (published earlier in the same chain).
+                if (reg == null) {
+                    return TransactionContext.typedError(
+                            "registration with a first mint needs the genesis registration row");
+                }
+                mintGsWitness = gsWitness(reg, gsFields, false);
+                requireDatumWithinCap(gsUtxoForRegistration, mintNewGsDatum, mintGsWitness.entry(),
+                        "registration mint");
 
                 // Receiver-KYC gate, identical to the steady-state mint (D1): the proof is
                 // only consulted when GS.requires_receiver_kyc AND the receiver is not the
@@ -940,7 +984,7 @@ public class RwaTokenModuleHandler
             // fits, because a standalone registration is structural.
             PublishedRefScripts publishedRefScripts = chained != null && chained.refScripts() != null
                     ? chained.refScripts()
-                    : new PublishedRefScripts(null, null, null, null, null, null);
+                    : new PublishedRefScripts(null, null, null, null, null, null, null);
             List<Utxo> refScriptUtxosInUse = new ArrayList<>();
             List<PlutusScript> refScriptsInUse = new ArrayList<>();
             if (publishedRefScripts.mintingAuthorityRefUtxo() != null) {
@@ -960,17 +1004,17 @@ public class RwaTokenModuleHandler
                 refScriptUtxosInUse.add(publishedRefScripts.mintingAuthorityRefUtxo());
                 refScriptsInUse.add(publishedRefScripts.mintingAuthorityScript());
             }
-            if (willMint && publishedRefScripts.globalStateSpendRefUtxo() != null) {
-                if (!Arrays.equals(publishedRefScripts.globalStateSpendScript().getScriptHash(),
-                        mintGsSpendScript.getScriptHash())) {
+            if (willMint && publishedRefScripts.globalStateLogicRefUtxo() != null) {
+                if (!Arrays.equals(publishedRefScripts.globalStateLogicScript().getScriptHash(),
+                        mintGsWitness.logic().getScriptHash())) {
                     return TransactionContext.typedError(
-                            "published global_state spend reference script "
-                            + HexUtil.encodeHexString(publishedRefScripts.globalStateSpendScript().getScriptHash())
-                            + " does not match the one this registration needs ("
-                            + HexUtil.encodeHexString(mintGsSpendScript.getScriptHash()) + ")");
+                            "published global_state_logic reference script "
+                            + HexUtil.encodeHexString(publishedRefScripts.globalStateLogicScript().getScriptHash())
+                            + " does not match the logic GlobalState field 0 names ("
+                            + mintGsWitness.logicHash() + ")");
                 }
-                refScriptUtxosInUse.add(publishedRefScripts.globalStateSpendRefUtxo());
-                refScriptsInUse.add(publishedRefScripts.globalStateSpendScript());
+                refScriptUtxosInUse.add(publishedRefScripts.globalStateLogicRefUtxo());
+                refScriptsInUse.add(publishedRefScripts.globalStateLogicScript());
             }
 
             // issuance_mint indexes protocol params across the complete final reference set.
@@ -1018,15 +1062,15 @@ public class RwaTokenModuleHandler
                 issuanceRedeemerIdx = 2
                         + (progTokenPolicyId.compareTo(directoryMintPolicyId) < 0 ? 0 : 1);
 
+                // GlobalStateSpendRedeemer { global_state_output_index, action } rides on the
+                // GlobalState LOGIC withdrawal (added with the others below); the proxy spend
+                // redeemer is ignored. The proxy's Spend sorts like the old GS spend did, so
+                // the issuance Mint index above is unchanged.
+                mintGsLogicWithdrawal = mintGsWitness.withdrawal(3,              // global_state_output_index
+                        ConstrPlutusData.of(GS_ACTION_MINT_SECURITY,
+                                BigIntPlutusData.of(BigInteger.valueOf(issuanceRedeemerIdx))));
                 tx = tx
-                        // GlobalStateSpendRedeemer { global_state_output_index, action } —
-                        // TWO fields. The leading config_ref_input_index went away with the
-                        // Config NFT; leaving it in shifted the output index into its slot
-                        // and made the action unparseable.
-                        .collectFrom(gsUtxoForRegistration, ConstrPlutusData.of(0,
-                                BigIntPlutusData.of(BigInteger.valueOf(3)),         // global_state_output_index
-                                ConstrPlutusData.of(GS_ACTION_MINT_SECURITY,
-                                        BigIntPlutusData.of(BigInteger.valueOf(issuanceRedeemerIdx)))))
+                        .collectFrom(gsUtxoForRegistration, GS_PROXY_SPEND_REDEEMER)
                         .mintAsset(issuanceContract,
                                 regReferenceToken == null
                                         ? List.of(programmableToken)
@@ -1094,6 +1138,7 @@ public class RwaTokenModuleHandler
             Credential issuanceLogicCredential = issuanceLogic == null
                     ? null : Credential.fromScript(issuanceLogic.getScriptHash());
             if (issuanceLogicCredential != null) regLayoutBuilder.withdrawal(issuanceLogicCredential);
+            if (willMint) regLayoutBuilder.withdrawal(mintGsWitness.logicCredential());
             var regResolved = regLayoutBuilder.build();
             List<TransactionInput> regRefInputsSorted = regResolved.referenceInputs();
             int gsRefIdxForRegistration = willMint
@@ -1167,13 +1212,17 @@ public class RwaTokenModuleHandler
                         issuanceLogic, network.getCardanoNetwork());
                 registrationWithdrawals.add(new CoreWithdrawal(issuanceLogicCredential,
                         issuanceLogicRewardAddress.getAddress(), issuanceLogicRedeemer));
+                registrationWithdrawals.add(mintGsLogicWithdrawal);
             }
             for (CoreWithdrawal withdrawal : regResolved.inWithdrawalOrder(
                     registrationWithdrawals, CoreWithdrawal::credential)) {
-                tx = tx.withdraw(withdrawal.rewardAddress(), BigInteger.ZERO, withdrawal.redeemer());
+                tx = tx.withdraw(withdrawal.rewardAddress(), withdrawAmount(withdrawal, mintGsWitness), withdrawal.redeemer());
             }
             if (willMint) {
-                tx = tx.attachSpendingValidator(mintGsSpendScript);
+                // The proxy rides inline; the logic is referenced when the chain published it,
+                // and attached inline otherwise.
+                tx = tx.attachSpendingValidator(mintGsWitness.proxy())
+                        .attachRewardValidator(mintGsWitness.logic());
             }
 
             // 7b. Signers. The registration itself is authorised by the admin credential
@@ -1275,6 +1324,15 @@ public class RwaTokenModuleHandler
                             + ". The balancer reshaped the transaction after the redeemer "
                             + "indices were computed, so submitting it would trap on chain.");
                 }
+                // Plan Addendum I17: the registration's GlobalState half does exactly MintSecurity.
+                GsTxSelfCheck.verify(transaction, new GsTxSelfCheck.Expectation(txInputOf(gsUtxoForRegistration),
+                        gsUtxoForRegistration.getAddress(), gsPolicy,
+                        RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX, mintNewGsDatum,
+                        java.util.Map.of(mintGsLogicWithdrawal.rewardAddress(), mintGsLogicWithdrawal.redeemer()),
+                        Set.of(mintingLogicRewardAddress.getAddress(), mintingAuthorityRewardAddress.getAddress(),
+                                AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork()).getAddress()),
+                        Set.of(progTokenPolicyId, directoryMintPolicyId), Set.of(txInputOf(directoryUtxo)),
+                        hexSigners(requiredSigners)));
                 // The reference NFT exists exactly once, and this transaction is the only
                 // one that can ever create it. Record that at the moment a signable
                 // transaction is handed out — not at confirmation — so a second attempt
@@ -1444,8 +1502,19 @@ public class RwaTokenModuleHandler
 
             // ── 3. Parse GS datum + apply mintable_amount delta ────────────
             List<PlutusData> gsFields = parseGsFields(gsUtxo);
+            // The authority's reference script FIRST: publishing only the GS logic does not make a
+            // mint buildable, so the logic's message must not be the one the operator sees.
+            if (reg.getRefScriptsTxHash() == null || reg.getMintingAuthorityRefIndex() == null) {
+                throw new BuildPreconditionException(
+                        "mint: this token's minting authority was never published as a reference "
+                        + "script, so the mint transaction cannot be built. Registrations that carry a "
+                        + "first mint publish it automatically; policy " + request.tokenPolicyId()
+                        + " has no record of it.");
+            }
+            GsWitness gsWitness = gsWitness(reg, gsFields, true);
             long currentMintable = ((BigIntPlutusData) gsFields.get(GS_IDX_MINTABLE_AMOUNT)).getValue().longValueExact();
             PlutusData newGsDatum = applyMintableDelta(gsFields, -mintQuantity.longValueExact());
+            requireDatumWithinCap(gsUtxo, newGsDatum, gsWitness.entry(), "mint");
             long newMintable = currentMintable - mintQuantity.longValueExact();
 
             // ── 3b. Resolve the recipient up front ─────────────────────────
@@ -1516,13 +1585,14 @@ public class RwaTokenModuleHandler
             // wrong answer: issuance_mint resolved a different reference input and failed
             // with an opaque `RedeemerError { tag: "Mint" }`. They must be resolved here,
             // before the indices, not appended at compose time.
+            // The authority's reference script is checked first: publishing only the
+            // GlobalState logic does not make a mint buildable, so its message would mislead.
             if (reg.getRefScriptsTxHash() == null
-                    || reg.getMintingAuthorityRefIndex() == null
-                    || reg.getGsSpendRefIndex() == null) {
+                    || reg.getMintingAuthorityRefIndex() == null) {
                 throw new BuildPreconditionException(
-                        "mint: this token's validators were never published as reference scripts, "
-                        + "so the mint transaction cannot be built — inline they are 15 441 bytes "
-                        + "and the transaction comes to ~17 500 against a 16 384-byte limit. "
+                        "mint: this token's minting authority was never published as a reference "
+                        + "script, so the mint transaction cannot be built — inline the authority and "
+                        + "the GlobalState logic are ~15 000 bytes against a 16 384-byte limit. "
                         + "Registrations that carry a first mint publish them automatically; "
                         + "policy " + request.tokenPolicyId() + " has no record of them. Re-publish "
                         + "before minting.");
@@ -1530,9 +1600,9 @@ public class RwaTokenModuleHandler
             TransactionInput mintAuthorityRefInput = TransactionInput.builder()
                     .transactionId(reg.getRefScriptsTxHash())
                     .index(reg.getMintingAuthorityRefIndex()).build();
-            TransactionInput mintGsSpendRefInput = TransactionInput.builder()
-                    .transactionId(reg.getRefScriptsTxHash())
-                    .index(reg.getGsSpendRefIndex()).build();
+            // The logic named by the LIVE datum's field 0, not the genesis derivation: after a
+            // RotateGlobalStateScript they differ.
+            TransactionInput mintGsSpendRefInput = gsWitness.logicRefInput();
             TransactionInput issuanceLogicRefInput = TransactionInput.builder()
                     .transactionId(protocolParams.issuanceLogicRefInput().txHash())
                     .index(protocolParams.issuanceLogicRefInput().outputIndex()).build();
@@ -1548,15 +1618,15 @@ public class RwaTokenModuleHandler
                     .referenceInput(mintAuthorityRefInput).referenceInput(mintGsSpendRefInput)
                     .referenceInput(issuanceLogicRefInput)
                     .withdrawal(proxyCredential).withdrawal(authorityCredential)
-                    .withdrawal(issuanceLogicCredential).build();
+                    .withdrawal(issuanceLogicCredential).withdrawal(gsWitness.logicCredential()).build();
             List<TransactionInput> mintRefInputsSorted = issuanceLayout.referenceInputs();
             int directoryRefIdx = issuanceLayout.referenceInputIndex(txInputOf(directoryEntry));
             int paramsRefIdx = issuanceLayout.referenceInputIndex(txInputOf(protocolParamsUtxo));
             int puNodeRefIdx = issuanceLayout.referenceInputIndex(txInputOf(puNode));
             int denylistRefIdx = issuanceLayout.referenceInputIndex(txInputOf(denylistCoveringNode));
-            // Tx has 1 Spend (GS), 1 Mint (issuance) and now 2 Rewards (the minting proxy
-            // and the authority). Redeemers are sorted by tag (Spend → Mint → Cert →
-            // Reward), so the second Reward APPENDS and shifts nothing: the issuance Mint
+            // Tx has 1 Spend (GS, at the proxy), 1 Mint (issuance) and 4 Rewards (minting
+            // proxy, authority, issuance logic, GlobalState logic). Redeemers are sorted by
+            // tag (Spend → Mint → Cert → Reward), so Rewards shift nothing: the issuance Mint
             // still sits at global redeemer index 1.
             int issuancePri = 1;
 
@@ -1609,8 +1679,9 @@ public class RwaTokenModuleHandler
             // at the current pin: the leading `config_ref_input_index` was removed along
             // with the Config NFT. Leaving it in place would shift every field right and
             // make the action unparseable.
-            PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
-                    BigIntPlutusData.of(BigInteger.valueOf(gsOutputIdx)),
+            // At the PR #29 pin it rides on the GlobalState LOGIC withdrawal; the proxy
+            // spend redeemer is ignored.
+            CoreWithdrawal gsLogicWithdrawal = gsWitness.withdrawal(gsOutputIdx,
                     ConstrPlutusData.of(GS_ACTION_MINT_SECURITY,
                             BigIntPlutusData.of(BigInteger.valueOf(issuancePri))));
 
@@ -1666,11 +1737,11 @@ public class RwaTokenModuleHandler
 
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
-                    .collectFrom(gsUtxo, gsSpendRedeemer)
+                    .collectFrom(gsUtxo, GS_PROXY_SPEND_REDEEMER)
                     .mintAsset(s.issuanceContract(), mintedAssets, issuanceRedeemer)
                     .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue),
                             ConstrPlutusData.of(0))                                                 // output 0
-                    .payToContract(s.gsSpendAddress().getAddress(), ValueUtil.toAmountList(gsValue),
+                    .payToContract(gsUtxo.getAddress(), ValueUtil.toAmountList(gsValue),
                             newGsDatum);                                                             // output 1
 
             MintAttestationMetadata.attach(tx, request.attestation());
@@ -1693,14 +1764,17 @@ public class RwaTokenModuleHandler
             tx = tx
                     .readFrom(mintRefInputsSorted.toArray(new TransactionInput[0]))
                     .attachRewardValidator(s.mintingLogic())
+                    // The 421-byte GlobalState proxy rides inline.
+                    .attachSpendingValidator(s.gsProxy())
                     .withChangeAddress(request.feePayerAddress());
 
             for (CoreWithdrawal withdrawal : issuanceLayout.inWithdrawalOrder(List.of(
                     new CoreWithdrawal(proxyCredential, s.mintingLogicRewardAddress().getAddress(), proxyRedeemer),
                     new CoreWithdrawal(authorityCredential, s.mintingAuthorityRewardAddress().getAddress(), authorityRedeemer),
-                    new CoreWithdrawal(issuanceLogicCredential, issuanceLogicRewardAddress.getAddress(), issuanceLogicRedeemer)),
+                    new CoreWithdrawal(issuanceLogicCredential, issuanceLogicRewardAddress.getAddress(), issuanceLogicRedeemer),
+                    gsLogicWithdrawal),
                     CoreWithdrawal::credential)) {
-                tx = tx.withdraw(withdrawal.rewardAddress(), BigInteger.ZERO, withdrawal.redeemer());
+                tx = tx.withdraw(withdrawal.rewardAddress(), withdrawAmount(withdrawal, gsWitness), withdrawal.redeemer());
             }
 
             // Finite validity upper bound (D1). verify_membership_proof
@@ -1730,13 +1804,20 @@ public class RwaTokenModuleHandler
                     // removeDuplicateScriptWitnesses then drops exactly those hashes from the
                     // witness set. Without the second flag both copies ship — over
                     // max-tx-size, and rejected as ExtraneousScriptWitnessesUTXOW.
-                    .withReferenceScripts(s.mintingAuthority(), s.gsSpend(), issuanceLogic)
+                    .withReferenceScripts(s.mintingAuthority(), gsWitness.logic(), issuanceLogic)
                     .removeDuplicateScriptWitnesses(true)
                     .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
                     .ignoreScriptCostEvaluationError(false)
                     .build();
 
             checkedTxSize("mint", transaction);
+            GsTxSelfCheck.verify(transaction, new GsTxSelfCheck.Expectation(txInputOf(gsUtxo), gsUtxo.getAddress(),
+                    reg.getGlobalStatePolicyId(), RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX, newGsDatum,
+                    java.util.Map.of(gsLogicWithdrawal.rewardAddress(), gsLogicWithdrawal.redeemer()),
+                    Set.of(s.mintingLogicRewardAddress().getAddress(), s.mintingAuthorityRewardAddress().getAddress(),
+                            issuanceLogicRewardAddress.getAddress()),
+                    Set.of(s.issuanceContract().getPolicyId()), Set.of(),
+                    hexSigners(List.of(callerPkh))));
             log.info("rwa-token mint: policy={} qty={} (mintable_amount {} → {})",
                     request.tokenPolicyId(), mintQuantity, currentMintable, newMintable);
             return TransactionContext.ok(transaction.serializeToHex());
@@ -2310,8 +2391,10 @@ public class RwaTokenModuleHandler
                 BigIntPlutusData.of(BigInteger.valueOf(denylistCoveringRefIdx)));
     }
 
-    /** Build a {@code KycProof.Membership} — {@code Constr 1 (Constr 0 [pkh,
-     *  valid_until_ms, mpf_proof])} per {@code lib/types/kyc_proof.ak}.
+    /** Build a {@code KycProof.Membership} — {@code Constr 0 (Constr 0 [pkh,
+     *  valid_until_ms, mpf_proof])} per {@code lib/types/kyc_proof.ak}. Membership is
+     *  constructor 0 at the PR #29 pin: removing the raw {@code Attestation} variant moved it
+     *  from 1, and {@code Cip30Attestation} is now 1.
      *
      *  <p>When {@code includeKycProof} is false (or the caller supplied no proof)
      *  a placeholder with {@code valid_until_ms = 0} and an empty proof list is
@@ -2320,6 +2403,10 @@ public class RwaTokenModuleHandler
      *  {@code gs_datum.requires_receiver_kyc} is false, so the contents are never
      *  inspected — but the Membership <em>shape</em> still has to be there for the
      *  redeemer to deserialise. */
+    /** {@code KycProof} constructor indices at the PR #29 pin. */
+    static final int KYC_PROOF_MEMBERSHIP = 0;
+    static final int KYC_PROOF_CIP30_ATTESTATION = 1;
+
     private static PlutusData buildMembershipProof(byte[] stakeHash,
                                                    boolean includeKycProof,
                                                    String mpfProofCborHex,
@@ -2327,13 +2414,13 @@ public class RwaTokenModuleHandler
             throws CborDeserializationException {
         if (includeKycProof && mpfProofCborHex != null && !mpfProofCborHex.isBlank()
                 && mpfValidUntilMs != null) {
-            return ConstrPlutusData.of(1,
+            return ConstrPlutusData.of(KYC_PROOF_MEMBERSHIP,
                     ConstrPlutusData.of(0,
                             BytesPlutusData.of(stakeHash),
                             BigIntPlutusData.of(BigInteger.valueOf(mpfValidUntilMs)),
                             decodeMpfProof(mpfProofCborHex)));
         }
-        return ConstrPlutusData.of(1,
+        return ConstrPlutusData.of(KYC_PROOF_MEMBERSHIP,
                 ConstrPlutusData.of(0,
                         BytesPlutusData.of(stakeHash),
                         BigIntPlutusData.of(BigInteger.ZERO),
@@ -2376,9 +2463,13 @@ public class RwaTokenModuleHandler
         if (attestation != null) {
             var verified = CmtaAttestationVerifier.verify(attestation, stakeHash, credentialType,
                     policyId, networkId, trustedVkeys, System.currentTimeMillis(), party);
-            return new TransferKycProof(ConstrPlutusData.of(0,
+            // KycProof.Cip30Attestation { Cip30AttestationProof { protected_header, payload,
+            // hashed, signature, issuer_vkey } }. `payload` is OUR claim, never COSE_Sign1[2].
+            return new TransferKycProof(ConstrPlutusData.of(KYC_PROOF_CIP30_ATTESTATION,
                     ConstrPlutusData.of(0,
+                            BytesPlutusData.of(verified.protectedHeader()),
                             BytesPlutusData.of(verified.payload()),
+                            ConstrPlutusData.of(verified.hashed() ? 1 : 0),
                             BytesPlutusData.of(verified.signature()),
                             BytesPlutusData.of(verified.issuerVkey()))), verified.validUntilMs());
         }
@@ -2605,7 +2696,9 @@ public class RwaTokenModuleHandler
             // but the earlier chain may be submitted later. Each new attempt
             // therefore starts from a fresh, unreserved one-shot input.
             GenesisFunding selectedFunding = preparedGenesis == null ? selectGenesisFunding(adminAddress)
-                    : new GenesisFunding(requirePreparedFunding(adminAddress, preparedGenesis), preparedGenesis.funding());
+                    : new GenesisFunding(requirePreparedFunding(adminAddress, preparedGenesis), preparedGenesis.funding(),
+                            preparedGenesis.preGenesisFunding());
+            List<Utxo> preGenesisFunding = selectedFunding.preGenesis();
             List<Utxo> utilityUtxos = selectedFunding.selected();
             List<Utxo> eligibleUtxos = selectedFunding.eligible();
             Utxo bootstrap = utilityUtxos.getFirst();
@@ -2622,7 +2715,8 @@ public class RwaTokenModuleHandler
             // BEFORE the denylist mint script can be built. Under the previous pin
             // denylist came first; swapping them back would compile and produce a
             // denylist policy id that nothing on chain recognises.
-            PlutusScript gsMintScript = scriptBuilder.buildGlobalStateMintScript(bootstrapInput);
+            int maxGsDatumBytes = genesisMaxGsDatumBytes(request);
+            PlutusScript gsMintScript = scriptBuilder.buildGlobalStateMintScript(bootstrapInput, maxGsDatumBytes);
             String globalStatePolicyId = gsMintScript.getPolicyId();
 
             PlutusScript powerUsersMintScript = scriptBuilder.buildPowerUsersMintScript(globalStatePolicyId, bootstrapInput);
@@ -2671,7 +2765,9 @@ public class RwaTokenModuleHandler
                     bootstrap.getTxHash(), bootstrap.getOutputIndex()) != 1) {
                 return TransactionContext.typedError("bootstrap was reserved by another registration attempt; retry with a fresh ADA-only UTxO");
             }
-            for (Utxo funding : utilityUtxos) {
+            List<Utxo> everyFundingInput = new ArrayList<>(utilityUtxos);
+            everyFundingInput.addAll(preGenesisFunding);
+            for (Utxo funding : everyFundingInput) {
                 String inputRef = funding.getTxHash().toLowerCase(java.util.Locale.ROOT)
                         + "#" + funding.getOutputIndex();
                 if (preparedGenesis == null && genesisFundingReservationRepository.claim(inputRef, globalStatePolicyId) != 1) {
@@ -2684,24 +2780,45 @@ public class RwaTokenModuleHandler
             //     field `minting_script_credential_hash`; the proxy reads it there at run
             //     time and requires its withdraw-0, which is what makes the mint rules
             //     replaceable later via RotateMintingScript without touching the registry.
+            //     F08: the authority is parameterised on the EXACT transfer and third-party
+            //     hashes, and refuses a registry node naming anything else in fields 3/4.
+            String denylistScriptHash = HexUtil.encodeHexString(denylistSpendScript.getScriptHash());
+            String transferLogicHash = HexUtil.encodeHexString(scriptBuilder.buildTransferLogicScript(
+                    securityAssetNameHex, globalStatePolicyId, issuancePolicyId, denylistScriptHash).getScriptHash());
+            String thirdPartyTransferLogicHash = HexUtil.encodeHexString(scriptBuilder.buildThirdPartyTransferLogicScript(
+                    securityAssetNameHex, globalStatePolicyId, issuancePolicyId, denylistScriptHash,
+                    powerUserListScriptHash).getScriptHash());
             PlutusScript mintingAuthorityScript = scriptBuilder.buildMintingAuthorityScript(
                     securityAssetNameHex, globalStatePolicyId,
                     protocolParams.registry().scriptHash(), powerUsersPolicyId,
                     HexUtil.encodeHexString(mintingLogicScript.getScriptHash()),
                     issuancePolicyId,
-                    // plb_script_hash was dropped upstream on 2026-08-21 — nine parameters
-                    // now, not ten. See RwaTokenScriptBuilderService.
-                    HexUtil.encodeHexString(denylistSpendScript.getScriptHash()),
+                    denylistScriptHash,
                     powerUserListScriptHash,
-                    // (100) when this token is CIP-68, else the security name itself, which
-                    // is the contract's documented way to switch CIP-68 off.
-                    RwaTokenScriptBuilderService.referenceAssetNameFor(securityAssetNameHex));
+                    transferLogicHash,
+                    thirdPartyTransferLogicHash);
             String mintingAuthorityHash = HexUtil.encodeHexString(mintingAuthorityScript.getScriptHash());
 
-            // 4. Build the remaining spend script and derive its address.
-            PlutusScript gsSpendScript = scriptBuilder.buildGlobalStateSpendScript(
-                    securityAssetNameHex, issuancePolicyId, globalStatePolicyId, powerUserListScriptHash);
-            Address gsSpendAddress = AddressProvider.getEntAddress(gsSpendScript, network.getCardanoNetwork());
+            // 4. The GlobalState logic (datum field 0) and the shared proxy address it sits at.
+            //    No stake credential: the logic preserves the full address on every write, and
+            //    GlobalState is always located by its NFT, never by this (shared) address.
+            PlutusScript gsLogicScript = scriptBuilder.buildGlobalStateLogicScript(
+                    securityAssetNameHex, issuancePolicyId, globalStatePolicyId, powerUserListScriptHash,
+                    maxGsDatumBytes);
+            String gsLogicHash = HexUtil.encodeHexString(gsLogicScript.getScriptHash());
+            PlutusScript gsProxyScript = scriptBuilder.buildGlobalStateProxyScript();
+            String gsProxyHash = HexUtil.encodeHexString(gsProxyScript.getScriptHash());
+            Address gsSpendAddress = AddressProvider.getEntAddress(gsProxyScript, network.getCardanoNetwork());
+            // Integration guide, genesis: field 0 must differ from the admin, the minting
+            // authority and the proxy. Nothing on chain binds field 0 to the compiled logic,
+            // so these checks are the only guard against a GlobalState no one can govern.
+            if (gsLogicHash.equalsIgnoreCase(adminPkh) || gsLogicHash.equalsIgnoreCase(mintingAuthorityHash)
+                    || gsLogicHash.equalsIgnoreCase(gsProxyHash)) {
+                return TransactionContext.typedError("GlobalState logic hash collides with the admin, authority or proxy");
+            }
+            if (powerUsersPolicyId.equalsIgnoreCase(denylistPolicyId)) {
+                return TransactionContext.typedError("power-users and denylist policy ids must differ");
+            }
 
             // 4b. OPT-IN genesis allowlist seed. Off by default; when off, member_root_hash
             // stays empty exactly as before and nothing below runs.
@@ -2782,7 +2899,12 @@ public class RwaTokenModuleHandler
                     kycNetworkId(),
                     request.getInitialTrustedEntityVkeys(),
                     genesisMemberRootHash,
-                    mintingAuthorityHash);
+                    mintingAuthorityHash,
+                    gsLogicHash);
+            String datumCapProblem = genesisDatumCapProblem(gsDatum, maxGsDatumBytes);
+            if (datumCapProblem != null) {
+                return TransactionContext.typedError(datumCapProblem);
+            }
             PlutusData linkedListRootDatum = buildLinkedListRootDatum();
 
             // 5. Build the values for the three NFT outputs.
@@ -2841,9 +2963,40 @@ public class RwaTokenModuleHandler
             log.info("rwa-token genesis: mintingLogic stake cred {} ({})",
                     mintingLogicCredAlreadyRegistered ? "already registered" : "will be registered in this tx",
                     mintingLogicRewardAddress);
+            // The GlobalState logic's credential. Since 63fad89 GENESIS itself withdraws 0 from it
+            // (the GlobalState mint requires the logic field 0 names to run), and registering +
+            // withdrawing in one tx does not work: the ledger checks withdrawals against the
+            // pre-certificate state. So the preGenesis tx registers it — and publishes the logic as
+            // a reference script, because the four genesis scripts inline (≈19.3 KB) exceed
+            // max-tx-size. Integration guide §0.
+            String gsLogicRewardAddress = AddressProvider.getRewardAddress(
+                    gsLogicScript, network.getCardanoNetwork()).getAddress();
+            boolean gsLogicCredAlreadyRegistered = rewardAccountRegistered(gsLogicRewardAddress);
+            long genesisTtlSlot = ttlSlotForDeadline(System.currentTimeMillis() + DEFAULT_TTL_MS);
+            PreGenesisTx preGenesis = buildPreGenesisTransaction(adminAddress, preGenesisFunding, gsLogicScript,
+                    gsLogicCredAlreadyRegistered ? null : gsLogicRewardAddress, genesisTtlSlot);
+            hybridUtxoSupplier.add(preGenesis.logicRef());
+            hybridUtxoSupplier.add(preGenesis.change());
+            hybridScriptSupplier.add(gsLogicScript);
+            // At genesis the logic reads only global_state_output_index (the GlobalState output,
+            // 0 — the list redeemers already pin roots at 1 and 2); the action must decode but is
+            // ignored. SetMintableAmount(own value) rather than upstream tests' DeactivateContract,
+            // so a reviewer of the genesis tx never reads "deactivate" in it.
+            long genesisMintable = request.getInitialMintableAmount() != null ? request.getInitialMintableAmount() : 0L;
+            ConstrPlutusData genesisLogicRedeemer = ConstrPlutusData.of(0, BigIntPlutusData.of(0),
+                    ConstrPlutusData.of(GS_ACTION_SET_MINTABLE_AMOUNT, BigIntPlutusData.of(genesisMintable)));
+            BigInteger genesisLogicBalance = utxoProvider.rewardBalance(gsLogicRewardAddress).orElse(BigInteger.ZERO);
 
+            List<Utxo> genesisInputs = new ArrayList<>(utilityUtxos);
+            // Spending the preGenesis change is what links the two: the chain validator requires
+            // every tx to spend its predecessor, so the KERI-sealed registration commits to it.
+            genesisInputs.add(preGenesis.change());
             Tx tx = new Tx()
-                    .collectFrom(utilityUtxos)
+                    .collectFrom(genesisInputs)
+                    .readFrom(TransactionInput.builder().transactionId(preGenesis.logicRef().getTxHash())
+                            .index(preGenesis.logicRef().getOutputIndex()).build())
+                    .attachRewardValidator(gsLogicScript)
+                    .withdraw(gsLogicRewardAddress, genesisLogicBalance, genesisLogicRedeemer)
                     .mintAsset(gsMintScript, gsNft, emptyRedeemer)
                     .mintAsset(denylistMintScript, emptyAsset, denylistInitRedeemer)
                     .mintAsset(powerUsersMintScript, emptyAsset, powerUsersInitRedeemer)
@@ -2867,16 +3020,20 @@ public class RwaTokenModuleHandler
             if (!mintingAuthorityCredAlreadyRegistered) {
                 tx = tx.registerStakeAddress(mintingAuthorityRewardAddress);
             }
-
             Utxo firstUtilityUtxo = utilityUtxos.getFirst();
             Transaction transaction = quickTxBuilder.compose(tx)
                     .feePayer(adminAddress)
                     .mergeOutputs(false)
+                    // The logic is read from the preGenesis reference output, never inlined.
+                    .withReferenceScripts(gsLogicScript)
+                    .removeDuplicateScriptWitnesses(true)
+                    // A missing reference script must fail the build, not fall back to made-up units.
+                    .ignoreScriptCostEvaluationError(false)
                     // A frozen initial-mint chain must eventually become
                     // impossible to start, even if none of it was submitted.
                     // The archived bootstrap reservation still excludes this
-                    // input from a replacement policy.
-                    .validTo(ttlSlotForDeadline(System.currentTimeMillis() + DEFAULT_TTL_MS))
+                    // input from a replacement policy. preGenesis carries the same bound.
+                    .validTo(genesisTtlSlot)
                     .withCollateralInputs(TransactionInput.builder()
                             .transactionId(firstUtilityUtxo.getTxHash())
                             .index(firstUtilityUtxo.getOutputIndex()).build())
@@ -2896,6 +3053,11 @@ public class RwaTokenModuleHandler
             java.util.Set<String> permittedFunding = eligibleUtxos.stream()
                     .map(u -> u.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + u.getOutputIndex())
                     .collect(java.util.stream.Collectors.toSet());
+            // ...plus exactly the one chained preGenesis change output; never the preGenesis funding.
+            preGenesisFunding.forEach(u -> permittedFunding.remove(
+                    u.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + u.getOutputIndex()));
+            permittedFunding.add(preGenesis.change().getTxHash().toLowerCase(java.util.Locale.ROOT)
+                    + "#" + preGenesis.change().getOutputIndex());
             var finalBody = transaction.getBody();
             if (finalBody.getInputs() == null
                     || finalBody.getInputs().stream().anyMatch(input -> !permittedFunding.contains(
@@ -2904,6 +3066,12 @@ public class RwaTokenModuleHandler
                     .anyMatch(input -> !permittedFunding.contains(
                             input.getTransactionId().toLowerCase(java.util.Locale.ROOT) + "#" + input.getIndex()))) {
                 return TransactionContext.typedError("genesis builder selected a reserved or stale funding input");
+            }
+            // The logic's genesis branch reads the output at global_state_output_index (0).
+            if (finalBody.getOutputs().isEmpty() || !holdsAsset(finalBody.getOutputs().getFirst(), globalStatePolicyId,
+                    RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX)) {
+                return TransactionContext.typedError("genesis: the GlobalState output is not output 0, which the "
+                        + "GlobalState logic redeemer names");
             }
 
             // 7. Persist the registration row. issuancePolicyId IS the prog-token
@@ -2941,6 +3109,17 @@ public class RwaTokenModuleHandler
                     // Its reward account is registered by THIS transaction (or was already),
                     // so mint, burn and registration can withdraw 0 from it.
                     .mintingAuthorityRewardRegistered(true)
+                    .maxGsDatumBytes(maxGsDatumBytes)
+                    // The v1 logic: registered AND published by the preGenesis tx (both PENDING
+                    // until seen on chain, bounded by its TTL), on every creation path.
+                    .gsLogics(GsLogicEntry.toJson(List.of(new GsLogicEntry(
+                            gsLogicHash, maxGsDatumBytes, gsLogicScript.getCborHex(),
+                            preGenesis.txHash(), preGenesis.logicRef().getOutputIndex(), GsLogicEntry.PENDING,
+                            gsLogicCredAlreadyRegistered ? null : preGenesis.txHash(),
+                            gsLogicCredAlreadyRegistered ? GsLogicEntry.CONFIRMED : GsLogicEntry.PENDING,
+                            // Genesis installs v1: it writes this hash into field 0.
+                            TransactionUtil.getTxHash(transaction.serialize()),
+                            preGenesis.ttlSlot(), gsLogicCredAlreadyRegistered ? null : preGenesis.ttlSlot()))))
                     .build();
             var previousRegistration = registrationRepository.findByProgrammableTokenPolicyId(issuancePolicyId);
             if (previousRegistration.isPresent()) {
@@ -2981,6 +3160,7 @@ public class RwaTokenModuleHandler
                         .build());
             }
 
+            this.builtPreGenesis = preGenesis;
             return TransactionContext.ok(transaction.serializeToHex(),
                     new RegistrationResult(issuancePolicyId));
 
@@ -2988,6 +3168,67 @@ public class RwaTokenModuleHandler
             log.error("rwa-token global-state init failed", e);
             return TransactionContext.typedError("init failed: " + e.getMessage());
         }
+    }
+
+    /** The preGenesis tx built alongside the last genesis (the chain reads it). */
+    public record PreGenesisTx(String cborHex, String txHash, Utxo logicRef, Utxo change, long ttlSlot) {}
+    private PreGenesisTx builtPreGenesis;
+
+    /**
+     * preGenesis (since 63fad89, integration guide §0): registers the GlobalState logic's stake
+     * credential (legacy StakeRegistration, no witness — the same practice as genesis) and publishes
+     * the logic as a reference script at the always-fail address with the marker. It spends ONLY
+     * {@code funding} — never a genesis input, above all never the bootstrap, whose output reference
+     * every policy id is derived from. Its TTL equals genesis's, so it cannot land after genesis expired.
+     *
+     * @param registerRewardAddress the logic's reward address, or null when it is already registered
+     */
+    private PreGenesisTx buildPreGenesisTransaction(String feePayerAddress, List<Utxo> funding,
+                                                    PlutusScript gsLogicScript, String registerRewardAddress,
+                                                    long ttlSlot) throws Exception {
+        if (funding == null || funding.isEmpty())
+            throw new BuildPreconditionException("preGenesis: no funding selected");
+        byte[] feePayerKeyHash = new Address(feePayerAddress).getPaymentCredentialHash()
+                .orElseThrow(() -> new BuildPreconditionException(
+                        "fee payer address has no payment credential: " + feePayerAddress));
+        NativeScript markerPolicy = refScriptMarkerPolicy(feePayerKeyHash);
+        String markerPolicyId = markerPolicy.getPolicyId();
+        MinAdaCalculator minAda = new MinAdaCalculator(protocolParamsSupplier.getProtocolParams());
+        BigInteger coin = minAda.calculateMinAda(TransactionOutput.builder()
+                        .address(unspendableRefScriptAddress())
+                        .value(refScriptOutputValue(MinAdaCalculator.DUMMY_COIN_VAL, markerPolicyId))
+                        .scriptRef(gsLogicScript).build())
+                .add(BigInteger.valueOf(1_999_999L))
+                .divide(BigInteger.valueOf(1_000_000L)).multiply(BigInteger.valueOf(1_000_000L));
+        Tx tx = new Tx()
+                .from(feePayerAddress)
+                .collectFrom(funding)
+                .mintAssets(markerPolicy, new Asset("0x" + REF_SCRIPT_MARKER_ASSET_NAME_HEX, BigInteger.ONE))
+                .payToAddress(unspendableRefScriptAddress(),
+                        List.of(Amount.lovelace(coin), refScriptMarkerAmount(markerPolicyId)), gsLogicScript)
+                .withChangeAddress(feePayerAddress);
+        if (registerRewardAddress != null) tx = tx.registerStakeAddress(registerRewardAddress);
+        Transaction transaction = quickTxBuilder.compose(tx)
+                .feePayer(feePayerAddress)
+                .mergeOutputs(false)
+                .validTo(ttlSlot)
+                .build();
+        java.util.Set<String> allowed = new java.util.HashSet<>();
+        funding.forEach(u -> allowed.add(u.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + u.getOutputIndex()));
+        boolean foreignInput = transaction.getBody().getInputs().stream().anyMatch(i -> !allowed.contains(
+                i.getTransactionId().toLowerCase(java.util.Locale.ROOT) + "#" + i.getIndex()))
+                || transaction.getBody().getCollateral() != null && !transaction.getBody().getCollateral().isEmpty();
+        if (foreignInput) throw new BuildPreconditionException("preGenesis selected an input outside its own funding");
+        String txHash = TransactionUtil.getTxHash(transaction.serialize());
+        Utxo logicRef = findRefScriptOutput(transaction, txHash, gsLogicScript);
+        Utxo change = findOutputAtAddress(transaction, txHash, feePayerAddress, BigInteger.ONE);
+        if (logicRef == null || change == null)
+            throw new BuildPreconditionException("preGenesis: could not locate its reference-script or change output");
+        checkedTxSize("preGenesis", transaction);
+        log.info("rwa-token preGenesis: tx {} publishes global_state_logic at :{}{}", txHash,
+                logicRef.getOutputIndex(), registerRewardAddress == null ? " (credential already registered)"
+                        : " and registers " + registerRewardAddress);
+        return new PreGenesisTx(transaction.serializeToHex(), txHash, logicRef, change, ttlSlot);
     }
 
     /** Bitfield encoding all 5 power-user capabilities (matches BaFin's PowerUser);
@@ -3018,6 +3259,85 @@ public class RwaTokenModuleHandler
         return countDenylistNft(utxos, policyId, nodeName) > 0;
     }
 
+    /** Platform rule (not on chain): bytes of free space every GlobalState logic's cap must
+     *  leave above the datum it is installed over — at genesis, and on every rotation. The
+     *  on-chain cap only refuses GROWTH beyond it, so a datum sitting at its cap refuses even a
+     *  burn that lengthens {@code mintable_amount}'s encoding. */
+    static final int GS_DATUM_HEADROOM_BYTES = 1024;
+
+    /** Hard maximum for {@code max_global_state_datum_bytes} (plan Addendum I2, user decision):
+     *  the upstream-recommended 8192. It keeps the heaviest GlobalState transaction — a mint or
+     *  burn with the datum at its cap — inside max-tx-size, permanently once upgrades are locked. */
+    static final int MAX_GS_DATUM_BYTES_LIMIT = 8192;
+
+    private static int genesisMaxGsDatumBytes(RwaTokenRegisterRequest request) {
+        Integer requested = request.getMaxGsDatumBytes();
+        if (requested == null) return RwaTokenScriptBuilderService.DEFAULT_MAX_GS_DATUM_BYTES;
+        if (requested <= 0) throw new BuildPreconditionException("maxGsDatumBytes must be positive");
+        if (requested > MAX_GS_DATUM_BYTES_LIMIT)
+            throw new BuildPreconditionException("maxGsDatumBytes " + requested + " exceeds the maximum of "
+                    + MAX_GS_DATUM_BYTES_LIMIT + " bytes");
+        return requested;
+    }
+
+    /** Size as the chain measures it ({@code serialise_data}); see {@link PlutusDataSize}. */
+    static int serialisedSize(PlutusData datum) {
+        return PlutusDataSize.of(datum);
+    }
+
+    /** Null when {@code datum} fits {@code cap} with {@link #GS_DATUM_HEADROOM_BYTES} to spare. */
+    static String genesisDatumCapProblem(PlutusData datum, int cap) {
+        int size = serialisedSize(datum);
+        if (size + GS_DATUM_HEADROOM_BYTES > cap) {
+            return "GlobalState datum is " + size + " bytes; max_global_state_datum_bytes " + cap
+                    + " must leave at least " + GS_DATUM_HEADROOM_BYTES + " bytes of headroom";
+        }
+        return null;
+    }
+
+    /** Mirror of the logic's {@code datum_within_cap}: a continuing datum is accepted when it
+     *  fits the INSTALLED logic's cap OR is no larger than the input datum. Checked before
+     *  building so a growing write past the cap fails with a reason instead of an opaque
+     *  evaluation error. */
+    /** Plan Addendum I3: admin writes that GROW the datum stop this many bytes below the cap,
+     *  so a burn — which can lengthen {@code mintable_amount}'s encoding by up to 8 bytes while it
+     *  stays within int64 (I14) — always remains buildable. Supply changes only mirror the chain. */
+    static final int GS_BURN_RESERVE_BYTES = 64;
+
+    /** An ADMIN write (not a mint or burn): also keeps {@link #GS_BURN_RESERVE_BYTES} free. */
+    static void requireAdminDatumWithinCap(Utxo gsUtxo, PlutusData newDatum, GsLogicEntry logic, String what) {
+        requireDatumWithinCap(gsUtxo, newDatum, logic, what);
+        int oldSize = canonicalSizeOf(gsUtxo, what);
+        int newSize = serialisedSize(newDatum);
+        if (newSize > oldSize && newSize > logic.maxDatumBytes() - GS_BURN_RESERVE_BYTES) {
+            throw new BuildPreconditionException(what + ": the GlobalState datum would grow to " + newSize
+                    + " bytes, inside the last " + GS_BURN_RESERVE_BYTES + " bytes below the cap ("
+                    + logic.maxDatumBytes() + ") that are reserved so burns stay possible. Shrink the datum "
+                    + "first, or rotate the GlobalState logic to a larger cap.");
+        }
+    }
+
+    private static int canonicalSizeOf(Utxo gsUtxo, String what) {
+        try {
+            return serialisedSize(PlutusData.deserialize(HexUtil.decodeHexString(gsUtxo.getInlineDatum())));
+        } catch (com.bloxbean.cardano.client.exception.CborDeserializationException e) {
+            throw new BuildPreconditionException(what + ": GlobalState datum cannot be decoded");
+        }
+    }
+
+    static void requireDatumWithinCap(Utxo gsUtxo, PlutusData newDatum, GsLogicEntry logic, String what) {
+        // Canonical size of the INPUT too: the stored bytes may be encoded differently from
+        // what the logic's serialise_data measures.
+        int oldSize = canonicalSizeOf(gsUtxo, what);
+        int newSize = serialisedSize(newDatum);
+        if (newSize > logic.maxDatumBytes() && newSize > oldSize) {
+            throw new BuildPreconditionException(what + ": the GlobalState datum would grow to " + newSize
+                    + " bytes, above the installed logic's max_global_state_datum_bytes "
+                    + logic.maxDatumBytes() + ". Shrink the datum (e.g. remove a trusted entity) or rotate "
+                    + "the GlobalState logic to a larger cap first.");
+        }
+    }
+
     /** Minimum lovelace placed on a script-locked UTxO that carries an NFT. */
     private static final long SCRIPT_UTXO_LOVELACE = 2_000_000L;
 
@@ -3044,7 +3364,8 @@ public class RwaTokenModuleHandler
             int networkId,
             List<String> initialTrustedEntityVkeys,
             byte[] memberRootHash,
-            String mintingScriptCredentialHash) {
+            String mintingScriptCredentialHash,
+            String globalStateLogicHash) {
         // Build trusted_entity_vkeys as a sorted MapPlutusData with each
         // 32-byte vkey → unit metadata (Constr 0 []). Sorting by vkey bytes
         // matches BaFin's on-chain invariant — verify_kyc_proof + AddTrusted
@@ -3067,31 +3388,30 @@ public class RwaTokenModuleHandler
                             BytesPlutusData.of(HexUtil.decodeHexString(vkeyHex)),
                             PlutusData.unit()));
         }
-        return ConstrPlutusData.of(0,
-                ConstrPlutusData.of(0),                                           // [0] transfers_paused = False
-                ConstrPlutusData.of(0),                                           // [1] deactivated = False (added @e69c66a)
-                BigIntPlutusData.of(BigInteger.valueOf(mintableAmount)),          // [2] mintable_amount
-                BytesPlutusData.of(HexUtil.decodeHexString(adminPkh)),            // admin_credential_hash
-                BytesPlutusData.of(HexUtil.decodeHexString(powerUsersPolicyId)),  // power_user_linked_list_policy_id
-                BytesPlutusData.of(HexUtil.decodeHexString(denylistPolicyId)),    // denylist_linked_list_policy_id
-                ConstrPlutusData.of(0),                                           // security_info = Unit (Data placeholder)
-                trustedMap,                                                       // trusted_entity_vkeys
-                // member_root_hash. Empty by default (matches upstream E2ETest and the
-                // long-proven path); non-empty only when the caller opted into the genesis
-                // allowlist seed, in which case it is the MPF root over that one member.
-                BytesPlutusData.of(memberRootHash == null ? new byte[0] : memberRootHash),
-                ConstrPlutusData.of(requiresSenderKyc ? 1 : 0),                   // requires_sender_kyc
-                ConstrPlutusData.of(requiresReceiverKyc ? 1 : 0),                 // requires_receiver_kyc
-                BigIntPlutusData.of(BigInteger.valueOf(networkId)),               // network_id
-                // [12] minting_script_credential_hash — the authority the permanent proxy
-                // delegates every mint/burn decision to. Genesis writes the authority
-                // built alongside these scripts; RotateMintingScript replaces it later.
-                BytesPlutusData.of(HexUtil.decodeHexString(mintingScriptCredentialHash)),
-                // [13] upgrades_locked = False. One-way: LockUpgrades sets it and nothing
-                // clears it, freezing both the minting rotation and the CIP-113 registry
-                // update path permanently.
-                ConstrPlutusData.of(0)
-        );
+        PlutusData[] fields = new PlutusData[GS_DATUM_FIELD_COUNT];
+        // Frozen core (0–4).
+        fields[GS_IDX_GLOBAL_STATE_SCRIPT] = BytesPlutusData.of(HexUtil.decodeHexString(globalStateLogicHash));
+        fields[GS_IDX_DEACTIVATED] = ConstrPlutusData.of(0);                       // False
+        fields[GS_IDX_ADMIN_CREDENTIAL_HASH] = BytesPlutusData.of(HexUtil.decodeHexString(adminPkh));
+        fields[GS_IDX_POWER_USER_LL_POLICY] = BytesPlutusData.of(HexUtil.decodeHexString(powerUsersPolicyId));
+        // The authority the permanent proxy delegates every mint/burn decision to.
+        fields[GS_IDX_MINTING_SCRIPT_CREDENTIAL_HASH] =
+                BytesPlutusData.of(HexUtil.decodeHexString(mintingScriptCredentialHash));
+        // v1 logic layout (5–14).
+        fields[GS_IDX_TRANSFERS_PAUSED] = ConstrPlutusData.of(0);                  // False
+        fields[GS_IDX_MINTABLE_AMOUNT] = BigIntPlutusData.of(BigInteger.valueOf(mintableAmount));
+        fields[GS_IDX_DENYLIST_LL_POLICY] = BytesPlutusData.of(HexUtil.decodeHexString(denylistPolicyId));
+        fields[GS_IDX_SECURITY_INFO] = ConstrPlutusData.of(0);                     // Unit (Data placeholder)
+        fields[GS_IDX_TRUSTED_ENTITY_VKEYS] = trustedMap;
+        // Empty by default; non-empty only when the caller opted into the genesis allowlist
+        // seed, in which case it is the MPF root over that one member.
+        fields[GS_IDX_MEMBER_ROOT_HASH] = BytesPlutusData.of(memberRootHash == null ? new byte[0] : memberRootHash);
+        fields[GS_IDX_REQUIRES_SENDER_KYC] = ConstrPlutusData.of(requiresSenderKyc ? 1 : 0);
+        fields[GS_IDX_REQUIRES_RECEIVER_KYC] = ConstrPlutusData.of(requiresReceiverKyc ? 1 : 0);
+        fields[GS_IDX_NETWORK_ID] = BigIntPlutusData.of(BigInteger.valueOf(networkId));
+        // One-way: LockUpgrades sets it and nothing clears it.
+        fields[GS_IDX_UPGRADES_LOCKED] = ConstrPlutusData.of(0);
+        return ConstrPlutusData.of(0, fields);
     }
 
     /** Number of fields in the upstream {@code GlobalStateDatum}
@@ -3102,36 +3422,42 @@ public class RwaTokenModuleHandler
      *  inserted at 8, {@code network_id} appended at 10); 12 at
      *  easy1staking-com/fn-bafin-cardano-sc @e69c66a, which inserted
      *  {@code deactivated} at index <b>1</b> and so shifted
-     *  {@code mintable_amount} and EVERY field after it up by one; <b>14 at the
-     *  current pin</b>, which APPENDED {@code minting_script_credential_hash} (12)
-     *  and {@code upgrades_locked} (13).
+     *  {@code mintable_amount} and EVERY field after it up by one; 14 at 9761a05,
+     *  which appended {@code minting_script_credential_hash} and {@code upgrades_locked};
+     *  <b>15 at the PR #29 pin</b>, which REORDERED everything: the GlobalState logic hash
+     *  is prepended at 0 and the frozen core (0–4) gathers the fields the non-redeployable
+     *  validators read.
      *
-     *  <p>The @e69c66a shift was silent and dangerous — reading
-     *  {@code mintable_amount} at the old index 1 yielded the {@code deactivated}
-     *  Bool — so every index below is named and no raw literal is used at a call
-     *  site. This latest change appends rather than inserts, so no existing index
-     *  moved; what it DOES break is any 12-field datum already on chain, which the
-     *  equality check in {@code parseGsFields} rejects rather than misreading. */
-    private static final int GS_DATUM_FIELD_COUNT = 14;
+     *  <p>Index shifts are silent and dangerous — reading a field at a stale index yields a
+     *  different, well-typed field — so every index below is named and no raw literal is
+     *  used at a call site. A 14-field datum from the previous pin is rejected by the
+     *  equality check in {@code parseGsFields} rather than misread. */
+    private static final int GS_DATUM_FIELD_COUNT = 15;
 
-    private static final int GS_IDX_TRANSFERS_PAUSED = 0;
-    /** Added at @e69c66a; {@code DeactivateContract} (spend action 12) sets it. */
+    // PR #29 layout. Fields 0–4 are the FROZEN CORE: the proxy, the minting proxy and both
+    // lists read only these, and can never be redeployed, so every future GlobalState logic
+    // must keep them. Fields 5+ belong to the installed logic (v1 = GlobalStateDatum below).
+    /** The GlobalState logic hash (withdraw-0) the proxy delegates every spend to.
+     *  {@code RotateGlobalStateScript} (spend action 14) rewrites it. */
+    private static final int GS_IDX_GLOBAL_STATE_SCRIPT = 0;
+    /** {@code DeactivateContract} (spend action 12) sets it. */
     private static final int GS_IDX_DEACTIVATED = 1;
-    private static final int GS_IDX_MINTABLE_AMOUNT = 2;
-    private static final int GS_IDX_ADMIN_CREDENTIAL_HASH = 3;
-    private static final int GS_IDX_POWER_USER_LL_POLICY = 4;
-    private static final int GS_IDX_DENYLIST_LL_POLICY = 5;
-    private static final int GS_IDX_SECURITY_INFO = 6;
-    private static final int GS_IDX_TRUSTED_ENTITY_VKEYS = 7;
-    private static final int GS_IDX_MEMBER_ROOT_HASH = 8;
-    private static final int GS_IDX_REQUIRES_SENDER_KYC = 9;
-    private static final int GS_IDX_REQUIRES_RECEIVER_KYC = 10;
-    private static final int GS_IDX_NETWORK_ID = 11;
+    private static final int GS_IDX_ADMIN_CREDENTIAL_HASH = 2;
+    private static final int GS_IDX_POWER_USER_LL_POLICY = 3;
     /** The rotatable minting authority the permanent proxy delegates to.
      *  {@code RotateMintingScript} (spend action 10) rewrites it. */
-    private static final int GS_IDX_MINTING_SCRIPT_CREDENTIAL_HASH = 12;
+    private static final int GS_IDX_MINTING_SCRIPT_CREDENTIAL_HASH = 4;
+    private static final int GS_IDX_TRANSFERS_PAUSED = 5;
+    private static final int GS_IDX_MINTABLE_AMOUNT = 6;
+    private static final int GS_IDX_DENYLIST_LL_POLICY = 7;
+    private static final int GS_IDX_SECURITY_INFO = 8;
+    private static final int GS_IDX_TRUSTED_ENTITY_VKEYS = 9;
+    private static final int GS_IDX_MEMBER_ROOT_HASH = 10;
+    private static final int GS_IDX_REQUIRES_SENDER_KYC = 11;
+    private static final int GS_IDX_REQUIRES_RECEIVER_KYC = 12;
+    private static final int GS_IDX_NETWORK_ID = 13;
     /** One-way lock; {@code LockUpgrades} (spend action 11) sets it and nothing clears it. */
-    private static final int GS_IDX_UPGRADES_LOCKED = 13;
+    private static final int GS_IDX_UPGRADES_LOCKED = 14;
 
     // ── GlobalStateSpendAction constructor indices ───────────────────────────
     //
@@ -3163,6 +3489,12 @@ public class RwaTokenModuleHandler
     private static final int GS_ACTION_LOCK_UPGRADES = 11;
     /** Moved from 10 to 12 at the current pin. */
     private static final int GS_ACTION_DEACTIVATE_CONTRACT = 12;
+    /** PR #29. Absolute remaining headroom in [0, 2^63-1]; admin-signed; refused once locked. */
+    private static final int GS_ACTION_SET_MINTABLE_AMOUNT = 13;
+    /** PR #29. Rewrites field 0; carried on BOTH the outgoing and the incoming logic withdrawal. */
+    private static final int GS_ACTION_ROTATE_GLOBAL_STATE_SCRIPT = 14;
+    /** Upper bound the platform enforces for SetMintableAmount: the logic checks only >= 0. */
+    static final BigInteger MAX_MINTABLE_AMOUNT = BigInteger.valueOf(Long.MAX_VALUE);
 
     // ── Minting PROXY withdraw redeemer ──────────────────────────────────────
     //
@@ -4142,9 +4474,10 @@ public class RwaTokenModuleHandler
     /** The two per-token scripts the registration transaction reads from reference
      *  inputs instead of carrying inline, plus the UTxOs that hold them.
      *
-     *  <p>Which two changed at the current pin. The published pair used to be
-     *  {@code minting_logic} + {@code global_state} spend; it is now
-     *  {@code minting_authority} + {@code global_state} spend. The minting logic split
+     *  <p>At the PR #29 pin the pair is {@code minting_authority} + {@code global_state_logic}
+     *  (9 298 + 5 675 bytes). The GlobalState spend script no longer exists: GlobalState sits
+     *  at the unparameterised 421-byte {@code global_state_proxy}, which rides inline.
+     *  Earlier pins published {@code minting_logic} / {@code global_state} spend. The minting logic split
      *  into a permanent 1 128-byte PROXY and an 8 117-byte rotatable AUTHORITY, and it
      *  is the authority that is worth publishing — the proxy is small enough to ride
      *  inline, and keeping it there avoids a third reference-script output.
@@ -4156,21 +4489,24 @@ public class RwaTokenModuleHandler
                                       String txHash,
                                       PlutusScript mintingAuthorityScript,
                                       Utxo mintingAuthorityRefUtxo,
-                                      PlutusScript globalStateSpendScript,
-                                      Utxo globalStateSpendRefUtxo) {
+                                      PlutusScript globalStateLogicScript,
+                                      Utxo globalStateLogicRefUtxo,
+                                      /** Validity upper bound of the publish tx: after it, a publish that never
+                                       *  landed is abandoned (I11). Null only for the empty placeholder. */
+                                      Long ttlSlot) {
 
         /** The reference inputs the registration tx must read. */
         public List<Utxo> refUtxos() {
             List<Utxo> out = new ArrayList<>();
             if (mintingAuthorityRefUtxo != null) out.add(mintingAuthorityRefUtxo);
-            if (globalStateSpendRefUtxo != null) out.add(globalStateSpendRefUtxo);
+            if (globalStateLogicRefUtxo != null) out.add(globalStateLogicRefUtxo);
             return out;
         }
 
         public List<PlutusScript> scripts() {
             List<PlutusScript> out = new ArrayList<>();
             if (mintingAuthorityScript != null) out.add(mintingAuthorityScript);
-            if (globalStateSpendScript != null) out.add(globalStateSpendScript);
+            if (globalStateLogicScript != null) out.add(globalStateLogicScript);
             return out;
         }
     }
@@ -4221,10 +4557,12 @@ public class RwaTokenModuleHandler
      *  and 5190 bytes inline leaves ~11 KB of headroom in the registration tx.
      *
      *  <h3>Where the outputs go</h3>
-     *  To the fee payer's ENTERPRISE address — same payment credential, so the admin
-     *  can still spend them and recover the ~51 ADA of min-UTxO once the token is
-     *  registered, but a distinct address from the base address every other builder
-     *  funds itself from. That separation is load-bearing twice over: the
+     *  The minting AUTHORITY goes to the fee payer's ENTERPRISE address — same payment
+     *  credential, so the admin can recover its min-UTxO once it is no longer needed, but a
+     *  distinct address from the base address every other builder funds itself from. The
+     *  GlobalState LOGIC goes to an always-fail address instead ({@link #unspendableRefScriptAddress}):
+     *  every GlobalState write needs it, so its ≈25 ADA is locked permanently rather than left
+     *  where a sweep could destroy it. That separation is load-bearing twice over: the
      *  registration builder picks its funding input by scanning the chaining tx for
      *  an output at the fee-payer address, and {@link AccountService#findAdaOnlyUtxo}
      *  queries by address — either would happily consume a reference-script UTxO and
@@ -4236,7 +4574,7 @@ public class RwaTokenModuleHandler
     public TransactionContext<PublishedRefScripts> buildPublishScriptsTransaction(
             String feePayerAddress,
             PlutusScript mintingAuthorityScript,
-            PlutusScript globalStateSpendScript,
+            PlutusScript globalStateLogicScript,
             Utxo funding) {
         try {
             Credential feePayerPaymentCred = new Address(feePayerAddress).getPaymentCredential()
@@ -4266,7 +4604,10 @@ public class RwaTokenModuleHandler
             // scripts in its own outputs, so all three together would exceed the same limit
             // this mechanism exists to get under. The minting PROXY is not published at all
             // — 1 128 bytes rides inline more cheaply than it publishes.
-            List<PlutusScript> toPublish = List.of(mintingAuthorityScript, globalStateSpendScript);
+            // Since 63fad89 the chain passes globalStateLogicScript = null: preGenesis already
+            // published the logic, and a second copy would lock another ≈27 ADA for nothing.
+            List<PlutusScript> toPublish = globalStateLogicScript == null ? List.of(mintingAuthorityScript)
+                    : List.of(mintingAuthorityScript, globalStateLogicScript);
             // Both outputs carry a marker asset so neither is Ada-only — see
             // REF_SCRIPT_MARKER_ASSET_NAME_HEX for why that matters.
             byte[] feePayerKeyHash = new Address(feePayerAddress).getPaymentCredentialHash()
@@ -4277,7 +4618,7 @@ public class RwaTokenModuleHandler
             List<BigInteger> coins = new ArrayList<>();
             for (PlutusScript script : toPublish) {
                 TransactionOutput candidate = TransactionOutput.builder()
-                        .address(refScriptAddress)
+                        .address(script == globalStateLogicScript ? unspendableRefScriptAddress() : refScriptAddress)
                         .value(refScriptOutputValue(MinAdaCalculator.DUMMY_COIN_VAL, markerPolicyId))
                         .scriptRef(script)
                         .build();
@@ -4311,14 +4652,15 @@ public class RwaTokenModuleHandler
             // min-UTxO here let a 5–10 ADA change pass both earlier guards and then die in
             // phase 3 with the opaque "could not chain tx", after the operator had been told
             // the chain was buildable.
-            BigInteger needed = coins.get(0).add(coins.get(1))
+            BigInteger needed = coins.stream().reduce(BigInteger.ZERO, BigInteger::add)
                     .add(BigInteger.valueOf(2_000_000L))    // fee headroom
                     .add(BigInteger.valueOf(11_000_000L));  // change the next two phases demand
             if (fundingLovelace.compareTo(needed) < 0) {
                 return TransactionContext.typedError(
                         "publishScripts: the funding UTxO holds " + fundingLovelace
-                        + " lovelace but publishing minting_logic + global_state as reference "
-                        + "scripts needs at least " + needed
+                        + " lovelace but publishing " + (globalStateLogicScript == null ? "minting_authority as a reference script"
+                                : "minting_authority + global_state_logic as reference scripts")
+                        + " needs at least " + needed
                         + " (their min-UTxO plus fee and change). Top up the admin wallet; a "
                         + "registration that carries a first mint cannot be built without them.");
             }
@@ -4336,15 +4678,20 @@ public class RwaTokenModuleHandler
                                     BigInteger.valueOf(toPublish.size())))
                     .payToAddress(refScriptAddress,
                             List.of(Amount.lovelace(coins.get(0)), refScriptMarkerAmount(markerPolicyId)),
-                            mintingAuthorityScript)
-                    .payToAddress(refScriptAddress,
-                            List.of(Amount.lovelace(coins.get(1)), refScriptMarkerAmount(markerPolicyId)),
-                            globalStateSpendScript)
-                    .withChangeAddress(feePayerAddress);
+                            mintingAuthorityScript);
+            // The logic goes to the ALWAYS-FAIL address (I10): it must never be spendable.
+            if (globalStateLogicScript != null) {
+                tx = tx.payToAddress(unspendableRefScriptAddress(),
+                        List.of(Amount.lovelace(coins.get(1)), refScriptMarkerAmount(markerPolicyId)),
+                        globalStateLogicScript);
+            }
+            tx = tx.withChangeAddress(feePayerAddress);
 
+            long publishTtlSlot = ttlSlotForDeadline(System.currentTimeMillis() + DEFAULT_TTL_MS);
             Transaction transaction = quickTxBuilder.compose(tx)
                     .feePayer(feePayerAddress)
                     .mergeOutputs(false)
+                    .validTo(publishTtlSlot)
                     .build();
             String txHash = TransactionUtil.getTxHash(transaction.serialize());
 
@@ -4354,26 +4701,456 @@ public class RwaTokenModuleHandler
             // versions. A misidentified output here would put a *spendable* UTxO in the
             // registration tx's reference inputs and the script would simply not resolve.
             Utxo mintingAuthorityRef = findRefScriptOutput(transaction, txHash, mintingAuthorityScript);
-            Utxo gsSpendRef = findRefScriptOutput(transaction, txHash, globalStateSpendScript);
-            if (mintingAuthorityRef == null || gsSpendRef == null) {
+            Utxo gsLogicRef = globalStateLogicScript == null ? null
+                    : findRefScriptOutput(transaction, txHash, globalStateLogicScript);
+            if (mintingAuthorityRef == null || globalStateLogicScript != null && gsLogicRef == null) {
                 return TransactionContext.typedError(
                         "publishScripts: could not locate the reference-script outputs in the "
                         + "built transaction (mintingAuthority=" + (mintingAuthorityRef != null)
-                        + ", globalStateSpend=" + (gsSpendRef != null) + ")");
+                        + ", globalStateLogic=" + (gsLogicRef != null) + ")");
             }
 
-            log.info("publishScripts: tx {} publishes minting_authority at :{}, global_state spend at :{}",
-                    txHash, mintingAuthorityRef.getOutputIndex(), gsSpendRef.getOutputIndex());
+            log.info("publishScripts: tx {} publishes minting_authority at :{}{}", txHash,
+                    mintingAuthorityRef.getOutputIndex(),
+                    gsLogicRef == null ? "" : ", global_state_logic at :" + gsLogicRef.getOutputIndex());
 
             return TransactionContext.ok(transaction.serializeToHex(), new PublishedRefScripts(
                     transaction.serializeToHex(), txHash,
                     mintingAuthorityScript, mintingAuthorityRef,
-                    globalStateSpendScript, gsSpendRef));
+                    globalStateLogicScript, gsLogicRef, publishTtlSlot));
         } catch (BuildPreconditionException bpe) {
             return TransactionContext.typedError(bpe.getMessage());
         } catch (Exception e) {
             log.error("rwa-token publish-scripts failed", e);
             return TransactionContext.typedError("publish reference scripts failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Publish a GlobalState logic's reference script (plan: structural path + rotation step 2).
+     *
+     * <p>An EXPLICIT admin step, never prepended to another chain: the frontend assumes one
+     * transaction per change. The output goes to the always-fail address (I10) — its ≈25 ADA is
+     * locked permanently — and carries the reference-script marker, so it is never an Ada-only
+     * reference input (the CIP-113 {@code peek_first} abort on token-less reference inputs).
+     *
+     * <p>Plan Addendum R2/I11: refused when the logic is already live on chain; refused while a
+     * previous publish tx is still within its TTL; rebuilt only once that TTL has passed and the
+     * output never appeared. A CONFIRMED ref that is merely not visible is NOT treated as spent.
+     *
+     * @param logicHash the registry entry to publish; null = the logic GlobalState field 0 names
+     */
+    public TransactionContext<Void> buildPublishGsLogicTransaction(String policyId, String logicHash,
+                                                                   String feePayerAddress) {
+        try {
+            RwaTokenRegistrationEntity reg = registrationRepository.findByProgrammableTokenPolicyId(policyId)
+                    .orElseThrow(() -> new BuildPreconditionException("rwa-token registration not found for policy " + policyId));
+            String target = logicHash;
+            if (target == null || target.isBlank()) {
+                target = HexUtil.encodeHexString(((BytesPlutusData) parseGsFields(findGsUtxo(reg))
+                        .get(GS_IDX_GLOBAL_STATE_SCRIPT)).getValue());
+            }
+            final String hash = target.toLowerCase(java.util.Locale.ROOT);
+            GsLogicEntry entry = GsLogicEntry.find(reg.getGsLogics(), hash)
+                    .orElseThrow(() -> new BuildPreconditionException("UNKNOWN GlobalState logic " + hash
+                            + ": this platform has no registry entry for it"));
+            String derived = derivedLogicHash(reg, entry.maxDatumBytes());
+            if (!derived.equalsIgnoreCase(hash))
+                throw new BuildPreconditionException("gs_logics entry " + hash + " is not the logic this token's "
+                        + "parameters derive at cap " + entry.maxDatumBytes() + " (" + derived + ")");
+
+            if (entry.hasRef()) {
+                Optional<Utxo> live = utxoProvider.findUtxo(entry.refTxHash(), entry.refOutputIndex());
+                if (live.isPresent()) {
+                    if (!GsLogicEntry.CONFIRMED.equals(entry.refState())) {
+                        reg.setGsLogics(GsLogicEntry.upsert(reg.getGsLogics(), entry.withRefState(GsLogicEntry.CONFIRMED)));
+                        registrationRepository.save(reg);
+                    }
+                    throw new BuildPreconditionException("the GlobalState logic " + hash + " is already published at "
+                            + entry.refTxHash() + "#" + entry.refOutputIndex());
+                }
+                if (GsLogicEntry.CONFIRMED.equals(entry.refState())) {
+                    throw new BuildPreconditionException("the GlobalState logic reference script " + entry.refTxHash()
+                            + "#" + entry.refOutputIndex() + " was seen on chain and is not visible now; it sits at an "
+                            + "unspendable address, so this is most likely indexer lag — retry shortly");
+                }
+                boolean expired = GsLogicEntry.pendingExpired(entry.refTtlSlot(), utxoProvider.currentTipSlot());
+                if (!expired) {
+                    throw new BuildPreconditionException("a publish tx for this GlobalState logic is still pending ("
+                            + entry.refTxHash() + "); wait for it to confirm"
+                            + (entry.refTtlSlot() != null ? " or for its validity (slot " + entry.refTtlSlot() + ") to pass" : ""));
+                }
+                log.info("publish-gs-logic: pending publish {} expired at slot {} without landing; rebuilding",
+                        entry.refTxHash(), entry.refTtlSlot());
+            }
+
+            PlutusScript logic = PlutusV3Script.builder().cborHex(entry.scriptCborHex()).build();
+            byte[] feePayerKeyHash = new Address(feePayerAddress).getPaymentCredentialHash()
+                    .orElseThrow(() -> new BuildPreconditionException("fee payer address has no payment credential"));
+            NativeScript markerPolicy = refScriptMarkerPolicy(feePayerKeyHash);
+            String markerPolicyId = markerPolicy.getPolicyId();
+            String refAddress = unspendableRefScriptAddress();
+            BigInteger exact = new MinAdaCalculator(protocolParamsSupplier.getProtocolParams()).calculateMinAda(
+                    TransactionOutput.builder().address(refAddress)
+                            .value(refScriptOutputValue(MinAdaCalculator.DUMMY_COIN_VAL, markerPolicyId))
+                            .scriptRef(logic).build());
+            BigInteger coin = exact.add(BigInteger.valueOf(1_999_999L)).divide(BigInteger.valueOf(1_000_000L))
+                    .multiply(BigInteger.valueOf(1_000_000L));
+            Utxo funding = findFunding(feePayerAddress, coin.longValue() + 5_000_000L);
+            long ttlSlot = ttlSlotForDeadline(System.currentTimeMillis() + DEFAULT_TTL_MS);
+
+            Tx tx = new Tx()
+                    .from(feePayerAddress)
+                    .collectFrom(List.of(funding))
+                    .mintAssets(markerPolicy, new Asset("0x" + REF_SCRIPT_MARKER_ASSET_NAME_HEX, BigInteger.ONE))
+                    .payToAddress(refAddress, List.of(Amount.lovelace(coin), refScriptMarkerAmount(markerPolicyId)), logic)
+                    .withChangeAddress(feePayerAddress);
+            Transaction transaction = quickTxBuilder.compose(tx)
+                    .feePayer(feePayerAddress)
+                    .mergeOutputs(false)
+                    .validTo(ttlSlot)
+                    .build();
+            String txHash = TransactionUtil.getTxHash(transaction.serialize());
+            Utxo ref = findRefScriptOutput(transaction, txHash, logic);
+            if (ref == null) throw new IllegalStateException("built publish tx carries no logic reference script");
+            checkedTxSize("publishGsLogic", transaction);
+
+            // Recorded at BUILD time on purpose (the hash of an unsubmitted tx is final): the
+            // live check promotes it once it lands, and the TTL decides when it was abandoned.
+            reg.setGsLogics(GsLogicEntry.upsert(reg.getGsLogics(),
+                    entry.withPendingRef(txHash, ref.getOutputIndex(), ttlSlot)));
+            registrationRepository.save(reg);
+            log.info("publish-gs-logic: policy={} logic={} tx={}#{} ({} lovelace locked permanently)",
+                    policyId, hash, txHash, ref.getOutputIndex(), coin);
+            return TransactionContext.ok(transaction.serializeToHex());
+        } catch (BuildPreconditionException bpe) {
+            return TransactionContext.typedError(bpe.getMessage());
+        } catch (Exception e) {
+            log.error("rwa-token publish-gs-logic failed for policy={}", policyId, e);
+            return TransactionContext.typedError("publish GlobalState logic failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * True when this token's GlobalState exists on chain but is not the PR #29 layout (15 fields,
+     * constructor 0) — a token registered under an earlier contract pin. Such tokens are not
+     * spendable by these builders and must be re-registered (plan Non-goals: INCOMPATIBLE).
+     */
+    public boolean hasIncompatibleGlobalState(String policyId) {
+        try {
+            RwaTokenRegistrationEntity reg = registrationRepository.findByProgrammableTokenPolicyId(policyId).orElse(null);
+            if (reg == null) return false;
+            Optional<Utxo> gs = utxoProvider.findUtxoByAsset(reg.getGlobalStatePolicyId(),
+                    RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX);
+            if (gs.isEmpty() || gs.get().getInlineDatum() == null) return false;
+            PlutusData datum = PlutusData.deserialize(HexUtil.decodeHexString(gs.get().getInlineDatum()));
+            return !(datum instanceof ConstrPlutusData c) || c.getAlternative() != 0
+                    || c.getData().getPlutusDataList().size() != GS_DATUM_FIELD_COUNT;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** What the admin panel needs about the PR #29 GlobalState logic, beyond the datum fields. */
+    public record GsLogicStatus(String logicHash, Integer maxDatumBytes, int datumBytes, boolean logicRefPublished,
+                                boolean logicKnown, String derivedMintingAuthorityHash, Long circulatingSupply,
+                                int maxCapLimit, int headroomBytes, int burnReserveBytes) {}
+
+    public Optional<GsLogicStatus> readGsLogicStatus(String policyId, ProtocolBootstrapParams protocolParams) {
+        try {
+            RwaTokenRegistrationEntity reg = registrationRepository.findByProgrammableTokenPolicyId(policyId).orElse(null);
+            if (reg == null) return Optional.empty();
+            Utxo gsUtxo = findGsUtxo(reg);
+            List<PlutusData> fields = parseGsFields(gsUtxo);
+            String logic = HexUtil.encodeHexString(((BytesPlutusData) fields.get(GS_IDX_GLOBAL_STATE_SCRIPT)).getValue());
+            Optional<GsLogicEntry> entry = GsLogicEntry.find(reg.getGsLogics(), logic);
+            int size = serialisedSize(PlutusData.deserialize(HexUtil.decodeHexString(gsUtxo.getInlineDatum())));
+            String derived = protocolParams == null ? null : chainIdentity(reg, protocolParams).derivedAuthorityHash();
+            Long supply = utxoProvider.assetSupply(policyId, reg.getSecurityAssetNameHex()).map(BigInteger::longValue).orElse(null);
+            return Optional.of(new GsLogicStatus(logic, entry.map(GsLogicEntry::maxDatumBytes).orElse(null), size,
+                    entry.map(GsLogicEntry::hasRef).orElse(false), entry.isPresent(), derived, supply,
+                    MAX_GS_DATUM_BYTES_LIMIT, GS_DATUM_HEADROOM_BYTES, GS_BURN_RESERVE_BYTES));
+        } catch (Exception e) {
+            log.debug("readGsLogicStatus({}) failed: {}", policyId, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /** Result of an attestation check against the LIVE GlobalState (read-only; no tx, no state). */
+    public record AttestationCheck(boolean valid, String reason, String subjectCredentialHash, Integer credentialType,
+                                   Integer tier, Long validUntilMs, String issuerVkey) {}
+
+    /**
+     * Would this CIP-30 attestation be accepted by a transfer right now? The subject (stake hash,
+     * bytes 0–27; credential type, byte 66) comes from the claim itself; trusted issuers and the
+     * network come from the live GlobalState. Runs the same verifier the transfer builder uses, so
+     * an issuer only ever shares a bundle the backend would accept.
+     */
+    public AttestationCheck verifyAttestation(String policyId, CmtaAttestation attestation) {
+        try {
+            RwaTokenRegistrationEntity reg = registrationRepository.findByProgrammableTokenPolicyId(policyId)
+                    .orElseThrow(() -> new BuildPreconditionException("rwa-token registration not found for policy " + policyId));
+            List<PlutusData> fields = parseGsFields(findGsUtxo(reg));
+            List<String> trusted = trustedEntitiesFrom(fields.get(GS_IDX_TRUSTED_ENTITY_VKEYS));
+            long network = ((BigIntPlutusData) fields.get(GS_IDX_NETWORK_ID)).getValue().longValueExact();
+            String payloadHex = attestation == null ? null : attestation.payloadHex();
+            if (payloadHex == null || !payloadHex.matches("(?i)[0-9a-f]{134}"))
+                return new AttestationCheck(false, "payload must be the 67-byte claim", null, null, null, null, null);
+            byte[] claim = HexUtil.decodeHexString(payloadHex);
+            byte[] subject = Arrays.copyOfRange(claim, 0, 28);
+            short credentialType = (short) (claim[66] & 0xff);
+            var verified = CmtaAttestationVerifier.verify(attestation, subject, credentialType, policyId, network,
+                    trusted, System.currentTimeMillis(), "attestation");
+            return new AttestationCheck(true, null, HexUtil.encodeHexString(subject), (int) credentialType,
+                    claim[28] & 0xff, verified.validUntilMs(), HexUtil.encodeHexString(verified.issuerVkey()));
+        } catch (IllegalArgumentException | BuildPreconditionException e) {
+            return new AttestationCheck(false, e.getMessage(), null, null, null, null, null);
+        }
+    }
+
+    // ══ PR #29: LockUpgrades and GlobalState-logic rotation (standalone endpoints) ══════
+
+    /** Every certificate that leaves a stake credential registered (legacy and Conway forms).
+     *  Anyone can register a script credential, so the platform must recognise them all (I12). */
+    private static final java.util.Set<CertificateType> REGISTRATION_CERTS = java.util.EnumSet.of(
+            CertificateType.STAKE_REGISTRATION, CertificateType.REG_CERT, CertificateType.STAKE_REG_DELEG_CERT,
+            CertificateType.VOTE_REG_DELEG_CERT, CertificateType.STAKE_VOTE_REG_DELEG_CERT);
+
+    private boolean rewardAccountRegistered(String rewardAddress) {
+        return stakeRegistrationRepository.findRegistrationsByStakeAddress(rewardAddress)
+                .map(r -> REGISTRATION_CERTS.contains(r.getType()))
+                .orElse(false);
+    }
+
+    /** Result of a lock build: the unsigned tx plus warnings the UI must show before signing. */
+    public record LockPlan(List<String> warnings) {}
+
+    /**
+     * {@code LockUpgrades} — irreversible. Plan Addendum I16 pre-lock checks: the installed logic
+     * is this token's (re-derived), published and registered; the minting authority is the derived
+     * one and registered; the datum keeps the burn reserve; no rotation is in flight; and the caller
+     * typed the policy id. Never batched (R5).
+     */
+    public TransactionContext<LockPlan> buildLockUpgradesTransaction(String policyId, String feePayerAddress,
+            String signerPkh, String confirmPolicyId, ProtocolBootstrapParams protocolParams) {
+        try {
+            if (!policyId.equalsIgnoreCase(confirmPolicyId == null ? "" : confirmPolicyId.trim()))
+                throw new BuildPreconditionException("LockUpgrades is irreversible: confirm by typing this token's policy id");
+            RwaTokenRegistrationEntity reg = registrationRepository.findByProgrammableTokenPolicyId(policyId)
+                    .orElseThrow(() -> new BuildPreconditionException("rwa-token registration not found for policy " + policyId));
+            Utxo gsUtxo = findGsUtxo(reg);
+            List<PlutusData> fields = parseGsFields(gsUtxo);
+            if (boolFromConstr(fields.get(GS_IDX_UPGRADES_LOCKED))) throw new BuildPreconditionException("upgrades are already locked");
+            if (boolFromConstr(fields.get(GS_IDX_DEACTIVATED))) throw new BuildPreconditionException("the contract is deactivated");
+            GsWitness witness = gsWitness(reg, fields, true);
+            // Observed as field 0 → installed (rotation step 3 never marks it at build time).
+            markInstalledIfObserved(reg, witness, gsUtxo);
+            if (!rewardAccountRegistered(witness.logicRewardAddress()))
+                throw new BuildPreconditionException("cannot confirm the installed GlobalState logic's reward account is registered");
+            ChainIdentity identity = chainIdentity(reg, protocolParams);
+            String authority = HexUtil.encodeHexString(((BytesPlutusData) fields.get(GS_IDX_MINTING_SCRIPT_CREDENTIAL_HASH)).getValue());
+            if (!authority.equalsIgnoreCase(identity.derivedAuthorityHash()))
+                throw new BuildPreconditionException("the installed minting authority " + authority + " is not this token's "
+                        + "derived authority; locking would make it permanent — rotate to the derived authority first");
+            String authorityReward = AddressProvider.getRewardAddress(Credential.fromScript(authority), network.getCardanoNetwork()).getAddress();
+            if (!rewardAccountRegistered(authorityReward) && !reg.isMintingAuthorityRewardRegistered())
+                throw new BuildPreconditionException("cannot confirm the minting authority's reward account is registered");
+            List<String> warnings = new ArrayList<>();
+            for (GsLogicEntry e : GsLogicEntry.parseList(reg.getGsLogics())) {
+                if (e.logicHash().equalsIgnoreCase(witness.logicHash()) || e.everInstalled()) continue;
+                Optional<Long> tip = utxoProvider.currentTipSlot();
+                boolean inFlight = (GsLogicEntry.PENDING.equals(e.registrationState())
+                                && !GsLogicEntry.pendingExpired(e.registrationTtlSlot(), tip))
+                        || (GsLogicEntry.PENDING.equals(e.refState()) && !GsLogicEntry.pendingExpired(e.refTtlSlot(), tip));
+                if (inFlight) throw new BuildPreconditionException("a GlobalState logic rotation to " + e.logicHash()
+                        + " is in flight; finish or abandon it before locking");
+                warnings.add("rotation target " + e.logicHash() + " (cap " + e.maxDatumBytes() + ") was prepared but never installed");
+            }
+            int size = serialisedSize(PlutusData.deserialize(HexUtil.decodeHexString(gsUtxo.getInlineDatum())));
+            int cap = witness.entry().maxDatumBytes();
+            if (size + GS_BURN_RESERVE_BYTES > cap)
+                throw new BuildPreconditionException("the datum (" + size + " B) is inside the burn reserve of its cap (" + cap
+                        + " B); after locking, burns could become impossible — shrink it first");
+            if (size + GS_DATUM_HEADROOM_BYTES > cap)
+                warnings.add("only " + (cap - size) + " bytes of datum headroom remain; after locking, adding trusted "
+                        + "entities or larger security info may no longer fit");
+
+            ActionAndDatum ad = computeActionAndDatum(new GsChangeSpec("LockUpgrades", null, null, null, null, null,
+                    null, null, null, null, null, null, null), PlutusData.deserialize(HexUtil.decodeHexString(gsUtxo.getInlineDatum())),
+                    policyId, identity);
+            if (ad.error != null) throw new BuildPreconditionException(ad.error);
+            Utxo funding = findFunding(feePayerAddress, 10_000_000L);
+            TransactionContext<Void> built = buildSingleGsUpdateTx(reg, witness, gsUtxo, ad.actionRedeemer, ad.newDatum,
+                    funding, feePayerAddress, List.of(HexUtil.decodeHexString(signerPkh)), List.of());
+            if (!built.isSuccessful()) return TransactionContext.typedError("lock-upgrades: " + built.error());
+            return TransactionContext.ok(built.unsignedCborTx(), new LockPlan(List.copyOf(warnings)));
+        } catch (BuildPreconditionException bpe) {
+            return TransactionContext.typedError(bpe.getMessage());
+        } catch (Exception e) {
+            log.error("rwa-token lock-upgrades failed for policy={}", policyId, e);
+            return TransactionContext.typedError("lock-upgrades failed: " + e.getMessage());
+        }
+    }
+
+    /** Checks shared by rotation steps 1 and 3: cap bounds, headroom and target identity. */
+    private String rotationTarget(RwaTokenRegistrationEntity reg, List<PlutusData> fields, Utxo gsUtxo, int newCap)
+            throws Exception {
+        if (newCap <= 0 || newCap > MAX_GS_DATUM_BYTES_LIMIT)
+            throw new BuildPreconditionException("the new cap must be between 1 and " + MAX_GS_DATUM_BYTES_LIMIT + " bytes");
+        if (boolFromConstr(fields.get(GS_IDX_UPGRADES_LOCKED))) throw new BuildPreconditionException("upgrades are locked");
+        if (boolFromConstr(fields.get(GS_IDX_DEACTIVATED))) throw new BuildPreconditionException("the contract is deactivated");
+        int size = serialisedSize(PlutusData.deserialize(HexUtil.decodeHexString(gsUtxo.getInlineDatum())));
+        // On chain, the cap check passes whenever the output is the same size as the input, so
+        // a too-small target cap is only caught here (complexity review, Addendum I2/I4).
+        if (size + GS_DATUM_HEADROOM_BYTES > newCap)
+            throw new BuildPreconditionException("the current datum is " + size + " bytes; a cap of " + newCap
+                    + " must leave at least " + GS_DATUM_HEADROOM_BYTES + " bytes of headroom");
+        String target = derivedLogicHash(reg, newCap);
+        String current = HexUtil.encodeHexString(((BytesPlutusData) fields.get(GS_IDX_GLOBAL_STATE_SCRIPT)).getValue());
+        String admin = HexUtil.encodeHexString(((BytesPlutusData) fields.get(GS_IDX_ADMIN_CREDENTIAL_HASH)).getValue());
+        String authority = HexUtil.encodeHexString(((BytesPlutusData) fields.get(GS_IDX_MINTING_SCRIPT_CREDENTIAL_HASH)).getValue());
+        if (target.equalsIgnoreCase(current)) throw new BuildPreconditionException("the GlobalState logic already has cap " + newCap);
+        if (target.equalsIgnoreCase(admin) || target.equalsIgnoreCase(authority))
+            throw new BuildPreconditionException("the rotation target collides with the admin or the minting authority");
+        return target;
+    }
+
+    /** The logic a rotation to {@code newCap} would install (derived, never caller-supplied). */
+    public String rotationTargetHash(String policyId, int newCap) {
+        return registrationRepository.findByProgrammableTokenPolicyId(policyId)
+                .map(reg -> derivedLogicHash(reg, newCap)).orElse(null);
+    }
+
+    /** Rotation step 1: register the new logic's reward account (idempotent: an account that is
+     *  already registered — by anyone — counts as done, Addendum I12). The target is ALWAYS
+     *  re-derived from this token's own parameters and the new cap (I4); no hash is accepted. */
+    public TransactionContext<Boolean> buildRegisterGsLogicTransaction(String policyId, String feePayerAddress, int newCap) {
+        try {
+            RwaTokenRegistrationEntity reg = registrationRepository.findByProgrammableTokenPolicyId(policyId)
+                    .orElseThrow(() -> new BuildPreconditionException("rwa-token registration not found for policy " + policyId));
+            Utxo gsUtxo = findGsUtxo(reg);
+            List<PlutusData> fields = parseGsFields(gsUtxo);
+            gsWitness(reg, fields, true);   // the INSTALLED logic must be one this platform can describe
+            String target = rotationTarget(reg, fields, gsUtxo, newCap);
+            PlutusScript logic = scriptBuilder.buildGlobalStateLogicScript(reg.getSecurityAssetNameHex(),
+                    reg.getProgrammableTokenPolicyId(), reg.getGlobalStatePolicyId(),
+                    HexUtil.encodeHexString(scriptBuilder.buildPowerUsersSpendScript(
+                            reg.getGlobalStatePolicyId(), reg.getPowerUsersPolicyId()).getScriptHash()), newCap);
+            String rewardAddress = AddressProvider.getRewardAddress(logic, network.getCardanoNetwork()).getAddress();
+            GsLogicEntry entry = GsLogicEntry.find(reg.getGsLogics(), target).orElse(new GsLogicEntry(target, newCap,
+                    logic.getCborHex(), null, null, GsLogicEntry.NONE, null, null, null));
+            if (rewardAccountRegistered(rewardAddress)) {
+                reg.setGsLogics(GsLogicEntry.upsert(reg.getGsLogics(), entry.withRegistration(
+                        entry.registrationTxHash(), GsLogicEntry.CONFIRMED)));
+                registrationRepository.save(reg);
+                return new TransactionContext<>(null, Boolean.TRUE, true, null);   // already registered
+            }
+            if (GsLogicEntry.PENDING.equals(entry.registrationState())
+                    && !GsLogicEntry.pendingExpired(entry.registrationTtlSlot(), utxoProvider.currentTipSlot())) {
+                throw new BuildPreconditionException("a registration tx for this GlobalState logic is still pending ("
+                        + entry.registrationTxHash() + "); wait for it to confirm or for its validity to pass");
+            }
+            Utxo funding = findFunding(feePayerAddress, 5_000_000L);
+            long ttlSlot = ttlSlotForDeadline(System.currentTimeMillis() + DEFAULT_TTL_MS);
+            Tx tx = new Tx().from(feePayerAddress).collectFrom(List.of(funding))
+                    .registerStakeAddress(rewardAddress).withChangeAddress(feePayerAddress);
+            Transaction transaction = quickTxBuilder.compose(tx).feePayer(feePayerAddress).mergeOutputs(false)
+                    .validTo(ttlSlot).build();
+            String txHash = TransactionUtil.getTxHash(transaction.serialize());
+            reg.setGsLogics(GsLogicEntry.upsert(reg.getGsLogics(), entry.withPendingRegistration(txHash, ttlSlot)));
+            registrationRepository.save(reg);
+            return TransactionContext.ok(transaction.serializeToHex(), Boolean.FALSE);
+        } catch (BuildPreconditionException bpe) {
+            return TransactionContext.typedError(bpe.getMessage());
+        } catch (Exception e) {
+            log.error("rwa-token register-gs-logic failed for policy={}", policyId, e);
+            return TransactionContext.typedError("register GlobalState logic failed: " + e.getMessage());
+        }
+    }
+
+    /** Rotation step 3: {@code RotateGlobalStateScript} on BOTH the outgoing and the incoming logic
+     *  withdrawal. Refused unless the target (re-derived) is registered on chain and its reference
+     *  script is live, and the current datum fits the new cap with headroom. */
+    public TransactionContext<Void> buildRotateGsLogicTransaction(String policyId, String feePayerAddress,
+                                                                  String signerPkh, int newCap) {
+        try {
+            RwaTokenRegistrationEntity reg = registrationRepository.findByProgrammableTokenPolicyId(policyId)
+                    .orElseThrow(() -> new BuildPreconditionException("rwa-token registration not found for policy " + policyId));
+            Utxo gsUtxo = findGsUtxo(reg);
+            List<PlutusData> fields = parseGsFields(gsUtxo);
+            GsWitness current = gsWitness(reg, fields, true);
+            String target = rotationTarget(reg, fields, gsUtxo, newCap);
+            GsLogicEntry entry = GsLogicEntry.find(reg.getGsLogics(), target).orElseThrow(() -> new BuildPreconditionException(
+                    "the rotation target " + target + " is not registered yet: run step 1 (register) first"));
+            if (entry.maxDatumBytes() != newCap)
+                throw new BuildPreconditionException("registry entry " + target + " records cap " + entry.maxDatumBytes());
+            PlutusScript logic = PlutusV3Script.builder().cborHex(entry.scriptCborHex()).build();
+            if (!target.equalsIgnoreCase(HexUtil.encodeHexString(logic.getScriptHash())))
+                throw new BuildPreconditionException("registry entry " + target + " holds a different script");
+            String targetReward = AddressProvider.getRewardAddress(logic, network.getCardanoNetwork()).getAddress();
+            if (!rewardAccountRegistered(targetReward))
+                throw new BuildPreconditionException("the rotation target's reward account " + targetReward
+                        + " is not registered on chain yet: run step 1 and wait for it to confirm "
+                        + "(registering and withdrawing in one transaction does not work)");
+            if (!entry.hasRef())
+                throw new BuildPreconditionException("the rotation target's reference script is not published: run step 2 first");
+            Optional<Utxo> live = utxoProvider.findUtxo(entry.refTxHash(), entry.refOutputIndex());
+            if (live.isEmpty())
+                throw new BuildPreconditionException("the rotation target's reference script " + entry.refTxHash() + "#"
+                        + entry.refOutputIndex() + " is not visible on chain yet: wait for step 2 to confirm");
+            if (live.get().getReferenceScriptHash() != null && !target.equalsIgnoreCase(live.get().getReferenceScriptHash()))
+                throw new BuildPreconditionException("the recorded rotation-target reference output carries another script");
+            entry = entry.withRefState(GsLogicEntry.CONFIRMED).withRegistration(entry.registrationTxHash(), GsLogicEntry.CONFIRMED);
+            reg.setGsLogics(GsLogicEntry.upsert(reg.getGsLogics(), entry));
+            registrationRepository.save(reg);
+
+            PlutusData newDatum = replaceGsField(fields, GS_IDX_GLOBAL_STATE_SCRIPT, BytesPlutusData.of(HexUtil.decodeHexString(target)));
+            PlutusData action = ConstrPlutusData.of(GS_ACTION_ROTATE_GLOBAL_STATE_SCRIPT, BytesPlutusData.of(HexUtil.decodeHexString(target)));
+            CoreWithdrawal outgoing = current.withdrawal(0, action);
+            Credential incomingCredential = Credential.fromScript(logic.getScriptHash());
+            CoreWithdrawal incoming = new CoreWithdrawal(incomingCredential, targetReward,
+                    ConstrPlutusData.of(0, BigIntPlutusData.of(BigInteger.ZERO), action));
+            BigInteger incomingBalance = utxoProvider.rewardBalance(targetReward).orElse(BigInteger.ZERO);
+            TransactionInput targetRef = TransactionInput.builder().transactionId(entry.refTxHash()).index(entry.refOutputIndex()).build();
+            var layout = CoreLayout.builder().referenceInput(current.logicRefInput()).referenceInput(targetRef)
+                    .withdrawal(current.logicCredential()).withdrawal(incomingCredential).build();
+
+            Utxo funding = findFunding(feePayerAddress, 10_000_000L);
+            Tx tx = new Tx()
+                    .collectFrom(List.of(funding))
+                    .collectFrom(gsUtxo, GS_PROXY_SPEND_REDEEMER)
+                    .payToContract(gsUtxo.getAddress(), ValueUtil.toAmountList(buildPreservedGsValue(gsUtxo, reg.getGlobalStatePolicyId())), newDatum)
+                    .readFrom(layout.referenceInputs().toArray(new TransactionInput[0]))
+                    .attachSpendingValidator(current.proxy())
+                    .attachRewardValidator(current.logic())
+                    .attachRewardValidator(logic)
+                    .withChangeAddress(feePayerAddress);
+            for (CoreWithdrawal w : layout.inWithdrawalOrder(List.of(outgoing, incoming), CoreWithdrawal::credential)) {
+                BigInteger amount = w == outgoing ? current.rewardBalance() : incomingBalance;
+                tx = tx.withdraw(w.rewardAddress(), amount, w.redeemer());
+            }
+            byte[] signer = HexUtil.decodeHexString(signerPkh);
+            Transaction transaction = quickTxBuilder.compose(tx)
+                    .withRequiredSigners(signer)
+                    .withReferenceScripts(current.logic(), logic)
+                    .removeDuplicateScriptWitnesses(true)
+                    .feePayer(feePayerAddress)
+                    .mergeOutputs(false)
+                    .withCollateralInputs(TransactionInput.builder().transactionId(funding.getTxHash()).index(funding.getOutputIndex()).build())
+                    .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
+                    .ignoreScriptCostEvaluationError(false)
+                    .build();
+            GsTxSelfCheck.verify(transaction, new GsTxSelfCheck.Expectation(txInputOf(gsUtxo), gsUtxo.getAddress(),
+                    reg.getGlobalStatePolicyId(), RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX, newDatum,
+                    java.util.Map.of(outgoing.rewardAddress(), outgoing.redeemer(), incoming.rewardAddress(), incoming.redeemer()),
+                    Set.of(), Set.of(), Set.of(), hexSigners(List.of(signer))));
+            log.info("rwa-token rotate-gs-logic: policy={} {} -> {} (cap {})", policyId, current.logicHash(), target, newCap);
+            return TransactionContext.ok(transaction.serializeToHex());
+        } catch (BuildPreconditionException bpe) {
+            return TransactionContext.typedError(bpe.getMessage());
+        } catch (Exception e) {
+            log.error("rwa-token rotate-gs-logic failed for policy={}", policyId, e);
+            return TransactionContext.typedError("rotate GlobalState logic failed: " + e.getMessage());
         }
     }
 
@@ -4410,6 +5187,16 @@ public class RwaTokenModuleHandler
      *  {@link Utxo} carrying {@code referenceScriptHash} — which is the field both
      *  {@code AikenTransactionEvaluator} and cardano-client's fee calculator key on
      *  when they ask a {@code ScriptSupplier} for the script bytes. */
+    /** Whether a built output carries exactly one {@code policyId.assetNameHex}. */
+    private static boolean holdsAsset(TransactionOutput output, String policyId, String assetNameHex) {
+        if (output.getValue() == null || output.getValue().getMultiAssets() == null) return false;
+        return output.getValue().getMultiAssets().stream().anyMatch(m -> m.getPolicyId().equalsIgnoreCase(policyId)
+                && m.getAssets().stream().anyMatch(a -> {
+                    String name = a.getName().startsWith("0x") ? a.getName().substring(2) : a.getName();
+                    return name.equalsIgnoreCase(assetNameHex) && BigInteger.ONE.equals(a.getValue());
+                }));
+    }
+
     private static Utxo findRefScriptOutput(Transaction tx, String txHash, PlutusScript script)
             throws Exception {
         byte[] wantedRefBytes = script.scriptRefBytes();
@@ -4469,10 +5256,41 @@ public class RwaTokenModuleHandler
             String registrationTxHash,
             String attestationTxHash,
             String registerTransferLogicTxHash,
-            String registerThirdPartyTransferLogicTxHash) {}
+            String registerThirdPartyTransferLogicTxHash,
+            /** Since 63fad89: registers + publishes the GlobalState logic; FIRST in the chain,
+             *  before genesis. Null only in a chain frozen under an earlier pin. */
+            String preGenesisCborHex,
+            String preGenesisTxHash) {
+        /** A chain without a preGenesis tx (persisted before 63fad89, or a test fixture). */
+        public ChainBuildResult(String genesisCborHex, String addPowerUserCborHex, String cmtaProvenanceCborHex,
+                String issuanceProvenanceCborHex, String publishScriptsCborHex, String registrationCborHex,
+                String attestationCborHex, String registerTransferLogicCborHex,
+                String registerThirdPartyTransferLogicCborHex, String globalStatePolicyId,
+                String programmableTokenPolicyId, String denylistPolicyId, String powerUsersPolicyId,
+                String genesisTxHash, String addPowerUserTxHash, String cmtaProvenanceTxHash,
+                String issuanceProvenanceTxHash, String publishScriptsTxHash, String registrationTxHash,
+                String attestationTxHash, String registerTransferLogicTxHash,
+                String registerThirdPartyTransferLogicTxHash) {
+            this(genesisCborHex, addPowerUserCborHex, cmtaProvenanceCborHex, issuanceProvenanceCborHex,
+                    publishScriptsCborHex, registrationCborHex, attestationCborHex, registerTransferLogicCborHex,
+                    registerThirdPartyTransferLogicCborHex, globalStatePolicyId, programmableTokenPolicyId,
+                    denylistPolicyId, powerUsersPolicyId, genesisTxHash, addPowerUserTxHash, cmtaProvenanceTxHash,
+                    issuanceProvenanceTxHash, publishScriptsTxHash, registrationTxHash, attestationTxHash,
+                    registerTransferLogicTxHash, registerThirdPartyTransferLogicTxHash, null, null);
+        }
+    }
 
-    /** Internal immutable selection. Never decoded from a public registration request. */
-    public record GenesisPlan(String globalStatePolicyId, String programmableTokenPolicyId, List<Utxo> funding) {}
+    /** Internal immutable selection. Never decoded from a public registration request.
+     *  {@code preGenesisFunding} (since 63fad89) funds the preGenesis tx and is disjoint from
+     *  {@code funding}; it is null only in a plan persisted before that pin, which
+     *  {@link #buildGlobalStateInitTransaction} refuses (its scripts would orphan the token). */
+    public record GenesisPlan(String globalStatePolicyId, String programmableTokenPolicyId, List<Utxo> funding,
+                              List<Utxo> preGenesisFunding) {
+        /** A plan without preGenesis funding (persisted before 63fad89, or a test fixture). */
+        public GenesisPlan(String globalStatePolicyId, String programmableTokenPolicyId, List<Utxo> funding) {
+            this(globalStatePolicyId, programmableTokenPolicyId, funding, null);
+        }
+    }
     private GenesisPlan preparedGenesis;
     private org.cardanofoundation.cip113.model.Cip170AttestationData initialMintAttestation;
     private java.time.Instant initialMintExpiresAt;
@@ -4540,19 +5358,25 @@ public class RwaTokenModuleHandler
                 prefix.powerUsersPolicyId(), prefix.genesisTxHash(), prefix.addPowerUserTxHash(),
                 prefix.cmtaProvenanceTxHash(), prefix.issuanceProvenanceTxHash(),
                 prefix.publishScriptsTxHash(), prefix.registrationTxHash(), null,
-                certHash, thirdPartyHash);
+                certHash, thirdPartyHash, prefix.preGenesisCborHex(), prefix.preGenesisTxHash());
     }
 
     public GenesisPlan planGenesis(RwaTokenRegisterRequest request, ProtocolBootstrapParams params) throws Exception {
         String error = creationPreflight(request);
         if (error != null) throw new IllegalArgumentException(error);
-        List<Utxo> funding = selectGenesisFunding(request.getFeePayerAddress()).selected();
+        GenesisFunding selected = selectGenesisFunding(request.getFeePayerAddress());
+        List<Utxo> funding = selected.selected();
         var input = txInputOf(funding.getFirst());
-        String gsPolicy = scriptBuilder.buildGlobalStateMintScript(input).getPolicyId();
+        // The same cap genesis will apply, or the planned policy differs from the built one.
+        String gsPolicy = scriptBuilder.buildGlobalStateMintScript(input, genesisMaxGsDatumBytes(request)).getPolicyId();
         var proxy = scriptBuilder.buildMintingLogicScript(gsPolicy);
         String policy = protocolScriptBuilderService.getParameterizedIssuanceMintScript(params, proxy).getPolicyId();
-        return new GenesisPlan(gsPolicy, policy, List.copyOf(funding));
+        return new GenesisPlan(gsPolicy, policy, List.copyOf(funding), List.copyOf(selected.preGenesis()));
     }
+
+    /** The refusal for a plan persisted before 63fad89 (no preGenesis funding). */
+    public static final String PRE_63FAD89_PLAN = "this attempt was prepared for an earlier rwa-token contract "
+            + "(no preGenesis funding); cancel it and prepare again";
 
     private List<Utxo> requirePreparedFunding(String address, GenesisPlan plan) {
         if (plan.funding() == null || plan.funding().isEmpty()) throw new IllegalArgumentException("Prepared funding is absent");
@@ -4562,8 +5386,12 @@ public class RwaTokenModuleHandler
         if (!bootstrap.getTxHash().equals(reservation.getBootstrapTxHash())
                 || bootstrap.getOutputIndex() != reservation.getBootstrapOutputIndex())
             throw new IllegalArgumentException("Prepared bootstrap reservation differs");
+        if (plan.preGenesisFunding() == null || plan.preGenesisFunding().isEmpty())
+            throw new IllegalArgumentException(PRE_63FAD89_PLAN);
         var live = utxoProvider.findAllCurrentUtxosFromBlockfrost(address);
-        for (var expected : plan.funding()) {
+        var everyInput = new ArrayList<>(plan.funding());
+        everyInput.addAll(plan.preGenesisFunding());
+        for (var expected : everyInput) {
             var actual = live.stream().filter(u -> u.getTxHash().equals(expected.getTxHash())
                     && u.getOutputIndex() == expected.getOutputIndex()).findFirst()
                     .orElseThrow(() -> new IllegalArgumentException("Prepared funding was spent; cancel this attempt and prepare again"));
@@ -4581,7 +5409,11 @@ public class RwaTokenModuleHandler
         return plan.funding();
     }
 
-    private record GenesisFunding(List<Utxo> selected, List<Utxo> eligible) {}
+    private record GenesisFunding(List<Utxo> selected, List<Utxo> eligible, List<Utxo> preGenesis) {}
+
+    /** Lovelace the preGenesis funding must hold: the GlobalState logic's reference-script output
+     *  (≈27 ADA at the current coinsPerUtxoByte), the 2 ADA stake deposit, the fee, and change. */
+    static final long PRE_GENESIS_MIN_LOVELACE = 40_000_000L;
 
     private GenesisFunding selectGenesisFunding(String adminAddress) {
             List<Utxo> directUtxos = utxoProvider.findAllCurrentUtxosFromBlockfrost(adminAddress);
@@ -4596,18 +5428,47 @@ public class RwaTokenModuleHandler
                     .filter(u -> !genesisFundingReservationRepository.existsById(
                             u.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + u.getOutputIndex()))
                     .toList();
-            List<Utxo> utilityUtxos = accountService.findAdaOnlyUtxo(adminAddress,
-                    10_000_000L, ignored -> eligibleUtxos);
-            BigInteger eligibleTotal = utilityUtxos.stream()
-                    .map(u -> u.getAmount().getFirst().getQuantity())
-                    .reduce(BigInteger.ZERO, BigInteger::add);
-            if (eligibleTotal.compareTo(BigInteger.valueOf(10_000_000L)) < 0) {
+            // Since 63fad89 a preGenesis tx registers + publishes the GlobalState logic before
+            // genesis, and must NOT spend any genesis input (the bootstrap is baked into every
+            // policy id). It gets one eligible UTxO of its own; genesis is funded from the rest.
+            // Every >= 40 ADA candidate is tried, smallest first, so a 45 + 15 ADA wallet works
+            // whichever of the two would otherwise have been picked as the bootstrap.
+            List<Utxo> preGenesisCandidates = eligibleUtxos.stream()
+                    .filter(u -> u.getAmount().getFirst().getQuantity()
+                            .compareTo(BigInteger.valueOf(PRE_GENESIS_MIN_LOVELACE)) >= 0)
+                    .sorted(java.util.Comparator.comparing((Utxo u) -> u.getAmount().getFirst().getQuantity()))
+                    .toList();
+            if (preGenesisCandidates.isEmpty()) {
+                boolean heldButReserved = directUtxos.stream().anyMatch(u -> adminAddress.equals(u.getAddress())
+                        && u.getAmount() != null && u.getAmount().size() == 1
+                        && "lovelace".equals(u.getAmount().getFirst().getUnit())
+                        && u.getAmount().getFirst().getQuantity().compareTo(BigInteger.valueOf(PRE_GENESIS_MIN_LOVELACE)) >= 0);
+                if (heldButReserved) throw new IllegalArgumentException(
+                        "existing registration attempts reserve the available bootstrap inputs (every ADA-only "
+                        + "UTxO of at least " + (PRE_GENESIS_MIN_LOVELACE / 1_000_000L) + " ADA is reserved by an "
+                        + "earlier registration attempt). Fund a fresh ADA-only UTxO with at least "
+                        + (PRE_GENESIS_MIN_LOVELACE / 1_000_000L) + " ADA and retry; a new token policy will be created");
                 throw new IllegalArgumentException(
-                        "existing registration attempts reserve the available bootstrap inputs. "
-                        + "Fund a fresh ADA-only UTxO with at least 10 ADA and retry; "
-                        + "a new token policy will be created");
+                        "creating a token now takes two ADA-only UTxOs in the wallet: one of at least "
+                        + (PRE_GENESIS_MIN_LOVELACE / 1_000_000L) + " ADA for the transaction that publishes the "
+                        + "GlobalState logic, and one of at least 10 ADA for genesis. Send yourself a second "
+                        + "ADA-only UTxO (>= " + (PRE_GENESIS_MIN_LOVELACE / 1_000_000L) + " ADA) and retry");
             }
-        return new GenesisFunding(utilityUtxos, eligibleUtxos);
+            for (Utxo preGenesis : preGenesisCandidates) {
+                List<Utxo> rest = eligibleUtxos.stream().filter(u -> u != preGenesis).toList();
+                List<Utxo> utilityUtxos = accountService.findAdaOnlyUtxo(adminAddress, 10_000_000L, ignored -> rest);
+                BigInteger total = utilityUtxos.stream()
+                        .map(u -> u.getAmount().getFirst().getQuantity())
+                        .reduce(BigInteger.ZERO, BigInteger::add);
+                if (!utilityUtxos.isEmpty() && total.compareTo(BigInteger.valueOf(10_000_000L)) >= 0) {
+                    return new GenesisFunding(utilityUtxos, rest, List.of(preGenesis));
+                }
+            }
+            throw new IllegalArgumentException(
+                    "creating a token now takes two ADA-only UTxOs in the wallet: one of at least "
+                    + (PRE_GENESIS_MIN_LOVELACE / 1_000_000L) + " ADA for the transaction that publishes the "
+                    + "GlobalState logic, and a SEPARATE one of at least 10 ADA for genesis (unreserved by "
+                    + "earlier attempts). Send yourself a second ADA-only UTxO and retry");
     }
 
     /** Request-only checks; runs before preparation reserves any wallet input. */
@@ -4832,6 +5693,8 @@ public class RwaTokenModuleHandler
             if (!genesisResult.isSuccessful()) {
                 return TransactionContext.typedError("chain[genesis]: " + genesisResult.error());
             }
+            PreGenesisTx preGenesis = java.util.Objects.requireNonNull(builtPreGenesis,
+                    "genesis built without its preGenesis tx");
             String genesisCbor = genesisResult.unsignedCborTx();
             Transaction genesisTx = Transaction.deserialize(HexUtil.decodeHexString(genesisCbor));
             String genesisTxHash = TransactionUtil
@@ -4876,8 +5739,10 @@ public class RwaTokenModuleHandler
             // Both records must reproduce the exact scripts used by this chain. A
             // mismatch fails the transactional build before any CBOR is returned.
             var provenanceRecords = provenance.records(reg, chainScripts);
+            // The proxy address is shared by every token, but genesisTx has exactly one output
+            // there (this token's GlobalState), so locating it by address within THIS tx is safe.
             String gsSpendAddr = AddressProvider.getEntAddress(
-                    chainScripts.globalStateSpend(), network.getCardanoNetwork()).getAddress();
+                    chainScripts.globalStateProxy(), network.getCardanoNetwork()).getAddress();
             String puSpendAddr = AddressProvider.getEntAddress(
                     chainScripts.powerUsersSpend(), network.getCardanoNetwork()).getAddress();
 
@@ -4982,8 +5847,7 @@ public class RwaTokenModuleHandler
             Utxo publishChange = null;
             if (chainWillMint) {
                 TransactionContext<PublishedRefScripts> publishResult = buildPublishScriptsTransaction(
-                        adminAddress, chainScripts.mintingAuthority(), chainScripts.globalStateSpend(),
-                        issuanceProvenanceChange);
+                        adminAddress, chainScripts.mintingAuthority(), null, issuanceProvenanceChange);
                 if (!publishResult.isSuccessful()) {
                     return TransactionContext.typedError("chain[publishScripts]: " + publishResult.error());
                 }
@@ -5010,9 +5874,10 @@ public class RwaTokenModuleHandler
                 // on purpose — the hash of an unsubmitted transaction is already final, and
                 // if the operator abandons the chain here the row simply points at a
                 // transaction that never landed, which the burn's own resolution catches.
+                // These describe the minting AUTHORITY only. The v1 logic's ref was recorded at
+                // genesis: preGenesis published it, on both creation paths.
                 reg.setRefScriptsTxHash(publishTxHash);
                 reg.setMintingAuthorityRefIndex(published.mintingAuthorityRefUtxo().getOutputIndex());
-                reg.setGsSpendRefIndex(published.globalStateSpendRefUtxo().getOutputIndex());
                 reg = registrationRepository.save(reg);
 
                 publishChange = findOutputAtAddress(publishTx, publishTxHash, adminAddress,
@@ -5020,10 +5885,10 @@ public class RwaTokenModuleHandler
                 if (publishChange == null) {
                     return TransactionContext.typedError(
                             "chain[publishScripts]: no admin change output >= 5 ADA left to fund the "
-                            + "registration tx. Publishing minting_authority + global_state costs about "
-                            + "55 ADA of min-UTxO (reclaimable — the outputs sit at the admin's own "
-                            + "enterprise address), so a registration that carries a first mint needs "
-                            + "that much more in the admin wallet than a structural one.");
+                            + "registration tx. Publishing minting_authority costs about 28 ADA of min-UTxO "
+                            + "(reclaimable — the output sits at the admin's own enterprise address), so a "
+                            + "registration that carries a first mint needs that much more in the admin wallet "
+                            + "than a structural one.");
                 }
                 hybridUtxoSupplier.add(publishChange);
             }
@@ -5086,7 +5951,13 @@ public class RwaTokenModuleHandler
             TransactionContext<RegistrationResult> regResult =
                     buildRegistrationTransaction(request, protocolParams,
                             new RegistrationChainInputs(chainedGsUtxo, chainedPuNode,
-                                    chainedDenylistRoot, published));
+                                    chainedDenylistRoot, published == null ? null
+                                    // The logic's reference script is the preGenesis output (since
+                                    // 63fad89); publishScripts carries only the authority. Without
+                                    // this the registration would inline the ≈5.9 KB logic.
+                                    : new PublishedRefScripts(published.cborHex(), published.txHash(),
+                                            published.mintingAuthorityScript(), published.mintingAuthorityRefUtxo(),
+                                            chainScripts.globalStateLogic(), preGenesis.logicRef(), published.ttlSlot())));
             if (!regResult.isSuccessful()) {
                 return TransactionContext.typedError("chain[registration]: " + regResult.error());
             }
@@ -5105,7 +5976,8 @@ public class RwaTokenModuleHandler
                         reg.getGlobalStatePolicyId(), progTokenPolicyId,
                         reg.getDenylistPolicyId(), reg.getPowerUsersPolicyId(),
                         genesisTxHash, addPuTxHash, cmtaProvenanceTxHash,
-                        issuanceProvenanceTxHash, publishTxHash, regTxHash, null, null, null));
+                        issuanceProvenanceTxHash, publishTxHash, regTxHash, null, null, null,
+                        preGenesis.cborHex(), preGenesis.txHash()));
             }
 
             // ── PHASE 4 ─ Register transferLogic stake credential ─────────
@@ -5200,7 +6072,7 @@ public class RwaTokenModuleHandler
                     reg.getDenylistPolicyId(), reg.getPowerUsersPolicyId(),
                     genesisTxHash, addPuTxHash, cmtaProvenanceTxHash,
                     issuanceProvenanceTxHash, publishTxHash, regTxHash, null, certTxHash,
-                    thirdPartyCertTxHash));
+                    thirdPartyCertTxHash, preGenesis.cborHex(), preGenesis.txHash()));
         } catch (Exception e) {
             log.error("rwa-token chain build failed", e);
             return TransactionContext.typedError("chain build failed: " + e.getMessage());
@@ -5483,8 +6355,20 @@ public class RwaTokenModuleHandler
             // Burn INCREMENTS mintable_amount (the cap returns):
             //   remaining = old - minted_amount = old - (-burnQty) = old + burnQty
             List<PlutusData> gsFields = parseGsFields(gsUtxo);
+            // Authority / third-party reference scripts FIRST, for the same reason as the mint.
+            if (reg.getRefScriptsTxHash() == null || reg.getMintingAuthorityRefIndex() == null
+                    || reg.getThirdPartyRefTxHash() == null || reg.getThirdPartyTransferLogicRefIndex() == null) {
+                return TransactionContext.typedError(
+                        "burn: this token's minting authority or third-party validator was never published "
+                        + "as a reference script (policy " + reg.getProgrammableTokenPolicyId() + "), so the "
+                        + "burn transaction cannot be built. Re-publish them before burning.");
+            }
+            GsWitness gsWitness = gsWitness(reg, gsFields, true);
             long currentMintable = ((BigIntPlutusData) gsFields.get(GS_IDX_MINTABLE_AMOUNT)).getValue().longValueExact();
             PlutusData newGsDatum = applyMintableDelta(gsFields, burnQuantity.longValueExact());
+            // A burn can LENGTHEN mintable_amount's encoding, so it is the one supply change
+            // that can trip the datum cap.
+            requireDatumWithinCap(gsUtxo, newGsDatum, gsWitness.entry(), "burn");
             long newMintable = currentMintable + burnQuantity.longValueExact();
 
             // ── 4b. Receiver-KYC gate on the partial-burn continuation ─────
@@ -5565,7 +6449,6 @@ public class RwaTokenModuleHandler
             // min-UTxO and the extra chained input a third reference-script output needs.
             if (reg.getRefScriptsTxHash() == null
                     || reg.getMintingAuthorityRefIndex() == null
-                    || reg.getGsSpendRefIndex() == null
                     || reg.getThirdPartyRefTxHash() == null
                     || reg.getThirdPartyTransferLogicRefIndex() == null) {
                 return TransactionContext.typedError(
@@ -5582,9 +6465,8 @@ public class RwaTokenModuleHandler
             TransactionInput mintingAuthorityRefInput = TransactionInput.builder()
                     .transactionId(reg.getRefScriptsTxHash())
                     .index(reg.getMintingAuthorityRefIndex()).build();
-            TransactionInput gsSpendRefInput = TransactionInput.builder()
-                    .transactionId(reg.getRefScriptsTxHash())
-                    .index(reg.getGsSpendRefIndex()).build();
+            // The logic named by the LIVE datum's field 0 (resolved through gs_logics).
+            TransactionInput gsSpendRefInput = gsWitness.logicRefInput();
             // A DIFFERENT transaction: this one is published by the cert tx that registers
             // the third-party reward account, because the publish tx had no room for it.
             TransactionInput thirdPartyRefInput = TransactionInput.builder()
@@ -5654,6 +6536,7 @@ public class RwaTokenModuleHandler
                     .withdrawal(Credential.fromScript(s.mintingLogic().getScriptHash()))
                     .withdrawal(Credential.fromScript(s.mintingAuthority().getScriptHash()))
                     .withdrawal(Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()))
+                    .withdrawal(gsWitness.logicCredential())
                     .build();
             List<TransactionInput> refInputsSorted = layout.referenceInputs();
             int paramsIdx = layout.referenceInputIndex(txInputOf(protocolParamsUtxo));
@@ -5707,8 +6590,8 @@ public class RwaTokenModuleHandler
             // at the current pin: the leading `config_ref_input_index` was removed along
             // with the Config NFT. Leaving it in place would shift every field right and
             // make the action unparseable.
-            PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
-                    BigIntPlutusData.of(BigInteger.valueOf(gsOutputIdx)),
+            // Rides on the GlobalState LOGIC withdrawal; the proxy ignores its spend redeemer.
+            CoreWithdrawal gsLogicWithdrawal = gsWitness.withdrawal(gsOutputIdx,
                     ConstrPlutusData.of(GS_ACTION_MINT_SECURITY,
                             BigIntPlutusData.of(BigInteger.valueOf(issuancePri))));
             // Token UTxO spend redeemer — passthrough. The prog-logic-base
@@ -5878,17 +6761,19 @@ public class RwaTokenModuleHandler
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
                     .collectFrom(tokenUtxo, tokenSpendRedeemer)
-                    .collectFrom(gsUtxo, gsSpendRedeemer)
+                    .collectFrom(gsUtxo, GS_PROXY_SPEND_REDEEMER)
                     .mintAsset(s.issuanceContract(), burnAsset, issuanceRedeemer)
                     .payToContract(tokenUtxo.getAddress(), ValueUtil.toAmountList(continuationValue),
                             ConstrPlutusData.of(0))                                                  // output 0 (continuation)
-                    .payToContract(s.gsSpendAddress().getAddress(), ValueUtil.toAmountList(gsValue),
+                    .payToContract(gsUtxo.getAddress(), ValueUtil.toAmountList(gsValue),
                             newGsDatum)                                                              // output 1 (new GS)
                     .readFrom(refInputsSorted.toArray(new TransactionInput[0]))
-                    .attachSpendingValidator(s.gsSpend())
+                    // The 421-byte GlobalState proxy rides inline; the logic is referenced.
+                    .attachSpendingValidator(s.gsProxy())
                     .attachRewardValidator(s.mintingLogic())
                     .attachRewardValidator(s.mintingAuthority())
                     .attachRewardValidator(thirdPartyTransferLogicScript)
+                    .attachRewardValidator(gsWitness.logic())
                     .withChangeAddress(request.feePayerAddress());
 
             // All FOUR withdrawals, added in LEDGER order. This is the widest withdrawal set in
@@ -5907,9 +6792,10 @@ public class RwaTokenModuleHandler
                             new CoreWithdrawal(issuanceLogicCredential, issuanceLogicRewardAddress.getAddress(),
                                     issuanceLogicRedeemer),
                             new CoreWithdrawal(coreThirdPartyCredential,
-                                    coreThirdPartyRewardAddress.getAddress(), coreThirdPartyRedeemer)),
+                                    coreThirdPartyRewardAddress.getAddress(), coreThirdPartyRedeemer),
+                            gsLogicWithdrawal),
                     CoreWithdrawal::credential)) {
-                tx = tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer());
+                tx = tx.withdraw(w.rewardAddress(), withdrawAmount(w, gsWitness), w.redeemer());
             }
 
             // ── 9. Build with burner signature + pinned collateral ─────────
@@ -5949,7 +6835,7 @@ public class RwaTokenModuleHandler
                     // referencing the authority made removeDuplicateScriptWitnesses strip the
                     // PROXY from the witness set even though nothing referenced it, so its
                     // withdrawal had no script at all.
-                    .withReferenceScripts(s.mintingAuthority(), s.gsSpend(),
+                    .withReferenceScripts(s.mintingAuthority(), gsWitness.logic(),
                             thirdPartyTransferLogicScript, programmableLogicBase,
                             coreThirdParty, dispatcher, issuanceLogic)
                     .removeDuplicateScriptWitnesses(true)
@@ -6006,6 +6892,14 @@ public class RwaTokenModuleHandler
                     .ignoreScriptCostEvaluationError(false)
                     .build();
 
+            GsTxSelfCheck.verify(transaction, new GsTxSelfCheck.Expectation(txInputOf(gsUtxo), gsUtxo.getAddress(),
+                    reg.getGlobalStatePolicyId(), RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX, newGsDatum,
+                    java.util.Map.of(gsLogicWithdrawal.rewardAddress(), gsLogicWithdrawal.redeemer()),
+                    Set.of(s.mintingLogicRewardAddress().getAddress(), s.mintingAuthorityRewardAddress().getAddress(),
+                            thirdPartyRewardAddress.getAddress(), dispatcherRewardAddress.getAddress(),
+                            issuanceLogicRewardAddress.getAddress(), coreThirdPartyRewardAddress.getAddress()),
+                    Set.of(s.issuanceContract().getPolicyId()), Set.of(txInputOf(tokenUtxo)),
+                    hexSigners(List.of(burnerKeyHash, burnerStakeHash))));
             log.info("rwa-token burn: policy={} qty={} (mintable_amount {} → {})",
                     request.tokenPolicyId(), burnQuantity, currentMintable, newMintable);
             return TransactionContext.ok(transaction.serializeToHex());
@@ -6452,13 +7346,6 @@ public class RwaTokenModuleHandler
             }
             RwaTokenRegistrationEntity reg = regOpt.get();
 
-            // Only the GS spend script is needed here: this is a plain GlobalState
-            // spend, not a MintSecurity one, so neither the minting proxy nor the
-            // authority takes part and no withdrawal is required.
-            PlutusScript gsSpendScript = resolveScripts(reg, protocolParams).globalStateSpend();
-            Address gsSpendAddress = AddressProvider.getEntAddress(
-                    gsSpendScript, network.getCardanoNetwork());
-
             // Look up the GS NFT specifically by (policy, asset_name). The
             // policy-only helper picks the first UTxO under any asset of that
             // policy — but after a token gets registered in the CIP-113
@@ -6480,22 +7367,26 @@ public class RwaTokenModuleHandler
                 return TransactionContext.typedError("GS UTxO is missing its inline datum");
             }
 
-            // Parse current datum, replace only field 8 (member_root_hash).
-            PlutusData currentDatum = PlutusData.deserialize(
-                    HexUtil.decodeHexString(gsUtxo.getInlineDatum()));
-            if (!(currentDatum instanceof ConstrPlutusData currentConstr)) {
-                return TransactionContext.typedError("GS datum is not a Constr");
+            // Replace only member_root_hash; everything else — including requires_sender_kyc /
+            // requires_receiver_kyc / network_id — is carried through verbatim, which is what
+            // the logic's equality check requires.
+            List<PlutusData> gsFields;
+            GsWitness gsWitness;
+            try {
+                gsFields = parseGsFields(gsUtxo);
+                // A plain GlobalState spend: no minting proxy or authority, ONE withdrawal —
+                // the logic datum field 0 names.
+                gsWitness = gsWitness(reg, gsFields, true);
+            } catch (BuildPreconditionException bpe) {
+                return TransactionContext.typedError(bpe.getMessage());
             }
-            List<PlutusData> gsFields = currentConstr.getData().getPlutusDataList();
-            if (gsFields.size() != GS_DATUM_FIELD_COUNT) {
-                return TransactionContext.typedError("GS datum has " + gsFields.size()
-                        + " fields, expected " + GS_DATUM_FIELD_COUNT
-                        + " (pre-@7ae4ce3 global state — must be re-bootstrapped)");
-            }
-            // Replace only field 8 (member_root_hash); everything else — including
-            // requires_sender_kyc / requires_receiver_kyc / network_id — is carried
-            // through verbatim, which is what the validator's equals_data check requires.
             PlutusData newGsDatum = replaceGsField(gsFields, GS_IDX_MEMBER_ROOT_HASH, BytesPlutusData.of(newRootHash));
+            try {
+                // Empty → 32 bytes is a growing write.
+                requireAdminDatumWithinCap(gsUtxo, newGsDatum, gsWitness.entry(), "member root update");
+            } catch (BuildPreconditionException bpe) {
+                return TransactionContext.typedError(bpe.getMessage());
+            }
 
             // Funding UTxO from admin's wallet (backend AdminSigningKeyProvider).
             List<Utxo> fundingUtxos = accountService.findAdaOnlyUtxo(adminAddress, 5_000_000L);
@@ -6510,8 +7401,7 @@ public class RwaTokenModuleHandler
             // comes from GS_ACTION_UPDATE_MEMBER_ROOT_HASH rather than a literal, because
             // this enum has been renumbered twice now (SetRequiresSenderKyc inserted at 6
             // in @7ae4ce3; RotateMintingScript and LockUpgrades inserted at 10-11 here).
-            PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
-                    BigIntPlutusData.of(BigInteger.ZERO),                          // global_state_output_index
+            CoreWithdrawal gsLogicWithdrawal = gsWitness.withdrawal(0,          // global_state_output_index
                     ConstrPlutusData.of(GS_ACTION_UPDATE_MEMBER_ROOT_HASH, BytesPlutusData.of(newRootHash)));
 
             // Preserve GS UTxO value verbatim (lovelace + the GS NFT).
@@ -6536,14 +7426,20 @@ public class RwaTokenModuleHandler
 
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
-                    .collectFrom(gsUtxo, gsSpendRedeemer)
-                    .payToContract(gsSpendAddress.getAddress(), ValueUtil.toAmountList(gsValue),
+                    .collectFrom(gsUtxo, GS_PROXY_SPEND_REDEEMER)
+                    .payToContract(gsUtxo.getAddress(), ValueUtil.toAmountList(gsValue),
                             newGsDatum)                                                              // output 0
-                    .attachSpendingValidator(gsSpendScript)
+                    .withdraw(gsLogicWithdrawal.rewardAddress(), gsWitness.rewardBalance(), gsLogicWithdrawal.redeemer())
+                    .readFrom(gsWitness.logicRefInput())
+                    .attachSpendingValidator(gsWitness.proxy())
+                    .attachRewardValidator(gsWitness.logic())
                     .withChangeAddress(adminAddress);
 
             Transaction transaction = quickTxBuilder.compose(tx)
                     .withRequiredSigners(signerKeyHash)
+                    // The logic is read from its reference script, not carried.
+                    .withReferenceScripts(gsWitness.logic())
+                    .removeDuplicateScriptWitnesses(true)
                     .feePayer(adminAddress)
                     .mergeOutputs(false)
                     .withCollateralInputs(TransactionInput.builder()
@@ -6591,6 +7487,10 @@ public class RwaTokenModuleHandler
                     .ignoreScriptCostEvaluationError(false)
                     .build();
 
+            GsTxSelfCheck.verify(transaction, new GsTxSelfCheck.Expectation(txInputOf(gsUtxo), gsUtxo.getAddress(),
+                    reg.getGlobalStatePolicyId(), RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX, newGsDatum,
+                    java.util.Map.of(gsLogicWithdrawal.rewardAddress(), gsLogicWithdrawal.redeemer()),
+                    Set.of(), Set.of(), Set.of(), hexSigners(List.of(signerKeyHash))));
             log.info("rwa-token UpdateMemberRootHash: policy={} new_root={}",
                     policyId, HexUtil.encodeHexString(newRootHash));
             return TransactionContext.ok(transaction.serializeToHex());
@@ -6634,8 +7534,22 @@ public class RwaTokenModuleHandler
             Boolean requiresReceiverKycEnabled,     // SetRequiresReceiverKyc
             String newMemberRootHashHex,            // UpdateMemberRootHash — if null, backend uses current local
             String newAdminCredentialHashHex,       // RotateAdmin (28-byte hex)
-            String newMintingScriptCredentialHashHex // RotateMintingScript (28-byte hex)
-    ) {}
+            String newMintingScriptCredentialHashHex, // RotateMintingScript (28-byte hex)
+            String newMintableAmount                // SetMintableAmount (decimal, absolute headroom)
+    ) {
+        /** Pre-PR #29 shape (no SetMintableAmount). */
+        public GsChangeSpec(String action, Boolean transfersPaused, String newSecurityInfoHex,
+                            String trustedVkeyHex, String trustedMetadataHex, String trustedOldVkeyHex,
+                            String trustedNewVkeyHex, String trustedNewMetadataHex,
+                            Boolean requiresSenderKycEnabled, Boolean requiresReceiverKycEnabled,
+                            String newMemberRootHashHex, String newAdminCredentialHashHex,
+                            String newMintingScriptCredentialHashHex) {
+            this(action, transfersPaused, newSecurityInfoHex, trustedVkeyHex, trustedMetadataHex,
+                    trustedOldVkeyHex, trustedNewVkeyHex, trustedNewMetadataHex, requiresSenderKycEnabled,
+                    requiresReceiverKycEnabled, newMemberRootHashHex, newAdminCredentialHashHex,
+                    newMintingScriptCredentialHashHex, null);
+        }
+    }
 
     /** Build N chained admin-signed txs, one per change. tx[i+1] mempool-chains
      *  off tx[i]'s GS UTxO output. Returns the unsigned CBORs in order. */
@@ -6669,6 +7583,21 @@ public class RwaTokenModuleHandler
             //
             // One transaction is also what makes a rotation atomic: there is no half-rotated state
             // to recover from, because there is nothing to half-apply.
+            // Plan Addendum R5/I15: irreversible or authority-changing actions never ride in a
+            // batch. LockUpgrades and RotateGlobalStateScript have their own endpoints (with
+            // their own prechecks); SetMintableAmount and RotateMintingScript must be alone.
+            for (GsChangeSpec c : changes) {
+                if (c == null) continue;
+                if ("LockUpgrades".equals(c.action()))
+                    return TransactionContext.typedError("LockUpgrades is not an update-chain action: use "
+                            + "POST /rwa-token/{policyId}/lock-upgrades, which runs the pre-lock checks");
+                if ("RotateGlobalStateScript".equals(c.action()))
+                    return TransactionContext.typedError("RotateGlobalStateScript is not an update-chain action: "
+                            + "use POST /rwa-token/{policyId}/rotate-gs-logic");
+                if (("SetMintableAmount".equals(c.action()) || "RotateMintingScript".equals(c.action()))
+                        && changes.size() != 1)
+                    return TransactionContext.typedError(c.action() + " must be the only change in its chain");
+            }
             long rotations = changes.stream()
                     .filter(c -> c != null && "RotateAdmin".equals(c.action()))
                     .count();
@@ -6694,12 +7623,9 @@ public class RwaTokenModuleHandler
             }
             RwaTokenRegistrationEntity reg = regOpt.get();
 
-            // Only the GS spend script is needed here: this is a plain GlobalState
-            // spend, not a MintSecurity one, so neither the minting proxy nor the
-            // authority takes part and no withdrawal is required.
-            PlutusScript gsSpendScript = resolveScripts(reg, protocolParams).globalStateSpend();
-            Address gsSpendAddress = AddressProvider.getEntAddress(
-                    gsSpendScript, network.getCardanoNetwork());
+            // A plain GlobalState spend: no minting proxy or authority, ONE withdrawal — the
+            // logic the step's INPUT datum names in field 0 (resolved per step below).
+            ChainIdentity identity = chainIdentity(reg, protocolParams);
 
             // Seed from the on-chain GS UTxO + datum.
             Utxo gsUtxo = utxoProvider.findUtxoByAsset(
@@ -6774,7 +7700,7 @@ public class RwaTokenModuleHandler
             try {
                 for (int i = 0; i < changes.size(); i++) {
                     GsChangeSpec change = changes.get(i);
-                    ActionAndDatum ad = computeActionAndDatum(change, currentDatum, policyId);
+                    ActionAndDatum ad = computeActionAndDatum(change, currentDatum, policyId, identity);
                     if (ad.error != null) {
                         return TransactionContext.typedError("change[" + i + "]: " + ad.error);
                     }
@@ -6800,8 +7726,19 @@ public class RwaTokenModuleHandler
                                 HexUtil.decodeHexString(change.newAdminCredentialHashHex()));
                     }
 
+                    GsWitness stepWitness;
+                    try {
+                        List<PlutusData> stepFields = parseGsFields(gsUtxo);
+                        stepWitness = gsWitness(reg, stepFields, true);
+                        markInstalledIfObserved(reg, stepWitness, gsUtxo);
+                        if (i > 0) stepWitness = stepWitness.withRewardBalance(BigInteger.ZERO);
+                        requireAdminDatumWithinCap(gsUtxo, ad.newDatum, stepWitness.entry(), change.action());
+                    } catch (BuildPreconditionException bpe) {
+                        return TransactionContext.typedError(
+                                "change[" + i + "] (" + change.action() + "): " + bpe.getMessage());
+                    }
                     TransactionContext<Void> stepCtx = buildSingleGsUpdateTx(
-                            reg, gsSpendScript, gsSpendAddress, gsUtxo, ad.actionRedeemer,
+                            reg, stepWitness, gsUtxo, ad.actionRedeemer,
                             ad.newDatum, funding, feePayerAddress, requiredSigners, refInputs);
                     if (!stepCtx.isSuccessful()) {
                         return TransactionContext.typedError(
@@ -6989,10 +7926,43 @@ public class RwaTokenModuleHandler
      *  orchestrator prefixes with {@code change[i]:} and the controller returns as
      *  a 400 naming the field — rather than as a parser message escaping from the
      *  middle of a transaction build (D7). */
-    private ActionAndDatum computeActionAndDatum(GsChangeSpec change, PlutusData currentDatum,
-                                                 String policyId) {
+    /**
+     * What a GlobalState action may point at, derived from this token's OWN parameters.
+     *
+     * @param derivedAuthorityHash the only minting authority RotateMintingScript may install
+     *        (plan Addendum I6): a permissive withdraw script there lets anyone mint to the cap,
+     *        and the proxy cannot tell.
+     * @param deploymentScriptHashes every script hash of this deployment. None may become the
+     *        admin (I7): {@code must_be_signed_by_credential} accepts a WITHDRAWAL as a signature,
+     *        so a script admin would be exercisable by anyone able to trigger that withdrawal.
+     */
+    record ChainIdentity(String derivedAuthorityHash, java.util.Set<String> deploymentScriptHashes) {}
+
+    ChainIdentity chainIdentity(RwaTokenRegistrationEntity reg, ProtocolBootstrapParams protocolParams) {
         try {
-            return computeActionAndDatumChecked(change, currentDatum, policyId);
+            var scripts = resolveScripts(reg, protocolParams);
+            var hashes = new java.util.HashSet<String>();
+            for (PlutusScript sc : List.of(scripts.mintingLogicProxy(), scripts.mintingAuthority(),
+                    scripts.transferLogic(), scripts.thirdPartyTransferLogic(), scripts.globalStateLogic(),
+                    scripts.globalStateProxy(), scripts.denylistSpend(), scripts.powerUsersSpend(),
+                    scripts.issuanceScript())) {
+                hashes.add(HexUtil.encodeHexString(sc.getScriptHash()).toLowerCase(java.util.Locale.ROOT));
+            }
+            for (String policy : List.of(reg.getGlobalStatePolicyId(), reg.getDenylistPolicyId(),
+                    reg.getPowerUsersPolicyId(), reg.getProgrammableTokenPolicyId())) {
+                if (policy != null) hashes.add(policy.toLowerCase(java.util.Locale.ROOT));
+            }
+            GsLogicEntry.parseList(reg.getGsLogics()).forEach(e -> hashes.add(e.logicHash().toLowerCase(java.util.Locale.ROOT)));
+            return new ChainIdentity(scripts.mintingAuthorityHashHex(), java.util.Set.copyOf(hashes));
+        } catch (com.bloxbean.cardano.client.exception.CborSerializationException e) {
+            throw new IllegalStateException("could not derive this token's script identity", e);
+        }
+    }
+
+    private ActionAndDatum computeActionAndDatum(GsChangeSpec change, PlutusData currentDatum,
+                                                 String policyId, ChainIdentity identity) {
+        try {
+            return computeActionAndDatumChecked(change, currentDatum, policyId, identity);
         } catch (ChangeValidationException e) {
             ActionAndDatum out = new ActionAndDatum();
             out.error = e.getMessage();
@@ -7012,7 +7982,7 @@ public class RwaTokenModuleHandler
     }
 
     private ActionAndDatum computeActionAndDatumChecked(GsChangeSpec change, PlutusData currentDatum,
-                                                        String policyId) {
+                                                        String policyId, ChainIdentity identity) {
         ActionAndDatum out = new ActionAndDatum();
         if (!(currentDatum instanceof ConstrPlutusData currentConstr)) {
             out.error = "current GS datum is not a Constr";
@@ -7055,6 +8025,16 @@ public class RwaTokenModuleHandler
                 if (change.transfersPaused() == null) {
                     out.error = "PauseTransfers requires transfersPaused"; return out;
                 }
+                // F11: a pause to the current value churns GlobalState and races admin
+                // recovery; the PR #29 logic rejects it, so refuse with the reason.
+                if (boolFromConstr(f.get(GS_IDX_TRANSFERS_PAUSED)) == change.transfersPaused()) {
+                    out.error = "transfers are already " + (change.transfersPaused() ? "paused" : "unpaused")
+                            + "; PauseTransfers must change the value";
+                    return out;
+                }
+                // The index is a placeholder: buildSingleGsUpdateTx rewrites it against the
+                // lex-sorted FULL reference-input set (the PU node AND the logic reference
+                // script), which is what the validator indexes.
                 out.actionRedeemer = ConstrPlutusData.of(GS_ACTION_PAUSE_TRANSFERS,
                         boolToConstr(change.transfersPaused()),
                         BigIntPlutusData.of(BigInteger.ZERO));
@@ -7220,6 +8200,14 @@ public class RwaTokenModuleHandler
                 byte[] newAdminBytes = requireHexOfLength(
                         "RotateAdmin: newAdminCredentialHashHex",
                         change.newAdminCredentialHashHex(), 28);
+                // Plan Addendum I7: the admin is always a KEY. A deployment script as admin would
+                // let anyone who can trigger its withdrawal act as admin.
+                if (identity.deploymentScriptHashes().contains(
+                        HexUtil.encodeHexString(newAdminBytes).toLowerCase(java.util.Locale.ROOT))) {
+                    out.error = "RotateAdmin: " + HexUtil.encodeHexString(newAdminBytes)
+                            + " is one of this token's own script hashes; the admin must be a key";
+                    return out;
+                }
                 PlutusData newAdmin = BytesPlutusData.of(newAdminBytes);
                 out.actionRedeemer = ConstrPlutusData.of(GS_ACTION_ROTATE_ADMIN, newAdmin);
                 out.newDatum = replaceGsField(f, GS_IDX_ADMIN_CREDENTIAL_HASH, newAdmin);
@@ -7287,6 +8275,17 @@ public class RwaTokenModuleHandler
                             + "minting authority — nothing to rotate.";
                     return out;
                 }
+                // Plan Addendum I6 (user decision): ONLY this token's derived authority. The
+                // chain checks nothing about the target beyond "it withdraws", and a permissive
+                // withdraw script there fails OPEN — anyone could mint to the cap. On a token
+                // the platform created this is a recovery action: it restores the derived
+                // authority after a rotation made elsewhere.
+                if (!identity.derivedAuthorityHash().equalsIgnoreCase(newHashHex)) {
+                    out.error = "RotateMintingScript: " + newHashHex + " is not this token's derived "
+                            + "minting authority (" + identity.derivedAuthorityHash() + "). Only the "
+                            + "authority derived from this token's own parameters can be installed.";
+                    return out;
+                }
 
                 // NOT ENFORCEABLE HERE, and not enforced on chain either: that the target
                 // genuinely decides whether a mint is allowed. The proxy checks only that
@@ -7301,6 +8300,39 @@ public class RwaTokenModuleHandler
                         GS_ACTION_ROTATE_MINTING_SCRIPT, BytesPlutusData.of(newMintingScriptHash));
                 out.newDatum = replaceGsField(f, GS_IDX_MINTING_SCRIPT_CREDENTIAL_HASH,
                         BytesPlutusData.of(newMintingScriptHash));
+            }
+            case "SetMintableAmount" -> {
+                // Absolute remaining headroom (not a delta, not total supply), constructor 13.
+                if (boolFromConstr(f.get(GS_IDX_UPGRADES_LOCKED))) {
+                    out.error = "SetMintableAmount: upgrades are locked; the supply cap is final"; return out;
+                }
+                String raw = change.newMintableAmount();
+                if (raw == null || !raw.trim().matches("[0-9]+")) {
+                    out.error = "SetMintableAmount requires newMintableAmount (a non-negative integer)"; return out;
+                }
+                BigInteger n = new BigInteger(raw.trim());
+                if (n.compareTo(MAX_MINTABLE_AMOUNT) > 0) {
+                    out.error = "SetMintableAmount: " + n + " exceeds 2^63-1"; return out;
+                }
+                BigInteger current = ((BigIntPlutusData) f.get(GS_IDX_MINTABLE_AMOUNT)).getValue();
+                if (current.equals(n)) {
+                    out.error = "SetMintableAmount: the mintable amount is already " + n; return out;
+                }
+                // Plan Addendum I14: keep supply + headroom within int64 forever, so a burn never
+                // lengthens mintable_amount past the 64-byte reserve. Unknown supply → refuse.
+                RwaTokenRegistrationEntity supplyReg = registrationRepository.findByProgrammableTokenPolicyId(policyId)
+                        .orElse(null);
+                Optional<BigInteger> supply = supplyReg == null ? Optional.empty()
+                        : utxoProvider.assetSupply(policyId, supplyReg.getSecurityAssetNameHex());
+                if (supply.isEmpty()) {
+                    out.error = "SetMintableAmount: cannot confirm circulating supply, refusing"; return out;
+                }
+                if (supply.get().add(n).compareTo(MAX_MINTABLE_AMOUNT) > 0) {
+                    out.error = "SetMintableAmount: circulating supply " + supply.get() + " + " + n
+                            + " would exceed 2^63-1"; return out;
+                }
+                out.actionRedeemer = ConstrPlutusData.of(GS_ACTION_SET_MINTABLE_AMOUNT, BigIntPlutusData.of(n));
+                out.newDatum = replaceGsField(f, GS_IDX_MINTABLE_AMOUNT, BigIntPlutusData.of(n));
             }
             case "LockUpgrades" -> {
                 // NULLARY, like DeactivateContract. Sets `upgrades_locked` = True, which
@@ -7346,8 +8378,7 @@ public class RwaTokenModuleHandler
      *  ({@code global_state.ak}: two {@code must_be_signed_by_credential} calls). */
     private TransactionContext<Void> buildSingleGsUpdateTx(
             RwaTokenRegistrationEntity reg,
-            PlutusScript gsSpendScript,
-            Address gsSpendAddress,
+            GsWitness gsWitness,
             Utxo gsUtxo,
             PlutusData actionRedeemer,
             PlutusData newGsDatum,
@@ -7356,8 +8387,22 @@ public class RwaTokenModuleHandler
             List<byte[]> requiredSignerKeyHashes,
             List<Utxo> refInputs) {
         try {
-            PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
-                    BigIntPlutusData.of(BigInteger.ZERO),                          // global_state_output_index
+            // Reference inputs: the action's own (PU node for PauseTransfers) plus the logic's
+            // reference script. The ledger lex-sorts them before any validator sees them.
+            List<TransactionInput> refTxInputs = new ArrayList<>();
+            if (refInputs != null) refInputs.forEach(u -> refTxInputs.add(txInputOf(u)));
+            refTxInputs.add(gsWitness.logicRefInput());
+            var refLayout = CoreLayout.builder();
+            refTxInputs.forEach(refLayout::referenceInput);
+            var resolvedRefs = refLayout.build();
+            if (actionRedeemer instanceof ConstrPlutusData a
+                    && a.getAlternative() == GS_ACTION_PAUSE_TRANSFERS && refInputs != null && !refInputs.isEmpty()) {
+                actionRedeemer = ConstrPlutusData.of(GS_ACTION_PAUSE_TRANSFERS,
+                        a.getData().getPlutusDataList().get(0),
+                        BigIntPlutusData.of(BigInteger.valueOf(
+                                resolvedRefs.referenceInputIndex(txInputOf(refInputs.getFirst())))));
+            }
+            CoreWithdrawal gsLogicWithdrawal = gsWitness.withdrawal(0,      // global_state_output_index
                     actionRedeemer);
 
             BigInteger gsLovelace = gsUtxo.getAmount().stream()
@@ -7379,24 +8424,20 @@ public class RwaTokenModuleHandler
 
             Tx tx = new Tx()
                     .collectFrom(List.of(funding))
-                    .collectFrom(gsUtxo, gsSpendRedeemer)
-                    .payToContract(gsSpendAddress.getAddress(), ValueUtil.toAmountList(gsValue),
+                    .collectFrom(gsUtxo, GS_PROXY_SPEND_REDEEMER)
+                    .payToContract(gsUtxo.getAddress(), ValueUtil.toAmountList(gsValue),
                             newGsDatum)
-                    .attachSpendingValidator(gsSpendScript)
+                    .withdraw(gsLogicWithdrawal.rewardAddress(), gsWitness.rewardBalance(), gsLogicWithdrawal.redeemer())
+                    .readFrom(resolvedRefs.referenceInputs().toArray(new TransactionInput[0]))
+                    .attachSpendingValidator(gsWitness.proxy())
+                    .attachRewardValidator(gsWitness.logic())
                     .withChangeAddress(feePayerAddress);
-
-            if (refInputs != null && !refInputs.isEmpty()) {
-                TransactionInput[] refTxInputs = refInputs.stream()
-                        .map(u -> TransactionInput.builder()
-                                .transactionId(u.getTxHash())
-                                .index(u.getOutputIndex())
-                                .build())
-                        .toArray(TransactionInput[]::new);
-                tx = tx.readFrom(refTxInputs);
-            }
 
             Transaction transaction = quickTxBuilder.compose(tx)
                     .withRequiredSigners(requiredSignerKeyHashes.toArray(byte[][]::new))
+                    // The logic is read from its reference script, not carried.
+                    .withReferenceScripts(gsWitness.logic())
+                    .removeDuplicateScriptWitnesses(true)
                     .feePayer(feePayerAddress)
                     .mergeOutputs(false)
                     .withCollateralInputs(TransactionInput.builder()
@@ -7413,6 +8454,11 @@ public class RwaTokenModuleHandler
                     })
                     .ignoreScriptCostEvaluationError(false)
                     .build();
+            // Plan Addendum I17: the signed bytes do exactly this one change.
+            GsTxSelfCheck.verify(transaction, new GsTxSelfCheck.Expectation(txInputOf(gsUtxo), gsUtxo.getAddress(),
+                    reg.getGlobalStatePolicyId(), RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX, newGsDatum,
+                    java.util.Map.of(gsLogicWithdrawal.rewardAddress(), gsLogicWithdrawal.redeemer()),
+                    Set.of(), Set.of(), Set.of(), hexSigners(requiredSignerKeyHashes)));
             return TransactionContext.ok(transaction.serializeToHex());
         } catch (Exception e) {
             log.error("buildSingleGsUpdateTx failed", e);
@@ -7602,7 +8648,7 @@ public class RwaTokenModuleHandler
             PlutusScript mintingLogic,
             PlutusScript mintingAuthority,
             PlutusScript issuanceContract,
-            PlutusScript gsSpend,
+            PlutusScript gsProxy,
             Address gsSpendAddress,
             Address mintingLogicRewardAddress,
             Address mintingAuthorityRewardAddress) {}
@@ -7623,8 +8669,11 @@ public class RwaTokenModuleHandler
                 scripts.mintingLogicProxy(),
                 scripts.mintingAuthority(),
                 scripts.issuanceScript(),
-                scripts.globalStateSpend(),
-                AddressProvider.getEntAddress(scripts.globalStateSpend(), network.getCardanoNetwork()),
+                scripts.globalStateProxy(),
+                // The shared proxy address. Builders only ever PAY the continuing GlobalState
+                // output here (same address as the input, which the logic requires); they
+                // never look GlobalState up by it.
+                AddressProvider.getEntAddress(scripts.globalStateProxy(), network.getCardanoNetwork()),
                 AddressProvider.getRewardAddress(scripts.mintingLogicProxy(), network.getCardanoNetwork()),
                 AddressProvider.getRewardAddress(scripts.mintingAuthority(), network.getCardanoNetwork()));
     }
@@ -7645,7 +8694,15 @@ public class RwaTokenModuleHandler
                 reg.getGlobalStatePolicyId(),
                 reg.getPowerUsersPolicyId(),
                 reg.getDenylistPolicyId(),
-                protocolParams);
+                protocolParams,
+                genesisCapOf(reg));
+    }
+
+    /** The genesis datum cap a row was built with. Rows from before V34 have none and default:
+     *  their GlobalState cannot be spent by these builders anyway (UNKNOWN LOGIC). */
+    private static int genesisCapOf(RwaTokenRegistrationEntity reg) {
+        return reg.getMaxGsDatumBytes() != null
+                ? reg.getMaxGsDatumBytes() : RwaTokenScriptBuilderService.DEFAULT_MAX_GS_DATUM_BYTES;
     }
 
     /** Look up the GS UTxO by exact (policy, asset_name) and validate it has
@@ -7663,6 +8720,155 @@ public class RwaTokenModuleHandler
         return gsUtxo;
     }
 
+    // ── GlobalState spend witness (PR #29) ───────────────────────────────────
+    //
+    // GlobalState is never governed by its spend script alone. The UTxO sits at the shared,
+    // unparameterised global_state_proxy, whose spend redeemer is IGNORED; the proxy only
+    // requires a withdrawal of the logic named in datum field 0, and THAT withdrawal carries
+    // GlobalStateSpendRedeemer { global_state_output_index, action }.
+
+    /** Amount for one withdrawal in a mixed list: the GlobalState logic's live balance (I8),
+     *  0 for every other withdraw-0 script. */
+    private static BigInteger withdrawAmount(CoreWithdrawal w, GsWitness gs) {
+        return gs != null && Arrays.equals(w.credential().getBytes(), gs.logicCredential().getBytes())
+                ? gs.rewardBalance() : BigInteger.ZERO;
+    }
+
+    private static Set<String> hexSigners(java.util.Collection<byte[]> signers) {
+        Set<String> out = new java.util.HashSet<>();
+        signers.forEach(b -> out.add(HexUtil.encodeHexString(b)));
+        return out;
+    }
+
+    /** The proxy ignores its redeemer; any Data will do. */
+    private static final PlutusData GS_PROXY_SPEND_REDEEMER = ConstrPlutusData.of(0);
+
+    /** Everything a builder needs to spend GlobalState through the logic currently installed.
+     *  {@code logicRefInput} is null only when the caller allowed an unpublished logic. */
+    record GsWitness(GsLogicEntry entry, PlutusScript logic, PlutusScript proxy,
+                     Credential logicCredential, String logicRewardAddress,
+                     TransactionInput logicRefInput, BigInteger rewardBalance) {
+
+        String logicHash() { return entry.logicHash(); }
+
+        /** Same witness, different withdrawal amount (a later tx of one chain: the first already
+         *  withdrew the balance, so the account holds 0 when the next one lands). */
+        GsWitness withRewardBalance(BigInteger amount) {
+            return new GsWitness(entry, logic, proxy, logicCredential, logicRewardAddress, logicRefInput, amount);
+        }
+
+        /** The logic withdrawal: {@code GlobalStateSpendRedeemer { global_state_output_index, action }}. */
+        CoreWithdrawal withdrawal(int gsOutputIndex, PlutusData action) {
+            return new CoreWithdrawal(logicCredential, logicRewardAddress, ConstrPlutusData.of(0,
+                    BigIntPlutusData.of(BigInteger.valueOf(gsOutputIndex)), action));
+        }
+    }
+
+    /**
+     * Resolve the logic named by GlobalState datum field 0 through the token's own registry.
+     *
+     * <p>Refuses (UNKNOWN LOGIC) when field 0 names a logic this platform did not build: one
+     * rotated outside the platform, or a token from before the PR #29 pin. Building against a
+     * guessed script there would at best fail evaluation and at worst sign a transaction whose
+     * effect the platform cannot describe.
+     *
+     * @param requireRef refuse when the logic's reference script was never published. Every
+     *  builder except the registration chain needs it: inline, the 5.7 kB logic plus an up to
+     *  8 kB datum would not reliably fit the transaction.
+     */
+    GsWitness gsWitness(RwaTokenRegistrationEntity reg, List<PlutusData> gsFields, boolean requireRef) {
+        if (!(gsFields.get(GS_IDX_GLOBAL_STATE_SCRIPT) instanceof BytesPlutusData field0)
+                || field0.getValue().length != 28) {
+            throw new BuildPreconditionException("GS datum field 0 is not a 28-byte script hash");
+        }
+        String logicHash = HexUtil.encodeHexString(field0.getValue());
+        GsLogicEntry entry = GsLogicEntry.find(reg.getGsLogics(), logicHash)
+                .orElseThrow(() -> new BuildPreconditionException(
+                        "UNKNOWN GlobalState logic " + logicHash + " for policy " + reg.getProgrammableTokenPolicyId()
+                        + ": it was rotated outside this platform, or the token predates the contract pin "
+                        + "this platform builds for. Refusing to build a GlobalState spend against a logic "
+                        + "this platform cannot describe."));
+        PlutusScript logic = PlutusV3Script.builder().cborHex(entry.scriptCborHex()).build();
+        // Plan Addendum I5: re-derive on every use. The chain trusts whatever field 0 names, so a
+        // corrupted or hand-edited row must never be what a write is built — or size-checked —
+        // against.
+        String derived = derivedLogicHash(reg, entry.maxDatumBytes());
+        if (!derived.equalsIgnoreCase(logicHash)) {
+            throw new BuildPreconditionException("gs_logics entry " + logicHash + " (cap " + entry.maxDatumBytes()
+                    + ") is not the logic this token's parameters derive at that cap (" + derived + ")");
+        }
+        try {
+            if (!logicHash.equalsIgnoreCase(HexUtil.encodeHexString(logic.getScriptHash()))) {
+                throw new BuildPreconditionException("gs_logics entry " + logicHash + " holds a different script");
+            }
+        } catch (com.bloxbean.cardano.client.exception.CborSerializationException e) {
+            throw new BuildPreconditionException("gs_logics entry " + logicHash + " is not a valid script");
+        }
+        TransactionInput ref = entry.hasRef()
+                ? TransactionInput.builder().transactionId(entry.refTxHash()).index(entry.refOutputIndex()).build()
+                : null;
+        if (requireRef && ref == null) {
+            throw new BuildPreconditionException(
+                    "publish the GlobalState logic first: its reference script (" + logicHash + ") was never "
+                    + "published for policy " + reg.getProgrammableTokenPolicyId()
+                    + " (POST /rwa-token/{policyId}/publish-gs-logic)");
+        }
+        if (requireRef) {
+            // Plan Addendum R2: the live chain decides. Standalone writes need the reference
+            // script ON CHAIN; only the registration chain (requireRef=false) may spend against a
+            // publish tx it carries itself.
+            Optional<Utxo> live = utxoProvider.findUtxo(entry.refTxHash(), entry.refOutputIndex());
+            if (live.isEmpty()) {
+                throw new BuildPreconditionException(
+                        "the GlobalState logic reference script " + entry.refTxHash() + "#" + entry.refOutputIndex()
+                        + " is not visible on chain " + (GsLogicEntry.CONFIRMED.equals(entry.refState())
+                                ? "(it was seen before; if this persists it was spent — republish it via "
+                                  + "POST /rwa-token/{policyId}/publish-gs-logic)"
+                                : "yet: wait for the publish tx to confirm, then retry"));
+            }
+            String liveHash = live.get().getReferenceScriptHash();
+            if (liveHash != null && !liveHash.equalsIgnoreCase(logicHash)) {
+                throw new BuildPreconditionException("the output recorded as the GlobalState logic reference "
+                        + "script carries script " + liveHash + ", not " + logicHash);
+            }
+            if (!GsLogicEntry.CONFIRMED.equals(entry.refState())) {
+                entry = entry.withRefState(GsLogicEntry.CONFIRMED);
+                reg.setGsLogics(GsLogicEntry.upsert(reg.getGsLogics(), entry));
+                registrationRepository.save(reg);
+            }
+        }
+        String rewardAddress = AddressProvider.getRewardAddress(logic, network.getCardanoNetwork()).getAddress();
+        // Plan Addendum I8: withdraw the account's WHOLE balance (ledger rule). Normally 0;
+        // unknown (backend cannot answer) also means 0, today's behaviour, with a warning.
+        BigInteger balance = utxoProvider.rewardBalance(rewardAddress).orElseGet(() -> {
+            log.warn("GlobalState logic reward balance of {} unknown; withdrawing 0", rewardAddress);
+            return BigInteger.ZERO;
+        });
+        return new GsWitness(entry, logic, scriptBuilder.buildGlobalStateProxyScript(),
+                Credential.fromScript(field0.getValue()), rewardAddress, ref, balance);
+    }
+
+    /** A logic seen in datum field 0 is installed (WP-4: written on observation, never when the
+     *  rotate tx is merely built), so it never reads as "prepared but never installed". */
+    private void markInstalledIfObserved(RwaTokenRegistrationEntity reg, GsWitness witness, Utxo gsUtxo) {
+        if (witness.entry().everInstalled()) return;
+        reg.setGsLogics(GsLogicEntry.upsert(reg.getGsLogics(), witness.entry().withInstalled(gsUtxo.getTxHash())));
+        registrationRepository.save(reg);
+    }
+
+    /** The GlobalState logic THIS token's parameters derive at {@code cap} (plan Addendum I4/I5). */
+    String derivedLogicHash(RwaTokenRegistrationEntity reg, int cap) {
+        try {
+            String puList = HexUtil.encodeHexString(scriptBuilder.buildPowerUsersSpendScript(
+                    reg.getGlobalStatePolicyId(), reg.getPowerUsersPolicyId()).getScriptHash());
+            return HexUtil.encodeHexString(scriptBuilder.buildGlobalStateLogicScript(
+                    reg.getSecurityAssetNameHex(), reg.getProgrammableTokenPolicyId(),
+                    reg.getGlobalStatePolicyId(), puList, cap).getScriptHash());
+        } catch (com.bloxbean.cardano.client.exception.CborSerializationException e) {
+            throw new IllegalStateException("could not derive the GlobalState logic", e);
+        }
+    }
+
     /** Deserialize + validate the {@value #GS_DATUM_FIELD_COUNT}-field BaFin
      *  GlobalStateDatum, returning its fields. Throws
      *  {@link BuildPreconditionException} with a user-visible message when the
@@ -7676,8 +8882,8 @@ public class RwaTokenModuleHandler
         try {
             PlutusData datum = PlutusData.deserialize(
                     HexUtil.decodeHexString(gsUtxo.getInlineDatum()));
-            if (!(datum instanceof ConstrPlutusData constr)) {
-                throw new BuildPreconditionException("GS datum is not a Constr");
+            if (!(datum instanceof ConstrPlutusData constr) || constr.getAlternative() != 0) {
+                throw new BuildPreconditionException("GS datum is not a Constr 0");
             }
             List<PlutusData> fields = constr.getData().getPlutusDataList();
             if (fields.size() != GS_DATUM_FIELD_COUNT) {

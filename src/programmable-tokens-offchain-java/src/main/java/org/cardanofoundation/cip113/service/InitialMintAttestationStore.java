@@ -125,10 +125,17 @@ public class InitialMintAttestationStore {
                 || registrations.existsByBootstrapTxHashAndBootstrapOutputIndex(bootstrap.getTxHash(), bootstrap.getOutputIndex())
                 || genesisReservations.claim(plan.globalStatePolicyId(), bootstrap.getTxHash(), bootstrap.getOutputIndex()) != 1)
             throw conflict("Bootstrap is reserved; prepare again using another available wallet input");
-        for (var funding : plan.funding()) {
+        for (var funding : everyFundingInput(plan)) {
             if (fundingReservations.claim(funding.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + funding.getOutputIndex(), plan.globalStatePolicyId()) != 1)
                 throw conflict("Funding is reserved; prepare again using another available wallet input");
         }
+    }
+
+    /** Genesis funding plus (since 63fad89) the disjoint preGenesis funding. */
+    private static java.util.List<com.bloxbean.cardano.client.api.model.Utxo> everyFundingInput(RwaTokenModuleHandler.GenesisPlan plan) {
+        var all = new ArrayList<>(plan.funding());
+        if (plan.preGenesisFunding() != null) all.addAll(plan.preGenesisFunding());
+        return all;
     }
 
     @Transactional
@@ -148,6 +155,8 @@ public class InitialMintAttestationStore {
         // This lock also excludes cancellation. An expired builder cannot republish after a newer claim.
         var i = locked(id); requireOwner(i, owner); MintAttestationStore.unexpired(i);
         var plan = mapper.readValue(i.getInitialPlanJson(), RwaTokenModuleHandler.GenesisPlan.class);
+        if (plan.preGenesisFunding() == null || plan.preGenesisFunding().isEmpty())
+            throw conflict(RwaTokenModuleHandler.PRE_63FAD89_PLAN);
         var request = mapper.readValue(i.getInitialRegistrationJson(), RwaTokenRegisterRequest.class);
         var fields = mints.fields(i);
         var params = protocols.resolve(fields.protocolTxHash());
@@ -216,6 +225,26 @@ public class InitialMintAttestationStore {
     }
 
     public record Recovery(String status, boolean canStartNewPolicy, String tipHash, Long tipSlot, String reason) {}
+
+    private static final int UNKNOWN_HASH = -1, UNKNOWN_LOOKUP = -2, UNKNOWN_INCLUSION = -3;
+
+    /** 1 = included and valid, 0 = not found (404), negative = cannot be established. */
+    private int observed(String hash) {
+        if (hash == null || !hash.matches("[a-fA-F0-9]{64}")) return UNKNOWN_HASH;
+        try {
+            var response = bfBackendService.getTransactionService().getTransaction(hash);
+            if (response == null) return UNKNOWN_LOOKUP;
+            if (response.code() == 404) return 0;
+            if (!response.isSuccessful() || response.getValue() == null) return UNKNOWN_LOOKUP;
+            var tx = response.getValue();
+            if (!hash.equalsIgnoreCase(tx.getHash()) || tx.getBlock() == null || tx.getBlock().isBlank()
+                    || !Boolean.TRUE.equals(tx.getValidContract()))
+                return UNKNOWN_INCLUSION;
+            return 1;
+        } catch (Exception e) {
+            return UNKNOWN_LOOKUP;
+        }
+    }
     private record ChainPoint(String hash, long slot) {}
 
     /** Read-only observation. UNKNOWN never authorizes discarding/replacing an attempt. */
@@ -243,6 +272,17 @@ public class InitialMintAttestationStore {
             long genesisTtl = genesis.getBody().getTtl();
             if (genesisTtl <= 0)
                 return unknown("Frozen genesis has no finite validity bound; it may still spend its bootstrap");
+            // Since 63fad89 a preGenesis tx precedes genesis. It never spends the bootstrap, so it
+            // can land while genesis does not; it is reconciled OUTSIDE the contradiction rule below.
+            long preGenesisTtl = 0;
+            if (saved.preGenesisTxHash() != null) {
+                var preGenesis = Transaction.deserialize(HexUtil.decodeHexString(saved.preGenesisCborHex()));
+                if (!TransactionUtil.getTxHash(preGenesis.serialize()).equals(saved.preGenesisTxHash()))
+                    return unknown("Frozen preGenesis hash is unavailable");
+                preGenesisTtl = preGenesis.getBody().getTtl();
+                if (preGenesisTtl <= 0)
+                    return unknown("Frozen preGenesis has no finite validity bound");
+            }
             var before = chainPoint();
             var hashes = new ArrayList<String>();
             hashes.add(saved.genesisTxHash()); hashes.add(saved.addPowerUserTxHash());
@@ -254,16 +294,17 @@ public class InitialMintAttestationStore {
             if (saved.registerThirdPartyTransferLogicTxHash() != null) hashes.add(saved.registerThirdPartyTransferLogicTxHash());
             int confirmed = 0;
             for (String hash : hashes) {
-                if (hash == null || !hash.matches("[a-fA-F0-9]{64}")) return unknown("Saved transaction hash is unavailable");
-                var response = bfBackendService.getTransactionService().getTransaction(hash);
-                if (response == null) return unknown("Transaction lookup failed");
-                if (response.code() == 404) continue;
-                if (!response.isSuccessful() || response.getValue() == null) return unknown("Transaction lookup failed");
-                var tx = response.getValue();
-                if (!hash.equalsIgnoreCase(tx.getHash()) || tx.getBlock() == null || tx.getBlock().isBlank()
-                        || !Boolean.TRUE.equals(tx.getValidContract()))
-                    return unknown("Transaction inclusion or successful execution could not be established");
-                confirmed++;
+                int seen = observed(hash);
+                if (seen < 0) return unknown(seen == UNKNOWN_HASH ? "Saved transaction hash is unavailable"
+                        : seen == UNKNOWN_LOOKUP ? "Transaction lookup failed"
+                        : "Transaction inclusion or successful execution could not be established");
+                confirmed += seen;
+            }
+            boolean preGenesisConfirmed = false;
+            if (saved.preGenesisTxHash() != null) {
+                int seen = observed(saved.preGenesisTxHash());
+                if (seen < 0) return unknown("preGenesis lookup failed");
+                preGenesisConfirmed = seen == 1;
             }
             var fields = mapper.readValue(intent.getFieldsJson(), MintAttestationRequest.class);
             // Query the same backend as the block/transaction reads, bypassing the local index.
@@ -286,10 +327,20 @@ public class InitialMintAttestationStore {
             if (confirmed > 0 && bootstrapUnspent)
                 return unknown("Chain data contradicts itself: a saved transaction is confirmed but its bootstrap is unspent");
             if (confirmed > 0)
-                return new Recovery(confirmed == hashes.size() ? "CONFIRMED" : "PARTIAL", false,
+                return new Recovery(confirmed == hashes.size()
+                        && (saved.preGenesisTxHash() == null || preGenesisConfirmed) ? "CONFIRMED" : "PARTIAL", false,
                         after.hash(), after.slot(), "Resume the saved chain; a fresh policy is not authorized by this recovery check");
             if (!bootstrapUnspent) return unknown("Bootstrap is spent or unavailable; reconcile the saved chain");
-            if (after.slot() <= Math.max(ttl, genesisTtl))
+            if (preGenesisConfirmed) {
+                if (after.slot() <= genesisTtl)
+                    return new Recovery("PARTIAL", false, after.hash(), after.slot(),
+                            "preGenesis is on chain and genesis is still valid; resume submitting the saved chain");
+                return new Recovery("EXPIRED_UNSTARTED", true, after.hash(), after.slot(),
+                        "preGenesis landed but genesis expired unsubmitted; a different policy can be prepared. Its "
+                        + "GlobalState logic reference output (about 27 ADA, at an always-fail address) and the 2 ADA "
+                        + "stake deposit are not recoverable");
+            }
+            if (after.slot() <= Math.max(Math.max(ttl, genesisTtl), preGenesisTtl))
                 return new Recovery("UNCONFIRMED", false, after.hash(), after.slot(), "Frozen genesis or mint transaction is still valid");
             return new Recovery("EXPIRED_UNSTARTED", true, after.hash(), after.slot(),
                     "Genesis and mint validity have ended and the original bootstrap remains unspent; a different policy can be prepared");
@@ -349,7 +400,7 @@ public class InitialMintAttestationStore {
         if (registrations.existsByProgrammableTokenPolicyId(plan.programmableTokenPolicyId()))
             throw conflict("Registration state exists; retain its reservations for reconciliation");
         var bootstrap = plan.funding().getFirst();
-        for (var funding : plan.funding()) {
+        for (var funding : everyFundingInput(plan)) {
             String ref = funding.getTxHash().toLowerCase(java.util.Locale.ROOT) + "#" + funding.getOutputIndex();
             if (fundingReservations.releaseOwned(ref, plan.globalStatePolicyId()) != 1)
                 throw conflict("Funding reservation ownership changed; no reservations released");

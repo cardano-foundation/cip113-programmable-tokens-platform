@@ -139,9 +139,9 @@ class InitialMintAttestationStoreTest {
     }
     @Test void preparationReservationsAndIntentCommitTogetherOrRollBack() throws Exception {
         prepared("first");
-        assertEquals(1, intents.count()); assertEquals(1, genesis.count()); assertEquals(1, funding.count());
+        assertEquals(1, intents.count()); assertEquals(1, genesis.count()); assertEquals(2, funding.count());
         assertThrows(RuntimeException.class, () -> prepared("second"));
-        assertEquals(1, intents.count()); assertEquals(1, genesis.count()); assertEquals(1, funding.count());
+        assertEquals(1, intents.count()); assertEquals(1, genesis.count()); assertEquals(2, funding.count());
     }
     @Test void failedBuilderRollsBackSideEffectsWithoutPublishingChain() throws Exception {
         anchored(); var claim = store.claimBuild("intent");
@@ -195,13 +195,13 @@ class InitialMintAttestationStoreTest {
     @Test void failedOwnershipReleaseRollsBackEarlierDeletes() throws Exception {
         prepared("intent"); var row = funding.findById(BOOTSTRAP + "#0").orElseThrow(); row.setGlobalStatePolicyId("ff".repeat(28)); funding.saveAndFlush(row);
         assertThrows(RuntimeException.class, () -> store.release("intent"));
-        assertEquals(1, genesis.count()); assertEquals(1, funding.count()); assertEquals("PREPARED", store.get("intent").getStatus());
+        assertEquals(1, genesis.count()); assertEquals(2, funding.count()); assertEquals("PREPARED", store.get("intent").getStatus());
     }
     @Test void expiryCleanupReleasesOnlyExpiredUnbuiltAttempt() throws Exception {
         prepared("intent");
         var now = Instant.now();
         assertFalse(store.releaseExpired("intent", now));
-        assertEquals(1, funding.count());
+        assertEquals(2, funding.count());
         var i = intents.findById("intent").orElseThrow();
         i.setExpiresAt(now.minusSeconds(1)); intents.saveAndFlush(i);
         assertEquals(java.util.List.of("intent"), intents.findExpiredInitialIds(now, "",
@@ -217,7 +217,7 @@ class InitialMintAttestationStoreTest {
         i.setExpiresAt(Instant.now().minusSeconds(1)); intents.saveAndFlush(i);
         assertFalse(store.releaseExpired("intent", Instant.now()));
         assertEquals("BUILDING", store.get("intent").getStatus());
-        assertEquals(1, funding.count()); assertEquals(1, genesis.count());
+        assertEquals(2, funding.count()); assertEquals(1, genesis.count());
     }
     private void publishedWithExpiredUnstartedChain() throws Exception {
         anchored();
@@ -237,7 +237,7 @@ class InitialMintAttestationStoreTest {
         assertEquals("ARCHIVED_EXPIRED", store.archiveExpired("intent").status());
         assertEquals(original, store.get("intent").getInitialChainJson());
         assertEquals(chain(false), store.chain(store.get("intent")));
-        assertEquals(1, genesis.count()); assertEquals(1, funding.count());
+        assertEquals(1, genesis.count()); assertEquals(2, funding.count());
         assertTrue(registrations.existsByProgrammableTokenPolicyId(POLICY));
         assertThrows(RuntimeException.class, () -> store.release("intent"));
         assertThrows(RuntimeException.class, () -> store.claimBuild("intent"));
@@ -327,6 +327,62 @@ class InitialMintAttestationStoreTest {
         assertEquals("PARTIAL", recovery.status()); assertFalse(recovery.canStartNewPolicy());
         verify(handler, never()).completeInitialMintChain(any(), any(), any());
     }
+    // ── Since 63fad89: preGenesis precedes genesis and never spends the bootstrap ───────────
+
+    /** preGenesis on chain, genesis not yet, genesis still valid: resume — never a fresh policy. */
+    @Test void preGenesisLandedWhileGenesisValidIsPartialAndCannotArchive() throws Exception {
+        publishedWithExpiredUnstartedChain();
+        when(bfBackendService.getBlockService().getLatestBlock().getValue().getSlot()).thenReturn(999_999_998L);
+        confirmedTransaction(chain(false).preGenesisTxHash());
+        var recovery = store.recovery(store.get("intent"));
+        assertEquals("PARTIAL", recovery.status(), recovery.reason());
+        assertFalse(recovery.canStartNewPolicy());
+        assertThrows(RuntimeException.class, () -> store.archiveExpired("intent"));
+    }
+
+    /** preGenesis on chain, genesis expired unsubmitted, bootstrap unspent: not a contradiction —
+     *  the attempt is EXPIRED_UNSTARTED and the sunk cost is named. */
+    @Test void preGenesisLandedButGenesisExpiredIsExpiredUnstartedAndNamesSunkCost() throws Exception {
+        publishedWithExpiredUnstartedChain();
+        confirmedTransaction(chain(false).preGenesisTxHash());
+        var recovery = store.recovery(store.get("intent"));
+        assertEquals("EXPIRED_UNSTARTED", recovery.status(), recovery.reason());
+        assertTrue(recovery.canStartNewPolicy());
+        assertTrue(recovery.reason().contains("not recoverable"), recovery.reason());
+        assertEquals("ARCHIVED_EXPIRED", store.archiveExpired("intent").status());
+    }
+
+    /** A confirmed GENESIS with an unspent bootstrap is still contradictory, preGenesis or not. */
+    @Test void confirmedGenesisWithUnspentBootstrapStaysContradictoryWithPreGenesis() throws Exception {
+        publishedWithExpiredUnstartedChain();
+        confirmedTransaction(chain(false).preGenesisTxHash());
+        confirmedTransaction(chain(false).genesisTxHash());
+        var recovery = store.recovery(store.get("intent"));
+        assertEquals("UNKNOWN", recovery.status());
+        assertTrue(recovery.reason().contains("contradicts"), recovery.reason());
+    }
+
+    /** A plan persisted before 63fad89 (no preGenesis funding) would complete an orphaned token. */
+    @Test void aPlanPreparedBeforeThePinIsRefusedByBuild() throws Exception {
+        anchored();
+        var i = intents.findById("intent").orElseThrow();
+        i.setInitialPlanJson(mapper.writeValueAsString(legacyPlan())); intents.saveAndFlush(i);
+        var claim = store.claimBuild("intent");
+        var e = assertThrows(org.springframework.web.server.ResponseStatusException.class,
+                () -> store.build("intent", claim.owner()));
+        assertTrue(String.valueOf(e.getReason()).contains("earlier rwa-token contract"), e.getReason());
+        verify(handler, never()).completeInitialMintChain(any(), any(), any());
+    }
+
+    /** Preparation reserves the preGenesis funding next to the genesis funding; cancelling releases both. */
+    @Test void preGenesisFundingIsReservedAndReleasedWithTheAttempt() throws Exception {
+        prepared("intent");
+        String preRef = PRE_GENESIS_FUNDING + "#0";
+        assertTrue(funding.findById(preRef).isPresent(), "preGenesis funding must be reserved");
+        store.release("intent");
+        assertTrue(funding.findById(preRef).isEmpty(), "cancelling must release the preGenesis funding");
+    }
+
     private void changeGenesisTtl(long ttl) throws Exception {
         var saved = store.get("intent");
         var json = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.readTree(saved.getInitialChainJson());

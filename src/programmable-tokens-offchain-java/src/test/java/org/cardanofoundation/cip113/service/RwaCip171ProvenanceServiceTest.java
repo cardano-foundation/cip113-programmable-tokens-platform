@@ -78,7 +78,7 @@ class RwaCip171ProvenanceServiceTest {
             assertEquals(0, ((BytesPlutusData) cmta.get(4)).getValue().length);
             var parameters = ((MapPlutusData) cmta.get(5)).getMap();
             assertEquals(10, parameters.size());
-            assertEquals(33, parameters.values().stream().mapToInt(v -> ((ListPlutusData) v).getPlutusDataList().size()).sum());
+            assertEquals(37, parameters.values().stream().mapToInt(v -> ((ListPlutusData) v).getPlutusDataList().size()).sum());
             assertEquals(1, ((MapPlutusData) core.get(5)).getMap().size());
             var gsHash = modules.getModuleValidator("rwa-token", "global_state.global_state_mint_validator.mint")
                     .orElseThrow().scriptHash();

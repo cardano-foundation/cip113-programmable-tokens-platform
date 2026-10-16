@@ -75,25 +75,44 @@ shasum -a 256 plutus.json
 # verifies the release archive's checksum and source commit before building.
 ```
 
-### rwa-token — a rebuild, not upstream's file
+### rwa-token — upstream's file, verbatim (PR #29 head)
 
-**Upstream's committed `plutus.json` at this commit is stale**, so we do not ship it. At
-`9761a05e`, `global_state.global_state_spend_validator` is committed as
-`57e2c6d5…` (4901 bytes) while the source compiles to `e720eb53…` (4698 bytes) — the
-blueprint and `validators/global_state.ak` were last touched by the *same* commit, so it was
-committed without being regenerated after a final source edit.
-
-We ship the **rebuild**, on the principle that the script that goes on chain must be the
-source that gets audited.
+The pin is the head of cpt-rwa-ch-cmta-reference **PR #29** (branch `feat/global-state-migration`,
+commit `63fad8917ebb6057105d833cafc601b9e4c78ccb`, not yet on upstream `main`). Unlike the previous
+pin (`9761a05e`, whose committed blueprint was stale and was shipped as a rebuild), upstream's
+committed `plutus.json` at this commit **reproduces from its own source**, so it is shipped byte for
+byte (`verbatim_from_upstream: true`).
 
 ```bash
-git clone https://github.com/cardano-foundation/cpt-rwa-ch-de-cmta-reference /tmp/rwa
-cd /tmp/rwa && git checkout 9761a05e5d7d298a940c990989438cc894a0dad5
-
-shasum -a 256 plutus.json     # upstream's STALE file: 301b2d9f…
-aiken build
-shasum -a 256 plutus.json     # the rebuild we ship:   2f1f1799…
+git clone https://github.com/cardano-foundation/cpt-rwa-ch-cmta-reference /tmp/rwa
+cd /tmp/rwa && git checkout 63fad8917ebb6057105d833cafc601b9e4c78ccb
+shasum -a 256 plutus.json     # 12cd56fc…6425
+aiken build                   # v1.1.23+8949565
+shasum -a 256 plutus.json     # unchanged: 12cd56fc…6425
 ```
+
+The repository URL recorded in `contracts-pin.json` and the on-chain CIP-171 record stays
+`cardano-foundation/cpt-rwa-ch-de-cmta-reference` (upstream's README name); GitHub redirects it to
+the canonical `cardano-foundation/cpt-rwa-ch-cmta-reference`.
+
+What changed for the platform at this pin: `global_state_spend_validator` is gone. GlobalState sits
+at the unparameterised `global_state_proxy` (shared by every token, so GlobalState is always located
+by its NFT) and is governed by `global_state_logic` (withdraw-0, parameterised on the aggregate
+`max_global_state_datum_bytes`), named by datum field 0 and rotatable via `RotateGlobalStateScript`.
+The datum has 15 fields (frozen core 0–4). Tokens registered under the previous pin are not
+spendable by these builders and must be re-registered.
+
+Since `63fad89` (upstream security-fixes §15) the GlobalState mint requires the logic field 0 names
+to RUN at genesis (its withdraw-0), which moves every new GlobalState policy id; tokens built at
+`346f9bf` are orphaned for the same reason as above. A withdrawal needs an already-registered
+credential, and the four genesis scripts inline (≈19.3 KB) exceed max-tx-size, so the creation chain
+now starts with a **preGenesis** transaction (integration guide §0): it registers the logic's stake
+credential and publishes the logic as a reference script at the always-fail address, spending a
+second ADA-only wallet UTxO (≥ 40 ADA) and never the bootstrap. Genesis spends the bootstrap and the
+preGenesis change, reads the logic from that reference output and withdraws 0 from it; publishScripts
+(mint path) now publishes only the minting authority. If preGenesis lands but genesis does not, its
+≈27 ADA reference output and 2 ADA deposit are not recoverable. Rotation additionally requires the
+new logic to run with the identical redeemer, which these builders already send.
 
 For a release check, run `python3 scripts/verify-cip171-sources.py` with Python
 3.11 or later from this repository. It checks out both exact commits and verifies
@@ -107,9 +126,6 @@ verified archive in Aiken's versioned package cache, and requires the lock to st
 unchanged during the build. An external verifier should check this archive too,
 because a version tag alone does not guarantee immutable content.
 
-`contracts-pin.json` records `upstream_committed_sha256` alongside ours, so it stays possible
-to tell whether upstream has since regenerated. If `301b2d9f…` ever changes, check whether
-their blueprint now reproduces — and if it does, drop the exception and ship theirs verbatim.
 
 ## Adopting a new upstream revision
 

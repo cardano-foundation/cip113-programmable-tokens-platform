@@ -49,6 +49,7 @@ function RwaTokenSuccessStep(props: StepComponentProps) {
       globalStatePolicyId: chainResult?.globalStatePolicyId,
       denylistPolicyId: chainResult?.denylistPolicyId,
       powerUsersPolicyId: chainResult?.powerUsersPolicyId,
+      preGenesisTxHash: byName?.preGenesis,
       genesisTxHash: byName?.genesis,
       addPowerUserTxHash: byName?.addPowerUser,
       cmtaProvenanceTxHash: byName?.cmtaProvenance,

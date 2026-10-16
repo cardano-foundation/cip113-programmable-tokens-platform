@@ -65,6 +65,12 @@ public class RwaTokenRegisterRequest extends RegisterTokenRequest {
      *  {@link org.cardanofoundation.cip113.util.Cip68#userTokenLabel}. */
     private Long initialMintableAmount;
 
+    /** Aggregate GlobalState datum byte cap (F09), applied to BOTH the GlobalState mint and
+     *  its logic. Null = {@code RwaTokenScriptBuilderService.DEFAULT_MAX_GS_DATUM_BYTES}. The
+     *  genesis datum plus headroom must fit: a cap below what later writes need refuses every
+     *  growing write until a logic rotation, which LockUpgrades makes impossible. */
+    private Integer maxGsDatumBytes;
+
     /** Optional initial supply minted BY the registration transaction itself, as a
      *  decimal string. Defaults to {@code "0"} — a structural registration that only
      *  inserts the CIP-113 directory entry and mints no RWA tokens.

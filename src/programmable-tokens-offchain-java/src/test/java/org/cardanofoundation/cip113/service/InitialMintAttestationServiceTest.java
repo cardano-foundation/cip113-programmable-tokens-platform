@@ -47,7 +47,8 @@ class InitialMintAttestationServiceTest {
                     built.registrationCborHex(), null, null, null, built.globalStatePolicyId(),
                     built.programmableTokenPolicyId(), built.denylistPolicyId(), built.powerUsersPolicyId(),
                     built.genesisTxHash(), built.addPowerUserTxHash(), built.cmtaProvenanceTxHash(),
-                    built.issuanceProvenanceTxHash(), built.publishScriptsTxHash(), built.registrationTxHash(), null, null, null);
+                    built.issuanceProvenanceTxHash(), built.publishScriptsTxHash(), built.registrationTxHash(), null, null, null,
+                    built.preGenesisCborHex(), built.preGenesisTxHash());
             return new InitialMintAttestationStore.Preview(prefix, "{}");
         });
         when(mints.config()).thenReturn(Map.of("network", "preview", "audience", "https://api.example/api/v1"));

@@ -39,7 +39,9 @@ public final class RwaCip171ProvenanceService {
             "version", "v2.2.0");
     private static final Map<String, String> CMTA_TITLES = Map.of(
             "global_state_mint", "global_state.global_state_mint_validator.mint",
-            "global_state_spend", "global_state.global_state_spend_validator.spend",
+            // The GS proxy is unparameterised (applied hash == blueprint hash), so it has no
+            // parameter application to capture; the logic it delegates to does.
+            "global_state_logic", "global_state_logic.global_state_logic.withdraw",
             "denylist_mint", "denylist.mint.mint",
             "denylist_spend", "denylist.denylist_validator.spend",
             "power_users_mint", "power_users.mint.mint",
@@ -120,7 +122,7 @@ public final class RwaCip171ProvenanceService {
             requireActive();
             var expected = new LinkedHashMap<String, String>();
             expected.put("global_state_mint", reg.getGlobalStatePolicyId());
-            expected.put("global_state_spend", hash(scripts.globalStateSpend()));
+            expected.put("global_state_logic", hash(scripts.globalStateLogic()));
             expected.put("denylist_mint", reg.getDenylistPolicyId());
             expected.put("denylist_spend", hash(scripts.denylistSpend()));
             expected.put("power_users_mint", reg.getPowerUsersPolicyId());

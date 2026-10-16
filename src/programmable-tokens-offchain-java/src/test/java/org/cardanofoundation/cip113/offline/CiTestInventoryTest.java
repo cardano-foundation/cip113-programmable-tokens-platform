@@ -48,7 +48,7 @@ class CiTestInventoryTest {
      *  100 → 102 (main): offline PowerUserInsertionTest and RwaAdminAuthorityTest.
      *  → 104: offline TxAttestationSealTest and MintAttestationMetadataTest (CIP-170 ATTEST_TX).
      *  → 105: offline Cip170AuthBeginTest (AUTH_BEGIN announces label 170). */
-    private static final int EXPECTED_TEST_CLASS_COUNT = 105;
+    private static final int EXPECTED_TEST_CLASS_COUNT = 109;
 
     /** Why the rest are out: they submit transactions, need a database, or need a live backend. */
     private static final String NOT_IN_CI_REASON =

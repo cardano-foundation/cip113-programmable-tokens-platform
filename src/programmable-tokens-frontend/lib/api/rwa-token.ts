@@ -62,6 +62,29 @@ export interface RwaTokenGlobalState {
   /** One-way lock. Once true, BOTH the minting-authority rotation and the CIP-113
    *  registry-node upgrade path are permanently frozen — no branch clears it. */
   upgradesLocked: boolean;
+  /** PR #29: the GlobalState logic in force (datum field 0) and what the panel needs about it. */
+  gsLogic?: RwaGsLogicStatus;
+}
+
+export interface RwaGsLogicStatus {
+  logicHash: string;
+  /** The installed logic's max_global_state_datum_bytes; null when this platform did not build it. */
+  maxDatumBytes: number | null;
+  /** Current datum size as the chain measures it (canonical serialise_data). */
+  datumBytes: number;
+  /** Whether the logic's reference script has been published (structural tokens start without). */
+  logicRefPublished: boolean;
+  /** False = field 0 names a logic this platform did not build; every write is refused. */
+  logicKnown: boolean;
+  /** The only authority RotateMintingScript may install (this token's own derivation). */
+  derivedMintingAuthorityHash: string | null;
+  circulatingSupply: number | null;
+  /** Hard cap on max_global_state_datum_bytes (8192). */
+  maxCapLimit: number;
+  /** Free space a new cap must leave above the current datum. */
+  headroomBytes: number;
+  /** Bytes below the cap that admin writes never use, so burns stay possible. */
+  burnReserveBytes: number;
 }
 
 export const getRwaTokenGlobalState = (policyId: string) =>
@@ -87,6 +110,8 @@ export interface RwaTokenInitRequest {
   adminPubKeyHash: string;          // 28-byte hex
   requiresReceiverKyc: boolean;
   initialMintableAmount?: number;
+  /** PR #29: max_global_state_datum_bytes for the GS mint and logic; ≤ 8192 (default 8192). */
+  maxGsDatumBytes?: number;
   /** Initial supply minted BY the registration transaction itself (decimal string).
    *  Omit or '0' for a structural registration that mints nothing — the default,
    *  and the path with the most on-chain mileage. When set, the registration tx
@@ -159,6 +184,11 @@ export const initRwaTokenGlobalState = async (body: RwaTokenInitRequest, rawApi:
 // ── Chained registration (genesis + AddPowerUser + registration in one round-trip) ──
 
 export interface RwaTokenChainBuildResponse {
+  /** Since contract pin 63fad89: registers the GlobalState logic's stake credential and
+   *  publishes the logic as a reference script. FIRST in the chain — genesis runs the logic
+   *  (withdraw-0), reads it from this tx and spends this tx's change. Absent only in a chain
+   *  built under an earlier pin. */
+  preGenesisCborHex?: string;
   genesisCborHex: string;
   addPowerUserCborHex: string;
   cmtaProvenanceCborHex: string;
@@ -185,6 +215,7 @@ export interface RwaTokenChainBuildResponse {
   programmableTokenPolicyId: string;
   denylistPolicyId: string;
   powerUsersPolicyId: string;
+  preGenesisTxHash?: string;
   genesisTxHash: string;
   addPowerUserTxHash: string;
   cmtaProvenanceTxHash: string;
@@ -198,6 +229,7 @@ export interface RwaTokenChainBuildResponse {
 
 /** Build the whole rwa-token registration chain at once, in submission order:
  *
+ *    0. preGenesis         registers + publishes the GlobalState logic (genesis runs it)
  *    1. genesis            mints GS + denylist root + PU root
  *    2. addPowerUser       inserts the admin into the power-user linked list
  *    3. cmtaProvenance     publishes CIP-171 source and parameters for ten CMTA scripts
@@ -321,12 +353,8 @@ export interface GsChangeSpec {
      *  other withdraw-capable script silently disables every mint control. After rotating,
      *  confirm a mint lacking a power-user signature is REJECTED. */
     | "RotateMintingScript"
-    /** Irreversible. Permanently freezes BOTH the minting-authority rotation and the
-     *  CIP-113 registry-node upgrade path, so the token's mint and transfer rules become
-     *  final. Meaningful to holders precisely because an admin key compromise cannot undo
-     *  it — and it also gives up the ability to patch a buggy authority, leaving
-     *  DeactivateContract as the only remaining lever. Rejected if already locked. */
-    | "LockUpgrades"
+    /** Absolute remaining headroom (not a delta, not total supply). Must be the only change. */
+    | "SetMintableAmount"
     /** Irreversible. Requires transfers to already be paused; afterwards the
      *  on-chain validator rejects every further spend of the global state. */
     | "DeactivateContract";
@@ -344,9 +372,49 @@ export interface GsChangeSpec {
   requiresReceiverKycEnabled?: boolean;
   newMemberRootHashHex?: string;
   newAdminCredentialHashHex?: string;
-  /** RotateMintingScript. 28-byte hex script hash of the new minting authority. */
+  /** RotateMintingScript. Must be this token's derived authority (the backend refuses any other). */
   newMintingScriptCredentialHashHex?: string;
+  /** SetMintableAmount: decimal, 0 … 2^63-1, and supply + amount ≤ 2^63-1. */
+  newMintableAmount?: string;
 }
+
+// ── PR #29: GlobalState logic, cap, lock, attestation check ────────────────────
+
+/** Publish the GlobalState logic's reference script (structural tokens, rotation step 2).
+ *  Its ≈25 ADA is locked PERMANENTLY at an always-fail address. */
+export const buildPublishGsLogicTx = (policyId: string, feePayerAddress: string,
+    authHeaders: Record<string, string>, logicHash?: string) =>
+  apiPost<{ feePayerAddress: string; logicHash?: string }, { unsignedCborTx: string }>(
+    `/rwa-token/${policyId}/publish-gs-logic`, { feePayerAddress, logicHash }, { headers: authHeaders });
+
+/** Rotation step 1: register the new logic (derived from the token's parameters + newCap). */
+export const buildRegisterGsLogicTx = (policyId: string, feePayerAddress: string, newCap: number,
+    authHeaders: Record<string, string>) =>
+  apiPost<{ feePayerAddress: string; newCap: number },
+    { alreadyRegistered: boolean; logicHash: string; unsignedCborTx?: string }>(
+    `/rwa-token/${policyId}/rotate-gs-logic/register`, { feePayerAddress, newCap }, { headers: authHeaders });
+
+/** The body the admin's CIP-30 request signature covers for the two endpoints above; must equal
+ *  the backend's RwaTokenController.gsLogicAdminBody. */
+export function gsLogicAdminBody(feePayerAddress: string, key: "logic" | "cap", value: string): string {
+  return `payer=${feePayerAddress.toLowerCase()}\n${key}=${value.toLowerCase()}\n`;
+}
+
+/** Rotation step 3: RotateGlobalStateScript. */
+export const buildRotateGsLogicTx = (policyId: string, feePayerAddress: string, newCap: number) =>
+  apiPost<{ feePayerAddress: string; newCap: number }, { unsignedCborTx: string }>(
+    `/rwa-token/${policyId}/rotate-gs-logic`, { feePayerAddress, newCap });
+
+/** LockUpgrades — irreversible; confirmPolicyId must be the token's policy id, typed by the user. */
+export const buildLockUpgradesTx = (policyId: string, feePayerAddress: string, confirmPolicyId: string) =>
+  apiPost<{ feePayerAddress: string; confirmPolicyId: string }, { unsignedCborTx: string; warnings: string[] }>(
+    `/rwa-token/${policyId}/lock-upgrades`, { feePayerAddress, confirmPolicyId });
+
+/** Read-only: would this attestation bundle be accepted by a transfer right now? */
+export const verifyRwaAttestation = (policyId: string,
+    attestation: { payloadHex: string; coseSign1Hex: string; coseKeyHex: string }) =>
+  apiPost<typeof attestation, import('@/types/api').AttestationCheck>(
+    `/rwa-token/${policyId}/attestation/verify`, attestation);
 
 /** Build a chain of admin-signed GS update txs (one per change). Returns the
  *  unsigned CBORs in order — frontend signs all via CIP-103 signTxs and submits

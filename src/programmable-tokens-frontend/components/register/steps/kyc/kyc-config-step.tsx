@@ -227,6 +227,10 @@ export function KycConfigStep({
   }, []);
 
   const [mintableAmount, setMintableAmount] = useState(defaultQuantity);
+  /** PR #29: aggregate GlobalState datum byte cap (F09), applied to the GS mint AND its logic. */
+  const [gsDatumCap, setGsDatumCap] = useState("8192");
+  const gsDatumCapValue = /^[0-9]+$/.test(gsDatumCap.trim()) ? Number(gsDatumCap.trim()) : NaN;
+  const gsDatumCapInvalid = !(gsDatumCapValue >= 1 && gsDatumCapValue <= 8192);
   const [securityInfo, setSecurityInfo] = useState('');
 
   // Supply minted BY the registration transaction itself — NOT a field of this
@@ -281,7 +285,7 @@ export function KycConfigStep({
   const mintBlockedByKyc = willFirstMint && displayedRequiresReceiverKyc && !displayedSeedRecipient;
   const mintExceedsCap = willFirstMint && capQty !== null && mintQty > capQty;
   const registrationBlocked =
-    isRwaTokenFlow && (mintQtyInvalid || capInvalid || mintBlockedByKyc || mintExceedsCap);
+    isRwaTokenFlow && (mintQtyInvalid || capInvalid || mintBlockedByKyc || mintExceedsCap || gsDatumCapInvalid);
 
   // Clear the opt-in the moment it stops being applicable. The checkbox only renders
   // while receiver KYC is on AND something is being minted; without this, ticking it
@@ -406,6 +410,7 @@ export function KycConfigStep({
       : capInvalid ? 'Mintable amount must be a whole number from 0 to 9,007,199,254,740,991.'
       : mintBlockedByKyc
         ? 'Receiver KYC with an initial mint requires enrolling the recipient at genesis.'
+      : gsDatumCapInvalid ? 'GlobalState datum cap must be a whole number from 1 to 8192.'
         : 'Initial supply cannot exceed the mintable amount.');
     const adminAddress = newPayerAddress;
     if (!recoveryLoaded || !adminAddress) throw new Error('Wallet recovery check has not completed');
@@ -421,6 +426,7 @@ export function KycConfigStep({
       adminPubKeyHash: adminPkh,
       requiresReceiverKyc,
       initialMintableAmount: capValue ?? 0,
+      maxGsDatumBytes: gsDatumCapValue,
       bootstrapPowerUserPkh: adminPkh,
       bootstrapPowerUserCapabilities: PowerUserCapability.ADMIN | PowerUserCapability.MINTER |
         PowerUserCapability.BURNER | PowerUserCapability.PAUSER | PowerUserCapability.FORCE_TRANSFER,
@@ -432,7 +438,7 @@ export function KycConfigStep({
       seedRecipientInAllowlistAtGenesis: seedRecipientInAllowlist,
     };
   }, [newPayerAddress, recoveryLoaded, wizardState, registrationBlocked, mintQtyInvalid, capInvalid, capValue, mintBlockedByKyc,
-    requiresReceiverKyc, trustedEntities, trimmedMint, seedRecipientInAllowlist]);
+    requiresReceiverKyc, trustedEntities, trimmedMint, seedRecipientInAllowlist, gsDatumCapInvalid, gsDatumCapValue]);
 
   const openAttestation = useCallback(async () => {
     try {
@@ -523,6 +529,10 @@ export function KycConfigStep({
       // spend validator as reference scripts, without which the registration tx's
       // five inline validators are 16 584 bytes against a 16 384-byte limit.
       const chainTxs: { name: string; cbor: string }[] = [
+        // FIRST: registers + publishes the GlobalState logic that genesis runs.
+        ...(chain.preGenesisCborHex
+          ? [{ name: 'preGenesis', cbor: chain.preGenesisCborHex }]
+          : []),
         { name: 'genesis', cbor: chain.genesisCborHex },
         { name: 'addPowerUser', cbor: chain.addPowerUserCborHex },
         { name: 'cmtaProvenance', cbor: chain.cmtaProvenanceCborHex },
@@ -558,7 +568,9 @@ export function KycConfigStep({
       if (!Array.isArray(signedCbors) || signedCbors.length !== totalTxs ||
           signedCbors.some(cbor => typeof cbor !== 'string' || !/^(?:[0-9a-fA-F]{2})+$/.test(cbor)))
         throw new Error('Saved registration signatures are invalid; inspect this attempt before resuming');
-      const expectedHashes = [chain.genesisTxHash, chain.addPowerUserTxHash,
+      const expectedHashes = [
+        ...(chain.preGenesisTxHash ? [chain.preGenesisTxHash] : []),
+        chain.genesisTxHash, chain.addPowerUserTxHash,
         chain.cmtaProvenanceTxHash, chain.issuanceProvenanceTxHash,
         ...(chain.publishScriptsTxHash ? [chain.publishScriptsTxHash] : []),
         chain.registrationTxHash,
@@ -1194,6 +1206,22 @@ export function KycConfigStep({
         {isRwaTokenFlow && capInvalid && <p role="alert" className="text-xs text-red-300">
           Enter a whole number from 0 to 9,007,199,254,740,991.
         </p>}
+
+        {isRwaTokenFlow && <>
+          <Input
+            label="GlobalState datum cap (bytes)"
+            type="number"
+            min="1"
+            max="8192"
+            value={gsDatumCap}
+            onChange={(e) => setGsDatumCap(e.target.value)}
+            disabled={isProcessing}
+            helperText="Upper bound on the token's on-chain GlobalState (trusted issuers, security info, …). 8192 is the maximum and the recommended default; a token at 8192 can later only rotate to a SMALLER cap. The initial state must leave at least 1024 bytes free."
+          />
+          {gsDatumCapInvalid && <p role="alert" className="text-xs text-red-300">
+            Enter a whole number from 1 to 8192.
+          </p>}
+        </>}
 
         {isRwaTokenFlow && (
           /* Not an input. The initial supply is collected once, on the previous step

@@ -30,7 +30,8 @@ import { useRwaTokenMembershipStatus } from "@/hooks/useRwaTokenMembershipStatus
 import { getMpfInclusionProof, requestMpfInclusion } from "@/lib/api/kyc-extended";
 import { getRwaTokenInclusionProof, getRwaTokenGlobalState } from "@/lib/api/rwa-token";
 import { extractStakeCredHashFromAddress } from "@/lib/utils/address";
-import { buildCmtaAttestationPayloadHex, prepareCmtaSignature, sameStakeIdentity, stakeIdentityFromBaseAddress } from "@/lib/rwa/attestation";
+import { buildCmtaAttestationPayloadHex, resolvePastedAttestation, sameStakeIdentity, stakeIdentityFromBaseAddress } from "@/lib/rwa/attestation";
+import { IssuerSigner } from "@/components/attestation/IssuerSigner";
 import { getKeriSessionIdForWallet } from "@/lib/utils/keri-session";
 
 type TransactionBuilder = "sdk" | "backend";
@@ -67,17 +68,25 @@ function preparedPayload(address: string, policyId: string, networkId: number | 
   }
 }
 
-function parsePastedSignature(input: SignatureInput, payloadHex: string,
-  context: { trustedVkeys: string[] } | null, expiry: string):
-  { value: CmtaAttestation | null; validUntilMs: number | null; error: string | null } {
-  if (!input.text.trim()) return { value: null, validUntilMs: null, error: null };
-  if (!context) return { value: null, validUntilMs: null, error: "Loading the live trusted-entity list" };
+type ParsedPaste = { value: CmtaAttestation | null; validUntilMs: number | null; error: string | null;
+  /** Set when the paste is an issuer's bundle: its claim, tier and expiry are what is sent. */
+  bundle: { tier: number; validUntilMs: number } | null };
+
+/** Holder-side data flow (PR #29): a v1 bundle carries its own claim; a raw signData result signs
+ *  the claim this dialog copied. See resolvePastedAttestation. */
+function parsePastedSignature(input: SignatureInput, address: string, policyId: string, payloadHex: string,
+  context: { networkId: number; trustedVkeys: string[] } | null, expiry: string): ParsedPaste {
+  if (!input.text.trim()) return { value: null, validUntilMs: null, error: null, bundle: null };
+  if (!context) return { value: null, validUntilMs: null, error: "Loading the live trusted-entity list", bundle: null };
   try {
-    const value = prepareCmtaSignature(input.text, input.signedPayloadHex,
-      payloadHex, context.trustedVkeys);
-    return { value, validUntilMs: new Date(expiry).getTime(), error: null };
+    const resolved = resolvePastedAttestation(input.text, { address, policyId, networkId: context.networkId,
+      trustedVkeys: context.trustedVkeys, signedPayloadHex: input.signedPayloadHex, currentPayloadHex: payloadHex });
+    if (resolved.kind === "bundle")
+      return { value: resolved.attestation, validUntilMs: resolved.validUntilMs, error: null,
+        bundle: { tier: resolved.tier, validUntilMs: resolved.validUntilMs } };
+    return { value: resolved.attestation, validUntilMs: new Date(expiry).getTime(), error: null, bundle: null };
   } catch (e) {
-    return { value: null, validUntilMs: null, error: e instanceof Error ? e.message : String(e) };
+    return { value: null, validUntilMs: null, error: e instanceof Error ? e.message : String(e), bundle: null };
   }
 }
 
@@ -170,10 +179,10 @@ export function TransferModal({
     senderTier, senderExpiry);
   const recipientPayload = preparedPayload(recipientAddress, policyId, rwaAttestationContext?.networkId ?? null,
     recipientTier, recipientExpiry);
-  const parsedSenderAttestation = parsePastedSignature(senderSignature, senderPayload.payloadHex,
-    rwaAttestationContext, senderExpiry);
-  const parsedRecipientAttestation = parsePastedSignature(recipientSignature, recipientPayload.payloadHex,
-    rwaAttestationContext, recipientExpiry);
+  const parsedSenderAttestation = parsePastedSignature(senderSignature, senderAddress, policyId,
+    senderPayload.payloadHex, rwaAttestationContext, senderExpiry);
+  const parsedRecipientAttestation = parsePastedSignature(recipientSignature, recipientAddress, policyId,
+    recipientPayload.payloadHex, rwaAttestationContext, recipientExpiry);
   // Only the backend knows whether the selected token UTxOs create change.
   // The sender flag is the only unconditional sender gate in this form.
   const rwaTokenSenderProofRequired = rwaTokenRequiresSenderKyc;
@@ -203,9 +212,14 @@ export function TransferModal({
       policyId, rwaAttestationContext.networkId,
       party === "sender" ? senderTier : recipientTier,
       party === "sender" ? senderExpiry : recipientExpiry);
-    if (prepared.error) throw new Error(`${party} ${prepared.error}`);
-    return prepareCmtaSignature(input.text, input.signedPayloadHex,
-      prepared.payloadHex, rwaAttestationContext.trustedVkeys);
+    // A bundle is sent exactly as the issuer signed it (its own claim); a raw signData result is
+    // re-checked against the claim the inputs build NOW, so an edit after copying is caught.
+    const resolved = resolvePastedAttestation(input.text, {
+      address: party === "sender" ? senderAddress : recipientAddress, policyId,
+      networkId: rwaAttestationContext.networkId, trustedVkeys: rwaAttestationContext.trustedVkeys,
+      signedPayloadHex: input.signedPayloadHex, currentPayloadHex: prepared.payloadHex });
+    if (resolved.kind === "signData" && prepared.error) throw new Error(`${party} ${prepared.error}`);
+    return resolved.attestation;
   };
 
   // Reset state when modal opens
@@ -785,6 +799,9 @@ export function TransferModal({
                   text={senderSignature.text}
                   onChange={(value) => setSenderSignature({ text: value, signedPayloadHex: senderCopiedPayloadHex })}
                   attestation={parsedSenderAttestation.value}
+                  bundle={parsedSenderAttestation.bundle}
+                  trustedVkeys={rwaAttestationContext?.trustedVkeys ?? []}
+                  onIssuerSigned={(bundleText) => setSenderSignature({ text: bundleText, signedPayloadHex: "" })}
                   validUntilMs={parsedSenderAttestation.validUntilMs}
                   error={parsedSenderAttestation.error ?? rwaAttestationContextError}
                 />
@@ -902,6 +919,9 @@ export function TransferModal({
                   text={recipientSignature.text}
                   onChange={(value) => setRecipientSignature({ text: value, signedPayloadHex: recipientCopiedPayloadHex })}
                   attestation={parsedRecipientAttestation.value}
+                  bundle={parsedRecipientAttestation.bundle}
+                  trustedVkeys={rwaAttestationContext?.trustedVkeys ?? []}
+                  onIssuerSigned={(bundleText) => setRecipientSignature({ text: bundleText, signedPayloadHex: "" })}
                   validUntilMs={parsedRecipientAttestation.validUntilMs}
                   error={parsedRecipientAttestation.error ?? rwaAttestationContextError}
                 />
@@ -991,7 +1011,7 @@ function localDateTimeValue(timestamp: number): string {
 
 function AttestationPaste({ party, address, policyId, networkId, trustedIssuerCount, tier, onTierChange,
   expiry, onExpiryChange, payloadHex, payloadError, onPayloadCopied, required, text, onChange,
-  attestation, validUntilMs, error }: {
+  attestation, bundle, trustedVkeys, onIssuerSigned, validUntilMs, error }: {
   party: "Sender" | "Receiver";
   address: string;
   policyId: string;
@@ -1008,6 +1028,10 @@ function AttestationPaste({ party, address, policyId, networkId, trustedIssuerCo
   text: string;
   onChange: (value: string) => void;
   attestation: CmtaAttestation | null;
+  /** A pasted issuer bundle: its tier/expiry are shown and the inputs are locked. */
+  bundle: { tier: number; validUntilMs: number } | null;
+  trustedVkeys: string[];
+  onIssuerSigned: (bundleText: string) => void;
   validUntilMs: number | null;
   error: string | null;
 }) {
@@ -1052,8 +1076,9 @@ function AttestationPaste({ party, address, policyId, networkId, trustedIssuerCo
       <p className="text-xs text-dark-300">
         {required ? "Required without published Merkle membership. "
           : "May be needed if selected token inputs return change to the sender. "}
-        Set the claim below, then give its payload to a trusted issuer. The issuer must hex-decode
-        and sign the 67 raw bytes with Ed25519. CIP-30 signData has a different format.
+        Paste the attestation bundle a trusted issuer gave you — it carries its own claim. Or set the
+        claim below and have the issuer sign it with their CIP-30 wallet (here, or in another wallet
+        and paste its signData result).
       </p>
       {trustedIssuerCount === 0 && <p className="text-xs text-red-400">
         This token has no trusted issuer in its live global state. Ask the token admin to add one before signing.
@@ -1061,22 +1086,22 @@ function AttestationPaste({ party, address, policyId, networkId, trustedIssuerCo
       <div className="grid gap-3 sm:grid-cols-[7rem_1fr]">
         <label className="space-y-1 text-xs text-dark-300">
           <span className="block">KYC tier</span>
-          <input type="number" min="1" max="255" step="1" value={tier}
-            onChange={(e) => onTierChange(e.target.value)}
+          <input type="number" min="1" max="255" step="1" value={bundle ? String(bundle.tier) : tier}
+            disabled={!!bundle} onChange={(e) => onTierChange(e.target.value)}
             className="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-sm text-white focus:border-primary-500 focus:outline-none" />
           <span className="block text-dark-400">1 User · 2 Institutional · 3 vLEI</span>
         </label>
         <label className="space-y-1 text-xs text-dark-300">
           <span className="block">Attestation valid until (local time)</span>
-          <input type="datetime-local" value={expiry}
-            onChange={(e) => onExpiryChange(e.target.value)}
+          <input type="datetime-local" value={bundle ? localDateTimeValue(bundle.validUntilMs) : expiry}
+            disabled={!!bundle} onChange={(e) => onExpiryChange(e.target.value)}
             className="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 text-sm text-white focus:border-primary-500 focus:outline-none" />
         </label>
       </div>
       <div className="space-y-1">
         <label htmlFor={`${id}-payload`} className="text-xs text-dark-300">Payload to sign (hex)</label>
         <div className="flex items-start gap-2">
-          <textarea id={`${id}-payload`} value={payloadHex} readOnly rows={3} spellCheck={false}
+          <textarea id={`${id}-payload`} value={bundle && attestation ? attestation.payloadHex : payloadHex} readOnly rows={3} spellCheck={false}
             onCopy={(event) => {
               if (payloadHex && event.currentTarget.selectionStart === 0
                   && event.currentTarget.selectionEnd === payloadHex.length) {
@@ -1093,16 +1118,25 @@ function AttestationPaste({ party, address, policyId, networkId, trustedIssuerCo
         {copyStatus === "failed" && <p role="alert" className="text-xs text-red-400">Copy failed; retry or select and copy the hex above</p>}
         <p className="text-xs text-dark-400">This claim can be used for applicable transfers until expiry while the issuer remains trusted.</p>
       </div>
+      {!bundle && <div className="space-y-1">
+        <p className="text-xs text-dark-300">Issuer present? Sign this claim with the issuer&apos;s wallet:</p>
+        <IssuerSigner claimHex={payloadHex || null} trustedVkeys={trustedVkeys}
+          disabled={!payloadHex || trustedIssuerCount === 0}
+          onSigned={({ bundle: bundleText }) => onIssuerSigned(bundleText)} />
+      </div>}
       <div className="space-y-1">
-        <label htmlFor={id} className="text-xs text-dark-300">Paste raw Ed25519 signature (hex)</label>
+        <label htmlFor={id} className="text-xs text-dark-300">Paste an attestation bundle, or a signData result</label>
         <textarea id={id} value={text} onChange={(e) => onChange(e.target.value)} rows={3}
-          spellCheck={false} placeholder="128 hex characters, with optional 0x prefix"
+          spellCheck={false} placeholder='{"v":1,"payloadHex":…} from the issuer, or {"signature":…,"key":…}'
           className="w-full rounded-lg border border-dark-700 bg-dark-800 px-3 py-2 font-mono text-xs text-white placeholder:text-dark-500 focus:border-primary-500 focus:outline-none" />
-        <p className="text-xs text-dark-400">The backend checks this signature against the token&apos;s live trusted issuers and adds the matching key to the transaction proof.</p>
+        <p className="text-xs text-dark-400">{bundle
+          ? "This bundle is used exactly as the issuer signed it; the tier and expiry above come from it."
+          : "A signData result must be over the claim you copied above, unchanged."} The backend checks it
+          against the token&apos;s live trusted issuers before building.</p>
         {error && text.trim() && <p className="text-xs text-red-400">{error}</p>}
       </div>
       {attestation && validUntilMs !== null && <div className="space-y-1 text-xs text-success-400">
-        <p>Signature format is valid; the backend verifies the issuer before building. Tier {parseInt(attestation.payloadHex.slice(56, 58), 16)};
+        <p>Signature verified in your browser; the backend re-checks it against the live issuers before building. Tier {parseInt(attestation.payloadHex.slice(56, 58), 16)};
           expires {new Date(validUntilMs).toLocaleString()}.</p>
         <p className="font-mono break-all">Stake credential: {attestation.payloadHex.slice(0, 56)}</p>
       </div>}

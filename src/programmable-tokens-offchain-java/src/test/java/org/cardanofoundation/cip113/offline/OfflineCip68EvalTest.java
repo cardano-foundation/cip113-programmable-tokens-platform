@@ -2,6 +2,10 @@ package org.cardanofoundation.cip113.offline;
 
 import com.bloxbean.cardano.client.address.Address;
 import com.bloxbean.cardano.client.address.AddressProvider;
+import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.PlutusData;
+import com.bloxbean.cardano.client.api.model.Utxo;
 import com.bloxbean.cardano.client.address.Credential;
 import com.bloxbean.cardano.client.quicktx.QuickTxBuilder;
 import com.bloxbean.cardano.client.transaction.spec.Transaction;
@@ -524,6 +528,8 @@ public class OfflineCip68EvalTest {
 
         int checked = 0;
         for (var entry : java.util.List.of(
+                // Since 63fad89 the GlobalState logic's ref is published by preGenesis.
+                java.util.Map.entry("preGenesis", built.preGenesisCborHex()),
                 java.util.Map.entry("publishScripts", built.publishScriptsCborHex()),
                 java.util.Map.entry("third-party cert", built.registerThirdPartyTransferLogicCborHex()))) {
             if (entry.getValue() == null) continue;
@@ -1230,8 +1236,14 @@ public class OfflineCip68EvalTest {
         Assertions.assertEquals(1, lone.metadata().size());
 
         // (d) a multi-change chain WITHOUT a rotation is untouched — the rule is scoped.
+        // Pause then unpause: since PR #29 (F11) a PauseTransfers that does not flip the value
+        // is rejected on chain, so [pause, pause] can no longer validate.
+        var unpause = new org.cardanofoundation.cip113.service.module
+                .RwaTokenModuleHandler.GsChangeSpec(
+                "PauseTransfers", Boolean.FALSE, null, null, null, null, null, null, null, null,
+                null, null, null);
         var noRotate = handler.buildGlobalStateUpdateChain(
-                policyId, java.util.List.of(pause, pause),
+                policyId, java.util.List.of(pause, unpause),
                 BootstrapFixture.ADMIN.baseAddress(), adminPkh, boot.params());
         Assertions.assertTrue(noRotate.isSuccessful(),
                 "batching is still allowed for actions that need no second signature: "
@@ -2194,6 +2206,1219 @@ public class OfflineCip68EvalTest {
         return repo;
     }
 
+
+    // ══ PR #29 WP-2: genesis, cap and logic reference script ═════════════════════════════
+
+    private static org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService rwaBuilder() throws Exception {
+        return new org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService(
+                HandlerFixtures.moduleService(), HandlerFixtures.protocolScriptBuilderService());
+    }
+
+    /** The logic a registration row's parameters derive at {@code cap}. */
+    private static String derivedLogicHash(org.cardanofoundation.cip113.entity.RwaTokenRegistrationEntity reg,
+                                           int cap) throws Exception {
+        var b = rwaBuilder();
+        String puList = HexUtil.encodeHexString(
+                b.buildPowerUsersSpendScript(reg.getGlobalStatePolicyId(), reg.getPowerUsersPolicyId()).getScriptHash());
+        return HexUtil.encodeHexString(b.buildGlobalStateLogicScript(reg.getSecurityAssetNameHex(),
+                reg.getProgrammableTokenPolicyId(), reg.getGlobalStatePolicyId(), puList, cap).getScriptHash());
+    }
+
+    private static com.bloxbean.cardano.client.transaction.spec.TransactionOutput gsOutput(
+            Transaction tx, String gsPolicy) {
+        return tx.getBody().getOutputs().stream()
+                .filter(o -> o.getValue().getMultiAssets() != null && o.getValue().getMultiAssets().stream()
+                        .anyMatch(ma -> ma.getPolicyId().equals(gsPolicy)))
+                .findFirst().orElseThrow(() -> new AssertionError("no GlobalState output"));
+    }
+
+    private static java.util.Set<String> registeredScriptCredentials(Transaction tx) {
+        var registered = new java.util.HashSet<String>();
+        if (tx.getBody().getCerts() == null) return registered;
+        for (var cert : tx.getBody().getCerts()) {
+            com.bloxbean.cardano.client.transaction.spec.cert.StakeCredential cred = null;
+            if (cert instanceof com.bloxbean.cardano.client.transaction.spec.cert.StakeRegistration sr) cred = sr.getStakeCredential();
+            else if (cert instanceof com.bloxbean.cardano.client.transaction.spec.cert.RegCert rc) cred = rc.getStakeCredential();
+            if (cred != null && cred.getType() == com.bloxbean.cardano.client.transaction.spec.cert.StakeCredType.SCRIPTHASH)
+                registered.add(HexUtil.encodeHexString(cred.getHash()));
+        }
+        return registered;
+    }
+
+    /**
+     * Genesis writes the logic its own parameters derive into GlobalState field 0, registers
+     * THAT credential's reward account (offline evals mock every account as registered, so only
+     * this test notices a missing cert), sits at the unparameterised proxy with no stake part,
+     * and records the v1 logic as installed.
+     */
+    @Test
+    public void genesisRegistersTheLogicNamedInField0() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L);   // structural
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        var genesis = Transaction.deserialize(HexUtil.decodeHexString(st.built().genesisCborHex()));
+        var out = gsOutput(genesis, reg.getGlobalStatePolicyId());
+        var fields = ((ConstrPlutusData) out.getInlineDatum()).getData().getPlutusDataList();
+        Assertions.assertEquals(15, fields.size(), "PR #29 GlobalStateDatum has 15 fields");
+        String field0 = HexUtil.encodeHexString(((BytesPlutusData) fields.get(0)).getValue());
+
+        Assertions.assertEquals(derivedLogicHash(reg, 8192), field0,
+                "field 0 must be the logic derived from this token's own parameters");
+        // Since 63fad89 genesis WITHDRAWS from the logic, so the preGenesis tx registers it.
+        var preGenesis = Transaction.deserialize(HexUtil.decodeHexString(st.built().preGenesisCborHex()));
+        Assertions.assertTrue(registeredScriptCredentials(preGenesis).contains(field0),
+                "preGenesis must register the reward account of the logic genesis names in field 0");
+        Assertions.assertTrue(genesis.getBody().getWithdrawals().stream().anyMatch(w -> w.getRewardAddress().equals(
+                AddressProvider.getRewardAddress(com.bloxbean.cardano.client.address.Credential.fromScript(field0),
+                        HandlerFixtures.NETWORK.getCardanoNetwork()).getAddress())),
+                "genesis must run (withdraw 0 from) the logic it names in field 0");
+        var addr = new Address(out.getAddress());
+        Assertions.assertEquals(rwaBuilder().globalStateProxyHashHex(),
+                HexUtil.encodeHexString(addr.getPaymentCredentialHash().orElseThrow()));
+        Assertions.assertTrue(addr.getDelegationCredential().isEmpty(), "GlobalState carries no stake credential");
+        var entry = org.cardanofoundation.cip113.model.GsLogicEntry.find(reg.getGsLogics(), field0).orElseThrow();
+        Assertions.assertEquals(8192, entry.maxDatumBytes());
+        Assertions.assertTrue(entry.everInstalled());
+        Assertions.assertEquals(8192, reg.getMaxGsDatumBytes());
+    }
+
+    /** A cap that leaves less than 1024 bytes of headroom above the genesis datum is refused. */
+    @Test
+    public void genesisRefusedWhenDatumExceedsCap() throws Exception {
+        requestCustomizer = r -> r.setMaxGsDatumBytes(1100);
+        expectChainFailure = true;
+        rwaTokenChain(null, 1_000_000L);
+        Assertions.assertFalse(lastChainResult.isSuccessful());
+        Assertions.assertTrue(String.valueOf(lastChainResult.error()).contains("headroom"), lastChainResult.error());
+    }
+
+    /** Plan Addendum I2 (user decision): 8192 is the hard maximum. */
+    @Test
+    public void capAbove8192Refused() throws Exception {
+        requestCustomizer = r -> r.setMaxGsDatumBytes(8193);
+        expectChainFailure = true;
+        rwaTokenChain(null, 1_000_000L);
+        Assertions.assertFalse(lastChainResult.isSuccessful());
+        Assertions.assertTrue(String.valueOf(lastChainResult.error()).contains("exceeds the maximum"), lastChainResult.error());
+    }
+
+    /**
+     * A non-default cap reaches BOTH the GlobalState mint and the logic (nothing on chain ties the
+     * two together), is stored, and is what the plan-ahead (attested) path derives too — the
+     * attested chain asserts planGenesis' policy equals the built one inside rwaTokenChain.
+     */
+    @Test
+    public void nonDefaultCapFlowsToMintLogicAndPlan() throws Exception {
+        requestCustomizer = r -> r.setMaxGsDatumBytes(4096);
+        var st = rwaTokenChain(null, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress(),
+                false, false, false, /*attestInitialMint=*/ true);
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        Assertions.assertEquals(4096, reg.getMaxGsDatumBytes());
+        var genesis = Transaction.deserialize(HexUtil.decodeHexString(st.built().genesisCborHex()));
+        var fields = ((ConstrPlutusData) gsOutput(genesis, reg.getGlobalStatePolicyId()).getInlineDatum())
+                .getData().getPlutusDataList();
+        String field0 = HexUtil.encodeHexString(((BytesPlutusData) fields.get(0)).getValue());
+        Assertions.assertEquals(derivedLogicHash(reg, 4096), field0);
+        Assertions.assertNotEquals(derivedLogicHash(reg, 8192), field0);
+        var bootstrap = com.bloxbean.cardano.client.transaction.spec.TransactionInput.builder()
+                .transactionId(reg.getBootstrapTxHash()).index(reg.getBootstrapOutputIndex()).build();
+        Assertions.assertEquals(rwaBuilder().buildGlobalStateMintScript(bootstrap, 4096).getPolicyId(),
+                reg.getGlobalStatePolicyId(), "GS mint must be parameterised on the same cap as the logic");
+        Assertions.assertEquals(4096,
+                org.cardanofoundation.cip113.model.GsLogicEntry.find(reg.getGsLogics(), field0).orElseThrow().maxDatumBytes());
+    }
+
+    /** The minting-path publish tx (authority + GS logic) stays under max-tx-size with margin. */
+    @Test
+    public void publishScriptsTxFitsSizeLimit() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress());
+        var publish = Transaction.deserialize(HexUtil.decodeHexString(st.built().publishScriptsCborHex()));
+        int size = publish.serialize().length;
+        log.info("[rwa-token/publishScripts] {} bytes", size);
+        Assertions.assertTrue(size <= 16384 - 512, "publishScripts is " + size + " bytes; limit with margin 15872");
+    }
+
+    /**
+     * Plan Addendum I10 (user decision): the GS logic reference script sits at the always-fail
+     * {@code ScriptAny []} address, and the registry records exactly that output.
+     */
+    @Test
+    public void gsLogicRefOutputIsUnspendable() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress());
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        String logic = derivedLogicHash(reg, 8192);
+        // Since 63fad89 the logic's ref is published by preGenesis, not publishScripts.
+        var publish = Transaction.deserialize(HexUtil.decodeHexString(st.built().preGenesisCborHex()));
+        String never = AddressProvider.getEntAddress(
+                new com.bloxbean.cardano.client.transaction.spec.script.ScriptAny(),
+                HandlerFixtures.NETWORK.getCardanoNetwork()).getAddress();
+        int idx = -1;
+        for (int i = 0; i < publish.getBody().getOutputs().size(); i++) {
+            var o = publish.getBody().getOutputs().get(i);
+            if (o.getScriptRef() != null && logic.equals(HexUtil.encodeHexString(
+                    com.bloxbean.cardano.client.plutus.spec.PlutusV3Script.deserializeScriptRef(o.getScriptRef()).getScriptHash()))) {
+                idx = i;
+                Assertions.assertEquals(never, o.getAddress(), "the GS logic reference script must be unspendable");
+            }
+        }
+        Assertions.assertTrue(idx >= 0, "preGenesis carries no GS logic reference script");
+        var entry = org.cardanofoundation.cip113.model.GsLogicEntry.find(reg.getGsLogics(), logic).orElseThrow();
+        Assertions.assertEquals(st.built().preGenesisTxHash(), entry.refTxHash());
+        Assertions.assertEquals(idx, entry.refOutputIndex());
+    }
+
+    /** Review S1: the minting-path publish tx has a validity bound, and the v1 logic's PENDING
+     *  ref records it — so a publish that never lands can be abandoned instead of blocking forever. */
+    @Test
+    public void publishScriptsTxHasTtlRecordedOnTheV1Logic() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress());
+        var publish = Transaction.deserialize(HexUtil.decodeHexString(st.built().publishScriptsCborHex()));
+        Assertions.assertNotNull(publish.getBody().getTtl(), "publishScripts must carry a validity upper bound");
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        var v1 = org.cardanofoundation.cip113.model.GsLogicEntry.find(reg.getGsLogics(), derivedLogicHash(reg, 8192)).orElseThrow();
+        // Since 63fad89 the v1 ref is the preGenesis output, so its TTL is the preGenesis TTL.
+        var preGenesis = Transaction.deserialize(HexUtil.decodeHexString(st.built().preGenesisCborHex()));
+        Assertions.assertEquals(preGenesis.getBody().getTtl(), v1.refTtlSlot().longValue());
+    }
+
+    /** Review S3: in a multi-step update chain only the FIRST tx withdraws the logic's balance —
+     *  once it lands the account holds 0, and the ledger rejects any later tx claiming more. */
+    @Test
+    public void updateChainWithdrawsLiveBalanceOnlyOnce() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var field0 = HexUtil.encodeHexString(((BytesPlutusData) gsFieldsOf(liveGs(st)).get(0)).getValue());
+        var logicReward = AddressProvider.getRewardAddress(com.bloxbean.cardano.client.address.Credential.fromScript(field0),
+                HandlerFixtures.NETWORK.getCardanoNetwork()).getAddress();
+        Mockito.when(st.utxoProvider().rewardBalance(logicReward))
+                .thenReturn(java.util.Optional.of(java.math.BigInteger.valueOf(3_000_000L)));
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(), java.util.List.of(
+                gsSpec("SetRequiresSenderKyc", null, null, null, null, null, null, null, Boolean.TRUE, null, null, null, null),
+                gsSpec("PauseTransfers", Boolean.TRUE, null, null, null, null, null, null, null, null, null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(result.isSuccessful(), result.error());
+        java.util.function.IntFunction<java.math.BigInteger> withdrawn = i -> {
+            try {
+                return Transaction.deserialize(HexUtil.decodeHexString(result.metadata().get(i))).getBody().getWithdrawals()
+                        .stream().filter(w -> logicReward.equals(w.getRewardAddress())).findFirst().orElseThrow().getCoin();
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        Assertions.assertEquals(java.math.BigInteger.valueOf(3_000_000L), withdrawn.apply(0));
+        Assertions.assertEquals(java.math.BigInteger.ZERO, withdrawn.apply(1));
+    }
+
+    // ── 63fad89: genesis runs the GlobalState logic, read from the preGenesis tx ───────────
+
+    /** preGenesis registers + publishes the field-0 logic without touching any genesis input;
+     *  genesis spends the bootstrap and the preGenesis change, reads the logic ref, withdraws 0
+     *  from it with redeemer {output 0, SetMintableAmount(own value)}, and registers no logic cert. */
+    @Test
+    public void genesisRunsTheLogicPublishedByPreGenesis() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L);
+        var pre = Transaction.deserialize(HexUtil.decodeHexString(st.built().preGenesisCborHex()));
+        var genesis = Transaction.deserialize(HexUtil.decodeHexString(st.built().genesisCborHex()));
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        String field0 = HexUtil.encodeHexString(((BytesPlutusData) ((ConstrPlutusData) genesis.getBody().getOutputs()
+                .getFirst().getInlineDatum()).getData().getPlutusDataList().getFirst()).getValue());
+        String logicReward = AddressProvider.getRewardAddress(com.bloxbean.cardano.client.address.Credential.fromScript(field0),
+                HandlerFixtures.NETWORK.getCardanoNetwork()).getAddress();
+        // preGenesis: never a genesis input, registers the logic, carries the logic ref.
+        var genesisInputs = genesis.getBody().getInputs().stream().map(i -> i.getTransactionId() + "#" + i.getIndex()).toList();
+        Assertions.assertTrue(pre.getBody().getInputs().stream().noneMatch(i -> genesisInputs.contains(i.getTransactionId() + "#" + i.getIndex())),
+                "preGenesis must not spend a genesis input");
+        Assertions.assertTrue(genesisInputs.contains(reg.getBootstrapTxHash() + "#" + reg.getBootstrapOutputIndex()));
+        Assertions.assertTrue(genesisInputs.stream().anyMatch(r -> r.startsWith(st.built().preGenesisTxHash() + "#")),
+                "genesis must spend the preGenesis change");
+        Assertions.assertTrue(pre.getBody().getCerts() != null && pre.getBody().getCerts().stream().anyMatch(c ->
+                c instanceof com.bloxbean.cardano.client.transaction.spec.cert.StakeRegistration sr
+                        && field0.equalsIgnoreCase(HexUtil.encodeHexString(sr.getStakeCredential().getHash()))),
+                "preGenesis must register the logic named in field 0");
+        Assertions.assertTrue(pre.getBody().getOutputs().stream().anyMatch(o -> o.getScriptRef() != null),
+                "preGenesis must carry the logic reference script");
+        Assertions.assertTrue(genesis.getBody().getCerts() == null || genesis.getBody().getCerts().stream().noneMatch(c ->
+                c instanceof com.bloxbean.cardano.client.transaction.spec.cert.StakeRegistration sr
+                        && field0.equalsIgnoreCase(HexUtil.encodeHexString(sr.getStakeCredential().getHash()))),
+                "genesis must not register the logic it withdraws from");
+        Assertions.assertTrue(genesis.getBody().getReferenceInputs().stream()
+                .anyMatch(i -> i.getTransactionId().equals(st.built().preGenesisTxHash())));
+        var withdrawals = genesis.getBody().getWithdrawals();
+        Assertions.assertEquals(1, withdrawals.size());
+        Assertions.assertEquals(logicReward, withdrawals.getFirst().getRewardAddress());
+        var redeemer = genesis.getWitnessSet().getRedeemers().stream()
+                .filter(r -> r.getTag() == com.bloxbean.cardano.client.plutus.spec.RedeemerTag.Reward).findFirst().orElseThrow();
+        Assertions.assertEquals(ConstrPlutusData.of(0, com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData.of(0),
+                ConstrPlutusData.of(13, com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData.of(1_000_000L))).serializeToHex(), redeemer.getData().serializeToHex());
+        Assertions.assertTrue(genesis.getWitnessSet().getPlutusV3Scripts() == null
+                || genesis.getWitnessSet().getPlutusV3Scripts().stream().noneMatch(sc -> {
+                    try { return field0.equalsIgnoreCase(HexUtil.encodeHexString(sc.getScriptHash())); }
+                    catch (Exception e) { return false; }
+                }), "the logic must be read from the reference input, not inlined");
+        // The v1 entry points at the preGenesis output on this (structural) path too.
+        var v1 = org.cardanofoundation.cip113.model.GsLogicEntry.find(reg.getGsLogics(), field0).orElseThrow();
+        Assertions.assertEquals(st.built().preGenesisTxHash(), v1.refTxHash());
+        Assertions.assertEquals(pre.getBody().getTtl(), v1.refTtlSlot().longValue());
+        Assertions.assertTrue(pre.getBody().getTtl() <= genesis.getBody().getTtl());
+    }
+
+    /** Review WP-8 #1: a registration that carries a first mint reads the GlobalState logic from
+     *  the preGenesis reference output — never inline (≈5.9 KB it cannot afford). */
+    @Test
+    public void mintPathRegistrationReadsTheLogicFromPreGenesis() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress());
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        String logic = derivedLogicHash(reg, 8192);
+        var pre = Transaction.deserialize(HexUtil.decodeHexString(st.built().preGenesisCborHex()));
+        int refIdx = -1;
+        for (int i = 0; i < pre.getBody().getOutputs().size(); i++) if (pre.getBody().getOutputs().get(i).getScriptRef() != null) refIdx = i;
+        final int idx = refIdx;
+        var registration = Transaction.deserialize(HexUtil.decodeHexString(st.built().registrationCborHex()));
+        Assertions.assertTrue(registration.getBody().getReferenceInputs().stream().anyMatch(i ->
+                        i.getTransactionId().equals(st.built().preGenesisTxHash()) && i.getIndex() == idx),
+                "the registration must reference the preGenesis logic output");
+        var inline = registration.getWitnessSet().getPlutusV3Scripts();
+        Assertions.assertTrue(inline == null || inline.stream().noneMatch(sc -> {
+            try { return logic.equalsIgnoreCase(HexUtil.encodeHexString(sc.getScriptHash())); }
+            catch (Exception e) { return false; }
+        }), "the GlobalState logic must not be inlined in the registration");
+    }
+
+    /** One ADA-only UTxO is not enough any more: refused with the reason, before anything is built. */
+    @Test
+    public void singleUtxoWalletIsRefusedWithTheReason() throws Exception {
+        walletView = utxos -> utxos.stream()
+                .filter(u -> u.getAmount().size() == 1 && "lovelace".equals(u.getAmount().getFirst().getUnit()))
+                .max(java.util.Comparator.comparing((com.bloxbean.cardano.client.api.model.Utxo u) -> u.getAmount().getFirst().getQuantity()))
+                .map(java.util.List::of).orElse(java.util.List.of());
+        expectChainFailure = true;
+        try {
+            rwaTokenChain(null, 1_000_000L);
+        } finally {
+            walletView = java.util.function.UnaryOperator.identity();
+        }
+        Assertions.assertFalse(lastChainResult.isSuccessful());
+        Assertions.assertTrue(String.valueOf(lastChainResult.error()).contains("two ADA-only UTxOs"), lastChainResult.error());
+    }
+
+    // ══ end PR #29 WP-2 ══════════════════════════════════════════════════════════════════
+
+    // ══ PR #29 WP-5b: transfers carrying a CIP-30 attestation; the verify endpoint ════════
+
+    /** TEST-ONLY issuer key (deterministic seed), never a real operator key. */
+    private static final org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters CIP30_ISSUER =
+            new org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters(new byte[]{
+                    0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,
+                    0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a}, 0);
+    private static final org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters CIP30_STRANGER =
+            new org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters(new byte[32], 0);
+
+    private static byte[] cbor(co.nstant.in.cbor.model.DataItem item) throws Exception {
+        var out = new java.io.ByteArrayOutputStream();
+        new co.nstant.in.cbor.CborEncoder(out).encode(item);
+        return out.toByteArray();
+    }
+
+    /** What CIP-30 signData returns: COSE_Sign1 (wallet-style protected header) + COSE_Key. */
+    private static org.cardanofoundation.cip113.model.CmtaAttestation cip30Attestation(
+            byte[] claim, boolean hashed, org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters key) throws Exception {
+        byte[] protectedHeader = HexUtil.decodeHexString(
+                "a201276761646472657373581d6027e38d0e19e3434e33fbd001d3fe04b5b76763f88acd625e0d770b43");
+        byte[] signed = hashed ? com.bloxbean.cardano.client.crypto.Blake2bUtil.blake2bHash224(claim) : claim;
+        byte[] message = cbor(new co.nstant.in.cbor.model.Array()
+                .add(new co.nstant.in.cbor.model.UnicodeString("Signature1"))
+                .add(new co.nstant.in.cbor.model.ByteString(protectedHeader))
+                .add(new co.nstant.in.cbor.model.ByteString(new byte[0]))
+                .add(new co.nstant.in.cbor.model.ByteString(signed)));
+        var signer = new org.bouncycastle.crypto.signers.Ed25519Signer();
+        signer.init(true, key);
+        signer.update(message, 0, message.length);
+        var unprotected = new co.nstant.in.cbor.model.Map();
+        if (hashed) unprotected.put(new co.nstant.in.cbor.model.UnicodeString("hashed"), co.nstant.in.cbor.model.SimpleValue.TRUE);
+        byte[] sign1 = cbor(new co.nstant.in.cbor.model.Array()
+                .add(new co.nstant.in.cbor.model.ByteString(protectedHeader)).add(unprotected)
+                .add(new co.nstant.in.cbor.model.ByteString(signed))
+                .add(new co.nstant.in.cbor.model.ByteString(signer.generateSignature())));
+        var coseKey = new co.nstant.in.cbor.model.Map();
+        coseKey.put(new co.nstant.in.cbor.model.UnsignedInteger(1), new co.nstant.in.cbor.model.UnsignedInteger(1));
+        coseKey.put(new co.nstant.in.cbor.model.UnsignedInteger(3), new co.nstant.in.cbor.model.NegativeInteger(-8));
+        coseKey.put(new co.nstant.in.cbor.model.NegativeInteger(-1), new co.nstant.in.cbor.model.UnsignedInteger(6));
+        coseKey.put(new co.nstant.in.cbor.model.NegativeInteger(-2),
+                new co.nstant.in.cbor.model.ByteString(key.generatePublicKey().getEncoded()));
+        return new org.cardanofoundation.cip113.model.CmtaAttestation(HexUtil.encodeHexString(claim),
+                HexUtil.encodeHexString(sign1), HexUtil.encodeHexString(cbor(coseKey)));
+    }
+
+    /** The 67-byte claim for {@code address}'s stake credential on this token and network. */
+    private static byte[] kycClaim(RwaTokenChain st, String address) throws Exception {
+        byte[] claim = new byte[67];
+        byte[] stake = HexUtil.decodeHexString(stakeCredHex(address));
+        System.arraycopy(stake, 0, claim, 0, 28);
+        claim[28] = 1;
+        java.nio.ByteBuffer.wrap(claim, 29, 8).putLong(System.currentTimeMillis() + 10 * 60_000L);
+        System.arraycopy(HexUtil.decodeHexString(st.built().programmableTokenPolicyId()), 0, claim, 37, 28);
+        claim[65] = (byte) ((com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData) gsFieldsOf(liveGs(st)).get(13))
+                .getValue().intValueExact();
+        claim[66] = 0;
+        return claim;
+    }
+
+    /** A token whose transfers require RECEIVER KYC, with the test issuer trusted. Alice holds it. */
+    private RwaTokenChain kycToken() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress(), true);
+        runGsChainChangingOnly(st, java.util.List.of(
+                gsSpec("AddTrustedEntity", null, null, HexUtil.encodeHexString(CIP30_ISSUER.generatePublicKey().getEncoded()),
+                        "d87980", null, null, null, null, null, null, null, null),
+                gsSpec("SetRequiresReceiverKyc", null, null, null, null, null, null, null, null, Boolean.TRUE, null, null, null)),
+                9, 12);
+        st.chain().seedAda("offline-cip30-alice-funding", BootstrapFixture.ALICE.baseAddress(), 7, 100);
+        return st;
+    }
+
+    private org.cardanofoundation.cip113.model.TransactionContext<Void> transferWith(RwaTokenChain st,
+            org.cardanofoundation.cip113.model.CmtaAttestation recipientAttestation) throws Exception {
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        return st.handler().buildTransferTransaction(new org.cardanofoundation.cip113.model.TransferTokenRequest(
+                BootstrapFixture.ALICE.baseAddress(), st.built().programmableTokenPolicyId() + reg.getSecurityAssetNameHex(),
+                "1000", BootstrapFixture.ADMIN.baseAddress(), null, null, null, null, null, null, null,
+                null, recipientAttestation), st.boot().params());
+    }
+
+    @Test
+    public void transferWithCip30AttestationEvaluates() throws Exception {
+        var st = kycToken();
+        var result = transferWith(st, cip30Attestation(kycClaim(st, BootstrapFixture.ADMIN.baseAddress()), false, CIP30_ISSUER));
+        Assertions.assertTrue(result.isSuccessful(), "transfer with a CIP-30 attestation failed: " + result.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(result.unsignedCborTx()));
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("rwa-token/transfer-cip30", tx) > 0);
+        Assertions.assertTrue(tx.serialize().length < 16384);
+    }
+
+    /** CIP-8 hashed mode (what a Ledger signs): the wallet signs blake2b_224(claim). */
+    @Test
+    public void transferWithHashedCip30AttestationEvaluates() throws Exception {
+        var st = kycToken();
+        var result = transferWith(st, cip30Attestation(kycClaim(st, BootstrapFixture.ADMIN.baseAddress()), true, CIP30_ISSUER));
+        Assertions.assertTrue(result.isSuccessful(), "transfer with a hashed CIP-30 attestation failed: " + result.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(result.unsignedCborTx()));
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("rwa-token/transfer-cip30-hashed", tx) > 0);
+    }
+
+    /** The retired raw-Ed25519 format is refused by name (the controller maps it to a 400). */
+    @Test
+    public void rawSignatureAttestationRefused400() throws Exception {
+        var st = kycToken();
+        var claim = HexUtil.encodeHexString(kycClaim(st, BootstrapFixture.ADMIN.baseAddress()));
+        var result = transferWith(st, new org.cardanofoundation.cip113.model.CmtaAttestation(claim, null, null, "00".repeat(64)));
+        Assertions.assertFalse(result.isSuccessful());
+        Assertions.assertTrue(result.error().contains("CIP-30"), result.error());
+    }
+
+    @Test
+    public void attestationVerifyEndpointAcceptsWalletBundle() throws Exception {
+        var st = kycToken();
+        var check = st.handler().verifyAttestation(st.built().programmableTokenPolicyId(),
+                cip30Attestation(kycClaim(st, BootstrapFixture.ADMIN.baseAddress()), false, CIP30_ISSUER));
+        Assertions.assertTrue(check.valid(), check.reason());
+        Assertions.assertEquals(stakeCredHex(BootstrapFixture.ADMIN.baseAddress()), check.subjectCredentialHash());
+        Assertions.assertEquals(1, check.tier());
+        Assertions.assertEquals(HexUtil.encodeHexString(CIP30_ISSUER.generatePublicKey().getEncoded()), check.issuerVkey());
+    }
+
+    /** A VALID signature from a key that is not trusted fails on trust, not on the signature. */
+    @Test
+    public void attestationVerifyEndpointRejectsUntrustedIssuer() throws Exception {
+        var st = kycToken();
+        var check = st.handler().verifyAttestation(st.built().programmableTokenPolicyId(),
+                cip30Attestation(kycClaim(st, BootstrapFixture.ADMIN.baseAddress()), false, CIP30_STRANGER));
+        Assertions.assertFalse(check.valid());
+        Assertions.assertTrue(check.reason().contains("not a trusted entity"), check.reason());
+    }
+
+    @Test
+    public void attestationVerifyEndpointRejectsOversizedCose() throws Exception {
+        var st = kycToken();
+        var good = cip30Attestation(kycClaim(st, BootstrapFixture.ADMIN.baseAddress()), false, CIP30_ISSUER);
+        var check = st.handler().verifyAttestation(st.built().programmableTokenPolicyId(),
+                new org.cardanofoundation.cip113.model.CmtaAttestation(good.payloadHex(), "00".repeat(1025), good.coseKeyHex()));
+        Assertions.assertFalse(check.valid());
+        Assertions.assertTrue(check.reason().contains("at most 2048"), check.reason());
+    }
+
+    // ══ PR #29 WP-4: SetMintableAmount, GlobalState-logic rotation, LockUpgrades ═════════
+
+    private static org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec setMintable(String n) {
+        return new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec(
+                "SetMintableAmount", null, null, null, null, null, null, null, null, null, null, null, null, n);
+    }
+
+    private static void stubSupply(RwaTokenChain st, long supply) {
+        Mockito.when(st.utxoProvider().assetSupply(Mockito.anyString(), Mockito.anyString()))
+                .thenReturn(java.util.Optional.of(java.math.BigInteger.valueOf(supply)));
+    }
+
+    /** Registered-accounts minting-path chain: the shape every rotation / lock test needs. */
+    private RwaTokenChain registeredChain() throws Exception {
+        return rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress(), true);
+    }
+
+    @Test
+    public void setMintableAmountEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        stubSupply(st, 1000);
+        runGsChainChangingOnly(st, java.util.List.of(setMintable("5000000")), 6);
+        Assertions.assertEquals(java.math.BigInteger.valueOf(5_000_000),
+                ((com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData) gsFieldsOf(liveGs(st)).get(6)).getValue());
+    }
+
+    /** Plan Addendum I14: supply + headroom must stay within int64. */
+    @Test
+    public void setMintableAmountRefusesInt64Overflow() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        stubSupply(st, 10);
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(setMintable(String.valueOf(Long.MAX_VALUE))),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertFalse(result.isSuccessful());
+        Assertions.assertTrue(result.error().contains("would exceed 2^63-1"), result.error());
+    }
+
+    /** The contract rejects SetMintableAmount in a transaction that also mints (the platform never
+     *  builds one): a real mint tx re-labelled as SetMintableAmount fails evaluation. */
+    @Test
+    public void setMintableAmountWithMintRejectedOnChain() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        var mint = st.handler().buildMintTransaction(
+                mintTokenRequest(st.built().programmableTokenPolicyId(), reg.getSecurityAssetNameHex(), "10", null),
+                st.boot().params());
+        Assertions.assertTrue(mint.isSuccessful(), mint.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(mint.unsignedCborTx()));
+        // The continuing datum's mintable_amount, so the SetMintableAmount branch's own datum check passes.
+        var gsOut = gsOutput(tx, reg.getGlobalStatePolicyId());
+        var newMintable = ((com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData)
+                ((ConstrPlutusData) gsOut.getInlineDatum()).getData().getPlutusDataList().get(6)).getValue();
+        boolean relabelled = false;
+        for (var r : tx.getWitnessSet().getRedeemers()) {
+            if (r.getTag() != com.bloxbean.cardano.client.plutus.spec.RedeemerTag.Reward
+                    || !(r.getData() instanceof ConstrPlutusData d) || d.getAlternative() != 0) continue;
+            var parts = d.getData().getPlutusDataList();
+            if (parts.size() == 2 && parts.get(1) instanceof ConstrPlutusData action && action.getAlternative() == 0
+                    && parts.get(0) instanceof com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData) {
+                r.setData(ConstrPlutusData.of(0, parts.get(0), ConstrPlutusData.of(13,
+                        com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData.of(newMintable))));
+                relabelled = true;
+            }
+        }
+        Assertions.assertTrue(relabelled, "found no GlobalStateSpendRedeemer{MintSecurity} to relabel");
+        // The GS logic is the withdrawal that must reject it — not any other script.
+        var field0 = HexUtil.encodeHexString(((BytesPlutusData) gsFieldsOf(liveGs(st)).get(0)).getValue());
+        var logicReward = AddressProvider.getRewardAddress(com.bloxbean.cardano.client.address.Credential.fromScript(field0),
+                HandlerFixtures.NETWORK.getCardanoNetwork()).getAddress();
+        int logicIdx = -1;
+        for (int i = 0; i < tx.getBody().getWithdrawals().size(); i++)
+            if (logicReward.equals(tx.getBody().getWithdrawals().get(i).getRewardAddress())) logicIdx = i;
+        Assertions.assertTrue(logicIdx >= 0);
+        var e = Assertions.assertThrows(com.bloxbean.cardano.client.api.exception.ApiException.class,
+                () -> st.chain().evaluator().evaluateTx(tx.serialize(), java.util.Set.of()),
+                "SetMintableAmount alongside a mint must be rejected on chain");
+        String cause = String.valueOf(e.getCause());
+        Assertions.assertTrue(cause.contains("tag: \"Withdraw\", index: " + logicIdx) && cause.contains("EvaluationFailure"),
+                "the GlobalState logic (withdrawal " + logicIdx + ") must be what rejects it: " + cause);
+    }
+
+    /** F11: a PauseTransfers to the current value is refused before building. */
+    @Test
+    public void pauseToCurrentValueRefusedBeforeBuild() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(gsSpec("PauseTransfers", Boolean.FALSE, null, null, null, null, null, null, null, null,
+                        null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertFalse(result.isSuccessful());
+        Assertions.assertTrue(result.error().contains("already unpaused"), result.error());
+    }
+
+    /** R5/I15: lock and logic rotation are not update-chain actions; SetMintableAmount is alone. */
+    @Test
+    public void rotateAndLockNeverBatched() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var policy = st.built().programmableTokenPolicyId();
+        var lock = st.handler().buildGlobalStateUpdateChain(policy, java.util.List.of(gsSpec("LockUpgrades", null, null,
+                null, null, null, null, null, null, null, null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(!lock.isSuccessful() && lock.error().contains("lock-upgrades"), lock.error());
+        var rotate = st.handler().buildGlobalStateUpdateChain(policy, java.util.List.of(gsSpec("RotateGlobalStateScript",
+                null, null, null, null, null, null, null, null, null, null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(!rotate.isSuccessful() && rotate.error().contains("rotate-gs-logic"), rotate.error());
+        var batched = st.handler().buildGlobalStateUpdateChain(policy, java.util.List.of(setMintable("5"),
+                gsSpec("PauseTransfers", Boolean.TRUE, null, null, null, null, null, null, null, null, null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(!batched.isSuccessful() && batched.error().contains("must be the only change"), batched.error());
+    }
+
+    /** Rotation steps 1–3 to a smaller cap, then a mint against the NEW logic. Both withdrawals
+     *  carry RotateGlobalStateScript; only field 0 changes. */
+    private void rotateTo(RwaTokenChain st, int newCap) throws Exception {
+        var policy = st.built().programmableTokenPolicyId();
+        var step1 = st.handler().buildRegisterGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), newCap);
+        Assertions.assertTrue(step1.isSuccessful(), "step 1: " + step1.error());
+        if (step1.unsignedCborTx() != null)
+            st.chain().submit(Transaction.deserialize(HexUtil.decodeHexString(step1.unsignedCborTx())));
+        String target = st.handler().rotationTargetHash(policy, newCap);
+        var step2 = st.handler().buildPublishGsLogicTransaction(policy, target, BootstrapFixture.ADMIN.baseAddress());
+        if (step2.isSuccessful()) st.chain().submit(Transaction.deserialize(HexUtil.decodeHexString(step2.unsignedCborTx())));
+        else Assertions.assertTrue(step2.error().contains("already published"), "step 2: " + step2.error());
+        var before = gsFieldsOf(liveGs(st));
+        var step3 = st.handler().buildRotateGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), newCap);
+        Assertions.assertTrue(step3.isSuccessful(), "step 3: " + step3.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(step3.unsignedCborTx()));
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("rwa-token/rotate-gs-logic", tx) >= 3,
+                "the proxy spend and BOTH logic withdrawals must be evaluated");
+        st.chain().submit(tx);
+        var after = gsFieldsOf(liveGs(st));
+        for (int f = 0; f < 15; f++)
+            if (f == 0) Assertions.assertEquals(target, HexUtil.encodeHexString(((BytesPlutusData) after.get(0)).getValue()));
+            else Assertions.assertEquals(before.get(f), after.get(f), "rotation changed field " + f);
+    }
+
+    @Test
+    public void rotateGsLogicToNewCapThenMintEvaluates() throws Exception {
+        var st = registeredChain();
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        rotateTo(st, 4096);
+        var mint = st.handler().buildMintTransaction(
+                mintTokenRequest(st.built().programmableTokenPolicyId(), reg.getSecurityAssetNameHex(), "10", null),
+                st.boot().params());
+        Assertions.assertTrue(mint.isSuccessful(), "mint after rotation: " + mint.error());
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("rwa-token/mint-after-rotation",
+                Transaction.deserialize(HexUtil.decodeHexString(mint.unsignedCborTx()))) > 0);
+        // …and back to the genesis logic, whose stored row makes it reachable without re-derivation.
+        rotateTo(st, 8192);
+    }
+
+    /** Step 3 is refused until the target's reward account is registered on chain AND its
+     *  reference script is published. */
+    @Test
+    public void rotateGsLogicRefusedUntilNewLogicRegisteredAndPublished() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var policy = st.built().programmableTokenPolicyId();
+        var early = st.handler().buildRotateGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), 4096);
+        Assertions.assertTrue(!early.isSuccessful() && early.error().contains("run step 1"), early.error());
+        var step1 = st.handler().buildRegisterGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), 4096);
+        Assertions.assertTrue(step1.isSuccessful() && step1.unsignedCborTx() != null, String.valueOf(step1.error()));
+        var unregistered = st.handler().buildRotateGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), 4096);
+        Assertions.assertTrue(!unregistered.isSuccessful() && unregistered.error().contains("not registered on chain"),
+                unregistered.error());
+    }
+
+    /** Step 1 registers exactly the logic derived from the token's parameters at the new cap. */
+    @Test
+    public void rotationStep1RegistersExactlyTheNewHash() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var policy = st.built().programmableTokenPolicyId();
+        var reg = st.registrations().get(policy);
+        var step1 = st.handler().buildRegisterGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), 4096);
+        Assertions.assertTrue(step1.isSuccessful(), step1.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(step1.unsignedCborTx()));
+        Assertions.assertEquals(java.util.Set.of(derivedLogicHash(reg, 4096)), registeredScriptCredentials(tx));
+    }
+
+    /** Plan Addendum I12: an account that is already registered (by anyone) counts as done. */
+    @Test
+    public void rotationStep1IdempotentWhenAlreadyRegistered() throws Exception {
+        var st = registeredChain();
+        var step1 = st.handler().buildRegisterGsLogicTransaction(st.built().programmableTokenPolicyId(),
+                BootstrapFixture.ADMIN.baseAddress(), 4096);
+        Assertions.assertTrue(step1.isSuccessful(), step1.error());
+        Assertions.assertNull(step1.unsignedCborTx(), "no tx when the account is already registered");
+        Assertions.assertEquals(Boolean.TRUE, step1.metadata());
+    }
+
+    /** I4/I5: a registry row for the target that is not the token's own derivation is refused. */
+    @Test
+    public void rotateRefusesRowNotDerivedFromTokenParams() throws Exception {
+        var st = registeredChain();
+        var policy = st.built().programmableTokenPolicyId();
+        Assertions.assertTrue(st.handler().buildRegisterGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), 4096).isSuccessful());
+        var reg = st.registrations().get(policy);
+        String target = st.handler().rotationTargetHash(policy, 4096);
+        var entries = org.cardanofoundation.cip113.model.GsLogicEntry.parseList(reg.getGsLogics());
+        var v1 = entries.getFirst();
+        for (int i = 0; i < entries.size(); i++) {
+            var e = entries.get(i);
+            if (e.logicHash().equalsIgnoreCase(target))   // swap in the v1 script under the target's name
+                entries.set(i, new org.cardanofoundation.cip113.model.GsLogicEntry(e.logicHash(), e.maxDatumBytes(),
+                        v1.scriptCborHex(), e.refTxHash(), e.refOutputIndex(), e.refState(), e.registrationTxHash(),
+                        e.registrationState(), e.installedTxHash()));
+        }
+        reg.setGsLogics(org.cardanofoundation.cip113.model.GsLogicEntry.toJson(entries));
+        var result = st.handler().buildRotateGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), 4096);
+        Assertions.assertTrue(!result.isSuccessful() && result.error().contains("holds a different script"), result.error());
+    }
+
+    /** I2: a rotation target cap above 8192 is refused. */
+    @Test
+    public void rotationCapAbove8192Refused() throws Exception {
+        var st = registeredChain();
+        var result = st.handler().buildRegisterGsLogicTransaction(st.built().programmableTokenPolicyId(),
+                BootstrapFixture.ADMIN.baseAddress(), 8193);
+        Assertions.assertTrue(!result.isSuccessful() && result.error().contains("between 1 and 8192"), result.error());
+    }
+
+    /** After rotating to a smaller cap, a write that grows the datum into the new cap's reserve is
+     *  refused while a smaller one evaluates. */
+    @Test
+    public void rotateToSmallCapRefusesGrowingWriteButAllowsSmallerOne() throws Exception {
+        var st = registeredChain();
+        int size = ConstrPlutusData.of(0, gsFieldsOf(liveGs(st)).toArray(new PlutusData[0])).serializeToBytes().length;
+        int newCap = size + 1100;
+        rotateTo(st, newCap);
+        int securityNow = gsFieldsOf(liveGs(st)).get(8).serializeToBytes().length;
+        int n = 0;
+        while (size - securityNow + BytesPlutusData.of(new byte[n + 1]).serializeToBytes().length <= newCap - 10) n++;
+        var refused = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(gsSpec("ModifySecurityInfo", null, HexUtil.encodeHexString(BytesPlutusData.of(new byte[n]).serializeToBytes()),
+                        null, null, null, null, null, null, null, null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(!refused.isSuccessful() && refused.error().contains("reserved so burns stay possible"), refused.error());
+        runGsChainChangingOnly(st, java.util.List.of(gsSpec("ModifySecurityInfo", null,
+                HexUtil.encodeHexString(BytesPlutusData.of(new byte[n - 200]).serializeToBytes()),
+                null, null, null, null, null, null, null, null, null, null)), 8);
+    }
+
+    private org.cardanofoundation.cip113.model.TransactionContext<org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.LockPlan>
+            lock(RwaTokenChain st) {
+        return st.handler().buildLockUpgradesTransaction(st.built().programmableTokenPolicyId(),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.built().programmableTokenPolicyId(), st.boot().params());
+    }
+
+    @Test
+    public void lockUpgradesEvaluates() throws Exception {
+        var st = registeredChain();
+        var bad = st.handler().buildLockUpgradesTransaction(st.built().programmableTokenPolicyId(),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), "wrong", st.boot().params());
+        Assertions.assertTrue(!bad.isSuccessful() && bad.error().contains("confirm by typing"), bad.error());
+        var before = gsFieldsOf(liveGs(st));
+        var result = lock(st);
+        Assertions.assertTrue(result.isSuccessful(), result.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(result.unsignedCborTx()));
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("rwa-token/lock-upgrades", tx) >= 2);
+        st.chain().submit(tx);
+        var after = gsFieldsOf(liveGs(st));
+        for (int f = 0; f < 15; f++)
+            if (f == 14) Assertions.assertNotEquals(before.get(f), after.get(f));
+            else Assertions.assertEquals(before.get(f), after.get(f), "lock changed field " + f);
+    }
+
+    @Test
+    public void lockedRefusesSetMintableAmountRotateLogicAndRotateMinting() throws Exception {
+        var st = registeredChain();
+        stubSupply(st, 1000);
+        st.chain().submit(Transaction.deserialize(HexUtil.decodeHexString(lock(st).unsignedCborTx())));
+        var policy = st.built().programmableTokenPolicyId();
+        var setAmount = st.handler().buildGlobalStateUpdateChain(policy, java.util.List.of(setMintable("5")),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(!setAmount.isSuccessful() && setAmount.error().contains("locked"), setAmount.error());
+        var rotate = st.handler().buildRegisterGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), 4096);
+        Assertions.assertTrue(!rotate.isSuccessful() && rotate.error().contains("locked"), rotate.error());
+        var rotateMinting = st.handler().buildGlobalStateUpdateChain(policy, java.util.List.of(gsSpec("RotateMintingScript",
+                null, null, null, null, null, null, null, null, null, null, null, "33".repeat(28))),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(!rotateMinting.isSuccessful() && rotateMinting.error().contains("locked"), rotateMinting.error());
+    }
+
+    /** A completed rotation leaves the old logic CONFIRMED but installed-before: lock still works. */
+    @Test
+    public void lockAllowedAfterCompletedRotation() throws Exception {
+        var st = registeredChain();
+        rotateTo(st, 4096);
+        var result = lock(st);
+        Assertions.assertTrue(result.isSuccessful(), "lock after a completed rotation: " + result.error());
+    }
+
+    /** I16: a rotation target in flight (registered PENDING) blocks the lock. */
+    @Test
+    public void lockRefusedWhileRotationPending() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress(), true);
+        var policy = st.built().programmableTokenPolicyId();
+        var reg = st.registrations().get(policy);
+        String target = st.handler().rotationTargetHash(policy, 4096);
+        var entries = org.cardanofoundation.cip113.model.GsLogicEntry.parseList(reg.getGsLogics());
+        entries.add(new org.cardanofoundation.cip113.model.GsLogicEntry(target, 4096, entries.getFirst().scriptCborHex(),
+                null, null, org.cardanofoundation.cip113.model.GsLogicEntry.NONE, "aa".repeat(32),
+                org.cardanofoundation.cip113.model.GsLogicEntry.PENDING, null));
+        reg.setGsLogics(org.cardanofoundation.cip113.model.GsLogicEntry.toJson(entries));
+        var result = lock(st);
+        Assertions.assertTrue(!result.isSuccessful() && result.error().contains("in flight"), result.error());
+    }
+
+    /** A registration tx built but not yet landed blocks a second one until its TTL passes —
+     *  a second build would only overwrite the record of the first. */
+    @Test
+    public void pendingRegistrationIsNotRebuiltWithinTtl() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var policy = st.built().programmableTokenPolicyId();
+        Assertions.assertTrue(st.handler().buildRegisterGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), 4096).isSuccessful());
+        var again = st.handler().buildRegisterGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), 4096);
+        Assertions.assertTrue(!again.isSuccessful() && again.error().contains("still pending"), again.error());
+        String target = st.handler().rotationTargetHash(policy, 4096);
+        var entry = org.cardanofoundation.cip113.model.GsLogicEntry.find(st.registrations().get(policy).getGsLogics(), target).orElseThrow();
+        Mockito.when(st.utxoProvider().currentTipSlot()).thenReturn(java.util.Optional.of(entry.registrationTtlSlot() + 1));
+        Assertions.assertTrue(st.handler().buildRegisterGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), 4096).isSuccessful(),
+                "an abandoned (expired) registration must be rebuildable");
+    }
+
+    /** An ABANDONED rotation (registration PENDING past its TTL) no longer blocks the lock — it is
+     *  reported as a warning — so a stray, never-submitted build cannot freeze LockUpgrades forever. */
+    @Test
+    public void abandonedPendingRegistrationDoesNotBlockLock() throws Exception {
+        var st = registeredChain();
+        var policy = st.built().programmableTokenPolicyId();
+        var reg = st.registrations().get(policy);
+        String target = st.handler().rotationTargetHash(policy, 4096);
+        var entries = org.cardanofoundation.cip113.model.GsLogicEntry.parseList(reg.getGsLogics());
+        entries.add(new org.cardanofoundation.cip113.model.GsLogicEntry(target, 4096, entries.getFirst().scriptCborHex(),
+                null, null, org.cardanofoundation.cip113.model.GsLogicEntry.NONE, "aa".repeat(32),
+                org.cardanofoundation.cip113.model.GsLogicEntry.PENDING, null, null, 100L));
+        reg.setGsLogics(org.cardanofoundation.cip113.model.GsLogicEntry.toJson(entries));
+        Mockito.when(st.utxoProvider().currentTipSlot()).thenReturn(java.util.Optional.of(101L));
+        var result = lock(st);
+        Assertions.assertTrue(result.isSuccessful(), "an abandoned rotation must not block the lock: " + result.error());
+        Assertions.assertTrue(result.metadata().warnings().stream().anyMatch(w -> w.contains(target)),
+                "the abandoned target is still reported");
+    }
+
+    /** I16: an authority that is not this token's derived one is never locked in. */
+    @Test
+    public void lockRefusedWhenAuthorityNotDerived() throws Exception {
+        var st = registeredChain();
+        forceGsField(st, 4, BytesPlutusData.of(HexUtil.decodeHexString("33".repeat(28))));
+        var result = lock(st);
+        Assertions.assertTrue(!result.isSuccessful() && result.error().contains("not this token's derived authority"),
+                result.error());
+    }
+
+    // ══ PR #29 WP-3: publish-gs-logic (structural path, rotation step 2) ════════════════
+
+    /** Since 63fad89 every token's logic is published by preGenesis: the first GS write builds and
+     *  evaluates against it with no publish step, promotes the entry to CONFIRMED, and a
+     *  publish-gs-logic for field 0 is then refused as already published. */
+    @Test
+    public void firstGsWriteConfirmsThePreGenesisLogicRef() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L);
+        var policy = st.built().programmableTokenPolicyId();
+        runGsChainChangingOnly(st, java.util.List.of(
+                gsSpec("SetRequiresSenderKyc", null, null, null, null, null, null, null, Boolean.TRUE, null, null, null, null)), 11);
+        var reg = st.registrations().get(policy);
+        var field0 = HexUtil.encodeHexString(((BytesPlutusData) gsFieldsOf(liveGs(st)).get(0)).getValue());
+        Assertions.assertEquals(org.cardanofoundation.cip113.model.GsLogicEntry.CONFIRMED,
+                org.cardanofoundation.cip113.model.GsLogicEntry.find(reg.getGsLogics(), field0).orElseThrow().refState(),
+                "a build that saw the ref live must promote the entry to CONFIRMED");
+        var again = st.handler().buildPublishGsLogicTransaction(policy, null, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertFalse(again.isSuccessful());
+        Assertions.assertTrue(again.error().contains("already published"), again.error());
+    }
+
+    /** Plan Addendum R2/I11, on the one remaining use of publish-gs-logic (rotation step 2): while
+     *  a built publish tx for the target has not landed and is within its TTL, a second publish is
+     *  refused (it would lock another ≈27 ADA), and the rotation waits for it. */
+    @Test
+    public void publishRotationTargetPendingIsNotRebuilt() throws Exception {
+        var st = registeredChain();
+        var policy = st.built().programmableTokenPolicyId();
+        var step1 = st.handler().buildRegisterGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), 4096);
+        Assertions.assertTrue(step1.isSuccessful(), "step 1: " + step1.error());
+        if (step1.unsignedCborTx() != null)
+            st.chain().submit(Transaction.deserialize(HexUtil.decodeHexString(step1.unsignedCborTx())));
+        String target = st.handler().rotationTargetHash(policy, 4096);
+        Assertions.assertTrue(st.handler().buildPublishGsLogicTransaction(policy, target,
+                BootstrapFixture.ADMIN.baseAddress()).isSuccessful());
+        var second = st.handler().buildPublishGsLogicTransaction(policy, target, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertFalse(second.isSuccessful());
+        Assertions.assertTrue(second.error().contains("still pending"), second.error());
+        var rotate = st.handler().buildRotateGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), 4096);
+        Assertions.assertFalse(rotate.isSuccessful());
+        Assertions.assertTrue(rotate.error().contains("not visible on chain yet"), rotate.error());
+    }
+
+    /** Plan Addendum I11: a PENDING publish of a rotation target whose TTL has passed without
+     *  landing is abandoned, so a rebuild is allowed. */
+    @Test
+    public void expiredPendingRotationTargetPublishIsRebuildable() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L);
+        var policy = st.built().programmableTokenPolicyId();
+        var step1 = st.handler().buildRegisterGsLogicTransaction(policy, BootstrapFixture.ADMIN.baseAddress(), 4096);
+        Assertions.assertTrue(step1.isSuccessful(), "step 1: " + step1.error());
+        if (step1.unsignedCborTx() != null)
+            st.chain().submit(Transaction.deserialize(HexUtil.decodeHexString(step1.unsignedCborTx())));
+        String target = st.handler().rotationTargetHash(policy, 4096);
+        Assertions.assertTrue(st.handler().buildPublishGsLogicTransaction(policy, target,
+                BootstrapFixture.ADMIN.baseAddress()).isSuccessful());
+        var entry = org.cardanofoundation.cip113.model.GsLogicEntry.find(
+                st.registrations().get(policy).getGsLogics(), target).orElseThrow();
+        Mockito.when(st.utxoProvider().currentTipSlot()).thenReturn(java.util.Optional.of(entry.refTtlSlot() + 1));
+        var rebuilt = st.handler().buildPublishGsLogicTransaction(policy, target, BootstrapFixture.ADMIN.baseAddress());
+        Assertions.assertTrue(rebuilt.isSuccessful(), "an expired pending publish must be rebuildable: " + rebuilt.error());
+    }
+
+    /** Plan Addendum I8: the GS logic withdrawal takes the account's live balance, not 0. */
+    @Test
+    public void gsLogicWithdrawsLiveRewardBalance() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var field0 = HexUtil.encodeHexString(((BytesPlutusData) gsFieldsOf(liveGs(st)).get(0)).getValue());
+        var logicReward = AddressProvider.getRewardAddress(
+                com.bloxbean.cardano.client.address.Credential.fromScript(field0),
+                HandlerFixtures.NETWORK.getCardanoNetwork()).getAddress();
+        Mockito.when(st.utxoProvider().rewardBalance(logicReward))
+                .thenReturn(java.util.Optional.of(java.math.BigInteger.valueOf(5_000_000L)));
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(gsSpec("SetRequiresSenderKyc", null, null, null, null, null, null, null, Boolean.TRUE,
+                        null, null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(result.isSuccessful(), result.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(result.metadata().getFirst()));
+        var w = tx.getBody().getWithdrawals().stream().filter(x -> logicReward.equals(x.getRewardAddress()))
+                .findFirst().orElseThrow(() -> new AssertionError("no GS logic withdrawal"));
+        Assertions.assertEquals(java.math.BigInteger.valueOf(5_000_000L), w.getCoin());
+    }
+
+    /** On a structural token, mint is refused for the missing AUTHORITY reference script first —
+     *  publishing only the GS logic would not make it buildable. */
+    @Test
+    public void structuralMintStillRefusedForMissingAuthority() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L);
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        var result = st.handler().buildMintTransaction(
+                mintTokenRequest(st.built().programmableTokenPolicyId(), reg.getSecurityAssetNameHex(), "10", null),
+                st.boot().params());
+        Assertions.assertFalse(result.isSuccessful());
+        Assertions.assertTrue(result.error().contains("minting authority was never published"), result.error());
+    }
+
+    /** The allowlist service reads member_root_hash at the PR #29 index (10) of a 15-field datum. */
+    @Test
+    public void allowlistReadsMemberRootAtPr29Index() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress(), true, true);
+        var root = ((BytesPlutusData) gsFieldsOf(liveGs(st)).get(10)).getValue();
+        Assertions.assertEquals(32, root.length, "the seeded genesis root must be a 32-byte MPF root");
+        Assertions.assertArrayEquals(root, st.allowlist().liveOnchainRoot(st.built().programmableTokenPolicyId()));
+    }
+
+    /** Grow GlobalState towards the 8192 cap with real admin actions: a large security_info
+     *  plus several trusted entities with large metadata. Returns the final datum size. */
+    private int fillGsNearCap(RwaTokenChain st, int entities) throws Exception {
+        var changes = new java.util.ArrayList<org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec>();
+        int[] fields = new int[entities + 1];
+        changes.add(gsSpec("ModifySecurityInfo", null,
+                HexUtil.encodeHexString(BytesPlutusData.of(new byte[3900]).serializeToBytes()),
+                null, null, null, null, null, null, null, null, null, null));
+        fields[0] = 8;
+        for (int i = 0; i < entities; i++) {
+            String vkey = String.format("%02x", 0x30 + i).repeat(32);
+            changes.add(gsSpec("AddTrustedEntity", null, null, vkey,
+                    HexUtil.encodeHexString(BytesPlutusData.of(new byte[480]).serializeToBytes()),
+                    null, null, null, null, null, null, null, null));
+            fields[i + 1] = 9;
+        }
+        runGsChainChangingOnly(st, changes, fields);
+        var gs = liveGs(st);
+        return ConstrPlutusData.of(0, gsFieldsOf(gs).toArray(new PlutusData[0])).serializeToBytes().length;
+    }
+
+    /** An admin action on a datum close to the 8192 cap still fits max-tx-size (the datum rides
+     *  in the continuing output). */
+    @Test
+    public void adminActionNearCapFitsTxSize() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        int size = fillGsNearCap(st, 6);
+        log.info("[rwa-token/near-cap] GlobalState datum is {} bytes (cap 8192)", size);
+        Assertions.assertTrue(size > 7000, "the fixture must actually be near the cap, got " + size);
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(gsSpec("SetRequiresSenderKyc", null, null, null, null, null, null, null, Boolean.TRUE,
+                        null, null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(result.isSuccessful(), result.error());
+        int txSize = HexUtil.decodeHexString(result.metadata().getFirst()).length;
+        log.info("[rwa-token/near-cap] admin tx is {} bytes", txSize);
+        Assertions.assertTrue(txSize < 16384, "admin tx at a near-cap datum is " + txSize + " bytes");
+    }
+
+    /** Plan Addendum I3: with the datum filled close to the cap by admin writes, a burn — the
+     *  supply change that GROWS mintable_amount — still builds, evaluates and fits. */
+    @Test
+    public void burnStillBuildsAtCapMinusReserve() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var built = st.built();
+        var reg = st.registrations().get(built.programmableTokenPolicyId());
+        var regTx = Transaction.deserialize(HexUtil.decodeHexString(built.registrationCborHex()));
+        var regTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil.getTxHash(regTx.serialize());
+        var userToken = Cip68Evidence.tokensOfPolicy(regTx, built.programmableTokenPolicyId()).stream()
+                .filter(t -> !Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label())).findFirst().orElseThrow();
+        int size = fillGsNearCap(st, 6);
+        log.info("[rwa-token/near-cap] GlobalState datum is {} bytes before the burn", size);
+        var burn = st.handler().buildBurnTransaction(new org.cardanofoundation.cip113.model.BurnTokenRequest(
+                BootstrapFixture.ADMIN.baseAddress(), built.programmableTokenPolicyId(), reg.getSecurityAssetNameHex(),
+                "400", regTxHash, userToken.outputIndex()), st.boot().params());
+        Assertions.assertTrue(burn.isSuccessful(), "burn at a near-cap datum failed: " + burn.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(burn.unsignedCborTx()));
+        int txSize = tx.serialize().length;
+        log.info("[rwa-token/near-cap] burn tx is {} bytes", txSize);
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("rwa-token/near-cap-burn", tx) > 0);
+        Assertions.assertTrue(txSize < 16384, "burn at a near-cap datum is " + txSize + " bytes");
+    }
+
+    // ══ PR #29 WP-3: every GlobalState action through proxy + logic, one field at a time ═══
+
+    private static String adminPkhHex() {
+        return HexUtil.encodeHexString(new Address(BootstrapFixture.ADMIN.baseAddress())
+                .getPaymentCredentialHash().orElseThrow());
+    }
+
+    private static org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec gsSpec(
+            String action, Boolean paused, String securityInfo, String vkey, String meta, String oldVkey,
+            String newVkey, String newMeta, Boolean senderKyc, Boolean receiverKyc, String root,
+            String newAdmin, String newAuthority) {
+        return new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec(
+                action, paused, securityInfo, vkey, meta, oldVkey, newVkey, newMeta, senderKyc,
+                receiverKyc, root, newAdmin, newAuthority);
+    }
+
+    private static java.util.List<PlutusData> gsFieldsOf(Utxo gs) throws Exception {
+        return ((ConstrPlutusData) PlutusData.deserialize(HexUtil.decodeHexString(gs.getInlineDatum())))
+                .getData().getPlutusDataList();
+    }
+
+    private static Utxo liveGs(RwaTokenChain st) {
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        return st.chain().findUtxoByUnit(reg.getGlobalStatePolicyId()
+                + org.cardanofoundation.cip113.service.RwaTokenScriptBuilderService.GLOBAL_STATE_ASSET_NAME_HEX)
+                .orElseThrow();
+    }
+
+    /**
+     * Build the update chain, evaluate every tx against the real logic, submit it, and assert
+     * each step's continuing GlobalState differs from its input in EXACTLY {@code changedIdx[i]}.
+     * That is the check against an index mistake: the validator rejects most, not all of them.
+     */
+    private static void runGsChainChangingOnly(RwaTokenChain st,
+            java.util.List<org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GsChangeSpec> changes,
+            int... changedIdx) throws Exception {
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(), changes,
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(result.isSuccessful(), "update chain failed: " + result.error());
+        Assertions.assertEquals(changes.size(), result.metadata().size());
+        for (int i = 0; i < result.metadata().size(); i++) {
+            var before = gsFieldsOf(liveGs(st));
+            var tx = Transaction.deserialize(HexUtil.decodeHexString(result.metadata().get(i)));
+            int evaluated = st.chain().reportAndCheckRedeemers("rwa-token/" + changes.get(i).action(), tx);
+            Assertions.assertTrue(evaluated >= 2, changes.get(i).action()
+                    + ": the proxy spend AND the logic withdrawal must both be genuinely evaluated");
+            st.chain().submit(tx);
+            var after = gsFieldsOf(liveGs(st));
+            Assertions.assertEquals(15, after.size());
+            for (int f = 0; f < 15; f++) {
+                if (f == changedIdx[i]) Assertions.assertNotEquals(before.get(f), after.get(f),
+                        changes.get(i).action() + " did not change field " + f);
+                else Assertions.assertEquals(before.get(f), after.get(f),
+                        changes.get(i).action() + " changed field " + f + " (expected only " + changedIdx[i] + ")");
+            }
+        }
+    }
+
+    /** Replace GlobalState as if a transaction made OUTSIDE the platform had rewritten one field
+     *  (OfflineChain.submit retires inputs without validating). */
+    private static void forceGsField(RwaTokenChain st, int idx, PlutusData value) throws Exception {
+        var gs = liveGs(st);
+        var fields = new java.util.ArrayList<>(gsFieldsOf(gs));
+        fields.set(idx, value);
+        var out = com.bloxbean.cardano.client.transaction.spec.TransactionOutput.builder()
+                .address(gs.getAddress()).value(gs.toValue())
+                .inlineDatum(ConstrPlutusData.of(0, fields.toArray(new PlutusData[0]))).build();
+        var body = com.bloxbean.cardano.client.transaction.spec.TransactionBody.builder()
+                .inputs(new java.util.ArrayList<>(java.util.List.of(
+                        com.bloxbean.cardano.client.transaction.spec.TransactionInput.builder()
+                                .transactionId(gs.getTxHash()).index(gs.getOutputIndex()).build())))
+                .outputs(new java.util.ArrayList<>(java.util.List.of(out)))
+                .fee(java.math.BigInteger.ZERO).build();
+        st.chain().submit(Transaction.builder().body(body).build());
+    }
+
+    private static final String VKEY_A = "11".repeat(32);
+    private static final String VKEY_B = "22".repeat(32);
+
+    @Test
+    public void addTrustedEntityEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        runGsChainChangingOnly(st, java.util.List.of(
+                gsSpec("AddTrustedEntity", null, null, VKEY_A, "d87980", null, null, null, null, null, null, null, null)), 9);
+    }
+
+    @Test
+    public void removeTrustedEntityEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        runGsChainChangingOnly(st, java.util.List.of(
+                gsSpec("AddTrustedEntity", null, null, VKEY_A, "d87980", null, null, null, null, null, null, null, null),
+                gsSpec("RemoveTrustedEntity", null, null, VKEY_A, null, null, null, null, null, null, null, null, null)), 9, 9);
+    }
+
+    @Test
+    public void updateTrustedEntityEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        runGsChainChangingOnly(st, java.util.List.of(
+                gsSpec("AddTrustedEntity", null, null, VKEY_A, "d87980", null, null, null, null, null, null, null, null),
+                gsSpec("UpdateTrustedEntity", null, null, null, null, VKEY_A, VKEY_B, "d87980", null, null, null, null, null)), 9, 9);
+    }
+
+    @Test
+    public void setRequiresReceiverKycEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        runGsChainChangingOnly(st, java.util.List.of(
+                gsSpec("SetRequiresReceiverKyc", null, null, null, null, null, null, null, null, Boolean.TRUE, null, null, null)), 12);
+    }
+
+    @Test
+    public void deactivateAfterPauseEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        runGsChainChangingOnly(st, java.util.List.of(
+                gsSpec("PauseTransfers", Boolean.TRUE, null, null, null, null, null, null, null, null, null, null, null),
+                gsSpec("DeactivateContract", null, null, null, null, null, null, null, null, null, null, null, null)), 5, 1);
+    }
+
+    /** Plan Addendum R1: RotateMintingScript is a RECOVERY action — restore the derived authority
+     *  after a rotation made elsewhere. Seeded: field 4 names some other script. */
+    @Test
+    public void rotateMintingScriptEvaluates() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var derived = HexUtil.encodeHexString(((BytesPlutusData) gsFieldsOf(liveGs(st)).get(4)).getValue());
+        forceGsField(st, 4, BytesPlutusData.of(HexUtil.decodeHexString("33".repeat(28))));
+        runGsChainChangingOnly(st, java.util.List.of(
+                gsSpec("RotateMintingScript", null, null, null, null, null, null, null, null, null, null, null, derived)), 4);
+        Assertions.assertEquals(derived,
+                HexUtil.encodeHexString(((BytesPlutusData) gsFieldsOf(liveGs(st)).get(4)).getValue()));
+    }
+
+    /** Plan Addendum I6: any target other than the derived authority is refused before build. */
+    @Test
+    public void rotateMintingScriptRefusesNonDerivedHash() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        var transferLogic = rwaBuilder().resolveScripts(reg.getSecurityAssetNameHex(), reg.getGlobalStatePolicyId(),
+                reg.getPowerUsersPolicyId(), reg.getDenylistPolicyId(), st.boot().params(), 8192).transferLogic();
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(gsSpec("RotateMintingScript", null, null, null, null, null, null, null, null, null, null,
+                        null, HexUtil.encodeHexString(transferLogic.getScriptHash()))),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertFalse(result.isSuccessful());
+        Assertions.assertTrue(result.error().contains("not this token's derived minting authority"), result.error());
+    }
+
+    /** Plan Addendum I7: a deployment script can never become the admin. */
+    @Test
+    public void rotateAdminRefusesScriptHash() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var field0 = HexUtil.encodeHexString(((BytesPlutusData) gsFieldsOf(liveGs(st)).get(0)).getValue());
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(gsSpec("RotateAdmin", null, null, null, null, null, null, null, null, null, null, field0, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertFalse(result.isSuccessful());
+        Assertions.assertTrue(result.error().contains("the admin must be a key"), result.error());
+    }
+
+    /** A GlobalState whose field 0 names a logic this platform did not build is never written. */
+    @Test
+    public void unknownLogicRefusedBeforeBuild() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        forceGsField(st, 0, BytesPlutusData.of(HexUtil.decodeHexString("44".repeat(28))));
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(gsSpec("SetRequiresSenderKyc", null, null, null, null, null, null, null, Boolean.TRUE,
+                        null, null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertFalse(result.isSuccessful());
+        Assertions.assertTrue(result.error().contains("UNKNOWN GlobalState logic"), result.error());
+    }
+
+    /** Plan Addendum I5: a registry row that is not the derivation of this token's parameters
+     *  at its stated cap is refused, so a corrupted row can never size or build a write. */
+    @Test
+    public void tamperedLogicRowRefused() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var reg = st.registrations().get(st.built().programmableTokenPolicyId());
+        var entries = org.cardanofoundation.cip113.model.GsLogicEntry.parseList(reg.getGsLogics());
+        var v1 = entries.getFirst();
+        entries.set(0, new org.cardanofoundation.cip113.model.GsLogicEntry(v1.logicHash(), 4096, v1.scriptCborHex(),
+                v1.refTxHash(), v1.refOutputIndex(), v1.refState(), v1.registrationTxHash(), v1.registrationState(),
+                v1.installedTxHash()));
+        reg.setGsLogics(org.cardanofoundation.cip113.model.GsLogicEntry.toJson(entries));
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(gsSpec("SetRequiresSenderKyc", null, null, null, null, null, null, null, Boolean.TRUE,
+                        null, null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertFalse(result.isSuccessful());
+        Assertions.assertTrue(result.error().contains("is not the logic this token's parameters derive"), result.error());
+    }
+
+    /** Since 63fad89 a structural registration's logic is published by preGenesis too, so its
+     *  first GS write builds and evaluates with no separate publish step. */
+    @Test
+    public void structuralTokenGsWriteNeedsNoPublishStep() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L);
+        runGsChainChangingOnly(st, java.util.List.of(gsSpec("SetRequiresSenderKyc", null, null, null, null, null, null,
+                null, Boolean.TRUE, null, null, null, null)), 11);
+    }
+
+    @Test
+    public void structuralRotateAdminNeedsNoPublishStep() throws Exception {
+        var st = rwaTokenChain(null, 1_000_000L);
+        var alice = HexUtil.encodeHexString(new Address(BootstrapFixture.ALICE.baseAddress())
+                .getPaymentCredentialHash().orElseThrow());
+        var result = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(gsSpec("RotateAdmin", null, null, null, null, null, null, null, null, null, null, alice, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertTrue(result.isSuccessful(), result.error());
+        var tx = Transaction.deserialize(HexUtil.decodeHexString(result.metadata().getFirst()));
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers("rwa-token/structural-rotate-admin", tx) >= 2,
+                "the proxy spend and the logic withdrawal must be evaluated");
+    }
+
+    /**
+     * Plan Addendum I3: an admin write that grows the datum into the last 64 bytes below the cap
+     * is refused (burns must stay possible), while one that stays below the reserve evaluates.
+     */
+    @Test
+    public void growingAdminWriteRefusedInsideBurnReserve() throws Exception {
+        requestCustomizer = r -> r.setMaxGsDatumBytes(2048);
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ADMIN.baseAddress());
+        var fields = gsFieldsOf(liveGs(st));
+        int size = ConstrPlutusData.of(0, fields.toArray(new PlutusData[0])).serializeToBytes().length;
+        int securityInfoNow = fields.get(8).serializeToBytes().length;
+        // Largest bytestring security_info that lands INSIDE the reserve (cap-64, cap].
+        int target = 2048 - 10;
+        int n = 0;
+        while (size - securityInfoNow + BytesPlutusData.of(new byte[n + 1]).serializeToBytes().length <= target) n++;
+        var inside = HexUtil.encodeHexString(BytesPlutusData.of(new byte[n]).serializeToBytes());
+        var refused = st.handler().buildGlobalStateUpdateChain(st.built().programmableTokenPolicyId(),
+                java.util.List.of(gsSpec("ModifySecurityInfo", null, inside, null, null, null, null, null, null, null, null, null, null)),
+                BootstrapFixture.ADMIN.baseAddress(), adminPkhHex(), st.boot().params());
+        Assertions.assertFalse(refused.isSuccessful());
+        Assertions.assertTrue(refused.error().contains("reserved so burns stay possible"), refused.error());
+
+        int m = n - 200;   // comfortably below cap - 64
+        var below = HexUtil.encodeHexString(BytesPlutusData.of(new byte[m]).serializeToBytes());
+        runGsChainChangingOnly(st, java.util.List.of(
+                gsSpec("ModifySecurityInfo", null, below, null, null, null, null, null, null, null, null, null, null)), 8);
+    }
+
+
+    // ── PR #29 WP-2 test hooks (additive; JUnit gives every test a fresh instance) ──
+    /** Applied to the registration request before the chain is built. */
+    private java.util.function.Consumer<org.cardanofoundation.cip113.model.RwaTokenRegisterRequest> requestCustomizer;
+    /** When true, {@code rwaTokenChain} records the build result and returns null instead of
+     *  asserting success — for tests that expect the platform to REFUSE a registration. */
+    private boolean expectChainFailure;
+    private org.cardanofoundation.cip113.model.TransactionContext<?> lastChainResult;
+    /** Narrows the wallet's current-UTxO view (funding selection); identity by default. Static
+     *  because the stub is wired in a static fixture; the one test that sets it restores it. */
+    private static volatile java.util.function.UnaryOperator<java.util.List<com.bloxbean.cardano.client.api.model.Utxo>> walletView =
+            java.util.function.UnaryOperator.identity();
+
     private record RwaTokenChain(
             OfflineChain chain,
             BootstrapFixture.Bootstrapped boot,
@@ -2228,7 +3453,7 @@ public class OfflineCip68EvalTest {
         Mockito.when(utxoProvider.findUtxosFromBlockfrost(Mockito.anyString()))
                 .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
         Mockito.when(utxoProvider.findAllCurrentUtxosFromBlockfrost(Mockito.anyString()))
-                .thenAnswer(inv -> chain.utxosAt(inv.getArgument(0)));
+                .thenAnswer(inv -> walletView.apply(chain.utxosAt(inv.getArgument(0))));
         // Linked-list anchors (denylist, power users) are found BY POLICY, not by unit —
         // their asset name is the empty root name — so the mutation builders need this or
         // they cannot see the roots the genesis transaction minted.
@@ -2273,6 +3498,11 @@ public class OfflineCip68EvalTest {
                 .thenAnswer(inv -> java.util.Optional.ofNullable(registrations.get((String) inv.getArgument(0))));
         Mockito.when(repo.existsByProgrammableTokenPolicyId(Mockito.anyString()))
                 .thenAnswer(inv -> registrations.containsKey((String) inv.getArgument(0)));
+        // PR #29: the registration derives the token's genesis cap from its row, looked up by
+        // GlobalState policy — the production repository answers this; the stub must too.
+        Mockito.when(repo.findByGlobalStatePolicyId(Mockito.anyString()))
+                .thenAnswer(inv -> registrations.values().stream()
+                        .filter(row -> inv.getArgument(0).equals(row.getGlobalStatePolicyId())).findFirst());
         Mockito.when(repo.existsByBootstrapTxHashAndBootstrapOutputIndex(Mockito.anyString(), Mockito.anyInt()))
                 .thenAnswer(inv -> registrations.values().stream().anyMatch(row ->
                         inv.getArgument(0).equals(row.getBootstrapTxHash())
@@ -2490,6 +3720,7 @@ public class OfflineCip68EvalTest {
                 .requiresSenderKyc(false)
                 .seedRecipientInAllowlistAtGenesis(seedReceiverKyc)
                 .build();
+        if (requestCustomizer != null) requestCustomizer.accept(registerRequest);
 
         var frozenRequest = HandlerFixtures.OBJECT_MAPPER.readValue(
                 HandlerFixtures.OBJECT_MAPPER.writeValueAsString(registerRequest),
@@ -2510,10 +3741,13 @@ public class OfflineCip68EvalTest {
                     .thenReturn(java.util.Optional.of(savedReservation));
             for (var funding : approvedPlan.funding()) fundingReservationRepository.claim(
                     funding.getTxHash() + "#" + funding.getOutputIndex(), approvedPlan.globalStatePolicyId());
+            for (var funding : approvedPlan.preGenesisFunding()) fundingReservationRepository.claim(
+                    funding.getTxHash() + "#" + funding.getOutputIndex(), approvedPlan.globalStatePolicyId());
             if (metadata == null) {
                 // An attested attempt must never choose another bootstrap when its pinned state differs.
                 var wrongPolicy = new org.cardanofoundation.cip113.service.module.RwaTokenModuleHandler.GenesisPlan(
-                        approvedPlan.globalStatePolicyId(), "ff".repeat(28), approvedPlan.funding());
+                        approvedPlan.globalStatePolicyId(), "ff".repeat(28), approvedPlan.funding(),
+                        approvedPlan.preGenesisFunding());
                 handler.usePreparedGenesis(wrongPolicy, approval, java.time.Instant.now().plusSeconds(1800));
                 var rejectedPolicy = handler.buildFullRegistrationChain(registerRequest, boot.params());
                 Assertions.assertFalse(rejectedPolicy.isSuccessful());
@@ -2529,6 +3763,8 @@ public class OfflineCip68EvalTest {
             handler.usePreparedGenesis(approvedPlan, approval, java.time.Instant.now().plusSeconds(1800));
         }
         var chainResult = handler.buildFullRegistrationChain(registerRequest, boot.params());
+        lastChainResult = chainResult;
+        if (expectChainFailure) return null;
         Assertions.assertTrue(chainResult.isSuccessful(),
                 "rwa-token registration chain build failed: " + chainResult.error());
 
@@ -2622,6 +3858,8 @@ public class OfflineCip68EvalTest {
                     "public proof lookup must not trust an unsubmitted genesis snapshot");
         }
         var stages = new java.util.LinkedHashMap<String, String>();
+        // Since 63fad89: preGenesis lands first (genesis reads its logic ref and spends its change).
+        stages.put("preGenesis", built.preGenesisCborHex());
         stages.put("genesis", built.genesisCborHex());
         stages.put("addPowerUser", built.addPowerUserCborHex());
         stages.put("cmtaProvenance", built.cmtaProvenanceCborHex());
@@ -2669,6 +3907,7 @@ public class OfflineCip68EvalTest {
             if (!"registerTransferLogic".equals(stage.getKey())
                     && !"registerThirdPartyTransferLogic".equals(stage.getKey())
                     && !"publishScripts".equals(stage.getKey())
+                    && !"preGenesis".equals(stage.getKey())
                     && !"attestation".equals(stage.getKey())
                     && !stage.getKey().endsWith("Provenance")) {
                 Assertions.assertTrue(evaluated > 0,

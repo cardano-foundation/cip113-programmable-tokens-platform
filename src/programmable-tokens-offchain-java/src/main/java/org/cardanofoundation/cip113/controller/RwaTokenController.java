@@ -212,7 +212,8 @@ public class RwaTokenController {
                         (Boolean) change.get("requiresReceiverKycEnabled"),
                         (String) change.get("newMemberRootHashHex"),
                         (String) change.get("newAdminCredentialHashHex"),
-                        (String) change.get("newMintingScriptCredentialHashHex")
+                        (String) change.get("newMintingScriptCredentialHashHex"),
+                        change.get("newMintableAmount") == null ? null : String.valueOf(change.get("newMintableAmount"))
                 ));
             }
 
@@ -439,6 +440,158 @@ public class RwaTokenController {
         }
     }
 
+    /** The body the admin's CIP-30 request signature covers for the GS-logic endpoints. The
+     *  frontend's gsLogicAdminBody builds the identical string. */
+    static String gsLogicAdminBody(String feePayerAddress, String key, String value) {
+        return "payer=" + feePayerAddress.toLowerCase(java.util.Locale.ROOT) + "\n"
+                + key + "=" + value.toLowerCase(java.util.Locale.ROOT) + "\n";
+    }
+
+    private static String signerOf(String feePayerAddress) {
+        return com.bloxbean.cardano.client.util.HexUtil.encodeHexString(
+                new com.bloxbean.cardano.client.address.Address(feePayerAddress).getPaymentCredentialHash()
+                        .orElseThrow(() -> new IllegalArgumentException("feePayerAddress has no payment credential")));
+    }
+
+    private static Integer intField(Map<String, Object> body, String name) {
+        Object v = body.get(name);
+        if (v instanceof Number n) return n.intValue();
+        if (v instanceof String s && s.matches("[0-9]+")) return Integer.parseInt(s);
+        return null;
+    }
+
+    /** Read-only: would this CIP-30 attestation bundle be accepted by a transfer right now?
+     *  Body: {@code { payloadHex, coseSign1Hex, coseKeyHex }}. Builds no tx, stores nothing. */
+    @PostMapping("/{policyId}/attestation/verify")
+    public ResponseEntity<?> verifyAttestation(@PathVariable String policyId, @RequestBody Map<String, Object> body) {
+        try {
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
+                    .getHandler("rwa-token", RwaTokenContext.emptyContext());
+            var check = handler.verifyAttestation(policyId, new org.cardanofoundation.cip113.model.CmtaAttestation(
+                    (String) body.get("payloadHex"), (String) body.get("coseSign1Hex"), (String) body.get("coseKeyHex"),
+                    (String) body.get("signatureHex")));
+            return ResponseEntity.ok(check);
+        } catch (Exception e) {
+            log.error("rwa-token attestation verify failed for policy={}", policyId, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** LockUpgrades — IRREVERSIBLE; its own endpoint with the pre-lock checks (plan Addendum
+     *  I16/R5). Body: {@code { feePayerAddress, confirmPolicyId }}; confirmPolicyId must equal the
+     *  path's policy id. Response carries {@code warnings} the UI must show before signing. */
+    @PostMapping("/{policyId}/lock-upgrades")
+    public ResponseEntity<?> lockUpgrades(@PathVariable String policyId, @RequestBody Map<String, Object> body) {
+        try {
+            String feePayerAddress = (String) body.get("feePayerAddress");
+            if (feePayerAddress == null || feePayerAddress.isBlank())
+                return ResponseEntity.badRequest().body(Map.of("error", "feePayerAddress is required"));
+            ProtocolBootstrapParams protocolParams = protocolBootstrapService.getProtocolBootstrapParams();
+            if (protocolParams == null) return ResponseEntity.status(503).body(Map.of("error", "protocol params not loaded"));
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
+                    .getHandler("rwa-token", RwaTokenContext.emptyContext());
+            var result = handler.buildLockUpgradesTransaction(policyId, feePayerAddress, signerOf(feePayerAddress),
+                    (String) body.get("confirmPolicyId"), protocolParams);
+            if (!result.isSuccessful())
+                return ResponseEntity.badRequest().body(Map.of("error", result.error() != null ? result.error() : "build failed"));
+            return ResponseEntity.ok(Map.of("unsignedCborTx", result.unsignedCborTx(),
+                    "warnings", result.metadata().warnings()));
+        } catch (Exception e) {
+            log.error("rwa-token lock-upgrades failed for policy={}", policyId, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** GlobalState-logic rotation, step 1 of 3: register the new logic's reward account. The
+     *  target is derived from the token's parameters and {@code newCap} — no hash is accepted.
+     *  Body: {@code { feePayerAddress, newCap }}. {@code alreadyRegistered: true} means continue
+     *  with step 2 (POST publish-gs-logic with the returned {@code logicHash}). */
+    @PostMapping("/{policyId}/rotate-gs-logic/register")
+    public ResponseEntity<?> registerGsLogic(@PathVariable String policyId, @RequestBody Map<String, Object> body,
+                                             @org.springframework.web.bind.annotation.RequestHeader HttpHeaders headers) {
+        try {
+            String feePayerAddress = (String) body.get("feePayerAddress");
+            Integer newCap = intField(body, "newCap");
+            if (feePayerAddress == null || feePayerAddress.isBlank() || newCap == null)
+                return ResponseEntity.badRequest().body(Map.of("error", "feePayerAddress and newCap are required"));
+            // It records a PENDING registration for this token, so only the live GS admin may call it.
+            authorizeAdminRequest(policyId, "POST", "/rwa-token/" + policyId + "/rotate-gs-logic/register",
+                    gsLogicAdminBody(feePayerAddress, "cap", String.valueOf(newCap)), headers);
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
+                    .getHandler("rwa-token", RwaTokenContext.emptyContext());
+            var result = handler.buildRegisterGsLogicTransaction(policyId, feePayerAddress, newCap);
+            if (!result.isSuccessful())
+                return ResponseEntity.badRequest().body(Map.of("error", result.error() != null ? result.error() : "build failed"));
+            var response = new java.util.HashMap<String, Object>();
+            response.put("alreadyRegistered", Boolean.TRUE.equals(result.metadata()));
+            response.put("logicHash", handler.rotationTargetHash(policyId, newCap));
+            if (result.unsignedCborTx() != null) response.put("unsignedCborTx", result.unsignedCborTx());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            if (e instanceof ResponseStatusException rse)
+                return ResponseEntity.status(rse.getStatusCode()).body(Map.of("error",
+                        rse.getReason() == null ? "admin authentication failed" : rse.getReason()));
+            log.error("rwa-token register-gs-logic failed for policy={}", policyId, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** GlobalState-logic rotation, step 3 of 3 (step 2 is POST publish-gs-logic with
+     *  {@code logicHash}). Body: {@code { feePayerAddress, newCap }}. */
+    @PostMapping("/{policyId}/rotate-gs-logic")
+    public ResponseEntity<?> rotateGsLogic(@PathVariable String policyId, @RequestBody Map<String, Object> body) {
+        try {
+            String feePayerAddress = (String) body.get("feePayerAddress");
+            Integer newCap = intField(body, "newCap");
+            if (feePayerAddress == null || feePayerAddress.isBlank() || newCap == null)
+                return ResponseEntity.badRequest().body(Map.of("error", "feePayerAddress and newCap are required"));
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
+                    .getHandler("rwa-token", RwaTokenContext.emptyContext());
+            var result = handler.buildRotateGsLogicTransaction(policyId, feePayerAddress, signerOf(feePayerAddress), newCap);
+            if (!result.isSuccessful())
+                return ResponseEntity.badRequest().body(Map.of("error", result.error() != null ? result.error() : "build failed"));
+            return ResponseEntity.ok(Map.of("unsignedCborTx", result.unsignedCborTx()));
+        } catch (Exception e) {
+            log.error("rwa-token rotate-gs-logic failed for policy={}", policyId, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** Publish the GlobalState logic's reference script — an explicit admin step on structural
+     *  tokens before their first GlobalState write, and rotation step 2. Its ≈25 ADA is locked
+     *  permanently (always-fail address). Body: {@code { feePayerAddress, logicHash? }}; without
+     *  {@code logicHash} the logic GlobalState field 0 names is published. */
+    @PostMapping("/{policyId}/publish-gs-logic")
+    public ResponseEntity<?> publishGsLogic(@PathVariable String policyId, @RequestBody Map<String, Object> body,
+                                            @org.springframework.web.bind.annotation.RequestHeader HttpHeaders headers) {
+        try {
+            String feePayerAddress = (String) body.get("feePayerAddress");
+            if (feePayerAddress == null || feePayerAddress.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "feePayerAddress is required"));
+            }
+            // It records a PENDING publish (blocking a second one until its TTL), so only the live
+            // GS admin may call it — otherwise anyone could keep the admin's publish refused.
+            String logicHash = (String) body.get("logicHash");
+            authorizeAdminRequest(policyId, "POST", "/rwa-token/" + policyId + "/publish-gs-logic",
+                    gsLogicAdminBody(feePayerAddress, "logic", logicHash == null || logicHash.isBlank() ? "-" : logicHash), headers);
+            RwaTokenModuleHandler handler = (RwaTokenModuleHandler) handlerFactory
+                    .getHandler("rwa-token", RwaTokenContext.emptyContext());
+            TransactionContext<Void> result = handler.buildPublishGsLogicTransaction(
+                    policyId, (String) body.get("logicHash"), feePayerAddress);
+            if (!result.isSuccessful()) {
+                return ResponseEntity.badRequest().body(Map.of("error",
+                        result.error() != null ? result.error() : "build failed"));
+            }
+            return ResponseEntity.ok(Map.of("unsignedCborTx", result.unsignedCborTx()));
+        } catch (Exception e) {
+            if (e instanceof ResponseStatusException rse)
+                return ResponseEntity.status(rse.getStatusCode()).body(Map.of("error",
+                        rse.getReason() == null ? "admin authentication failed" : rse.getReason()));
+            log.error("rwa-token publish-gs-logic failed for policy={}", policyId, e);
+            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+        }
+    }
+
     /** Build the full rwa-token registration chain (genesis → AddPowerUser →
      *  CMTA provenance → issuance provenance → optional publishScripts →
      *  registration → optional transfer-logic certificates) as up to eight unsigned
@@ -475,6 +628,11 @@ public class RwaTokenController {
             // Null-value entries (e.g. the optional 4th tx) are skipped so the
             // JSON response omits them, keeping the wire shape forward-compat.
             Map<String, Object> resp = new java.util.HashMap<>();
+            // Since 63fad89: FIRST in the chain (registers + publishes the GlobalState logic).
+            if (meta.preGenesisCborHex() != null) {
+                resp.put("preGenesisCborHex", meta.preGenesisCborHex());
+                resp.put("preGenesisTxHash", meta.preGenesisTxHash());
+            }
             resp.put("genesisCborHex", meta.genesisCborHex());
             resp.put("addPowerUserCborHex", meta.addPowerUserCborHex());
             resp.put("cmtaProvenanceCborHex", meta.cmtaProvenanceCborHex());
@@ -540,6 +698,11 @@ public class RwaTokenController {
         try {
             RwaTokenModuleHandler handler = (RwaTokenModuleHandler)
                     handlerFactory.getHandler("rwa-token", RwaTokenContext.emptyContext());
+            if (handler.hasIncompatibleGlobalState(policyId)) {
+                return ResponseEntity.status(409).body(Map.of("error", "INCOMPATIBLE: this token's GlobalState was "
+                        + "created under an earlier rwa-token contract pin and cannot be operated by this platform "
+                        + "version; re-register the token", "incompatible", true));
+            }
             byte[] activeRoot = allowlistService.liveOnchainRoot(policyId);
             allowlistService.activeLeaves(policyId, activeRoot);
             int pendingCount = allowlistService.pendingLeaves(policyId).size();
@@ -578,6 +741,10 @@ public class RwaTokenController {
                         // at all, rather than offering an action the chain will reject.
                         resp.put("mintingScriptCredentialHash", gs.mintingScriptCredentialHash());
                         resp.put("upgradesLocked", gs.upgradesLocked());
+                        // PR #29: the GlobalState logic in force, its cap and whether its reference
+                        // script is published — what the rotation / publish / lock controls need.
+                        handler.readGsLogicStatus(policyId, protocolBootstrapService.getProtocolBootstrapParams())
+                                .ifPresent(status -> resp.put("gsLogic", status));
                         return ResponseEntity.ok(resp);
                     })
                     .orElse(ResponseEntity.status(404).body(Map.of(
