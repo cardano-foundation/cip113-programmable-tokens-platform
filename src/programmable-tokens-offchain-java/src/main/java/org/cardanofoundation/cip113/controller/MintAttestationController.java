@@ -46,6 +46,11 @@ public class MintAttestationController {
                 .header("Cache-Control", "public, max-age=31536000, immutable")
                 .body(service.preimageByDigest(digest));
     }
+    @ExceptionHandler(org.cardanofoundation.cip113.service.RetiredAttestationProfileException.class)
+    public ResponseEntity<?> retired(RuntimeException ex) {
+        return ResponseEntity.status(HttpStatus.GONE).body(Map.of("error", ex.getMessage(),
+                "code", org.cardanofoundation.cip113.service.RetiredAttestationProfileException.CODE));
+    }
     @ExceptionHandler({IllegalArgumentException.class, IllegalStateException.class})
     public ResponseEntity<?> invalid(RuntimeException ex) { return ResponseEntity.badRequest().body(Map.of("error", ex.getMessage())); }
     @ExceptionHandler(TimeoutException.class)

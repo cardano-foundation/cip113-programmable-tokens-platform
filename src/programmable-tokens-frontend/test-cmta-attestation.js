@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { Address } = require("@evolution-sdk/evolution");
-const { buildCmtaAttestationPayloadHex, parseCmtaAttestationJson, prepareCmtaSignature,
+const { buildCmtaAttestationPayloadHex, parseCmtaAttestationJson, prepareCip30Signature,
   sameStakeIdentity, stakeIdentityFromBaseAddress } =
   require("./.attestation-build/lib/rwa/attestation.js");
 
@@ -30,37 +30,43 @@ assert.throws(() => buildCmtaAttestationPayloadHex(keyAddress, policy, 256, 1, n
 assert.throws(() => buildCmtaAttestationPayloadHex(keyAddress, policy, 2, 1, now, now - 119_999), /expiry/);
 assert.throws(() => buildCmtaAttestationPayloadHex(keyAddress, policy, 2, 1, Number.MAX_SAFE_INTEGER + 1, now), /expiry/);
 assert.throws(() => buildCmtaAttestationPayloadHex(keyAddress, "abc", 2, 1, now, now - 3_600_000), /policy/);
-const signatureOnly = prepareCmtaSignature("0x" + "DD".repeat(64), generated, generated, [vkey]);
-assert.deepEqual(signatureOnly, { payloadHex: generated, signatureHex: "dd".repeat(64) });
-assert.throws(() => prepareCmtaSignature("dd".repeat(64), "", generated, [vkey]), /Copy the payload/);
-assert.throws(() => prepareCmtaSignature("dd".repeat(64), generated, generated.slice(0, -2) + "01", [vkey]), /claim changed/);
-const tierTwo = buildCmtaAttestationPayloadHex(keyAddress, policy, 2, 2, now, now - 3_600_000);
-assert.throws(() => prepareCmtaSignature("dd".repeat(64), generated, tierTwo, [vkey]), /claim changed/);
-const laterExpiry = buildCmtaAttestationPayloadHex(keyAddress, policy, 2, 1, now + 60_000, now - 3_600_000);
-assert.throws(() => prepareCmtaSignature("dd".repeat(64), generated, laterExpiry, [vkey]), /claim changed/);
-const otherAddress = address("00", "33".repeat(28));
-const otherRecipient = buildCmtaAttestationPayloadHex(otherAddress, policy, 2, 1, now, now - 3_600_000);
-assert.throws(() => prepareCmtaSignature("dd".repeat(64), generated, otherRecipient, [vkey]), /claim changed/);
-assert.throws(() => prepareCmtaSignature("dd".repeat(63), generated, generated, [vkey]), /64-byte/);
-assert.throws(() => prepareCmtaSignature("dd".repeat(64), generated, generated, []), /no trusted entity/);
-const payload = Buffer.alloc(67);
-Buffer.from(stakeHash, "hex").copy(payload, 0);
-payload[28] = 1;
-payload.writeBigUInt64BE(BigInt(expiry), 29);
-Buffer.from(policy, "hex").copy(payload, 37);
-payload[65] = 0;
-payload[66] = 0;
-const bundle = { payloadHex: payload.toString("hex"), signatureHex: "dd".repeat(64), issuerVkeyHex: vkey };
-const parse = (value, addr = keyAddress) => parseCmtaAttestationJson(
-  JSON.stringify(value), addr, policy, 0, [vkey], now);
-assert.equal(parse(bundle).validUntilMs, expiry);
-const bad = (mutate) => { const value = Buffer.from(payload); mutate(value); return { ...bundle, payloadHex: value.toString("hex") }; };
-assert.throws(() => parse(bundle, scriptAddress), /credential type/);
-assert.throws(() => parse(bad((p) => p[0] = 0)), /different stake credential/);
-assert.throws(() => parse(bad((p) => p[28] = 0)), /invalid KYC tier/);
-assert.throws(() => parse(bad((p) => p[65] = 1)), /different network/);
-assert.throws(() => parse(bad((p) => p[66] = 1)), /credential type/);
-assert.throws(() => parse({ ...bundle, issuerVkeyHex: "ff".repeat(32) }), /not trusted/);
+// ── PR #29: CIP-30 signData results (named test edit, 2026-10-15) ─────────────────────────
+// The retired raw-Ed25519 rules (prepareCmtaSignature) and the {signatureHex, issuerVkeyHex}
+// bundle are replaced by their CIP-30 equivalents. GENUINE signed vectors from the pinned contract
+// (cpt-rwa-ch-cmta-reference @346f9bf, lib/kyc/verify.ak cip30_unit_valid / cip30_unit_hashed_valid,
+// public TEST seed): claim subject aa…, tier 1, expiry 100 000 000 ms, policy bb…, network 1.
+const { coseVectors } = require("./test-fixtures/cip30-vectors.js");
+const V = coseVectors;
+const vAddress = address("00", "aa".repeat(28));
+
+// A signData result pasted from another wallet signs the COPIED, unchanged claim.
+const fromWallet = JSON.stringify({ signature: V.sign1(V.claim, false), key: V.key });
+const prepared = prepareCip30Signature(fromWallet, V.claim, V.claim, [V.vkey]);
+assert.deepEqual(prepared, { payloadHex: V.claim, coseSign1Hex: V.sign1(V.claim, false), coseKeyHex: V.key });
+assert.throws(() => prepareCip30Signature(fromWallet, "", V.claim, [V.vkey]), /Copy the claim/);
+assert.throws(() => prepareCip30Signature(fromWallet, V.claim, V.claim.slice(0, -2) + "01", [V.vkey]), /claim changed/);
+assert.throws(() => prepareCip30Signature(fromWallet, V.claim, V.claim, []), /no trusted entity/);
+assert.throws(() => prepareCip30Signature(fromWallet, V.claim, V.claim, ["cc".repeat(32)]), /not a trusted issuer/);
+assert.throws(() => prepareCip30Signature("dd".repeat(64), V.claim, V.claim, [V.vkey]), /signData result/);
+// CIP-8 hashed mode (Ledger): the COSE payload is blake2b_224(claim).
+const hashedFromWallet = JSON.stringify({ signature: V.sign1(V.digest, true, V.hashedSig), key: V.key });
+assert.equal(prepareCip30Signature(hashedFromWallet, V.claim, V.claim, [V.vkey]).payloadHex, V.claim);
+// A forged signature is rejected in the browser too.
+assert.throws(() => prepareCip30Signature(JSON.stringify({ signature: V.sign1(V.claim, false, "00".repeat(64)), key: V.key }),
+  V.claim, V.claim, [V.vkey]), /does not verify/);
+
+// The v1 bundle: its own claim, checked against this party, token and network.
+const bundle = { v: 1, payloadHex: V.claim, coseSign1Hex: V.sign1(V.claim, false), coseKeyHex: V.key };
+const parse = (value, addr = vAddress, net = 1, keys = [V.vkey]) => parseCmtaAttestationJson(
+  JSON.stringify(value), addr, V.policy, net, keys, 0);
+assert.equal(parse(bundle).validUntilMs, 100_000_000);
+assert.equal(parse(bundle).tier, 1);
+assert.throws(() => parse({ ...bundle, v: 2 }), /version/);
+assert.throws(() => parse(bundle, address("20", "aa".repeat(28))), /credential type/);
+assert.throws(() => parse(bundle, keyAddress), /different stake credential/);
+assert.throws(() => parse(bundle, vAddress, 0), /different network/);
+assert.throws(() => parseCmtaAttestationJson(JSON.stringify(bundle), vAddress, "cd".repeat(28), 1, [V.vkey], 0), /different token/);
+assert.throws(() => parseCmtaAttestationJson(JSON.stringify(bundle), vAddress, V.policy, 1, [V.vkey], 100_000_000), /expiry/);
+assert.throws(() => parse(bundle, vAddress, 1, ["ff".repeat(32)]), /not trusted/);
 assert.throws(() => parse({ ...bundle, payloadHex: "00".repeat(37) }), /67 bytes/);
-assert.throws(() => parse(bad((p) => p.writeBigUInt64BE(BigInt(now - 1), 29))), /expiry/);
-console.log("CMTA payloads and signature-only requests bind to the selected claim; legacy bundles remain valid");
+console.log("CMTA claims bind to the selected party; CIP-30 signData results and v1 bundles verify against genuine contract vectors");

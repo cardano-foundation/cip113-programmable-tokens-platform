@@ -18,6 +18,7 @@ import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.bouncycastle.crypto.signers.Ed25519Signer;
 import org.cardanofoundation.cip113.config.AppConfig;
 import org.cardanofoundation.cip113.repository.RwaTokenAdminRequestNonceRepository;
+import org.cardanofoundation.cip113.service.cose.CoseSign1;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -61,7 +62,9 @@ public class RwaTokenAdminRequestVerifier {
                                  String canonicalBody, String nonce, long issued, long expires) {
         if (!network.matches("[a-z0-9-]{1,24}") || !gsPolicy.matches("(?i)[0-9a-f]{56}")
                 || !(method.equals("GET") || method.equals("POST"))
-                || !path.matches("/rwa-token/[0-9a-f]{56}/(members|update-member-root-hash)")
+                // PR #29: publish-gs-logic and rotate-gs-logic/register record pending registry
+                // state, so they are admin-authorised like the member-root flow.
+                || !path.matches("/rwa-token/[0-9a-f]{56}/(members|update-member-root-hash|publish-gs-logic|rotate-gs-logic/register)")
                 || !nonce.matches("[0-9a-f]{64}")) throw bad("invalid signed request fields");
         return "CMTA admin API v1\n"
                 + "audience=" + network + ":" + gsPolicy.toLowerCase(java.util.Locale.ROOT) + "\n"
@@ -204,24 +207,18 @@ public class RwaTokenAdminRequestVerifier {
         return HexUtil.decodeHexString(value);
     }
 
-    private static DataItem decodeOne(byte[] cbor) throws Exception {
-        ByteArrayInputStream input = new ByteArrayInputStream(cbor);
-        DataItem result = new CborDecoder(input).decodeNext();
-        if (result == null || input.available() != 0) throw new IllegalArgumentException("trailing or empty CBOR");
-        return result;
+    /** Shared COSE structure (service/cose/CoseSign1); this class keeps only the AUTH header
+     *  policy. Its IllegalArgumentExceptions carry the messages this verifier always used. */
+    private static <T> T cose(java.util.function.Supplier<T> parse) {
+        try {
+            return parse.get();
+        } catch (IllegalArgumentException e) {
+            throw unauthorized(e.getMessage());
+        }
     }
 
-    private static byte[] encode(DataItem item) throws Exception {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        new CborEncoder(out).encode(item);
-        return out.toByteArray();
-    }
-
-    private static Map strictMap(byte[] cbor) throws Exception {
-        DataItem item = decodeOne(cbor);
-        if (!(item instanceof Map map) || !Arrays.equals(cbor, encode(map)))
-            throw new IllegalArgumentException("noncanonical or duplicate COSE map");
-        return map;
+    private static Map strictMap(byte[] cbor) {
+        return cose(() -> CoseSign1.canonicalMap(cbor));
     }
 
     /**
@@ -232,37 +229,28 @@ public class RwaTokenAdminRequestVerifier {
      * path. Only the two CBOR simple values are accepted.
      */
     private static boolean coseHashed(Map unprotected) {
-        DataItem flag = unprotected.get(new UnicodeString("hashed"));
-        if (flag == null || SimpleValue.FALSE.equals(flag)) return false;
-        if (SimpleValue.TRUE.equals(flag)) return true;
-        throw unauthorized("COSE `hashed` header is not a boolean");
+        return cose(() -> CoseSign1.hashedFlag(unprotected));
     }
 
     private static long number(DataItem item) {
-        if (!(item instanceof co.nstant.in.cbor.model.Number number)) throw unauthorized("invalid COSE number");
-        return number.getValue().longValueExact();
+        return cose(() -> CoseSign1.number(item));
     }
 
-    private static byte[] cosePublicKey(String keyHex) throws Exception {
-        Map key = strictMap(strictHex(keyHex, 2048));
-        if (number(key.get(new UnsignedInteger(1))) != 1
-                || number(key.get(new UnsignedInteger(3))) != -8
-                || number(key.get(new NegativeInteger(-1))) != 6
-                || !(key.get(new NegativeInteger(-2)) instanceof ByteString x)
-                || x.getBytes().length != 32) throw unauthorized("unsupported COSE key");
-        return x.getBytes();
+    private static byte[] cosePublicKey(String keyHex) {
+        byte[] key = strictHex(keyHex, 2048);
+        return cose(() -> CoseSign1.ed25519Key(key));
     }
 
     private static byte[] verifyCose(String signatureHex, String keyHex, byte[] expectedPayload) throws Exception {
-        DataItem item = decodeOne(strictHex(signatureHex, 8192));
-        if (!(item instanceof Array sign1) || sign1.getDataItems().size() != 4
-                || (item.hasTag() && item.getTag().getValue() != 18)) throw unauthorized("invalid COSE_Sign1");
-        var parts = sign1.getDataItems();
-        if (!(parts.get(0) instanceof ByteString protectedBytes)
-                || !(parts.get(1) instanceof Map unprotected)
-                || !(parts.get(2) instanceof ByteString payload)
-                || !(parts.get(3) instanceof ByteString signature)
-                || signature.getBytes().length != 64) throw unauthorized("invalid COSE_Sign1");
+        byte[] sign1Bytes = strictHex(signatureHex, 8192);
+        CoseSign1 sign1 = cose(() -> CoseSign1.decode(sign1Bytes));
+        // Authentication signs a payload we reconstruct, so a detached (nil) payload is malformed
+        // here — unlike an attestation, where the claim is supplied alongside.
+        if (sign1.payload() == null) throw unauthorized("invalid COSE_Sign1");
+        ByteString protectedBytes = new ByteString(sign1.protectedHeader());
+        Map unprotected = sign1.unprotected();
+        ByteString payload = new ByteString(sign1.payload());
+        ByteString signature = new ByteString(sign1.signature());
 
         // ⛔ CIP-8 `hashed` MODE, WHICH THIS VERIFIER USED TO REJECT OUTRIGHT — a spec violation.
         // CIP-190: "Verifiers MUST inspect the unprotected header for `hashed` and, when its value
@@ -339,13 +327,8 @@ public class RwaTokenAdminRequestVerifier {
                 || protectedMap.get(new UnicodeString("hashed")) != null) {
             throw unauthorized("unsupported COSE headers");
         }
-        Array structure = new Array()
-                .add(new UnicodeString("Signature1"))
-                .add(new ByteString(protectedBytes.getBytes()))
-                .add(new ByteString(new byte[0]))
-                // The digest in hashed mode, the payload otherwise — CIP-190's Sig_structure[3].
-                .add(new ByteString(effectivePayload));
-        byte[] message = encode(structure);
+        // The digest in hashed mode, the payload otherwise — CIP-190's Sig_structure[3].
+        byte[] message = CoseSign1.sigStructure(protectedBytes.getBytes(), effectivePayload);
         Ed25519Signer verifier = new Ed25519Signer();
         verifier.init(false, new Ed25519PublicKeyParameters(cosePublicKey(keyHex), 0));
         verifier.update(message, 0, message.length);

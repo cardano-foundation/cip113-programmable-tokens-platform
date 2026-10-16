@@ -47,6 +47,11 @@ public class RwaTokenScriptBuilderService {
     /** Asset name from the ported {@code lib/constants.ak}. */
     public static final String GLOBAL_STATE_ASSET_NAME_HEX = "476c6f62616c5374617465"; // "GlobalState"
 
+    /** Default (and recommended, integration guide) aggregate GlobalState datum cap, F09.
+     *  Applied identically to {@code global_state_mint_validator} and {@code global_state_logic};
+     *  nothing on chain ties the two together, so every caller passes ONE value to both. */
+    public static final int DEFAULT_MAX_GS_DATUM_BYTES = 8192;
+
     private final ModuleService moduleService;
     private final ProtocolScriptBuilderService protocolScriptBuilderService;
 
@@ -64,7 +69,8 @@ public class RwaTokenScriptBuilderService {
             PlutusScript mintingAuthority,
             PlutusScript transferLogic,
             PlutusScript thirdPartyTransferLogic,
-            PlutusScript globalStateSpend,
+            PlutusScript globalStateLogic,
+            PlutusScript globalStateProxy,
             PlutusScript denylistSpend,
             PlutusScript powerUsersSpend,
             PlutusScript issuanceScript,
@@ -76,6 +82,14 @@ public class RwaTokenScriptBuilderService {
 
         public String mintingAuthorityHashHex() {
             return hashHex(mintingAuthority);
+        }
+
+        public String globalStateLogicHashHex() {
+            return hashHex(globalStateLogic);
+        }
+
+        public String globalStateProxyHashHex() {
+            return hashHex(globalStateProxy);
         }
     }
 
@@ -153,11 +167,28 @@ public class RwaTokenScriptBuilderService {
      * dependency runs one way only and a rotation never changes the proxy, the
      * issuance policy id, or the token's identity.
      */
+    /** @deprecated test-only convenience at {@link #DEFAULT_MAX_GS_DATUM_BYTES}. Production
+     *  code must pass the token's stored genesis cap, or the derived GlobalState logic (and
+     *  everything checked against it) silently differs from the one deployed. */
+    @Deprecated
     public RwaTokenScripts resolveScripts(String securityAssetNameHex,
                                                String globalStatePolicyId,
                                                String powerUsersPolicyId,
                                                String denylistPolicyId,
                                                ProtocolBootstrapParams protocolParams) {
+        return resolveScripts(securityAssetNameHex, globalStatePolicyId, powerUsersPolicyId,
+                denylistPolicyId, protocolParams, DEFAULT_MAX_GS_DATUM_BYTES);
+    }
+
+    /** @param maxGsDatumBytes the token's GENESIS GlobalState datum cap. The logic derived here
+     *  is the genesis (v1) logic; after a {@code RotateGlobalStateScript} the live logic is
+     *  whatever datum field 0 names, resolved through the token's logic registry, not here. */
+    public RwaTokenScripts resolveScripts(String securityAssetNameHex,
+                                               String globalStatePolicyId,
+                                               String powerUsersPolicyId,
+                                               String denylistPolicyId,
+                                               ProtocolBootstrapParams protocolParams,
+                                               int maxGsDatumBytes) {
         String registryPolicyId = protocolParams.registry().scriptHash();
         // programmable_logic_base's hash is deliberately NOT read here any more. The
         // 2026-08-21 upstream dropped it from all three validators that took it: CIP-113's
@@ -188,43 +219,90 @@ public class RwaTokenScriptBuilderService {
                 securityAssetNameHex, globalStatePolicyId, registryPolicyId, powerUsersPolicyId,
                 hashHex(mintingLogicProxy),
                 expectedIssuancePolicyId, denylistScriptHash, powerUserListScriptHash,
-                referenceAssetNameFor(securityAssetNameHex));
+                hashHex(transferLogic), hashHex(thirdPartyTransferLogic));
 
-        PlutusScript globalStateSpend = buildGlobalStateSpendScript(
-                securityAssetNameHex, expectedIssuancePolicyId, globalStatePolicyId, powerUserListScriptHash);
+        PlutusScript globalStateLogic = buildGlobalStateLogicScript(
+                securityAssetNameHex, expectedIssuancePolicyId, globalStatePolicyId, powerUserListScriptHash,
+                maxGsDatumBytes);
 
         return new RwaTokenScripts(
                 mintingLogicProxy, mintingAuthority, transferLogic, thirdPartyTransferLogic,
-                globalStateSpend, denylistSpend, powerUsersSpend, issuanceScript, expectedIssuancePolicyId);
+                globalStateLogic, buildGlobalStateProxyScript(), denylistSpend, powerUsersSpend,
+                issuanceScript, expectedIssuancePolicyId);
     }
 
     // ── Global state ─────────────────────────────────────────────────────────
 
+    /** @deprecated test-only convenience at {@link #DEFAULT_MAX_GS_DATUM_BYTES}; see
+     *  {@link #buildGlobalStateMintScript(TransactionInput, int)}. */
+    @Deprecated
     public PlutusScript buildGlobalStateMintScript(TransactionInput bootstrapTxInput) {
+        return buildGlobalStateMintScript(bootstrapTxInput, DEFAULT_MAX_GS_DATUM_BYTES);
+    }
+
+    /** {@code (tx0, index0, global_state_proxy_hash, max_global_state_datum_bytes)}. The mint
+     *  rejects any GlobalState output whose payment credential is not the proxy, and a genesis
+     *  datum serialising above the cap. The SAME cap must go to {@link #buildGlobalStateLogicScript}. */
+    public PlutusScript buildGlobalStateMintScript(TransactionInput bootstrapTxInput, int maxGsDatumBytes) {
+        requirePositiveCap(maxGsDatumBytes);
         ModuleValidator contract = getContract("global_state.global_state_mint_validator.mint");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(bootstrapTxInput.getTransactionId())),
-                BigIntPlutusData.of(BigInteger.valueOf(bootstrapTxInput.getIndex()))
+                BigIntPlutusData.of(BigInteger.valueOf(bootstrapTxInput.getIndex())),
+                BytesPlutusData.of(HexUtil.decodeHexString(globalStateProxyHashHex())),
+                BigIntPlutusData.of(BigInteger.valueOf(maxGsDatumBytes))
         );
         return applyParameters(contract, params, "global_state_mint");
     }
 
-    /** @param powerUserListScriptHash hash of {@link #buildPowerUsersSpendScript}. Added
-     *  at the current pin: the {@code PauseTransfers} branch resolves the authorising
-     *  power-user node by address rather than trusting a caller-named index, so it must
-     *  know which script holds the list. */
-    public PlutusScript buildGlobalStateSpendScript(String securityAssetNameHex,
+    /**
+     * The GlobalState address's spend script. UNPARAMETERISED, so it is the same script — and
+     * the same address — for every token on the network: locate GlobalState by its NFT, never
+     * by address. It only requires a withdrawal of the logic named in datum field 0; its spend
+     * redeemer is ignored.
+     */
+    public PlutusScript buildGlobalStateProxyScript() {
+        ModuleValidator contract = getContract("global_state_proxy.global_state_proxy.spend");
+        try {
+            return PlutusBlueprintUtil.getPlutusScriptFromCompiledCode(contract.scriptBytes(), PlutusVersion.v3);
+        } catch (Exception e) {
+            throw new IllegalStateException("could not load the rwa-token global_state_proxy script", e);
+        }
+    }
+
+    public String globalStateProxyHashHex() {
+        return hashHex(buildGlobalStateProxyScript());
+    }
+
+    /**
+     * The GlobalState governance logic (withdraw-0), named by datum field 0. Every GlobalState
+     * spend carries its withdrawal with {@code GlobalStateSpendRedeemer}. Rotatable via
+     * {@code RotateGlobalStateScript}; a rotated-in logic built here differs only in
+     * {@code maxGsDatumBytes}, so its NFT search still finds this token's GlobalState.
+     *
+     * @param powerUserListScriptHash hash of {@link #buildPowerUsersSpendScript}: {@code PauseTransfers}
+     *  resolves the authorising power-user node by address.
+     */
+    public PlutusScript buildGlobalStateLogicScript(String securityAssetNameHex,
                                                     String issuancePolicyId,
                                                     String globalStatePolicyId,
-                                                    String powerUserListScriptHash) {
-        ModuleValidator contract = getContract("global_state.global_state_spend_validator.spend");
+                                                    String powerUserListScriptHash,
+                                                    int maxGsDatumBytes) {
+        requirePositiveCap(maxGsDatumBytes);
+        ModuleValidator contract = getContract("global_state_logic.global_state_logic.withdraw");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
                 BytesPlutusData.of(HexUtil.decodeHexString(issuancePolicyId)),
                 BytesPlutusData.of(HexUtil.decodeHexString(globalStatePolicyId)),
-                BytesPlutusData.of(HexUtil.decodeHexString(powerUserListScriptHash))
+                BytesPlutusData.of(HexUtil.decodeHexString(powerUserListScriptHash)),
+                BigIntPlutusData.of(BigInteger.valueOf(maxGsDatumBytes))
         );
-        return applyParameters(contract, params, "global_state_spend");
+        return applyParameters(contract, params, "global_state_logic");
+    }
+
+    private static void requirePositiveCap(int maxGsDatumBytes) {
+        if (maxGsDatumBytes <= 0)
+            throw new IllegalArgumentException("max_global_state_datum_bytes must be positive");
     }
 
     // ── Denylist ─────────────────────────────────────────────────────────────
@@ -329,10 +407,11 @@ public class RwaTokenScriptBuilderService {
      * withdraw-0 needs no signature at all. Verify after every rotation with a smoke
      * test that a mint lacking a power-user signature is REJECTED.
      */
-    /** {@code plb_script_hash} is GONE as of the 2026-08-21 upstream (nine parameters, not
-     *  ten). The destination checks no longer assert the programmable-logic base
-     *  themselves — CIP-113's own base layer already confines the token there, so
-     *  re-asserting it here bought nothing and cost a parameter. */
+    /** Ten parameters at the PR #29 pin. {@code reference_asset_name} is gone (the CIP-68
+     *  reference NFT is now pinned by the registration arm itself), and the transfer and
+     *  third-party logic hashes were added (F08): registration and {@code UpgradeRegistryNode}
+     *  require registry node fields 3/4 to equal exactly these, so a node can never name
+     *  scripts the active authority was not built with. */
     public PlutusScript buildMintingAuthorityScript(String securityAssetNameHex,
                                                     String globalStatePolicyId,
                                                     String registryPolicyId,
@@ -341,7 +420,8 @@ public class RwaTokenScriptBuilderService {
                                                     String expectedIssuancePolicyId,
                                                     String denylistScriptHash,
                                                     String powerUserListScriptHash,
-                                                    String referenceAssetNameHex) {
+                                                    String transferLogicScriptHash,
+                                                    String thirdPartyTransferLogicScriptHash) {
         ModuleValidator contract = getContract("minting_authority.minting_authority_validator.withdraw");
         ListPlutusData params = ListPlutusData.of(
                 BytesPlutusData.of(HexUtil.decodeHexString(securityAssetNameHex)),
@@ -352,7 +432,8 @@ public class RwaTokenScriptBuilderService {
                 BytesPlutusData.of(HexUtil.decodeHexString(expectedIssuancePolicyId)),
                 BytesPlutusData.of(HexUtil.decodeHexString(denylistScriptHash)),
                 BytesPlutusData.of(HexUtil.decodeHexString(powerUserListScriptHash)),
-                BytesPlutusData.of(HexUtil.decodeHexString(referenceAssetNameHex))
+                BytesPlutusData.of(HexUtil.decodeHexString(transferLogicScriptHash)),
+                BytesPlutusData.of(HexUtil.decodeHexString(thirdPartyTransferLogicScriptHash))
         );
         return applyParameters(contract, params, "minting_authority");
     }

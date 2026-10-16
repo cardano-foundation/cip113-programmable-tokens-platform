@@ -33,7 +33,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.*;
-import org.cardanofoundation.cip113.service.module.Cip170MintChildBuilder;
 
 /** Current-Veridian profile: digest of a documented, retrievable off-chain SAID preimage. */
 @Service
@@ -41,7 +40,7 @@ import org.cardanofoundation.cip113.service.module.Cip170MintChildBuilder;
 @RequiredArgsConstructor
 public class MintAttestationService {
     public static final String PROFILE = "cip113-mint-intent-said-json-v1";
-    public static final String TX_HASH_PROFILE = "cip113-mint-txhash-said-json-v1";
+    public static final String TX_HASH_PROFILE = "cip113-mint-attest-tx-v1";
     private final MintAttestationStore store;
     private final MintAttestationRequestVerifier verifier;
     private final MintAttestationTransport transport;
@@ -51,7 +50,6 @@ public class MintAttestationService {
     private final AppConfig.Network network;
     private final ObjectMapper mapper;
     private final ObjectProvider<TokenOperationsService> tokenOperations;
-    private final Cip170MintChildBuilder childBuilder;
     private final CardanoConverters cardanoConverters;
 
     public record View(String intentId, String status, String signerAid, String digest, String seqNumber,
@@ -78,19 +76,20 @@ public class MintAttestationService {
         i.setWalletAid(session.getAid()); i.setIssuerAid(transport.issuerAid());
         i.setCredentialSaid(session.getCredentialAid()); i.setFieldsJson(mapper.writeValueAsString(fields));
         i.setExpiresAt(expires); i.setStatus("PREPARED");
-        String targetCbor = tokenOperations.getObject().buildMintDraft(fields);
-        String targetHash = MintAttestedTransactionValidator.validateMint(targetCbor, fields);
+        long magic = networkMagic();
+        String targetCbor = tokenOperations.getObject().buildMintDraft(fields,
+                Cip170AttestationData.attestTx(session.getAid()));
+        String targetHash = MintAttestedTransactionValidator.validateAttestTx(targetCbor, fields,
+                session.getAid(), null, magic);
         var target = Transaction.deserialize(HexUtil.decodeHexString(targetCbor));
         Instant targetDeadline = targetDeadline(target);
         if (!targetDeadline.isAfter(Instant.now().plusSeconds(120)))
             throw new IllegalArgumentException("Mint transaction validity is too short for Veridian approval; prepare a new mint");
         i.setExpiresAt(targetDeadline.minusSeconds(120).isBefore(expires)
                 ? targetDeadline.minusSeconds(120) : expires);
-        if (Cip170MintChildBuilder.fundingOutput(target, targetHash, fields.feePayerAddress(), 5_000_000L, null) == null)
-            throw new IllegalArgumentException("Mint leaves no plain fee-payer output with 5 ADA to fund its CIP-170 child");
-        Map<String, Object> document = MintTxHashPayload.signed(targetHash);
+        Map<String, Object> document = TxAttestationSeal.signed(targetHash, magic);
         i.setDigest((String) document.get("d")); i.setDocumentJson(Serder.dumps(document));
-        i.setPreimage(MintTxHashPayload.preimage(targetHash));
+        i.setPreimage(TxAttestationSeal.preimage(targetHash, magic));
         i.setUnsignedCbor(targetCbor); i.setTransactionHash(targetHash);
         transport.prepareExchange(i, document);
         try { return view(store.create(i)); }
@@ -108,6 +107,7 @@ public class MintAttestationService {
                 || !Objects.equals(saved.getSessionId(), fields.sessionId())
                 || !Objects.equals(saved.getWalletAid(), walletAid))
             throw new IllegalArgumentException("requestId already belongs to another mint request or Veridian identity");
+        requireCurrentProfile(saved);
         return view(saved);
     }
 
@@ -116,6 +116,7 @@ public class MintAttestationService {
         verifier.verifyAndConsume("/keri/mint-attestations/" + id + "/anchor", rawBody, raw.feePayerAddress(), headers);
         var i = store.get(id);
         if (i.getInitialRegistrationJson() != null) throw new IllegalArgumentException("Initial mint intent requires creation anchor");
+        requireCurrentProfile(i);
         MintAttestationRequest expected = fields(i);
         if (!expected.equals(normalize(raw))) throw new IllegalArgumentException("Mint signing request differs from prepared intent");
         var session = boundSession(expected);
@@ -141,6 +142,7 @@ public class MintAttestationService {
         if (!expected.equals(normalize(raw)))
             throw new IllegalArgumentException("Mint signing request differs from the frozen transaction");
         if ("BUILT".equals(i.getStatus())) return chain(i);
+        requireCurrentProfile(i);
         var session = boundSession(expected);
         if (!Objects.equals(i.getWalletAid(), session.getAid())
                 || !Objects.equals(i.getCredentialSaid(), session.getCredentialAid()))
@@ -152,27 +154,28 @@ public class MintAttestationService {
                 || new BigInteger(i.getSequenceNumber(), 16).compareTo(new BigInteger(i.getWalletKelFloor(), 16)) <= 0
                 || transport.verifiedEvent(i.getWalletAid(), i.getSequenceNumber(), i.getDigest()) == null)
             throw new IllegalStateException("Verified mint KERI event is unavailable");
-        if (!MintTxHashPayload.digest(i.getTransactionHash()).equals(i.getDigest()))
+        long magic = networkMagic();
+        if (!TxAttestationSeal.digest(i.getTransactionHash(), magic).equals(i.getDigest()))
             throw new IllegalStateException("Saved mint digest differs from frozen transaction");
-        MintAttestedTransactionValidator.validateMint(i.getUnsignedCbor(), expected);
+        if (!MintAttestedTransactionValidator.validateAttestTx(i.getUnsignedCbor(), expected, i.getWalletAid(),
+                i.getDigest(), magic).equals(i.getTransactionHash()))
+            throw new IllegalStateException("Frozen mint hash differs from its CBOR");
         if (!targetDeadline(Transaction.deserialize(HexUtil.decodeHexString(i.getUnsignedCbor())))
                 .isAfter(Instant.now().plusSeconds(120)))
             throw new IllegalStateException("Frozen mint transaction is near expiry; prepare a new mint intent");
         var claim = store.claimBuild(id);
         if (claim.owner() == null) return chain(store.get(id));
+        // The mint carries its own ATTEST_TX record: the frozen CBOR is the final transaction.
         try {
-            var child = childBuilder.build(expected.feePayerAddress(), i.getUnsignedCbor(), attestation(i),
-                    5_000_000L, null);
-            String cbor = child.serializeToHex();
-            String hash = MintAttestedTransactionValidator.validateChild(cbor, i.getUnsignedCbor(),
-                    expected.feePayerAddress(), attestation(i));
-            store.publishChild(id, claim.owner(), cbor, hash);
+            store.publishBuild(id, claim.owner(), i.getUnsignedCbor(), i.getTransactionHash());
             return chain(store.get(id));
         } finally { store.releaseBuild(id, claim.owner()); }
     }
 
+    /** ATTEST_TX rows return one transaction; rows built under the retired profile keep their stored child. */
     private Chain chain(MintAttestationIntentEntity i) {
-        if (!"BUILT".equals(i.getStatus()) || i.getAttestationCbor() == null)
+        if (!"BUILT".equals(i.getStatus()) || i.getUnsignedCbor() == null
+                || i.getAttestationCbor() == null && !TxAttestationSeal.isSealDocument(i.getDocumentJson()))
             throw new IllegalStateException("Attested mint chain is not built");
         return new Chain(i.getUnsignedCbor(), i.getAttestationCbor(),
                 i.getTransactionHash(), i.getAttestationTxHash());
@@ -213,6 +216,20 @@ public class MintAttestationService {
     }
     public Cip170AttestationData attestation(MintAttestationIntentEntity i) {
         return new Cip170AttestationData(i.getWalletAid(), i.getDigest(), i.getSequenceNumber(), "1.0");
+    }
+    public Cip170AttestationData txAttestation(MintAttestationIntentEntity i) {
+        return Cip170AttestationData.attestTx(i.getWalletAid());
+    }
+    public long networkMagic() { return TxAttestationSeal.magic(network.getNetwork()); }
+
+    /** True for an intent whose Veridian payload is the retired {d, txHash} child-profile document. */
+    public static boolean isRetiredProfile(MintAttestationIntentEntity i) {
+        return MintTxHashPayload.isDocument(i.getDocumentJson());
+    }
+    /** Must run before any Veridian dispatch, and only for intents that are not BUILT. */
+    public static void requireCurrentProfile(MintAttestationIntentEntity i) {
+        if (!"BUILT".equals(i.getStatus()) && isRetiredProfile(i))
+            throw new RetiredAttestationProfileException();
     }
     public MintAttestationStore.BuildClaim claimBuild(String id) { return store.claimBuild(id); }
     public String publishBuild(String id, String owner, String cbor) throws Exception {

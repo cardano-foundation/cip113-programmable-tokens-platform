@@ -122,6 +122,11 @@ ext.ciTestPatterns = [
 		'*ConditionalBeanWiringTest',
 		'*RegistryCredentialCrossCheckTest',
 		'*ShippedDispatcherDerivationTest',
+		// PR #29 rwa-token pin, 2026-10-15: offline unit tests for the CIP-30 COSE verifier (genuine
+		// upstream vectors), canonical serialise_data sizing, and the GlobalState tx self-check.
+		'*CoseSign1Test',
+		'*PlutusDataSizeTest',
+		'*GsTxSelfCheckTest',
 ]
 
 // ---------------------------- QUARANTINE ----------------------------

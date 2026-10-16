@@ -29,11 +29,13 @@ export interface MintAttestationView {
   fields: MintAttestationRequest;
 }
 
+/** CIP-170 ATTEST_TX: the mint carries its own label-170 record, so the attestation fields are null.
+ *  They are set only for mints built under the retired child-transaction profile. */
 export interface MintAttestationChain {
   mintCborHex: string;
-  attestationCborHex: string;
+  attestationCborHex: string | null;
   mintTxHash: string;
-  attestationTxHash: string;
+  attestationTxHash: string | null;
 }
 
 export interface MintAttestationConfig { network: string; audience: string; }

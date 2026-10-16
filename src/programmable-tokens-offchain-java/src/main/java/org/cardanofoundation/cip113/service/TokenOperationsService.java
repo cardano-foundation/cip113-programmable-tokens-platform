@@ -293,10 +293,12 @@ public class TokenOperationsService {
         }
     }
 
-    /** Build the exact, unsigned target of a transaction-hash attestation. */
-    public String buildMintDraft(MintAttestationRequest fields) {
+    /** Build the exact, unsigned mint that carries its own CIP-170 ATTEST_TX record. */
+    public String buildMintDraft(MintAttestationRequest fields, Cip170AttestationData attestTx) {
+        if (attestTx == null || !attestTx.isAttestTx())
+            throw new IllegalArgumentException("Attested mint draft requires a CIP-170 ATTEST_TX signer");
         var request = new MintTokenRequest(fields.feePayerAddress(), fields.tokenPolicyId(),
-                fields.assetName(), fields.quantity(), fields.recipientAddress(), null, null, null);
+                fields.assetName(), fields.quantity(), fields.recipientAddress(), attestTx, null, null);
         var result = buildMintTransaction(request, resolveProtocolParams(fields.protocolTxHash()),
                 null, null, null, null);
         if (!result.isSuccessful() || result.unsignedCborTx() == null)

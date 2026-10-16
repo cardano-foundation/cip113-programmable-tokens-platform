@@ -254,7 +254,10 @@ export function InitialMintAttestationPanel({ registration, feePayerAddress, onR
         catch { /* Keep the saved attempt ID when status cannot be read. */ }
       }
       const detail = parseSubmitChainFailure(e);
-      setError(recoveredPrepare
+      const retired = e instanceof Error && e.message.includes('RETIRED_ATTESTATION_PROFILE');
+      setError(retired
+        ? 'This attempt was prepared with a retired attestation format and cannot be approved. Use Back to cancel it, which releases its reserved inputs, then prepare again.'
+        : recoveredPrepare
         ? 'The preparation completed despite the lost response. Review the mint intent below before approving it.'
         : approvingId && e instanceof ApiException && e.status === 409
         ? 'This approval or build may still be processing. The saved attempt is retained; check its status before retrying.'

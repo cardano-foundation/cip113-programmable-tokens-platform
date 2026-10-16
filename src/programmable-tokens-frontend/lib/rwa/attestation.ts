@@ -1,5 +1,6 @@
 import { Address } from "@evolution-sdk/evolution";
 import type { CmtaAttestation } from "../../types/api";
+import { hexToBytes, verifyCip30Claim } from "./cose";
 
 export interface StakeIdentity { credentialHash: string; credentialType: 0 | 1 }
 
@@ -47,24 +48,61 @@ export function buildCmtaAttestationPayloadHex(address: string, policyId: string
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** The dialog accepts only a signature; the issuer key is resolved by the backend. */
-export function prepareCmtaSignature(signatureText: string, signedPayloadHex: string,
+
+/**
+ * A CIP-30 `signData` result pasted from ANOTHER wallet, as `{signature, key}` JSON or the two
+ * hex fields. It only proves a signature over whatever was signed, so it must be over the claim
+ * this dialog built and copied — and that claim must not have changed since.
+ */
+export function prepareCip30Signature(text: string, signedPayloadHex: string,
     currentPayloadHex: string, trustedVkeys: string[]): CmtaAttestation {
   if (!signedPayloadHex)
-    throw new Error("Copy the payload before pasting its signature");
+    throw new Error("Copy the claim before pasting its signData result");
   if (!currentPayloadHex || signedPayloadHex !== currentPayloadHex)
-    throw new Error("The claim changed; copy its new payload and paste a new signature");
-  if (!trustedVkeys.some((key) => typeof key === "string" && /^[0-9a-fA-F]{64}$/.test(key)))
-    throw new Error("This token has no trusted entity that can sign a claim");
-  const signatureHex = signatureText.trim().replace(/^0x/i, "");
-  if (!/^[0-9a-fA-F]{128}$/.test(signatureHex))
-    throw new Error("Paste a 64-byte raw Ed25519 signature in hex");
-  return { payloadHex: currentPayloadHex, signatureHex: signatureHex.toLowerCase() };
+    throw new Error("The claim changed; copy its new payload and sign again");
+  const { coseSign1Hex, coseKeyHex } = readSignDataResult(text);
+  return checkedAttestation(currentPayloadHex, coseSign1Hex, coseKeyHex, trustedVkeys);
 }
 
-export interface ParsedCmtaAttestation { attestation: CmtaAttestation; tier: number; validUntilMs: number }
+/** `{signature, key}` (what signData returns), or `signature` and `key` hex on two lines. */
+function readSignDataResult(text: string): { coseSign1Hex: string; coseKeyHex: string } {
+  const trimmed = text.trim();
+  let signature: unknown, key: unknown;
+  if (trimmed.startsWith("{")) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(trimmed); } catch { throw new Error("Paste the wallet's signData result as JSON"); }
+    const record = (parsed ?? {}) as Record<string, unknown>;
+    signature = record.signature; key = record.key;
+  } else {
+    [signature, key] = trimmed.split(/\s+/);
+  }
+  if (typeof signature !== "string" || typeof key !== "string" || !signature || !key)
+    throw new Error("Paste the wallet's signData result: {\"signature\": \"…\", \"key\": \"…\"}");
+  return { coseSign1Hex: signature.replace(/^0x/i, "").toLowerCase(), coseKeyHex: key.replace(/^0x/i, "").toLowerCase() };
+}
 
-/** Advisory UI check; the backend repeats it against the live GS and verifies Ed25519. */
+function checkedAttestation(payloadHex: string, coseSign1Hex: string, coseKeyHex: string,
+    trustedVkeys: string[]): CmtaAttestation {
+  if (!trustedVkeys.some((key) => typeof key === "string" && /^[0-9a-fA-F]{64}$/.test(key)))
+    throw new Error("This token has no trusted entity that can sign a claim");
+  const verified = verifyCip30Claim(hexToBytes(payloadHex), coseSign1Hex, coseKeyHex);
+  if (!trustedVkeys.some((key) => key.toLowerCase() === verified.issuerVkeyHex))
+    throw new Error(`Signed by ${verified.issuerVkeyHex}, which is not a trusted issuer of this token`);
+  return { payloadHex: payloadHex.toLowerCase(), coseSign1Hex, coseKeyHex };
+}
+
+export interface ParsedCmtaAttestation { attestation: CmtaAttestation; tier: number; validUntilMs: number; hashed: boolean }
+
+/** The copy-paste bundle an issuer hands a holder. Compact JSON, version 1. */
+export function buildAttestationBundle(attestation: CmtaAttestation): string {
+  return JSON.stringify({ v: 1, payloadHex: attestation.payloadHex,
+    coseSign1Hex: attestation.coseSign1Hex, coseKeyHex: attestation.coseKeyHex });
+}
+
+/**
+ * Advisory UI check of a bundle against THIS party, token and network; the backend repeats it
+ * against the live GlobalState. The bundle's own claim is the claim — nothing is rebuilt.
+ */
 export function parseCmtaAttestationJson(text: string, address: string, policyId: string,
     networkId: number, trustedVkeys: string[], nowMs = Date.now()): ParsedCmtaAttestation {
   let input: unknown;
@@ -72,16 +110,18 @@ export function parseCmtaAttestationJson(text: string, address: string, policyId
   if (!input || typeof input !== "object" || Array.isArray(input))
     throw new Error("Attestation must be a JSON object");
   const record = input as Record<string, unknown>;
-  const readHex = (name: string, bytes: number): string => {
+  if (record.v !== 1) throw new Error("Unsupported attestation bundle version (expected v: 1)");
+  const readHex = (name: string, bytes?: number): string => {
     const value = record[name];
-    if (typeof value !== "string" || !new RegExp(`^[0-9a-fA-F]{${bytes * 2}}$`).test(value))
-      throw new Error(`${name} must be ${bytes} bytes of hex`);
+    if (typeof value !== "string" || !/^[0-9a-fA-F]+$/.test(value) || value.length % 2 !== 0
+        || (bytes !== undefined && value.length !== bytes * 2))
+      throw new Error(bytes !== undefined ? `${name} must be ${bytes} bytes of hex` : `${name} must be hex`);
     return value.toLowerCase();
   };
   const payloadHex = readHex("payloadHex", 67);
-  const signatureHex = readHex("signatureHex", 64);
-  const issuerVkeyHex = readHex("issuerVkeyHex", 32);
-  const payload = Uint8Array.from(payloadHex.match(/../g)!, (part) => parseInt(part, 16));
+  const coseSign1Hex = readHex("coseSign1Hex");
+  const coseKeyHex = readHex("coseKeyHex");
+  const payload = hexToBytes(payloadHex);
   const identity = stakeIdentityFromBaseAddress(address);
   if (payloadHex.slice(0, 56) !== identity.credentialHash)
     throw new Error("Attestation is for a different stake credential");
@@ -96,7 +136,47 @@ export function parseCmtaAttestationJson(text: string, address: string, policyId
   if (payload[65] !== networkId) throw new Error("Attestation is for a different network");
   if (payload[66] !== identity.credentialType)
     throw new Error("Attestation credential type does not match the address");
-  if (!trustedVkeys.some((key) => key.toLowerCase() === issuerVkeyHex))
+  const verified = verifyCip30Claim(payload, coseSign1Hex, coseKeyHex);
+  if (!trustedVkeys.some((key) => key.toLowerCase() === verified.issuerVkeyHex))
     throw new Error("Issuer is not trusted by this token");
-  return { attestation: { payloadHex, signatureHex, issuerVkeyHex }, tier, validUntilMs: Number(expiry) };
+  return { attestation: { payloadHex, coseSign1Hex, coseKeyHex }, tier, validUntilMs: Number(expiry), hashed: verified.hashed };
+}
+
+export interface PasteContext {
+  /** The address of the party this paste is for (sender or recipient). */
+  address: string;
+  policyId: string;
+  networkId: number;
+  trustedVkeys: string[];
+  /** The claim the dialog built when the user copied it (raw signData path only). */
+  signedPayloadHex: string;
+  /** The claim the dialog's tier/expiry inputs build NOW (raw signData path only). */
+  currentPayloadHex: string;
+  nowMs?: number;
+}
+
+export type ResolvedAttestation =
+  | { kind: "bundle"; attestation: CmtaAttestation; tier: number; validUntilMs: number }
+  | { kind: "signData"; attestation: CmtaAttestation };
+
+/**
+ * The holder-side data flow (plan "Holder-side data flow"):
+ * - a BUNDLE (`{"v":1,…}`) carries its own claim: it is checked against this party and sent
+ *   as-is — no copied payload needed, the modal's tier/expiry do not apply;
+ * - a raw signData `{signature,key}` signs whatever the dialog copied, so it needs the copied,
+ *   unchanged claim.
+ */
+export function resolvePastedAttestation(text: string, ctx: PasteContext): ResolvedAttestation {
+  const trimmed = text.trim();
+  let isBundle = false;
+  if (trimmed.startsWith("{")) {
+    try { isBundle = (JSON.parse(trimmed) as Record<string, unknown>)?.v !== undefined; } catch { /* reported below */ }
+  }
+  if (isBundle) {
+    const parsed = parseCmtaAttestationJson(trimmed, ctx.address, ctx.policyId, ctx.networkId,
+      ctx.trustedVkeys, ctx.nowMs);
+    return { kind: "bundle", attestation: parsed.attestation, tier: parsed.tier, validUntilMs: parsed.validUntilMs };
+  }
+  return { kind: "signData",
+    attestation: prepareCip30Signature(trimmed, ctx.signedPayloadHex, ctx.currentPayloadHex, ctx.trustedVkeys) };
 }

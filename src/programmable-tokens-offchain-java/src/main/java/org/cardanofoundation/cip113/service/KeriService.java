@@ -736,17 +736,7 @@ public class KeriService {
             credentialChunks.add(chunk);
         }
 
-        MetadataMap cip170Map = MetadataBuilder.createMap();
-        cip170Map.put("t", "AUTH_BEGIN");
-        cip170Map.put("i", kyc.getAid());
-        cip170Map.put("s", kyc.getCredentialSaid());
-        cip170Map.put("c", credentialChunks);
-
-        MetadataMap versionMap = MetadataBuilder.createMap();
-        versionMap.put("v", "1.0");
-        versionMap.put("k", "KERI10JSON");
-        versionMap.put("a", "ACDC10JSON");
-        cip170Map.put("v", versionMap);
+        MetadataMap cip170Map = Cip170AuthBegin.record(kyc.getAid(), kyc.getCredentialSaid(), credentialChunks);
 
         Metadata metadata = MetadataBuilder.createMetadata();
         metadata.put(170L, cip170Map);

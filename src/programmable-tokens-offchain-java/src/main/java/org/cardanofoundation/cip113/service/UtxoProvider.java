@@ -52,6 +52,42 @@ public class UtxoProvider {
         return Optional.empty();
     }
 
+    /**
+     * The withdrawable reward balance of a stake address, or empty when the backend cannot
+     * answer. A withdrawal must take an account's WHOLE balance (ledger rule), and anyone can
+     * top a script's reward account up — so a withdraw-0 that was correct yesterday can be
+     * rejected today. Callers fall back to 0 (the normal case) when this is empty.
+     */
+    public Optional<java.math.BigInteger> rewardBalance(String stakeAddress) {
+        try {
+            var info = bfBackendService.getAccountService().getAccountInformation(stakeAddress);
+            if (info.isSuccessful() && info.getValue() != null && info.getValue().getWithdrawableAmount() != null) {
+                return Optional.of(new java.math.BigInteger(info.getValue().getWithdrawableAmount()));
+            }
+        } catch (Exception e) {
+            log.debug("could not read the reward balance of {}: {}", stakeAddress, e.toString());
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Circulating supply of one asset, summed over the local asset index ({@link #findUtxosByPolicy}),
+     * so it also answers on a devnet. Empty when no index is available.
+     */
+    public Optional<java.math.BigInteger> assetSupply(String policyId, String assetNameHex) {
+        // The asset's own minted-minus-burned quantity. A UTxO scan undercounts: holders sit at
+        // many addresses and the policy-scan helper looks at one asset and one address only.
+        try {
+            var result = bfBackendService.getAssetService().getAsset(policyId + assetNameHex);
+            if (result.isSuccessful() && result.getValue() != null && result.getValue().getQuantity() != null) {
+                return Optional.of(new java.math.BigInteger(result.getValue().getQuantity()));
+            }
+        } catch (Exception e) {
+            log.debug("could not read the supply of {}{}: {}", policyId, assetNameHex, e.toString());
+        }
+        return Optional.empty();
+    }
+
     public Optional<Utxo> findUtxo(String txHash, int outputIndex) {
 
         if (utxoRepository == null) {

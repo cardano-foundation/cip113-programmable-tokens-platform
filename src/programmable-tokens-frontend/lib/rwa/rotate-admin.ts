@@ -137,7 +137,8 @@ export interface RotationIntent {
  * Decode a rotation so a human can see what they are signing.
  *
  * ⛔ FROM THE REDEEMER, NOT FROM THE OUTPUT DATUM. The redeemer is what
- * `global_state.ak` actually reads to decide who must sign — it compares
+ * `global_state_logic.ak` actually reads to decide who must sign (at the PR #29 pin it rides on the
+ * GlobalState LOGIC withdrawal, a Reward redeemer — this decoder scans every redeemer, whatever its tag) — it compares
  * `new_admin_credential_hash` against `extra_signatories`. The output datum carries the same value,
  * but it is the builder's claim about the result; the redeemer is the validator's input. If the two
  * ever disagreed, the redeemer is the one that decides whether the transaction validates.

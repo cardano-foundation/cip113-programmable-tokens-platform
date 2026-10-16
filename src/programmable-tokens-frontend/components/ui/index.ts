@@ -11,6 +11,9 @@ export { Select } from "./select";
 export type { SelectProps, SelectOption } from "./select";
 
 export { Badge } from "./badge";
+
+export { Tabs } from "./tabs";
+export type { TabItem } from "./tabs";
 export type { BadgeProps } from "./badge";
 
 export { Toast, Toaster, useToast } from "./toast";

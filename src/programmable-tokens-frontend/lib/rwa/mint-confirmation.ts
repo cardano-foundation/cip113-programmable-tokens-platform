@@ -2,7 +2,9 @@ import { transactionHash } from '../tx/hash';
 
 export interface SavedMintChain {
   payer: string;
-  chain: { mintTxHash: string; attestationTxHash: string };
+  /** CIP-170 ATTEST_TX mints are one transaction (no attestationTxHash);
+   *  records saved under the retired child profile carry the child as a second transaction. */
+  chain: { mintTxHash: string; attestationTxHash?: string | null };
   signed: string[];
   quantity?: string;
   assetName?: string;
@@ -55,13 +57,15 @@ export function waitForMintPoll(signal: AbortSignal): Promise<void> {
 
 /** Check the saved bytes before they can cross a submission boundary. */
 export function validateSavedMint(record: SavedMintChain): string[] {
-  const hashes = [record?.chain?.mintTxHash, record?.chain?.attestationTxHash];
-  if (!record?.payer || !Array.isArray(record.signed) || record.signed.length !== 2 ||
+  const child = record?.chain?.attestationTxHash;
+  const hashes = child === undefined || child === null
+    ? [record?.chain?.mintTxHash] : [record?.chain?.mintTxHash, child];
+  if (!record?.payer || !Array.isArray(record.signed) || record.signed.length !== hashes.length ||
       hashes.some(hash => typeof hash !== 'string' || !/^[0-9a-f]{64}$/i.test(hash)) ||
-      hashes[0].toLowerCase() === hashes[1].toLowerCase())
+      (hashes.length === 2 && hashes[0]!.toLowerCase() === hashes[1]!.toLowerCase()))
     throw new Error('Saved mint chain is invalid. Its recovery record has been retained.');
-  for (let i = 0; i < 2; i++) {
-    if (transactionHash(record.signed[i]) !== hashes[i].toLowerCase())
+  for (let i = 0; i < hashes.length; i++) {
+    if (transactionHash(record.signed[i]) !== hashes[i]!.toLowerCase())
       throw new Error('Saved signed transaction does not match the expected mint chain. Its recovery record has been retained.');
   }
   const state = record.confirmation;
@@ -69,7 +73,7 @@ export function validateSavedMint(record: SavedMintChain): string[] {
       !Number.isInteger(state.submissions) || state.submissions < 0 || state.submissions > MAX_SUBMISSIONS ||
       (state.lastError !== undefined && typeof state.lastError !== 'string')))
     throw new Error('Saved mint submission state is invalid. Its recovery record has been retained.');
-  return hashes.map(hash => hash.toLowerCase());
+  return hashes.map(hash => hash!.toLowerCase());
 }
 
 /** One owner per intent, including reloads in other tabs where Web Locks is supported.
@@ -106,11 +110,12 @@ async function reconcile(ports: MintConfirmationPorts, initial: SavedMintChain):
     throw new Error('Submission returned unexpected transaction hashes. The saved chain needs inspection.');
   const state = record.confirmation;
   const pause = ports.pause ?? waitForMintPoll;
+  const subject = hashes.length === 2 ? 'the mint and CIP-170 attestation' : 'the attested mint';
   const progress = () => ports.progress(state.phase === 'accepted'
-    ? 'Waiting for the mint and CIP-170 attestation to confirm…'
+    ? `Waiting for ${subject} to confirm…`
     : state.submissions >= MAX_SUBMISSIONS
       ? `Submission status is uncertain; checking the chain…${state.lastError ? ` Last submission response: ${state.lastError}` : ''}`
-      : 'Checking mint and CIP-170 confirmation…', hashes);
+      : `Checking ${subject} confirmation…`, hashes);
 
   const submit = async (start: number) => {
     active(ports.signal);
@@ -151,7 +156,7 @@ async function reconcile(ports: MintConfirmationPorts, initial: SavedMintChain):
       continue;
     }
     active(ports.signal);
-    if (!Array.isArray(observations) || observations.length !== 2 || observations.some((item, index) =>
+    if (!Array.isArray(observations) || observations.length !== hashes.length || observations.some((item, index) =>
       !item || typeof item.hash !== 'string' || item.hash.toLowerCase() !== hashes[index] ||
       !['CONFIRMED', 'INVALID', 'NOT_INDEXED', 'UNKNOWN'].includes(item.status)))
       throw new Error('Chain status does not match the saved mint transactions. The recovery record has been retained.');
@@ -163,7 +168,7 @@ async function reconcile(ports: MintConfirmationPorts, initial: SavedMintChain):
     }
     if (state.phase !== 'accepted' && state.submissions < MAX_SUBMISSIONS) {
       if (observations.every(item => item.status === 'NOT_INDEXED')) await submit(0);
-      else if (observations[0].status === 'CONFIRMED' && observations[1].status === 'NOT_INDEXED') await submit(1);
+      else if (hashes.length === 2 && observations[0].status === 'CONFIRMED' && observations[1].status === 'NOT_INDEXED') await submit(1);
     }
     progress();
     await pause(ports.signal);

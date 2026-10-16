@@ -8,8 +8,8 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * The public reconstruction rule for a transaction-bound mint attestation.
- * The order and spelling of these two keys are part of the protocol.
+ * The retired child-profile payload {d, txHash}. Kept to recognise and recover mints built before
+ * CIP-170 ATTEST_TX; new attestations use {@link TxAttestationSeal}.
  */
 public final class MintTxHashPayload {
     private MintTxHashPayload() {}
@@ -30,6 +30,18 @@ public final class MintTxHashPayload {
         payload.put("d", "#".repeat(44));
         payload.put("txHash", normalize(transactionHash));
         return Serder.dumps(payload);
+    }
+
+    /** True only for a stored document of exactly this retired shape (keys d, txHash in order). */
+    public static boolean isDocument(String documentJson) {
+        if (documentJson == null) return false;
+        try {
+            Map<String, Object> document = new com.fasterxml.jackson.databind.ObjectMapper().readValue(documentJson,
+                    new com.fasterxml.jackson.core.type.TypeReference<LinkedHashMap<String, Object>>() {});
+            return new java.util.ArrayList<>(document.keySet()).equals(java.util.List.of("d", "txHash"));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private static String normalize(String transactionHash) {

@@ -121,6 +121,8 @@ export interface Cip170AttestationData {
   digest: string;
   seqNumber: string;
   cipVersion: string;
+  /** Absent means ATTEST. ATTEST_TX (CIP-170 v1.1) has no digest or seqNumber. */
+  type?: 'ATTEST' | 'ATTEST_TX';
 }
 
 export interface MintTokenRequest {
@@ -226,11 +228,25 @@ export interface TransferTokenRequest {
 }
 
 /** CMTA's 67-byte claim with a raw Ed25519 signature from a trusted issuer. */
+/** A trusted issuer's CIP-30 signData result over the 67-byte CMTA KYC claim (PR #29). */
 export interface CmtaAttestation {
+  /** The claim itself — never the COSE payload (which is its Blake2b-224 in CIP-8 hashed mode). */
   payloadHex: string;
-  signatureHex: string;
-  /** Optional hint for older callers; the backend resolves a trusted key when omitted. */
-  issuerVkeyHex?: string;
+  /** The wallet's `signature` (COSE_Sign1, hex). */
+  coseSign1Hex: string;
+  /** The wallet's `key` (COSE_Key, hex); its -2 value must be a trusted issuer. */
+  coseKeyHex: string;
+}
+
+/** POST /rwa-token/{policyId}/attestation/verify — read-only check against the live GlobalState. */
+export interface AttestationCheck {
+  valid: boolean;
+  reason: string | null;
+  subjectCredentialHash: string | null;
+  credentialType: number | null;
+  tier: number | null;
+  validUntilMs: number | null;
+  issuerVkey: string | null;
 }
 
 // Backend returns plain text CBOR hex string (not JSON)

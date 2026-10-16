@@ -129,4 +129,26 @@ public class RwaTokenRegistrationEntity {
      *  longer delegates to. */
     @Column(name = "minting_authority_hash", length = 56)
     private String mintingAuthorityHash;
+
+    /** The GENESIS {@code max_global_state_datum_bytes}, applied to the GlobalState mint and
+     *  the v1 logic. Needed to re-derive both; NULL only on rows from before V34, whose
+     *  GlobalState the PR #29 builders cannot spend anyway. See V34. */
+    @Column(name = "max_gs_datum_bytes")
+    private Integer maxGsDatumBytes;
+
+    /** JSON list of {@link org.cardanofoundation.cip113.model.GsLogicEntry}: every GlobalState
+     *  logic this platform built for the token (genesis v1, then each rotation target), with
+     *  its applied bytes, cap and reference-script location. Every GlobalState write looks up
+     *  datum field 0 here and refuses when it is absent. Read and write it only through
+     *  {@code GsLogicEntry}. See V34. */
+    @Column(name = "gs_logics", columnDefinition = "TEXT")
+    private String gsLogics;
+
+    /** Optimistic lock (plan Addendum I13). {@code gs_logics} is a read-modify-write JSON list:
+     *  a lost update could drop the entry GlobalState's field 0 names, after which every
+     *  GlobalState write refuses (UNKNOWN LOGIC). Null on a builder-made row means "new"; rows
+     *  from before V34 load the column default 0. */
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version;
 }
