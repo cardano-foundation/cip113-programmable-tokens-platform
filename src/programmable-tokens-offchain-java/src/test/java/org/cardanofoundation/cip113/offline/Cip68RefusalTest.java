@@ -34,13 +34,17 @@ public class Cip68RefusalTest {
     private static KycModuleHandler kycHandler() {
         return new KycModuleHandler(
                 null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null);
+                null, null, null, null, null, null,
+                null,
+                null);
     }
 
     private static KycExtendedModuleHandler kycExtendedHandler() {
         return new KycExtendedModuleHandler(
                 null, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null,
+                null,
+                null);
     }
 
     private static MintTokenRequest mintWithMetadata() {

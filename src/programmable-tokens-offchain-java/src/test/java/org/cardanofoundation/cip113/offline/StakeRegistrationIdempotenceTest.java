@@ -91,7 +91,9 @@ public class StakeRegistrationIdempotenceTest {
                         stakeRepo,
                         // Nothing pre-recorded: these tests exercise the ledger and
                         // indexed-certificate sources, not the learned one.
-                        Mockito.mock(org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class)));
+                        Mockito.mock(org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class)),
+                CclTestWiring.deployments(chain),
+                CclTestWiring.quickTx(chain));
     }
 
     private static DummyRegisterRequest dummyRequest() {
@@ -248,7 +250,9 @@ public class StakeRegistrationIdempotenceTest {
                         // indexed-certificate sources, not the learned one.
                         Mockito.mock(org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class)),
                 utxoProvider,
-                Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class));
+                Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
+                CclTestWiring.deployments(chain),
+                CclTestWiring.quickTx(chain));
     }
 
     // ------------------------------------------ the SDK-facing registration check
@@ -336,7 +340,9 @@ public class StakeRegistrationIdempotenceTest {
                         emptyIndex,
                         // Nothing pre-recorded: these tests exercise the ledger and
                         // indexed-certificate sources, not the learned one.
-                        Mockito.mock(org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class)));
+                        Mockito.mock(org.cardanofoundation.cip113.repository.KnownScriptRegistrationRepository.class)),
+                CclTestWiring.deployments(chain),
+                CclTestWiring.quickTx(chain));
 
         var result = handler.buildPreRegistrationTransaction(dummyRequest(), boot.params());
 
@@ -400,7 +406,9 @@ public class StakeRegistrationIdempotenceTest {
                         null,
                         Mockito.mock(AccountService.class),
                         emptyIndex,
-                        known));
+                        known),
+                CclTestWiring.deployments(chain),
+                CclTestWiring.quickTx(chain));
 
         var result = handler.buildPreRegistrationTransaction(dummyRequest(), boot.params());
 
