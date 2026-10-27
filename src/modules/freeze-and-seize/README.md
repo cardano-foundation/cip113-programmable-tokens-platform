@@ -1,5 +1,8 @@
 # Freeze-and-Seize Module
 
+> [!CAUTION]
+> **Demo contract. NOT ready for production.** This module shows how a CIP-113 module can be built and exists to exercise the platform on testnets. It is unaudited, may contain security flaws, and may change incompatibly at any time. Do not use it to issue tokens that hold real value.
+
 A CIP-113 module for regulated stablecoins: denylist-aware transfer logic, seizure/freeze operations, and on-chain denylist management.
 
 This module demonstrates how regulatory controls can be implemented on top of the CIP-113 core framework while preserving Cardano's native-token semantics.

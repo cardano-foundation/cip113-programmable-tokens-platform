@@ -55,6 +55,9 @@ A Spring Boot application providing transaction building and blockchain integrat
 
 Modules are the pluggable rule sets that define how specific programmable tokens behave on top of the CIP-113 core framework. Each module is its own Aiken project.
 
+> [!CAUTION]
+> **The `dummy`, `freeze-and-seize`, `kyc`, and `kyc-extended` modules are demo contracts and are NOT ready for production.** They exist to show how CIP-113 modules can be built and to exercise this platform on testnets. They are unaudited, may contain security flaws, and may change incompatibly at any time. Do not use them to issue tokens that hold real value. A production token needs its own module, written for its requirements and professionally audited.
+
 - **[`dummy/`](./src/modules/dummy/)** — Minimal permissioned-transfer module requiring a specific credential; useful as a template and for integration tests.
 - **[`freeze-and-seize/`](./src/modules/freeze-and-seize/)** — Denylist-aware transfer logic, seizure/freeze operations, and on-chain denylist management for regulated stablecoins.
 - **[`kyc/`](./src/modules/kyc/)** — Sender KYC proofs backed by an updatable trusted-entity list.
@@ -93,7 +96,7 @@ For a deeper walkthrough of the on-chain design, see the [on-chain repository's 
 - ✅ Core on-chain validators implemented and tested (see the [on-chain repo](https://github.com/cardano-foundation/cip113-programmable-tokens))
 - ✅ Reference frontend with wallet integration and core flows
 - ✅ Java off-chain service with transaction builders and Blockfrost/Yaci integration
-- ✅ Dummy, Freeze-and-Seize, KYC, and KYC-Extended modules implemented; the RWA-token blueprint is shipped from upstream
+- ✅ Dummy, Freeze-and-Seize, KYC, and KYC-Extended **demo** modules implemented (not for production); the RWA-token blueprint is shipped from upstream
 - ✅ Limited testing on Preview testnet
 - ⏳ Comprehensive real-world testing required
 - ⏳ **Professional security audit pending**
@@ -105,6 +108,8 @@ For a deeper walkthrough of the on-chain design, see the [on-chain repository's 
 - Comprehensive security audit by qualified professionals
 - Extensive testing across diverse scenarios
 - Thorough review by domain experts
+
+The bundled `dummy`, `freeze-and-seize`, `kyc`, and `kyc-extended` modules are **demo contracts**. Do not deploy them for production use, even after the platform itself has been audited.
 
 ---
 
