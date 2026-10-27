@@ -1,3 +1,10 @@
+//// DEMO CONTRACT. NOT READY FOR PRODUCTION.
+////
+//// This validator belongs to a demo module. It shows how a CIP-113 module can
+//// be built and exists to exercise the platform on testnets. It is unaudited,
+//// may contain security flaws, and may change incompatibly at any time. Do not
+//// use it to issue tokens that hold real value.
+
 use aiken/builtin
 use aiken/collection/list
 // Example Transfer Logic - Simple permissioned transfer

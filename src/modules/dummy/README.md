@@ -1,5 +1,8 @@
 # Dummy Module
 
+> [!CAUTION]
+> **Demo contract. NOT ready for production.** This module shows how a CIP-113 module can be built and exists to exercise the platform on testnets. It is unaudited, may contain security flaws, and may change incompatibly at any time. Do not use it to issue tokens that hold real value.
+
 A minimal CIP-113 module used for integration testing and as a template for building new modules.
 
 The `transfer` validator accepts a transfer only when the redeemer is exactly `200`; the `issue` validator accepts issuance only when the redeemer is exactly `100`. There is no real-world authorisation logic — the point is to exercise the CIP-113 registry, withdrawal flow, and off-chain integration without any domain-specific rules getting in the way.
