@@ -388,7 +388,9 @@ public class DevnetRwaTokenPathsTest {
                 hybridUtxoSupplier,
                 hybridScriptSupplier,
                 org.mockito.Mockito.mock(org.cardanofoundation.cip113.repository.CustomStakeRegistrationRepository.class),
-                devnetConverters());
+                devnetConverters(),
+                new org.cardanofoundation.cip113.ccl.CclDeployments(HandlerFixtures.NETWORK, backend, HandlerFixtures.protocolScriptBuilderService()),
+                new org.cardanofoundation.cip113.ccl.CclQuickTx(hybridUtxoSupplier, hybridScriptSupplier, protocolParamsSupplier, new com.bloxbean.cardano.aiken.AikenTransactionEvaluator(hybridUtxoSupplier, protocolParamsSupplier, hybridScriptSupplier, new com.bloxbean.cardano.client.common.model.SlotConfig(1000, 0L, devnetSystemStartMs()))));
 
         String adminPkh = new Address(BootstrapFixture.ADMIN.baseAddress())
                 .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();

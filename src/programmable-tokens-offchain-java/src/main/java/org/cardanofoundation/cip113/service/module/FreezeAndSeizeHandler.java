@@ -1,5 +1,19 @@
 package org.cardanofoundation.cip113.service.module;
 
+import com.bloxbean.cardano.client.address.CredentialType;
+import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenCredential;
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenPolicyRef;
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenRegistration;
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenTx;
+import com.bloxbean.cardano.client.programmabletoken.ThirdPartyBurnAuthorization;
+import com.bloxbean.cardano.client.programmabletoken.cip113.Cip113ProgrammableTokenService;
+import com.bloxbean.cardano.client.programmabletoken.cip113.LedgerOrdering;
+import com.bloxbean.cardano.client.transaction.spec.TransactionInput;
+import org.cardanofoundation.cip113.ccl.CclDeployments;
+import org.cardanofoundation.cip113.ccl.CclQuickTx;
+import org.cardanofoundation.cip113.ccl.CclWallets;
+import org.cardanofoundation.cip113.ccl.SubstandardRedeemerExtension;
 import com.bloxbean.cardano.client.address.Address;
 import com.bloxbean.cardano.client.address.AddressProvider;
 import com.bloxbean.cardano.client.address.Credential;
@@ -93,6 +107,15 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
 
     private static final String MODULE_ID = "freeze-and-seize";
 
+    /** {@code issuer_admin}'s redeemer: it checks only that the permitted credential signed. */
+    private static final PlutusData ISSUER_ADMIN = ConstrPlutusData.of(0);
+
+    /** The inline datum the platform writes on every holding ({@code Constr 0 []}). */
+    private static final PlutusData HOLDING = CoreDatums.programmableTokenDatum();
+
+    /** The name the registration and its first mint refer to each other by, within one transaction. */
+    private static final String REGISTRATION = "token";
+
     private final ObjectMapper objectMapper;
     private final AppConfig.Network network;
     private final BlacklistNodeParser blacklistNodeParser;
@@ -123,6 +146,12 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
     private final UtxoProvider utxoProvider;
 
     private final BFBackendService bfBackendService;
+
+    /** CCL's programmable-token service for the deployment each request names. */
+    private final CclDeployments cclDeployments;
+
+    /** A fresh CCL-extended builder per transaction, on the platform's suppliers. */
+    private final CclQuickTx cclQuickTx;
 
     /**
      * Context for this handler instance.
@@ -235,6 +264,269 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
 
     @Override
     public TransactionContext<RegistrationResult> buildRegistrationTransaction(
+            FreezeAndSeizeRegisterRequest request,
+            ProtocolBootstrapParams protocolParams) {
+
+        // CCL gap #17. A registration chained onto a blacklist init that is not on chain yet must
+        // spend that init's change output. CCL selects the fee payer's inputs itself and cannot be
+        // pointed at a pending output, so the chained flow keeps its hand-built transaction.
+        if (request.getChainingTransactionCborHex() != null) {
+            return buildChainedRegistrationTransaction(request, protocolParams);
+        }
+
+        try {
+            var adminPkh = Credential.fromKey(request.getAdminPubKeyHash());
+            var blacklistNodePolicyId = request.getBlacklistNodePolicyId();
+
+            // CIP-68 mints a PAIR under this one policy: the labelled user token, plus a (100)
+            // reference token of quantity 1 carrying the metadata as an inline datum.
+            //
+            // The labelled name has to be settled HERE, before the issuer-admin script is built,
+            // because that script is parameterized by the asset name and issuance_mint is in turn
+            // parameterized by that script — so the label participates in the token policy id.
+            // The TypeScript SDK path does the same (`labeledAssetName(333, …)` feeding
+            // `deployment.assetName`); if this used the bare name the two paths would register
+            // different policies for the same wizard input.
+            //
+            // The label is ALWAYS (333). example_transfer_logic.ak's issuer_admin_contract checks
+            // only that the permitted credential signed or withdrew — it ignores its
+            // `_asset_name` parameter and caps nothing — and buildMintTransaction below can mint
+            // more of the same name at any time. A (222) would therefore be a non-fungibility
+            // claim this module cannot enforce. Making the label independent of `quantity`
+            // also removes a whole failure mode: buildBlacklistInitTransaction registers the
+            // issuer_admin reward account that this registration withdraws-0 from, and if the two
+            // derived different labels from different quantities they would derive different
+            // reward addresses. They no longer can.
+            var cip68Metadata = request.getCip68Metadata();
+            if (cip68Metadata != null
+                && (request.getQuantity() == null || request.getQuantity().isBlank())) {
+                return TransactionContext.typedError(
+                        "quantity is required when cip68Metadata is present — the reference token "
+                        + "is minted against a stated supply.");
+            }
+            var mintQuantity = new BigInteger(request.getQuantity());
+            if (cip68Metadata != null && mintQuantity.signum() <= 0) {
+                return TransactionContext.typedError(
+                        "quantity must be > 0 when cip68Metadata is present, got: " + mintQuantity);
+            }
+            var userAssetNameHex = cip68Metadata == null
+                    ? request.getAssetName()
+                    : Cip68.labeledAssetName(Cip68.uncappedUserTokenLabel(), request.getAssetName());
+            var referenceAssetNameHex = cip68Metadata == null
+                    ? null
+                    : Cip68.labeledAssetName(Cip68.LABEL_REFERENCE, request.getAssetName());
+
+            // Cross-check against the blacklist init, BEFORE building anything. That transaction
+            // registered the issuer_admin reward account this registration is about to withdraw-0
+            // from, and issuer_admin is parameterized by the asset name — so if the init was built
+            // without CIP-68 and this registration is built with it (or the reverse), the two
+            // resolve DIFFERENT reward addresses and this transaction is rejected on chain with
+            // WithdrawalsNotInRewardsCERTS, after the user has signed and paid for both. Refusing
+            // here costs nothing; discovering it on chain costs the init deposit.
+            //
+            // A null flag means the row pre-dates the column, so there is no evidence either way
+            // and the check stays silent rather than blocking a registration that may be fine.
+            var initRowOpt = blacklistInitRepository.findByBlacklistNodePolicyId(blacklistNodePolicyId);
+            if (initRowOpt.isPresent() && initRowOpt.get().getCip68Enabled() != null
+                && initRowOpt.get().getCip68Enabled() != (cip68Metadata != null)) {
+                return TransactionContext.typedError(
+                        "CIP-68 mismatch: the blacklist init for policy " + blacklistNodePolicyId
+                        + " was built " + (initRowOpt.get().getCip68Enabled() ? "WITH" : "WITHOUT")
+                        + " CIP-68 metadata, but this registration is "
+                        + (cip68Metadata != null ? "WITH" : "WITHOUT")
+                        + " it. The init registered the issuer_admin reward account this "
+                        + "registration withdraws-0 from, and issuer_admin is parameterized by the "
+                        + "asset name — so the labelled and unlabelled forms are different "
+                        + "credentials. Re-run the blacklist init with the same CIP-68 setting.");
+            }
+
+            // ⛔ THE SAME CROSS-CHECK FOR THE OTHER TWO PARAMETERS OF issuer_admin.
+            //
+            // The check above closes the LABEL dimension. `issuer_admin` is parameterised by
+            // (adminPkh, ASSET NAME), and BOTH can differ from what the init registered while the
+            // label agrees:
+            //
+            //   * a different ADMIN — reusing a blacklist created by another wallet. Measured on
+            //     preprod 2026-09-30: an init covered 438e0a0a…, this registration arrived with
+            //     7eb45c3e…, and the withdraw-0 pointed at a reward account nothing had ever
+            //     registered.
+            //   * a different ASSET NAME — a SECOND token against one blacklist. Already present
+            //     in that database: two registrations sharing one blacklist_node_policy_id.
+            //
+            // Either way the ledger rejects with 3141, whose message reads as a balance problem
+            // ("withdrawals must consume rewards in full") and mentions the real cause only in its
+            // last sentence — after the user has signed and paid for the init.
+            //
+            // ⚑ REFUSED HERE, BEFORE BUILDING, because registration CANNOT fix it: the ledger
+            // applies withdrawals before certificates, so this transaction cannot register the
+            // credential it withdraws from. Only a new init can.
+            //
+            // A null recorded address means the row pre-dates the column — no evidence, stay
+            // silent, same convention as cip68Enabled above.
+            var expectedIssuerAdmin = AddressProvider.getRewardAddress(
+                    fesScriptBuilder.buildIssuerAdminScript(adminPkh, userAssetNameHex),
+                    network.getCardanoNetwork()).getAddress();
+            if (initRowOpt.isPresent() && initRowOpt.get().getIssuerAdminStakeAddress() != null
+                && !initRowOpt.get().getIssuerAdminStakeAddress().equals(expectedIssuerAdmin)) {
+                return TransactionContext.typedError(
+                        "This registration's issuer_admin credential is not the one the blacklist "
+                        + "init registered, so the withdraw-0 it needs would target an unregistered "
+                        + "reward account and the ledger would reject it (code 3141).\n"
+                        + "\n"
+                        + "  init registered : " + initRowOpt.get().getIssuerAdminStakeAddress() + "\n"
+                        + "  this needs      : " + expectedIssuerAdmin + "\n"
+                        + "\n"
+                        + "  issuer_admin is parameterised by (admin key hash, asset name), so this "
+                        + "differs because the ADMIN differs (init covered "
+                        + initRowOpt.get().getAdminPkh() + ", this request carries "
+                        + HexUtil.encodeHexString(adminPkh.getBytes()) + ") or because the ASSET NAME "
+                        + "differs — a blacklist covers exactly one pair. Registration cannot repair "
+                        + "it: the ledger applies withdrawals before certificates, so only a new "
+                        + "blacklist init can register this credential. Run a blacklist init with "
+                        + "this admin and this asset name, and register against that blacklist.");
+            }
+
+            // ⛔ AND ASK THE CHAIN, because the comparison above cannot fire for every row.
+            //
+            // The recorded address is NULL on rows written before V33, and those are exactly the
+            // rows most likely to be wrong — they were written while nothing checked. This catches
+            // them, and one case the comparison never could: an init that SKIPPED the certificate
+            // because `isStakeAddressRegistered` answered true when the credential was not in fact
+            // registered. That function has no "unknown" state, so a wrong true silently omits a
+            // certificate and the failure surfaces here, on chain, after payment.
+            //
+            // ⚑ REFUSING ON "NOT REGISTERED" IS SAFE IN THIS DIRECTION. The opposite default —
+            // build anyway and let the ledger decide — is what produced 3141. A false refusal
+            // costs a retry; a false proceed costs the init deposit and leaves the operator reading
+            // a message about rewards balances.
+            // ⛔ ONLY WHEN THE INIT IS ALREADY ON CHAIN. In the CHAINED flow the init transaction
+            // is the thing that registers this credential and it has NOT been submitted yet — the
+            // registration is built on its outputs and the two are signed and submitted together,
+            // init first. So "not registered" is the correct answer about the chain and the wrong
+            // answer about the situation, and asking here refused every FIRST registration against
+            // a fresh blacklist. Measured 2026-10-01: a brand-new wallet on develop could not
+            // register at all, because a new wallet never has a pre-existing blacklist.
+            //
+            // ⚑ SKIPPING IT COSTS NOTHING THAT MATTERS, which is why this is the right fix rather
+            // than a weakening. The comparison above is the real protection against a wrong admin
+            // or asset name, and it DOES work in the chained case: buildBlacklistInitTransaction
+            // persists the init row with issuerAdminStakeAddress at BUILD time, before submission,
+            // so the row is present and compared. This probe only ever added the case where no row
+            // exists or the row pre-dates V33 — and in the chained flow a row always exists,
+            // because the init that is being chained wrote it moments earlier.
+            boolean initIsChainedInThisBatch = request.getChainingTransactionCborHex() != null;
+            if (!initIsChainedInThisBatch
+                && !scriptRegistrationService.isStakeAddressRegistered(expectedIssuerAdmin)) {
+                return TransactionContext.typedError(
+                        "The issuer_admin reward account this registration must withdraw-0 from is "
+                        + "not registered on chain:\n"
+                        + "\n"
+                        + "  " + expectedIssuerAdmin + "\n"
+                        + "\n"
+                        + "  The blacklist init is the only place it gets registered — the ledger "
+                        + "applies withdrawals before certificates, so this transaction cannot "
+                        + "register the account it withdraws from. Submitting anyway is rejected as "
+                        + "code 3141, whose message describes a rewards-balance problem and mentions "
+                        + "the missing registration only in its last sentence.\n"
+                        + "\n"
+                        + "  issuer_admin is parameterised by (admin key hash, asset name), so a "
+                        + "blacklist covers exactly one pair. Run a blacklist init with THIS admin ("
+                        + HexUtil.encodeHexString(adminPkh.getBytes()) + ") and THIS asset name, and "
+                        + "register the token against that blacklist.\n"
+                        + "\n"
+                        + "  If you ARE initialising a blacklist in the same batch, the registration "
+                        + "must carry chainingTransactionCborHex — without it this check cannot tell "
+                        + "an in-flight init from a missing one.");
+            }
+
+            var blacklistInitOpt = blacklistInitRepository.findByBlacklistNodePolicyId(blacklistNodePolicyId);
+            if (blacklistInitOpt.isEmpty()) {
+                return TransactionContext.typedError("blacklist init could not be found");
+            }
+
+            var service = cclDeployments.service(protocolParams);
+            var deployment = service.advanced().deployment();
+
+            // Issuer to be used for minting/burning/seize, and the transfer logic
+            var moduleIssueContract = fesScriptBuilder.buildIssuerAdminScript(adminPkh, userAssetNameHex);
+            var moduleTransferContract = fesScriptBuilder.buildTransferScript(
+                    protocolParams.programmableLogicBase().scriptHash(),
+                    blacklistNodePolicyId);
+            CclDeployments.registerWitnesses(service, moduleIssueContract, moduleTransferContract);
+            var progTokenPolicyId = policyIdOf(service, moduleIssueContract, protocolParams);
+
+            var existing = service.advanced().getRegistryNode(progTokenPolicyId);
+            if (existing.isSuccessful() && existing.getValue() != null) {
+                return TransactionContext.typedError("registry node already present");
+            }
+
+            // issuer_admin also authorises third-party actions (seize); unfracking is forbidden.
+            var registration = ProgrammableTokenRegistration.builder()
+                    .mintingLogicScript(scriptCredential(moduleIssueContract))
+                    .transferLogicScript(scriptCredential(moduleTransferContract))
+                    .thirdPartyTransferLogicScript(scriptCredential(moduleIssueContract))
+                    .unfrackingLogicScript(new ProgrammableTokenCredential(CredentialType.Key, ""))
+                    .build();
+
+            var recipient = request.getRecipientAddress() == null || request.getRecipientAddress().isBlank()
+                    ? request.getFeePayerAddress()
+                    : request.getRecipientAddress();
+            var tx = new ProgrammableTokenTx()
+                    .from(request.getFeePayerAddress())
+                    .register(REGISTRATION, registration, ISSUER_ADMIN)
+                    .mint(ProgrammableTokenPolicyRef.named(REGISTRATION),
+                            CclWallets.smartWallet(deployment, recipient).toBech32(),
+                            List.of(asset(userAssetNameHex, mintQuantity)), ISSUER_ADMIN, HOLDING);
+            if (cip68Metadata != null) {
+                // The (100) reference token goes to the ISSUER's smart wallet, so the issuer can
+                // spend it later to update the metadata.
+                tx.mint(ProgrammableTokenPolicyRef.named(REGISTRATION),
+                        CclWallets.smartWallet(deployment, request.getFeePayerAddress()).toBech32(),
+                        List.of(asset(referenceAssetNameHex, BigInteger.ONE)),
+                        ISSUER_ADMIN, Cip68.buildDatum(cip68Metadata));
+            }
+
+            var transaction = cclQuickTx.builder(service)
+                    .compose(tx)
+                    .feePayer(request.getFeePayerAddress())
+                    .withRequiredSigners(adminPkh.getBytes())
+                    .mergeOutputs(false)
+                    .build();
+
+            // Measure the finished CBOR before returning it, so user-supplied metadata that
+            // overflows the ledger limit fails here rather than at submission.
+            if (cip68Metadata != null) {
+                Cip68.preflightTxSize("freeze-and-seize registration", transaction.serialize(),
+                        protocolParamsSupplier.getProtocolParams());
+            }
+
+            freezeAndSeizeTokenRegistrationRepository.save(FreezeAndSeizeTokenRegistrationEntity.builder()
+                    .programmableTokenPolicyId(progTokenPolicyId)
+                    .issuerAdminPkh(HexUtil.encodeHexString(adminPkh.getBytes()))
+                    .blacklistInit(blacklistInitOpt.get())
+                    .build());
+
+            // Save to unified programmable token registry (policyId -> moduleId binding)
+            programmableTokenRegistryRepository.save(ProgrammableTokenRegistryEntity.builder()
+                    .policyId(progTokenPolicyId)
+                    .moduleId(MODULE_ID)
+                    // The LABELLED name, so a later mint/transfer resolves the asset that is
+                    // actually on chain rather than the unlabelled base the wizard collected.
+                    .assetName(userAssetNameHex)
+                    .build());
+
+            return TransactionContext.ok(transaction.serializeToHex(), new RegistrationResult(progTokenPolicyId));
+
+        } catch (Exception e) {
+            log.error("error", e);
+            return TransactionContext.typedError("error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * The chained registration, built by hand: CCL gap #17 (see buildRegistrationTransaction).
+     */
+    private TransactionContext<RegistrationResult> buildChainedRegistrationTransaction(
             FreezeAndSeizeRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
 
@@ -793,143 +1085,40 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
                         + "the existing reference-token UTxO and rewrite its datum (not supported here).");
             }
 
-            var adminUtxos = accountService.findAdaOnlyUtxo(request.feePayerAddress(), 10_000_000L);
 
-            var bootstrapTxHash = protocolParams.txHash();
-
-            var issuanceUtxoOpt = utxoProvider.findIssuanceCborHexUtxo(protocolParams);
-            if (issuanceUtxoOpt.isEmpty()) {
-                return TransactionContext.typedError("could not resolve issuance params");
-            }
-            var issuanceUtxo = issuanceUtxoOpt.get();
-            log.info("issuanceUtxo: {}", issuanceUtxo);
-
-            /// Getting Module Contracts and parameterize
-            // Issuer to be used for minting/burning/sieze
             var adminPkh = Credential.fromKey(context.getIssuerAdminPkh());
-            var moduleIssueContract = fesScriptBuilder.buildIssuerAdminScript(Credential.fromKey(context.getIssuerAdminPkh()), request.assetName());
-            log.info("moduleIssueContract: {}", moduleIssueContract.getPolicyId());
+            var service = cclDeployments.service(protocolParams);
+            var deployment = service.advanced().deployment();
+            var moduleIssueContract = fesScriptBuilder.buildIssuerAdminScript(adminPkh, request.assetName());
+            CclDeployments.registerWitnesses(service, moduleIssueContract);
+            var progTokenPolicyId = policyIdOf(service, moduleIssueContract, protocolParams);
 
-            var moduleIssueAddress = AddressProvider.getRewardAddress(moduleIssueContract, network.getCardanoNetwork());
-            log.info("moduleIssueAddress: {}", moduleIssueAddress.getAddress());
-
-
-            var issuanceContract = protocolScriptBuilderService.getParameterizedIssuanceMintScript(protocolParams, moduleIssueContract);
-            log.info("issuanceContract: {}", issuanceContract.getPolicyId());
-
-            // Find the registry node for this token (must exist for subsequent mint)
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
-            var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
-            var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
-            final var progTokenPolicyId = issuanceContract.getPolicyId();
-            var progTokenRegistryOpt = registryEntries.stream()
-                    .filter(utxo -> {
-                        var registryDatumOpt = registryNodeParser.parse(utxo.getInlineDatum());
-                        return registryDatumOpt.map(registryDatum -> registryDatum.key().equals(progTokenPolicyId)).orElse(false);
-                    })
-                    .findAny();
-            if (progTokenRegistryOpt.isEmpty()) {
+            // issuer_admin is parameterised by (admin, asset name), so the request's asset name
+            // decides the policy minted under. Bind it to the policy the request names.
+            if (request.tokenPolicyId() != null && !progTokenPolicyId.equalsIgnoreCase(request.tokenPolicyId())) {
+                return TransactionContext.typedError("issuer_admin for this admin and asset name derives policy "
+                        + progTokenPolicyId + ", but the request names " + request.tokenPolicyId());
+            }
+            var registryNode = service.advanced().getRegistryNode(progTokenPolicyId);
+            if (!registryNode.isSuccessful() || registryNode.getValue() == null) {
                 return TransactionContext.typedError("could not find registry entry for token");
             }
-            var progTokenRegistry = progTokenRegistryOpt.get();
-            var registryRefInput = TransactionInput.builder()
-                    .transactionId(progTokenRegistry.getTxHash())
-                    .index(progTokenRegistry.getOutputIndex())
-                    .build();
-            var paramsUtxoOpt = utxoProvider.findUtxo(
-                    protocolParams.protocolParams().utxo().txHash(),
-                    protocolParams.protocolParams().utxo().outputIndex());
-            if (paramsUtxoOpt.isEmpty()) {
-                return TransactionContext.typedError("could not resolve protocol params UTxO");
-            }
-            var paramsUtxo = paramsUtxoOpt.get();
-            var paramsRefInput = TransactionInput.builder()
-                    .transactionId(paramsUtxo.getTxHash()).index(paramsUtxo.getOutputIndex()).build();
-            var issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
-            var issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
-            var issuanceLogicAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
-            var moduleIssueCredential = Credential.fromScript(moduleIssueContract.getScriptHash());
-            var mintLayout = CoreLayout.builder()
-                    .referenceInput(paramsRefInput).referenceInput(registryRefInput)
-                    .withdrawal(issuanceLogicCredential).withdrawal(moduleIssueCredential).build();
-            var registryRefInputIndex = mintLayout.referenceInputIndex(registryRefInput);
 
-            var registryProof = CoreRedeemers.mintProofRefInput(registryRefInputIndex);
-            var issuanceRedeemer = CoreRedeemers.issuanceRedeemer(
-                    mintLayout.referenceInputIndex(paramsRefInput));
-            var issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
-                    new CoreRedeemers.IssuanceEntry(issuanceContract.getPolicyId(), registryProof)));
-
-            // Programmable Token Mint
-            var programmableToken = Asset.builder()
-                    .name("0x" + request.assetName())
-                    .value(new BigInteger(request.quantity()))
-                    .build();
-
-            Value programmableTokenValue = Value.builder()
-                    .coin(Amount.ada(1).getQuantity())
-                    .multiAssets(List.of(
-                            MultiAsset.builder()
-                                    .policyId(issuanceContract.getPolicyId())
-                                    .assets(List.of(programmableToken))
-                                    .build()
-                    ))
-                    .build();
-
-            log.info("request.getRecipientAddress(): {}", request.recipientAddress());
-            var payeeAddress = new Address(request.recipientAddress());
-
-            var targetAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
-                    payeeAddress.getDelegationCredential().get(),
-                    network.getCardanoNetwork());
-
-
-            var tx = new Tx()
-                    .collectFrom(adminUtxos)
-                    .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
-                    .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue), ConstrPlutusData.of(0))
-                    .readFrom(mintLayout.referenceInputs().toArray(new TransactionInput[0]))
-                    .attachRewardValidator(issuanceLogic)
-                    .attachRewardValidator(moduleIssueContract)
-                    .withChangeAddress(request.feePayerAddress());
-
+            var recipient = request.recipientAddress() == null ? request.feePayerAddress() : request.recipientAddress();
+            var tx = new ProgrammableTokenTx()
+                    .from(request.feePayerAddress())
+                    .mint(progTokenPolicyId, CclWallets.smartWallet(deployment, recipient).toBech32(),
+                            List.of(asset(request.assetName(), new BigInteger(request.quantity()))),
+                            ISSUER_ADMIN, HOLDING);
+            // CIP-170 attestation, when the caller supplied an approved one.
             MintAttestationMetadata.attach(tx, request.attestation());
 
-            mintLayout.inWithdrawalOrder(List.of(
-                            new CoreWithdrawal(moduleIssueCredential, moduleIssueAddress.getAddress(), ConstrPlutusData.of(0)),
-                            new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(), issuanceLogicRedeemer)),
-                            CoreWithdrawal::credential)
-                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
-
-            var transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(adminPkh.getBytes())
+            var transaction = cclQuickTx.builder(service)
+                    .compose(tx)
                     .feePayer(request.feePayerAddress())
-//                .withTxEvaluator(new AikenTransactionEvaluator(bfBackendService))
-                    .mergeOutputs(false) //<-- this is important! or directory tokens will go to same address
-                    .preBalanceTx((txBuilderContext, transaction1) -> {
-                        var outputs = transaction1.getBody().getOutputs();
-                        if (outputs.getFirst().getAddress().equals(request.feePayerAddress())) {
-                            log.info("found dummy input, moving it...");
-                            var first = outputs.removeFirst();
-                            outputs.addLast(first);
-                        }
-                        try {
-                            log.info("pre tx: {}", objectMapper.writeValueAsString(transaction1));
-                        } catch (JsonProcessingException e) {
-                            throw new RuntimeException(e);
-                        }
-                    })
-                    .postBalanceTx((txBuilderContext, transaction1) -> {
-                        try {
-                            log.info("post tx: {}", objectMapper.writeValueAsString(transaction1));
-                        } catch (JsonProcessingException e) {
-                            throw new RuntimeException(e);
-                        }
-                    })
+                    .withRequiredSigners(adminPkh.getBytes())
+                    .mergeOutputs(false)
                     .build();
-
-            log.info("tx: {}", transaction.serializeToHex());
-            log.info("tx: {}", objectMapper.writeValueAsString(transaction));
 
             return TransactionContext.ok(transaction.serializeToHex());
 
@@ -937,208 +1126,80 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
             log.error("error", e);
             return TransactionContext.typedError("error: " + e.getMessage());
         }
-
-
     }
 
+    /**
+     * Burns {@code request.quantity()} of one asset name from one designated UTxO, wherever it
+     * sits — the admin's burn — as a CIP-113 third-party burn built by CCL: ThirdPartyAct on the
+     * holder's UTxO, issuer_admin as both the third-party and the minting logic, the burnt amount
+     * removed from the continuing output (address, datum and reference script unchanged; any
+     * other asset names of the policy, such as the CIP-68 (100), stay in it).
+     *
+     * <p>issuer_admin checks only the admin's signature, and the core folds the burn into the
+     * third-party conservation check, so a partial burn is valid. The (100) reference token
+     * itself is never burnt: CIP-68 allows exactly one per token.
+     */
     @Override
     public TransactionContext<Void> buildBurnTransaction(BurnTokenRequest request, ProtocolBootstrapParams protocolParams) {
 
-        log.info("request: {}", request);
-
         try {
-
-            var assetTypeToBurn = new AssetType(request.tokenPolicyId(), request.assetName());
-            log.info("assetTypeToBurn: {}", assetTypeToBurn);
-
-            var adminUtxos = accountService.findAdaOnlyUtxo(request.feePayerAddress(), 10_000_000L);
+            var policyId = request.tokenPolicyId();
+            var assetName = request.assetName();
+            if (Integer.valueOf(Cip68.LABEL_REFERENCE).equals(Cip68.readLabel(assetName))) {
+                return TransactionContext.typedError(
+                        "refusing to burn the CIP-68 (100) reference token: it carries the token's "
+                        + "metadata, and CIP-68 allows exactly one per token.");
+            }
 
             var utxoToBurnOpt = utxoProvider.findUtxo(request.utxoTxHash(), request.utxoOutputIndex());
             if (utxoToBurnOpt.isEmpty()) {
                 return TransactionContext.error("utxo to burn could not be found");
             }
-
             var utxoToBurn = utxoToBurnOpt.get();
-            log.info("utxoToBurn: {}", utxoToBurn);
+            var unit = policyId + assetName;
+            var held = utxoToBurn.getAmount().stream()
+                    .filter(a -> unit.equalsIgnoreCase(a.getUnit()))
+                    .map(Amount::getQuantity)
+                    .findFirst()
+                    .orElse(BigInteger.ZERO);
+            if (held.signum() <= 0) {
+                return TransactionContext.typedError("the UTxO to burn holds none of " + unit);
+            }
+            BigInteger quantity;
+            try {
+                quantity = new BigInteger(request.quantity());
+            } catch (NumberFormatException | NullPointerException e) {
+                return TransactionContext.typedError("burn quantity must be a positive integer, got: " + request.quantity());
+            }
+            if (quantity.signum() <= 0) {
+                return TransactionContext.typedError("burn quantity must be a positive integer, got: " + quantity);
+            }
+            if (quantity.compareTo(held) > 0) {
+                return TransactionContext.typedError("burn quantity " + quantity + " exceeds the UTxO's holding of "
+                        + held + " " + unit);
+            }
 
-            var utxoTokenAmount = utxoToBurn.toValue().amountOf(assetTypeToBurn.policyId(), "0x" + assetTypeToBurn.assetName());
-            log.info("utxoTokenAmount: {}", utxoTokenAmount);
-
-            // FES on-chain validator requires entire policy to be removed from output (dict.delete),
-            // so always burn the full UTxO token amount regardless of request.quantity()
-            var amountToBurn = utxoTokenAmount;
-            log.info("amountToBurn (full UTxO amount): {}", amountToBurn);
-
-            /// Getting Module Contracts and parameterize
-            // Issuer to be used for minting/burning/sieze
-            var adminPkh = Credential.fromKey(context.getIssuerAdminPkh());
-            var moduleIssueContract = fesScriptBuilder.buildIssuerAdminScript(Credential.fromKey(context.getIssuerAdminPkh()), assetTypeToBurn.assetName());
-            log.info("moduleIssueContract: {}", moduleIssueContract.getPolicyId());
-
-            var moduleIssueAddress = AddressProvider.getRewardAddress(moduleIssueContract, network.getCardanoNetwork());
-            log.info("moduleIssueAddress: {}", moduleIssueAddress.getAddress());
-
-
-            var issuanceContract = protocolScriptBuilderService.getParameterizedIssuanceMintScript(protocolParams, moduleIssueContract);
-            log.info("issuanceContract: {}", issuanceContract.getPolicyId());
-
-            // issuanceRedeemer is built below after registryRefInputIndex is computed
-
-            // Programmable Token Mint
-            var programmableToken = Asset.builder()
-                    .name("0x" + assetTypeToBurn.assetName())
-                    .value(amountToBurn.abs().negate())
-                    .build();
-            log.info("programmableToken: {}", programmableToken);
-
-            // Burn is an ADMINISTRATIVE action, so it goes through `third_party` -- not through
-            // `transfer`. Before the coordinator was dissolved both were arms of one validator
-            // and the choice was a redeemer constructor; now it is a different script, a
-            // different reference script, and a different reward account to withdraw from.
-            var coreThirdParty = protocolScriptBuilderService.getParameterizedThirdPartyScript(protocolParams);
-            var coreThirdPartyAddress = AddressProvider.getRewardAddress(coreThirdParty, network.getCardanoNetwork());
-            var coreThirdPartyCredential = Credential.fromScript(coreThirdParty.getScriptHash());
-            var dispatcher = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
-            var dispatcherAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
-            var dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
-            var issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
-            var issuanceLogicAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
-            var issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
-
-            // Directory SPEND parameterization
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
-            log.info("registrySpendContract: {}", HexUtil.encodeHexString(registrySpendContract.getScriptHash()));
-
-            var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
-            log.info("registryAddress: {}", registryAddress.getAddress());
-
-            var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
-
-            var progTokenRegistryOpt = registryEntries.stream()
-                    .filter(utxo -> {
-                        var registryDatumOpt = registryNodeParser.parse(utxo.getInlineDatum());
-                        return registryDatumOpt.map(registryDatum -> registryDatum.key().equals(assetTypeToBurn.policyId())).orElse(false);
-                    })
-                    .findAny();
-
-            if (progTokenRegistryOpt.isEmpty()) {
+            var service = cclDeployments.service(protocolParams);
+            var registryNode = service.advanced().getRegistryNode(policyId);
+            if (!registryNode.isSuccessful() || registryNode.getValue() == null) {
                 return TransactionContext.typedError("could not find registry entry for token");
             }
+            var adminPkh = Credential.fromKey(context.getIssuerAdminPkh());
+            CclDeployments.registerWitnesses(service, fesScriptBuilder.buildIssuerAdminScript(adminPkh, assetName));
 
-            var progTokenRegistry = progTokenRegistryOpt.get();
-            log.info("progTokenRegistry: {}", progTokenRegistry);
-
-            var sortedInputUtxos = Stream.concat(adminUtxos.stream(), Stream.of(utxoToBurn))
-                    .sorted(new UtxoComparator())
-                    .toList();
-
-            var bootstrapTxHash = protocolParams.txHash();
-
-            var protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
-
-            if (protocolParamsUtxoOpt.isEmpty()) {
-                return TransactionContext.typedError("could not resolve protocol params");
-            }
-
-            var protocolParamsUtxo = protocolParamsUtxoOpt.get();
-            log.info("protocolParamsUtxo: {}", protocolParamsUtxo);
-
-            var registryRefInput = TransactionInput.builder()
-                    .transactionId(progTokenRegistry.getTxHash())
-                    .index(progTokenRegistry.getOutputIndex())
-                    .build();
-            var protocolParamsRefInput = TransactionInput.builder()
-                    .transactionId(protocolParamsUtxo.getTxHash())
-                    .index(protocolParamsUtxo.getOutputIndex())
-                    .build();
-
-            var moduleIssueCredential = Credential.fromScript(moduleIssueContract.getScriptHash());
-            var layout = CoreLayout.builder()
-                    .referenceInput(protocolParamsRefInput)
-                    .referenceInput(registryRefInput)
-                    .withdrawal(coreThirdPartyCredential)
-                    .withdrawal(dispatcherCredential)
-                    .withdrawal(issuanceLogicCredential)
-                    .withdrawal(moduleIssueCredential)
-                    .build();
-            var sortedReferenceInputs = layout.referenceInputs();
-            var paramsIdx = layout.referenceInputIndex(protocolParamsRefInput);
-            var registryRefInputInex = layout.referenceInputIndex(registryRefInput);
-
-            // Burn of an already-registered policy: the registry node is a reference input.
-            var registryProof = CoreRedeemers.mintProofRefInput(registryRefInputInex);
-            var issuanceRedeemer = CoreRedeemers.issuanceRedeemer(paramsIdx);
-            var issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
-                    new CoreRedeemers.IssuanceEntry(assetTypeToBurn.policyId(), registryProof)));
-
-            var seizeInputIndex = sortedInputUtxos.indexOf(utxoToBurn);
-            log.info("seizeInputIndex: {}", seizeInputIndex);
-
-            // outputs_start_idx = 0: the burned UTxO's continuation is the first output.
-            var coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(registryRefInputInex, 0);
-
-            var baseSpendRedeemer = CoreRedeemers.baseSpend(
-                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
-
-            var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
-            log.info("programmableLogicBase policy: {}", programmableLogicBase.getPolicyId());
-
-            // Remove the entire policy from the UTxO value (matches on-chain dict.delete behavior)
-            var utxoValue = utxoToBurn.toValue();
-            var filteredMultiAssets = utxoValue.getMultiAssets() == null
-                    ? List.<MultiAsset>of()
-                    : utxoValue.getMultiAssets().stream()
-                    .filter(ma -> !ma.getPolicyId().equals(assetTypeToBurn.policyId()))
-                    .collect(Collectors.toList());
-            var returningValue = Value.builder()
-                    .coin(utxoValue.getCoin())
-                    .multiAssets(filteredMultiAssets)
-                    .build();
-            log.info("returningValue (policy removed): {}", returningValue);
-
-            var tx = new Tx()
-                    .collectFrom(adminUtxos)
-                    .collectFrom(utxoToBurn, baseSpendRedeemer)
-                    .payToContract(utxoToBurn.getAddress(), ValueUtil.toAmountList(returningValue), CoreDatums.programmableTokenDatum())
-                    .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
-                    .readFrom(sortedReferenceInputs.toArray(new TransactionInput[0]))
-                    .attachSpendingValidator(programmableLogicBase)
-                    .attachRewardValidator(coreThirdParty)
-                    .attachRewardValidator(dispatcher)
-                    .attachRewardValidator(issuanceLogic)
-                    .attachRewardValidator(moduleIssueContract)
-                    .withChangeAddress(request.feePayerAddress());
-
-            // Withdrawals added in LEDGER order, after the rest of the transaction: their
-            // redeemers are matched to entries by position in the canonical map.
-            layout.inWithdrawalOrder(
-                            List.of(new CoreWithdrawal(moduleIssueCredential, moduleIssueAddress.getAddress(),
-                                            ConstrPlutusData.of(0)),
-                                    new CoreWithdrawal(dispatcherCredential, dispatcherAddress.getAddress(),
-                                            CoreRedeemers.dispatchThirdParty()),
-                                    new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(),
-                                            issuanceLogicRedeemer),
-                                    new CoreWithdrawal(coreThirdPartyCredential, coreThirdPartyAddress.getAddress(),
-                                            coreThirdPartyRedeemer)),
-                            CoreWithdrawal::credential)
-                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
-
-            var transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(adminPkh.getBytes())
+            // issuer_admin is both this token's third-party logic and its minting logic, so the
+            // one withdrawal carries the one redeemer it checks (that the admin signed).
+            var tx = new ProgrammableTokenTx()
+                    .from(request.feePayerAddress())
+                    .thirdPartyBurn(request.utxoTxHash() + "#" + request.utxoOutputIndex(), policyId,
+                            List.of(asset(assetName, quantity)),
+                            ThirdPartyBurnAuthorization.of(ISSUER_ADMIN, ISSUER_ADMIN));
+            var transaction = cclQuickTx.builder(service)
+                    .compose(tx)
                     .feePayer(request.feePayerAddress())
-//                .withTxEvaluator(new AikenTransactionEvaluator(bfBackendService))
-                    .mergeOutputs(false) //<-- this is important! or directory tokens will go to same address
-                    .preBalanceTx((txBuilderContext, transaction1) -> {
-                        try {
-                            log.info("tx: {}", objectMapper.writeValueAsString(transaction1));
-                        } catch (JsonProcessingException e) {
-                            throw new RuntimeException(e);
-                        }
-                    })
+                    .withRequiredSigners(adminPkh.getBytes())
+                    .mergeOutputs(false)
                     .build();
-
-            log.info("tx: {}", transaction.serializeToHex());
-            log.info("tx: {}", objectMapper.writeValueAsString(transaction));
 
             return TransactionContext.ok(transaction.serializeToHex());
 
@@ -1146,8 +1207,6 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
             log.error("error", e);
             return TransactionContext.typedError("error: " + e.getMessage());
         }
-
-
     }
 
     @Override
@@ -1155,15 +1214,11 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
             TransferTokenRequest request,
             ProtocolBootstrapParams protocolParams) {
 
-
         try {
-
 
             var senderAddress = new Address(request.senderAddress());
             var receiverAddress = new Address(request.recipientAddress());
             var blacklistNodePolicyId = context.getBlacklistNodePolicyId();
-
-            var adminUtxos = accountService.findAdaOnlyUtxo(senderAddress.getAddress(), 10_000_000L);
 
             var progToken = AssetType.fromUnit(request.unit());
             log.info("policy id: {}, asset name: {}", progToken.policyId(), progToken.unsafeHumanAssetName());
@@ -1220,29 +1275,11 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
             var protocolParamsUtxo = protocolParamsUtxoOpt.get();
             log.info("protocolParamsUtxo: {}", protocolParamsUtxo);
 
-
             var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
                     senderAddress.getDelegationCredential().get(),
                     network.getCardanoNetwork());
 
-            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
-                    receiverAddress.getDelegationCredential().get(),
-                    network.getCardanoNetwork());
-
             var senderProgTokensUtxos = utxoProvider.findUtxos(senderProgrammableTokenAddress.getAddress());
-
-
-            // The `transfer` delegate. A transfer loads this reference script and neither of the
-            // other two -- programmable_logic_base dispatches to exactly one delegate per input.
-            var coreTransfer = protocolScriptBuilderService.getParameterizedTransferScript(protocolParams);
-            var coreTransferAddress = AddressProvider.getRewardAddress(coreTransfer, network.getCardanoNetwork());
-            var coreTransferCredential = Credential.fromScript(coreTransfer.getScriptHash());
-            var dispatcher = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
-            var dispatcherAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
-            var dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
-
-            var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
-            log.info("programmableLogicBase policy: {}", programmableLogicBase.getPolicyId());
 
             // FIXME:
             var parameterisedModuleTransferContract = fesScriptBuilder.buildTransferScript(
@@ -1306,189 +1343,102 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
                         + "register the account it withdraws from, so run a fresh blacklist init "
                         + "against the current deployment and re-register the token.");
             }
-
-            var valueToSend = Value.from(progToken.policyId(), "0x" + progToken.assetName(), amountToTransfer);
-
-            var inputUtxos = senderProgTokensUtxos.stream()
-                    .reduce(new Pair<List<Utxo>, Value>(List.of(), Value.builder().build()),
-                            (listValuePair, utxo) -> {
-                                if (listValuePair.second().subtract(valueToSend).isPositive()) {
-                                    return listValuePair;
-                                } else {
-                                    // `> 0`, not `> 1`. This predicate answers "does this UTxO
-                                    // carry any of the token we are moving?", and a UTxO holding
-                                    // exactly one unit does. With `> 1` a freshly registered NFT —
-                                    // or the last unit of any holding — was invisible to the
-                                    // selector, so the transfer collected no inputs and reported
-                                    // "Not enough funds" for a balance it could plainly see.
-                                    if (utxo.toValue().amountOf(progToken.policyId(), "0x" + progToken.assetName()).compareTo(BigInteger.ZERO) > 0) {
-                                        var newUtxos = Stream.concat(Stream.of(utxo), listValuePair.first().stream());
-                                        return new Pair<>(newUtxos.toList(), listValuePair.second().add(utxo.toValue()));
-                                    } else {
-                                        return listValuePair;
-                                    }
-                                }
-                            }, (listValuePair, listValuePair2) -> {
-                                var newUtxos = Stream.concat(listValuePair.first().stream(), listValuePair.first().stream());
-                                return new Pair<>(newUtxos.toList(), listValuePair.second().add(listValuePair2.second()));
-                            })
-                    .first();
-
-            var senderProgTokensValue = inputUtxos.stream()
-                    .map(Utxo::toValue)
-                    .filter(value -> value.amountOf(progToken.policyId(), "0x" + progToken.assetName()).compareTo(BigInteger.ZERO) > 0)
-                    .reduce(Value::add)
-                    .orElse(Value.builder().build());
-
-            var returningValue = senderProgTokensValue.subtract(valueToSend);
-
-            var tokenAsset2 = Asset.builder()
-                    .name("0x" + progToken.assetName())
-                    .value(amountToTransfer)
-                    .build();
-
-            Value tokenValue2 = Value.builder()
-                    .coin(Amount.ada(1).getQuantity())
-                    .multiAssets(List.of(
-                            MultiAsset.builder()
-                                    .policyId(progToken.policyId())
-                                    .assets(List.of(tokenAsset2))
-                                    .build()
-                    ))
-                    .build();
-
-            var progTokenAmount = senderProgTokensValue.amountOf(progToken.policyId(), "0x" + progToken.assetName());
-            log.info("progTokenAmount: {}", progTokenAmount);
-
-            if (progTokenAmount.compareTo(amountToTransfer) < 0) {
+            var held = senderProgTokensUtxos.stream()
+                    .map(utxo -> utxo.toValue().amountOf(progToken.policyId(), "0x" + progToken.assetName()))
+                    .reduce(BigInteger.ZERO, BigInteger::add);
+            if (held.compareTo(amountToTransfer) < 0) {
                 return TransactionContext.typedError("Not enough funds");
             }
 
+            // The sender must not be on the blacklist: its stake key has to fall strictly inside
+            // some node's (key, next) range. That node is the proof the transfer logic checks.
             var parameterisedBlacklistSpendingScript = fesScriptBuilder.buildBlacklistSpendScript(blacklistNodePolicyId);
             var blacklistAddress = AddressProvider.getEntAddress(parameterisedBlacklistSpendingScript, network.getCardanoNetwork());
-
             var blacklistUtxos = utxoProvider.findUtxos(blacklistAddress.getAddress());
-
-            var sortedInputUtxos = Stream.concat(adminUtxos.stream(), inputUtxos.stream())
-                    .sorted(new UtxoComparator())
-                    .toList();
-
-            var proofs = new ArrayList<Pair<Utxo, Utxo>>();
-            var progTokenBaseScriptHash = protocolParams.programmableLogicBase().scriptHash();
-            for (Utxo utxo : sortedInputUtxos) {
-                var address = new Address(utxo.getAddress());
-                var addressPkh = address.getPaymentCredentialHash().map(HexUtil::encodeHexString).get();
-                if (progTokenBaseScriptHash.equals(addressPkh)) {
-                    var stakingPkh = address.getDelegationCredentialHash().map(HexUtil::encodeHexString).get();
-                    var relevantBlacklistNodeOpt = blacklistUtxos.stream()
-                            .filter(blackListUtxo -> blacklistNodeParser
-                                    .parse(blackListUtxo.getInlineDatum())
-                                    .map(blacklistNode -> blacklistNode.key().compareTo(stakingPkh) < 0 && blacklistNode.next().compareTo(stakingPkh) > 0)
-                                    .orElse(false))
-                            .findAny();
-                    if (relevantBlacklistNodeOpt.isEmpty()) {
-                        return TransactionContext.typedError("could not resolve blacklist exemption");
-                    }
-                    proofs.add(new Pair<>(utxo, relevantBlacklistNodeOpt.get()));
-                }
+            var senderStakePkh = senderAddress.getDelegationCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
+            var exemption = coveringBlacklistNode(blacklistUtxos, senderStakePkh);
+            if (exemption == null) {
+                return TransactionContext.typedError("could not resolve blacklist exemption");
             }
 
-            var sortedReferenceInputs = Stream.concat(proofs.stream().map(Pair::second).map(utxo -> TransactionInput.builder()
-                                    .transactionId(utxo.getTxHash())
-                                    .index(utxo.getOutputIndex())
-                                    .build()),
-                            Stream.of(TransactionInput.builder()
-                                    .transactionId(protocolParamsUtxo.getTxHash())
-                                    .index(protocolParamsUtxo.getOutputIndex())
-                                    .build(), TransactionInput.builder()
-                                    .transactionId(progTokenRegistry.getTxHash())
-                                    .index(progTokenRegistry.getOutputIndex())
-                                    .build())
-                    )
-                    .toList();
+            var service = cclDeployments.service(protocolParams);
+            var deployment = service.advanced().deployment();
+            CclDeployments.registerWitnesses(service, parameterisedModuleTransferContract);
 
-            var protocolParamsRefInput = TransactionInput.builder()
-                    .transactionId(protocolParamsUtxo.getTxHash())
-                    .index(protocolParamsUtxo.getOutputIndex())
-                    .build();
-            var registryRefInput = TransactionInput.builder()
-                    .transactionId(progTokenRegistry.getTxHash())
-                    .index(progTokenRegistry.getOutputIndex())
-                    .build();
+            // The transfer logic's redeemer is one Constr 0 [i] per spent base-script input, in
+            // ledger input order, where i is the reference-input position of the node exempting
+            // that input's owner. Both orders exist only in the finished transaction, so CCL gets a
+            // placeholder and SubstandardRedeemerExtension writes the real list after balancing.
+            var tx = new ProgrammableTokenTx()
+                    .from(request.senderAddress())
+                    .transfer(CclWallets.smartWallet(deployment, request.recipientAddress()).toBech32(),
+                            Amount.asset(request.unit(), amountToTransfer),
+                            ListPlutusData.of(ConstrPlutusData.of(0, BigIntPlutusData.of(0))), HOLDING);
+            tx.readFrom(exemption);
 
-            var moduleTransferCredential =
-                    Credential.fromScript(parameterisedModuleTransferContract.getScriptHash());
-            var layoutBuilder = CoreLayout.builder()
-                    .withdrawal(coreTransferCredential)
-                    .withdrawal(dispatcherCredential)
-                    .withdrawal(moduleTransferCredential);
-            sortedReferenceInputs.forEach(layoutBuilder::referenceInput);
-            var layout = layoutBuilder.build();
-            sortedReferenceInputs = layout.referenceInputs();
-            var paramsIdx = layout.referenceInputIndex(protocolParamsRefInput);
-
-            var proofList = proofs.stream().map(pair -> {
-                log.info("first: {}, second: {}", pair.first(), pair.second());
-                var index = layout.referenceInputIndex(TransactionInput.builder().transactionId(pair.second().getTxHash()).index(pair.second().getOutputIndex()).build());
-                log.info("adding index: {} as a blacklist non-belonging proof", index);
-                return ConstrPlutusData.of(0, BigIntPlutusData.of(index));
-            }).toList();
-            var freezeAndSeizeRedeemer = ListPlutusData.of();
-            proofList.forEach(freezeAndSeizeRedeemer::add);
-
-            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(List.of(
-                    CoreRedeemers.tokenExists(layout.referenceInputIndex(registryRefInput))));
-
-            var baseSpendRedeemer = CoreRedeemers.baseSpend(
-                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
-
-            var tx = new Tx()
-                    .collectFrom(adminUtxos);
-
-            inputUtxos.forEach(utxo -> tx.collectFrom(utxo, baseSpendRedeemer));
-
-            // Added in LEDGER order: withdrawal redeemers are matched to entries by position in
-            // the canonical map, so pre-sorting removes any dependence on the serialiser
-            // re-indexing them afterwards.
-            layout.inWithdrawalOrder(
-                            List.of(new CoreWithdrawal(moduleTransferCredential, moduleTransferAddress.getAddress(), freezeAndSeizeRedeemer),
-                                    new CoreWithdrawal(dispatcherCredential, dispatcherAddress.getAddress(), CoreRedeemers.dispatchTransfer()),
-                                    new CoreWithdrawal(coreTransferCredential, coreTransferAddress.getAddress(), coreTransferRedeemer)),
-                            CoreWithdrawal::credential)
-                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
-
-            tx.payToContract(senderProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(returningValue), CoreDatums.programmableTokenDatum())
-                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenValue2), CoreDatums.programmableTokenDatum());
-
-            sortedReferenceInputs.forEach(tx::readFrom);
-
-            tx.attachRewardValidator(coreTransfer)
-                    .attachRewardValidator(dispatcher)
-                    .attachRewardValidator(parameterisedModuleTransferContract)
-                    .attachSpendingValidator(programmableLogicBase) // base
-                    .withChangeAddress(senderAddress.getAddress());
-
-
-            var transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(senderAddress.getDelegationCredentialHash().get())
+            var plb = protocolParams.programmableLogicBase().scriptHash();
+            var proof = new SubstandardRedeemerExtension(
+                    Credential.fromScript(parameterisedModuleTransferContract.getScriptHash()),
+                    (built, lookup) -> blacklistProof(built, lookup, plb, blacklistUtxos));
+            var transaction = cclQuickTx.builder(service, proof)
+                    .compose(tx)
+                    .feePayer(request.senderAddress())
+                    // The stake key signs for the wallet besides the paying payment key: price it.
                     .additionalSignersCount(1)
-                    .feePayer(senderAddress.getAddress())
                     .mergeOutputs(false)
-//                    .withTxEvaluator(new AikenTransactionEvaluator(bfBackendService))
                     .build();
-
-
-            log.info("tx: {}", transaction.serializeToHex());
-            log.info("tx: {}", objectMapper.writeValueAsString(transaction));
 
             return TransactionContext.ok(transaction.serializeToHex());
 
         } catch (Exception e) {
-            log.warn("error", e);
+            log.error("error", e);
             return TransactionContext.typedError("error: " + e.getMessage());
         }
+    }
 
+    /** The transfer logic's proof list, computed on the finished transaction's own input and reference orders. */
+    private PlutusData blacklistProof(Transaction built,
+                                      java.util.function.Function<TransactionInput, Optional<Utxo>> lookup,
+                                      String plb, List<Utxo> blacklistUtxos) {
+        var references = LedgerOrdering.sortedReferenceInputs(built);
+        var proofs = ListPlutusData.of();
+        for (TransactionInput input : LedgerOrdering.sortedInputs(built)) {
+            var spent = lookup.apply(input).orElseThrow(() -> new IllegalStateException(
+                    "input " + input.getTransactionId() + "#" + input.getIndex() + " cannot be resolved"));
+            var address = new Address(spent.getAddress());
+            var isBase = address.getPaymentCredentialHash().map(HexUtil::encodeHexString)
+                    .filter(plb::equalsIgnoreCase).isPresent();
+            if (!isBase) {
+                continue;
+            }
+            var owner = address.getDelegationCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
+            var node = coveringBlacklistNode(blacklistUtxos, owner);
+            if (node == null) {
+                throw new IllegalStateException("no blacklist exemption for " + owner);
+            }
+            var index = -1;
+            for (int i = 0; i < references.size(); i++) {
+                if (references.get(i).getTransactionId().equals(node.getTxHash())
+                    && references.get(i).getIndex() == node.getOutputIndex()) {
+                    index = i;
+                }
+            }
+            if (index < 0) {
+                throw new IllegalStateException("the exempting blacklist node is not a reference input");
+            }
+            proofs.add(ConstrPlutusData.of(0, BigIntPlutusData.of(index)));
+        }
+        return proofs;
+    }
 
+    /** The node whose (key, next) range strictly contains {@code stakeKeyHash}, or null when it is listed. */
+    private Utxo coveringBlacklistNode(List<Utxo> blacklistUtxos, String stakeKeyHash) {
+        return blacklistUtxos.stream()
+                .filter(utxo -> blacklistNodeParser.parse(utxo.getInlineDatum())
+                        .map(node -> node.key().compareTo(stakeKeyHash) < 0 && node.next().compareTo(stakeKeyHash) > 0)
+                        .orElse(false))
+                .findFirst()
+                .orElse(null);
     }
 
     // ========== BlacklistManageable Implementation ==========
@@ -1940,18 +1890,9 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
             SeizeRequest request,
             ProtocolBootstrapParams protocolParams) {
 
-
         try {
 
             log.info("request: {}", request);
-
-            var feePayerAddress = new Address(request.feePayerAddress());
-            var feePayerPkh = feePayerAddress.getPaymentCredentialHash().map(HexUtil::encodeHexString).get();
-
-            var adminUtxos = accountService.findAdaOnlyUtxoByPaymentPubKeyHash(feePayerPkh, 10_000_000L);
-            log.info("adminUtxos: {}", adminUtxos);
-
-            var bootstrapTxHash = protocolParams.txHash();
 
             var progToken = AssetType.fromUnit(request.unit());
             log.info("policy id: {}, asset name: {}", progToken.policyId(), progToken.unsafeHumanAssetName());
@@ -1971,218 +1912,86 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
                         + "Seize the (222)/(333) user token instead.");
             }
 
-            // Directory SPEND parameterization
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
-            log.info("registrySpendContract: {}", HexUtil.encodeHexString(registrySpendContract.getScriptHash()));
-
-            var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
-            log.info("registryAddress: {}", registryAddress.getAddress());
-
-            var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
-
-            // Keep the parsed node: its recorded credentials are what the withdrawals must agree with.
-            var progTokenRegistryNodeOpt = registryEntries.stream()
-                    .flatMap(utxo -> registryNodeParser.parse(utxo.getInlineDatum())
-                            .filter(datum -> datum.key().equals(progToken.policyId()))
-                            .map(datum -> java.util.Map.entry(utxo, datum))
-                            .stream())
-                    .findAny();
-            var progTokenRegistryOpt = progTokenRegistryNodeOpt.map(java.util.Map.Entry::getKey);
-
-            if (progTokenRegistryOpt.isEmpty()) {
-                return TransactionContext.typedError("could not find registry entry for token");
-            }
-
-            var progTokenRegistry = progTokenRegistryOpt.get();
-            log.info("progTokenRegistry: {}", progTokenRegistry);
-
-            var registryOpt = registryNodeParser.parse(progTokenRegistry.getInlineDatum());
-            if (registryOpt.isEmpty()) {
-                return TransactionContext.typedError("could not find registry entry for token");
-            }
-
-            var registry = registryOpt.get();
-            log.info("registry: {}", registry);
-
-            var protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
-
-            if (protocolParamsUtxoOpt.isEmpty()) {
-                return TransactionContext.typedError("could not resolve protocol params");
-            }
-
-            var protocolParamsUtxo = protocolParamsUtxoOpt.get();
-            log.info("protocolParamsUtxo: {}", protocolParamsUtxo);
-
             var utxoOpt = utxoProvider.findUtxo(request.utxoTxHash(), request.utxoOutputIndex());
-
             if (utxoOpt.isEmpty()) {
                 return TransactionContext.typedError("could not find utxo to seize");
             }
-
             var utxoToSeize = utxoOpt.get();
 
-//            var seizedAddress = aliceAccount.getBaseAddress();
-//            var seizedProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolBootstrapParams.programmableLogicBase().scriptHash()),
-//                    seizedAddress.getDelegationCredential().get(),
-//                    network);
-
-            var recipientAddress = new Address(request.destinationAddress());
-            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
-                    recipientAddress.getDelegationCredential().get(),
-                    network.getCardanoNetwork());
-
-
-            // Seizure is an ADMINISTRATIVE action: it goes through `third_party`, which since the
-            // coordinator was dissolved is a separate validator with its own reference script and
-            // its own reward account -- not a redeemer constructor on the transfer script.
-            var coreThirdParty = protocolScriptBuilderService.getParameterizedThirdPartyScript(protocolParams);
-            var coreThirdPartyAddress = AddressProvider.getRewardAddress(coreThirdParty, network.getCardanoNetwork());
-            var coreThirdPartyCredential = Credential.fromScript(coreThirdParty.getScriptHash());
-            var dispatcher = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
-            var dispatcherAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
-            var dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
-
-            var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
-            log.info("programmableLogicBase policy: {}", programmableLogicBase.getPolicyId());
-
-            // Issuer to be used for minting/burning/sieze
-            log.info("context.getIssuerAdminPkh(): {}", context.getIssuerAdminPkh());
-            var adminPkh = Credential.fromKey(context.getIssuerAdminPkh());
-            var moduleIssueAdminContract = fesScriptBuilder.buildIssuerAdminScript(Credential.fromKey(context.getIssuerAdminPkh()), progToken.assetName());
-            log.info("moduleIssueAdminContract: {}", moduleIssueAdminContract.getPolicyId());
-
-            var moduleIssueAdminAddress = AddressProvider.getRewardAddress(moduleIssueAdminContract, network.getCardanoNetwork());
-
-            var moduleTransferContractOpt = moduleService.getModuleValidator(MODULE_ID, "example_transfer_logic.transfer.withdraw");
-            if (moduleTransferContractOpt.isEmpty()) {
-                log.warn("could not resolve transfer contract");
-                return TransactionContext.typedError("could not resolve transfer contract");
-            }
-
-
             // ThirdPartyAct requires the CONTINUING output to carry the same address, datum and
-            // reference script as the input it continues — only the seized value may move. So the
-            // datum has to be the input's own bytes, not a freshly minted ConstrPlutusData.of(0):
-            // those coincide for an ordinary programmable-token UTxO and diverge for anything
-            // else, and "coincides today" is not a property worth relying on.
+            // reference script as the input it continues — only the seized value may move. CCL
+            // carries the input's datum forward as it is (or none, as on CCL's own change outputs),
+            // but it does not re-attach a reference script.
             if (utxoToSeize.getReferenceScriptHash() != null && !utxoToSeize.getReferenceScriptHash().isBlank()) {
                 return TransactionContext.typedError(
                         "refusing to seize a UTxO carrying a reference script: ThirdPartyAct "
                         + "requires the continuing output to preserve it, and this builder cannot "
                         + "re-attach it. utxo=" + utxoToSeize.getTxHash() + "#" + utxoToSeize.getOutputIndex());
             }
-            if (utxoToSeize.getInlineDatum() == null || utxoToSeize.getInlineDatum().isBlank()) {
-                return TransactionContext.typedError(
-                        "refusing to seize a UTxO with no inline datum: ThirdPartyAct requires the "
-                        + "continuing output's datum to match the input's, and there is nothing to "
-                        + "carry forward. utxo=" + utxoToSeize.getTxHash() + "#" + utxoToSeize.getOutputIndex());
-            }
-            PlutusData continuingDatum;
-            try {
-                continuingDatum = PlutusData.deserialize(HexUtil.decodeHexString(utxoToSeize.getInlineDatum()));
-            } catch (Exception e) {
-                return TransactionContext.typedError(
-                        "could not decode the seized UTxO's inline datum, so it cannot be preserved "
-                        + "on the continuing output: " + e.getMessage());
-            }
 
             var valueToSeize = utxoToSeize.toValue().amountOf(progToken.policyId(), "0x" + progToken.assetName());
-            log.info("amount to seize: {}", valueToSeize);
+            if (valueToSeize.signum() <= 0) {
+                return TransactionContext.typedError("the UTxO to seize holds none of " + request.unit());
+            }
 
-            var tokenAssetToSeize = Value.from(progToken.policyId(), "0x" + progToken.assetName(), valueToSeize);
+            var service = cclDeployments.service(protocolParams);
+            var deployment = service.advanced().deployment();
+            var registryNode = service.advanced().getRegistryNode(progToken.policyId());
+            if (!registryNode.isSuccessful() || registryNode.getValue() == null) {
+                return TransactionContext.typedError("could not find registry entry for token");
+            }
+            var adminPkh = Credential.fromKey(context.getIssuerAdminPkh());
+            CclDeployments.registerWitnesses(service,
+                    fesScriptBuilder.buildIssuerAdminScript(adminPkh, progToken.assetName()));
 
-            var sortedInputs = Stream.concat(adminUtxos.stream(), Stream.of(utxoToSeize))
-                    .sorted(new UtxoComparator())
-                    .toList();
-
-            var seizeInputIndex = sortedInputs.indexOf(utxoToSeize);
-            log.info("seizeInputIndex: {}", seizeInputIndex);
-
-            var registryRefInput = TransactionInput.builder()
-                    .transactionId(progTokenRegistry.getTxHash())
-                    .index(progTokenRegistry.getOutputIndex())
-                    .build();
-            var protocolParamsRefInput = TransactionInput.builder()
-                    .transactionId(protocolParamsUtxo.getTxHash())
-                    .index(protocolParamsUtxo.getOutputIndex())
-                    .build();
-
-            var moduleIssueAdminCredential =
-                    Credential.fromScript(moduleIssueAdminContract.getScriptHash());
-            var layout = CoreLayout.builder()
-                    .referenceInput(protocolParamsRefInput)
-                    .referenceInput(registryRefInput)
-                    .withdrawal(coreThirdPartyCredential)
-                    .withdrawal(dispatcherCredential)
-                    .withdrawal(moduleIssueAdminCredential)
-                    .build();
-            var sortedReferenceInputs = layout.referenceInputs();
-            var paramsIdx = layout.referenceInputIndex(protocolParamsRefInput);
-            var registryRefInputInex = layout.referenceInputIndex(registryRefInput);
-
-            // outputs_start_idx = 1: output 0 is the seized value's destination, output 1 is the
-            // CONTINUING output paired with the seized input. third_party pairs every acted-on
-            // PLB input positionally from this offset, and each pair must agree byte-for-byte on
-            // address, datum and reference script -- a seizure moves tokens, not ownership.
-            var coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(registryRefInputInex, 1);
-
-            var baseSpendRedeemer = CoreRedeemers.baseSpend(
-                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
-
-            var tx = new Tx()
-                    .collectFrom(adminUtxos)
-                    .collectFrom(utxoToSeize, baseSpendRedeemer)
-                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenAssetToSeize), CoreDatums.programmableTokenDatum())
-                    // The CONTINUING output: same address, same datum as the input it continues.
-                    .payToContract(utxoToSeize.getAddress(), ValueUtil.toAmountList(utxoToSeize.toValue().subtract(tokenAssetToSeize)), continuingDatum)
-                    .readFrom(sortedReferenceInputs.toArray(new TransactionInput[0]))
-                    .attachRewardValidator(coreThirdParty)
-                    .attachRewardValidator(dispatcher)
-                    .attachRewardValidator(moduleIssueAdminContract)
-                    .attachSpendingValidator(programmableLogicBase)
-                    .withChangeAddress(feePayerAddress.getAddress());
-
-            // Withdrawals in LEDGER order: their redeemers are matched to entries by position in
-            // the canonical map.
-            layout.inWithdrawalOrder(
-                            List.of(new CoreWithdrawal(moduleIssueAdminCredential,
-                                            moduleIssueAdminAddress.getAddress(), ConstrPlutusData.of(0)),
-                                    new CoreWithdrawal(dispatcherCredential, dispatcherAddress.getAddress(),
-                                            CoreRedeemers.dispatchThirdParty()),
-                                    new CoreWithdrawal(coreThirdPartyCredential,
-                                            coreThirdPartyAddress.getAddress(), coreThirdPartyRedeemer)),
-                            CoreWithdrawal::credential)
-                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
-
-
-            var transaction = quickTxBuilder.compose(tx)
-                    .feePayer(feePayerAddress.getAddress())
-                    .mergeOutputs(false)
-                    .preBalanceTx((txBuilderContext, transaction1) -> {
-                        try {
-                            log.info("pre balance tx: {}", objectMapper.writeValueAsString(transaction1));
-                        } catch (JsonProcessingException e) {
-                            throw new RuntimeException(e);
-                        }
-                    })
-//                    .withTxEvaluator(new AikenTransactionEvaluator(bfBackendService))
+            // ThirdPartyAct moves the seized value to the destination's smart wallet; CCL keeps the
+            // continuing output's address, datum and reference script as they were.
+            var tx = new ProgrammableTokenTx()
+                    .from(request.feePayerAddress())
+                    .thirdPartyTransfer(utxoToSeize.getAddress(),
+                            CclWallets.smartWallet(deployment, request.destinationAddress()).toBech32(),
+                            Amount.asset(request.unit(), valueToSeize), ISSUER_ADMIN);
+            var transaction = cclQuickTx.builder(service)
+                    .compose(tx)
+                    .feePayer(request.feePayerAddress())
                     .withRequiredSigners(adminPkh.getBytes())
+                    .mergeOutputs(false)
                     .build();
 
-
-            log.info("tx: {}", transaction.serializeToHex());
-            log.info("tx: {}", objectMapper.writeValueAsString(transaction));
+            // CCL picks the holder's UTxOs itself. A seizure acts on the UTxO the operator chose, so
+            // refuse unless exactly that one is the base-script input: a valid seizure of a
+            // different UTxO is still the wrong seizure (CCL gap #9).
+            var plb = protocolParams.programmableLogicBase().scriptHash();
+            // Inputs are resolved through the builder's own supplier (it sees pending outputs the
+            // indexer may not yet), and an input that cannot be resolved is not assumed harmless.
+            var unresolved = transaction.getBody().getInputs().stream()
+                    .filter(in -> cclQuickTx.utxoSupplier().getTxOutput(in.getTransactionId(), in.getIndex()).isEmpty())
+                    .toList();
+            if (!unresolved.isEmpty()) {
+                return TransactionContext.typedError("seize: cannot resolve input(s) " + unresolved
+                        + " of the built transaction; refusing to seize without knowing what it spends");
+            }
+            var baseInputs = transaction.getBody().getInputs().stream()
+                    .filter(in -> cclQuickTx.utxoSupplier().getTxOutput(in.getTransactionId(), in.getIndex())
+                            .map(u -> new Address(u.getAddress()).getPaymentCredentialHash()
+                                    .map(HexUtil::encodeHexString).filter(plb::equalsIgnoreCase).isPresent())
+                            .orElse(false))
+                    .toList();
+            if (baseInputs.size() != 1
+                || !baseInputs.getFirst().getTransactionId().equals(request.utxoTxHash())
+                || baseInputs.getFirst().getIndex() != request.utxoOutputIndex()) {
+                return TransactionContext.typedError("CCL selected " + baseInputs.size() + " base-script input(s) "
+                        + "other than exactly the named UTxO " + request.utxoTxHash() + "#" + request.utxoOutputIndex()
+                        + "; refusing to seize from a UTxO the operator did not choose");
+            }
 
             return TransactionContext.ok(transaction.serializeToHex());
 
         } catch (Exception e) {
-            log.warn("error", e);
+            log.error("error", e);
             return TransactionContext.typedError("error: " + e.getMessage());
         }
-
-
     }
-
     @Override
     public TransactionContext<Void> buildMultiSeizeTransaction(
             MultiSeizeRequest request,
@@ -2271,5 +2080,26 @@ public class FreezeAndSeizeHandler implements ModuleHandler, BasicOperations<Fre
                 + " — one of those is not what the registration used. The on-chain hash cannot simply "
                 + "be substituted: a withdraw-0 must carry the SCRIPT and we hold no script for that "
                 + "hash. Re-register the token under the correct inputs.");
+    }
+
+    /** The policy the platform derives, cross-checked against CCL's own derivation. */
+    private String policyIdOf(Cip113ProgrammableTokenService service, PlutusScript moduleIssueContract,
+                              ProtocolBootstrapParams protocolParams) throws Exception {
+        var platform = protocolScriptBuilderService
+                .getParameterizedIssuanceMintScript(protocolParams, moduleIssueContract).getPolicyId();
+        var ccl = service.advanced().derivePolicyId(Credential.fromScript(moduleIssueContract.getScriptHash()));
+        if (!ccl.isSuccessful() || !platform.equalsIgnoreCase(ccl.getValue())) {
+            throw new IllegalStateException("platform derives policy " + platform + " but CCL derives "
+                    + (ccl.isSuccessful() ? ccl.getValue() : ccl.getResponse()));
+        }
+        return platform;
+    }
+
+    private static ProgrammableTokenCredential scriptCredential(PlutusScript script) throws Exception {
+        return ProgrammableTokenCredential.from(Credential.fromScript(script.getScriptHash()));
+    }
+
+    private static Asset asset(String nameHex, BigInteger quantity) {
+        return Asset.builder().name("0x" + nameHex).value(quantity).build();
     }
 }

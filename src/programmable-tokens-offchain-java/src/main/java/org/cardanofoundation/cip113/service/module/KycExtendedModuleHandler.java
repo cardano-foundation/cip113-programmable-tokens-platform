@@ -1,5 +1,25 @@
 package org.cardanofoundation.cip113.service.module;
 
+import com.bloxbean.cardano.client.address.CredentialType;
+import com.bloxbean.cardano.client.plutus.spec.BigIntPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.BytesPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.ConstrPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.ListPlutusData;
+import com.bloxbean.cardano.client.plutus.spec.PlutusData;
+import com.bloxbean.cardano.client.plutus.spec.PlutusScript;
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenCredential;
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenPolicyRef;
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenRegistration;
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenTx;
+import com.bloxbean.cardano.client.programmabletoken.cip113.Cip113ProgrammableTokenService;
+import com.bloxbean.cardano.client.programmabletoken.cip113.LedgerOrdering;
+import com.bloxbean.cardano.client.transaction.spec.Asset;
+import com.bloxbean.cardano.client.transaction.spec.TransactionInput;
+import org.cardanofoundation.cip113.ccl.CclDeployments;
+import org.cardanofoundation.cip113.ccl.CclQuickTx;
+import org.cardanofoundation.cip113.ccl.CclWallets;
+import org.cardanofoundation.cip113.ccl.SubstandardRedeemerExtension;
+import org.cardanofoundation.cip113.model.BurnTokenRequest;
 import com.bloxbean.cardano.client.address.Address;
 import com.bloxbean.cardano.client.address.AddressProvider;
 import com.bloxbean.cardano.client.address.Credential;
@@ -79,6 +99,15 @@ public class KycExtendedModuleHandler implements ModuleHandler, BasicOperations<
 
     private static final String MODULE_ID = "kyc-extended";
 
+    /** The kyc-extended issue logic's redeemer. */
+    private static final PlutusData ISSUE = ConstrPlutusData.of(0);
+
+    /** The inline datum the platform writes on every holding ({@code Constr 0 []}). */
+    private static final PlutusData HOLDING = CoreDatums.programmableTokenDatum();
+
+    /** The name the registration and its first mint refer to each other by, within one transaction. */
+    private static final String REGISTRATION = "token";
+
     /** Hex of an empty (32-byte) MPF root: 32 zero bytes. Initial datum value at registration. */
     private static final String EMPTY_ROOT_HEX = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -100,6 +129,21 @@ public class KycExtendedModuleHandler implements ModuleHandler, BasicOperations<
     private final UtxoProvider utxoProvider;
     private final CardanoConverters cardanoConverters;
     private final MpfTreeService mpfTreeService;
+
+    /** CCL's programmable-token service for the deployment each request names. */
+    private final CclDeployments cclDeployments;
+
+    /** A fresh CCL-extended builder per transaction, on the platform's suppliers. */
+    private final CclQuickTx cclQuickTx;
+
+    /**
+     * How far ahead a transfer's upper validity bound lies at most. It must stay inside the node's
+     * time-translation horizon (3k/f slots): 1.5 days on public networks, 5 minutes on a default
+     * Yaci devnet.
+     */
+    @Setter
+    @org.springframework.beans.factory.annotation.Value("${cip113.kyc.transfer-validity-ms:900000}")
+    private long transferValidityMs = 15 * 60 * 1000L;
 
     @Setter
     private KycExtendedContext context;
@@ -123,6 +167,108 @@ public class KycExtendedModuleHandler implements ModuleHandler, BasicOperations<
 
     @Override
     public TransactionContext<RegistrationResult> buildRegistrationTransaction(
+            KycExtendedRegisterRequest request,
+            ProtocolBootstrapParams protocolParams) {
+
+        // CIP-68 is not implemented for this module. Refuse rather than drop it: the wizard's
+        // shared token-details step collects the metadata for every flow, and accepting it here
+        // would mint a token whose (222)/(333) label advertises metadata that was never written.
+        if (request.getCip68Metadata() != null) {
+            return TransactionContext.typedError(
+                    "CIP-68 is not supported for the 'kyc-extended' module. Supported: dummy, "
+                    + "freeze-and-seize, rwa-token. Register without CIP-68 metadata.");
+        }
+
+        // CCL gap #17. A registration chained onto a global-state init that is not on chain yet
+        // must spend that init's change output. CCL selects the fee payer's inputs itself and
+        // cannot be pointed at a pending output, so the chained flow keeps its hand-built
+        // transaction.
+        if (request.getChainingTransactionCborHex() != null) {
+            return buildChainedRegistrationTransaction(request, protocolParams);
+        }
+
+        try {
+            var adminPkh = Credential.fromKey(request.getAdminPubKeyHash());
+            var globalStatePolicyId = request.getGlobalStatePolicyId();
+
+            var service = cclDeployments.service(protocolParams);
+            var deployment = service.advanced().deployment();
+            var moduleIssueContract = kycExtendedScriptBuilder.buildIssueScript(globalStatePolicyId, adminPkh);
+            var moduleTransferContract = kycExtendedScriptBuilder.buildTransferScript(
+                    protocolParams.programmableLogicBase().scriptHash(), globalStatePolicyId);
+            CclDeployments.registerWitnesses(service, moduleIssueContract, moduleTransferContract);
+            var progTokenPolicyId = policyIdOf(service, moduleIssueContract, protocolParams);
+
+            var existing = service.advanced().getRegistryNode(progTokenPolicyId);
+            if (existing.isSuccessful() && existing.getValue() != null) {
+                return TransactionContext.typedError(String.format("Token policy %s already registered", progTokenPolicyId));
+            }
+
+            var globalState = globalStateUtxo(globalStatePolicyId);
+            if (globalState == null) {
+                return TransactionContext.typedError("could not find global state UTxO for global state");
+            }
+
+            // No seize authority: the third-party slot is pinned to the protocol's always-fail
+            // script, and unfracking is forbidden. The registry node names the global state.
+            var registration = ProgrammableTokenRegistration.builder()
+                    .mintingLogicScript(scriptCredential(moduleIssueContract))
+                    .transferLogicScript(scriptCredential(moduleTransferContract))
+                    .thirdPartyTransferLogicScript(ProgrammableTokenCredential.from(
+                            Credential.fromScript(protocolParams.issuance().alwaysFailScriptHash())))
+                    .unfrackingLogicScript(new ProgrammableTokenCredential(CredentialType.Key, ""))
+                    .globalStateCs(globalStatePolicyId)
+                    .build();
+            var recipient = request.getRecipientAddress() == null || request.getRecipientAddress().isBlank()
+                    ? request.getFeePayerAddress()
+                    : request.getRecipientAddress();
+            var tx = new ProgrammableTokenTx()
+                    .from(request.getFeePayerAddress())
+                    .register(REGISTRATION, registration, ISSUE)
+                    .mint(ProgrammableTokenPolicyRef.named(REGISTRATION),
+                            CclWallets.smartWallet(deployment, recipient).toBech32(),
+                            List.of(asset(request.getAssetName(), new BigInteger(request.getQuantity()))),
+                            ISSUE, HOLDING);
+            // The handler supplies the global state itself rather than leaving CCL to find it
+            // through an asset index the indexer may not offer.
+            tx.readFrom(globalState);
+            // CIP-170 attestation, when the wizard collected one.
+            MintAttestationMetadata.attach(tx, request.getAttestation());
+
+            var transaction = cclQuickTx.builder(service)
+                    .compose(tx)
+                    .feePayer(request.getFeePayerAddress())
+                    .withRequiredSigners(adminPkh.getBytes())
+                    .mergeOutputs(false)
+                    .build();
+
+            kycExtendedTokenRegistrationRepository.save(KycExtendedTokenRegistrationEntity.builder()
+                    .programmableTokenPolicyId(progTokenPolicyId)
+                    .issuerAdminPkh(HexUtil.encodeHexString(adminPkh.getBytes()))
+                    .telPolicyId(globalStatePolicyId)
+                    .memberRootHashOnchain(EMPTY_ROOT_HEX)
+                    .memberRootHashLocal(EMPTY_ROOT_HEX)
+                    .build());
+
+            // Save to unified programmable token registry (policyId -> moduleId binding)
+            programmableTokenRegistryRepository.save(ProgrammableTokenRegistryEntity.builder()
+                    .policyId(progTokenPolicyId)
+                    .moduleId(MODULE_ID)
+                    .assetName(request.getAssetName())
+                    .build());
+
+            return TransactionContext.ok(transaction.serializeToHex(), new RegistrationResult(progTokenPolicyId));
+
+        } catch (Exception e) {
+            log.warn("kyc-extended registration error", e);
+            return TransactionContext.typedError("error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * The chained registration, built by hand: CCL gap #17 (see buildRegistrationTransaction).
+     */
+    private TransactionContext<RegistrationResult> buildChainedRegistrationTransaction(
             KycExtendedRegisterRequest request,
             ProtocolBootstrapParams protocolParams) {
 
@@ -443,132 +589,83 @@ public class KycExtendedModuleHandler implements ModuleHandler, BasicOperations<
             ProtocolBootstrapParams protocolParams) {
 
         try {
-            // Same refusal as buildRegistrationTransaction, and it has to be here too. Registration
-            // refusing alone left this endpoint silently DISCARDING request.cip68Metadata(): a
-            // direct API call minted a user token with no (100) reference token behind it — a
-            // label advertising metadata that was never written, which is precisely the bug this
-            // whole feature exists to eliminate.
+            // Same refusal as registration: accepting cip68Metadata here would mint a user token
+            // with no (100) reference token behind it.
             if (request.cip68Metadata() != null) {
                 return TransactionContext.typedError(
-                        "CIP-68 is not supported for the 'kyc-extended' module. Supported: "
-                        + "dummy, freeze-and-seize, rwa-token. Mint without CIP-68 metadata.");
+                        "CIP-68 is not supported for the 'kyc-extended' module. Supported: dummy, "
+                        + "freeze-and-seize, rwa-token. Mint without CIP-68 metadata.");
             }
-
-            var adminUtxos = accountService.findAdaOnlyUtxo(request.feePayerAddress(), 10_000_000L);
-
-            var issuanceUtxoOpt = utxoProvider.findIssuanceCborHexUtxo(protocolParams);
-            if (issuanceUtxoOpt.isEmpty()) {
-                return TransactionContext.typedError("could not resolve issuance params");
-            }
-            var issuanceUtxo = issuanceUtxoOpt.get();
 
             var adminPkh = Credential.fromKey(context.getIssuerAdminPkh());
-            var moduleIssueContract = kycExtendedScriptBuilder.buildIssueScript(context.getGlobalStatePolicyId(), Credential.fromKey(context.getIssuerAdminPkh()));
-            var moduleIssueAddress = AddressProvider.getRewardAddress(moduleIssueContract, network.getCardanoNetwork());
+            var globalStatePolicyId = context.getGlobalStatePolicyId();
+            var service = cclDeployments.service(protocolParams);
+            var deployment = service.advanced().deployment();
+            var moduleIssueContract = kycExtendedScriptBuilder.buildIssueScript(globalStatePolicyId, adminPkh);
+            CclDeployments.registerWitnesses(service, moduleIssueContract);
+            var progTokenPolicyId = policyIdOf(service, moduleIssueContract, protocolParams);
 
-            var issuanceContract = protocolScriptBuilderService.getParameterizedIssuanceMintScript(protocolParams, moduleIssueContract);
-
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
-            var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
-            var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
-            final var progTokenPolicyId = issuanceContract.getPolicyId();
-            var progTokenRegistryOpt = registryEntries.stream()
-                    .filter(utxo -> registryNodeParser.parse(utxo.getInlineDatum())
-                            .map(registryDatum -> registryDatum.key().equals(progTokenPolicyId)).orElse(false))
-                    .findAny();
-            if (progTokenRegistryOpt.isEmpty()) {
+            // The issue logic is parameterised by (global state, admin), so the context decides the
+            // policy minted under. Bind it to the policy the request names.
+            if (request.tokenPolicyId() != null && !progTokenPolicyId.equalsIgnoreCase(request.tokenPolicyId())) {
+                return TransactionContext.typedError("issue logic for this global state and admin derives policy "
+                        + progTokenPolicyId + ", but the request names " + request.tokenPolicyId());
+            }
+            var registryNode = service.advanced().getRegistryNode(progTokenPolicyId);
+            if (!registryNode.isSuccessful() || registryNode.getValue() == null) {
                 return TransactionContext.typedError("could not find registry entry for token");
             }
-            var progTokenRegistry = progTokenRegistryOpt.get();
-            var registryRefInput = TransactionInput.builder()
-                    .transactionId(progTokenRegistry.getTxHash())
-                    .index(progTokenRegistry.getOutputIndex())
-                    .build();
-            // Sole reference input, so the index is trivially 0 -- taken through CoreLayout
-            // anyway, because `indexOf` returns -1 for anything it cannot find and -1 inside a
-            // redeemer is an out-of-range read the validator reports as an unrelated failure.
-            // CoreLayout throws instead, and adding a second reference input here later will
-            // then be a change that keeps working rather than one that silently renumbers.
-            var paramsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(),
-                    protocolParams.protocolParams().utxo().outputIndex());
-            if (paramsUtxoOpt.isEmpty()) return TransactionContext.typedError("could not resolve protocol params UTxO");
-            var paramsUtxo = paramsUtxoOpt.get();
-            var paramsRefInput = TransactionInput.builder()
-                    .transactionId(paramsUtxo.getTxHash()).index(paramsUtxo.getOutputIndex()).build();
-            var issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
-            var issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
-            var issuanceLogicAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
-            var moduleIssueCredential = Credential.fromScript(moduleIssueContract.getScriptHash());
-            var mintLayout = CoreLayout.builder().referenceInput(paramsRefInput).referenceInput(registryRefInput)
-                    .withdrawal(issuanceLogicCredential).withdrawal(moduleIssueCredential).build();
-            var registryRefInputIndex = mintLayout.referenceInputIndex(registryRefInput);
+            var globalState = globalStateUtxo(globalStatePolicyId);
+            if (globalState == null) {
+                return TransactionContext.typedError("could not find global state UTxO for global state");
+            }
 
-            var registryProof = CoreRedeemers.mintProofRefInput(registryRefInputIndex);
-            var issuanceRedeemer = CoreRedeemers.issuanceRedeemer(mintLayout.referenceInputIndex(paramsRefInput));
-            var issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
-                    new CoreRedeemers.IssuanceEntry(issuanceContract.getPolicyId(), registryProof)));
-
-            var programmableToken = Asset.builder()
-                    .name("0x" + request.assetName())
-                    .value(new BigInteger(request.quantity()))
-                    .build();
-
-            Value programmableTokenValue = Value.builder()
-                    .coin(Amount.ada(1).getQuantity())
-                    .multiAssets(List.of(
-                            MultiAsset.builder()
-                                    .policyId(issuanceContract.getPolicyId())
-                                    .assets(List.of(programmableToken))
-                                    .build()
-                    ))
-                    .build();
-
-            var recipient = Optional.ofNullable(request.recipientAddress()).orElse(request.feePayerAddress());
-            var recipientAddress = new Address(recipient);
-
-            var targetAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
-                    recipientAddress.getDelegationCredential().get(),
-                    network.getCardanoNetwork());
-
-            var tx = new Tx()
-                    .collectFrom(adminUtxos)
-                    .mintAsset(issuanceContract, programmableToken, issuanceRedeemer)
-                    .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue), ConstrPlutusData.of(0))
-                    .readFrom(mintLayout.referenceInputs().toArray(new TransactionInput[0]))
-                    .attachRewardValidator(issuanceLogic)
-                    .attachRewardValidator(moduleIssueContract)
-                    .withChangeAddress(request.feePayerAddress());
-
-            mintLayout.inWithdrawalOrder(List.of(
-                            new CoreWithdrawal(moduleIssueCredential, moduleIssueAddress.getAddress(), ConstrPlutusData.of(0)),
-                            new CoreWithdrawal(issuanceLogicCredential, issuanceLogicAddress.getAddress(), issuanceLogicRedeemer)),
-                            CoreWithdrawal::credential)
-                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
-
+            var recipient = request.recipientAddress() == null ? request.feePayerAddress() : request.recipientAddress();
+            var tx = new ProgrammableTokenTx()
+                    .from(request.feePayerAddress())
+                    .mint(progTokenPolicyId, CclWallets.smartWallet(deployment, recipient).toBech32(),
+                            List.of(asset(request.assetName(), new BigInteger(request.quantity()))),
+                            ISSUE, HOLDING);
+            tx.readFrom(globalState);
+            // CIP-170 attestation, when the caller supplied an approved one.
             MintAttestationMetadata.attach(tx, request.attestation());
 
-            var transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(adminPkh.getBytes())
+            var transaction = cclQuickTx.builder(service)
+                    .compose(tx)
                     .feePayer(request.feePayerAddress())
+                    .withRequiredSigners(adminPkh.getBytes())
                     .mergeOutputs(false)
-                    .preBalanceTx((txBuilderContext, transaction1) -> {
-                        var outputs = transaction1.getBody().getOutputs();
-                        if (outputs.getFirst().getAddress().equals(request.feePayerAddress())) {
-                            var first = outputs.removeFirst();
-                            outputs.addLast(first);
-                        }
-                    })
                     .build();
 
             return TransactionContext.ok(transaction.serializeToHex());
 
         } catch (Exception e) {
-            log.error("kyc-extended mint error", e);
+            log.warn("kyc-extended mint error", e);
             return TransactionContext.typedError("error: " + e.getMessage());
         }
     }
 
+    /**
+     * Refused: CCL gap #18. A burn spends the holder's own wallet, so the kyc-extended transfer
+     * logic runs and demands a KYC proof for every spent input, and a burn request carries no
+     * attestation to build one from.
+     */
+    @Override
+    public TransactionContext<Void> buildBurnTransaction(BurnTokenRequest request,
+                                                         ProtocolBootstrapParams protocolParams) {
+        return TransactionContext.typedError("kyc-extended burn is not supported yet (CCL gap #18): burning spends the "
+                + "holder's wallet, which runs the KYC transfer check, and a burn request carries no KYC attestation "
+                + "to prove it with.");
+    }
+
+    /**
+     * An owner transfer whose transfer-logic redeemer is
+     * {@code Constr 0 [global_state_idx, sender_proofs, receiver_proofs]}: one sender proof per
+     * spent base-script input (an attestation or a membership proof) and one membership proof for
+     * the recipient unless it is a self-send. {@code global_state_idx} and the number of spent
+     * base-script inputs exist only in the finished transaction, so CCL gets a placeholder and
+     * {@link SubstandardRedeemerExtension} writes the real redeemer after balancing.
+     */
     @Override
     public TransactionContext<Void> buildTransferTransaction(
             TransferTokenRequest request,
@@ -613,252 +710,43 @@ public class KycExtendedModuleHandler implements ModuleHandler, BasicOperations<
                 return TransactionContext.typedError("either Attestation (kycPayload+kycSignature) or Membership (senderMpfProofCborHex+senderMpfValidUntilMs) is required for kyc-extended transfer");
             }
 
-            var adminUtxos = accountService.findAdaOnlyUtxo(senderAddress.getAddress(), 10_000_000L);
-
-            var progToken = AssetType.fromUnit(request.unit());
             var amountToTransfer = new BigInteger(request.quantity());
+            var plb = protocolParams.programmableLogicBase().scriptHash();
+            var moduleTransferContract = kycExtendedScriptBuilder.buildTransferScript(plb, globalStatePolicyId);
 
-            // Registry lookup
-            var registrySpendContract = protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
-            var registryAddress = AddressProvider.getEntAddress(registrySpendContract, network.getCardanoNetwork());
-            var registryEntries = utxoProvider.findUtxos(registryAddress.getAddress());
-
-            var progTokenRegistryOpt = registryEntries.stream()
-                    .filter(utxo -> registryNodeParser.parse(utxo.getInlineDatum())
-                            .map(registryDatum -> registryDatum.key().equals(progToken.policyId())).orElse(false))
-                    .findAny();
-
-            if (progTokenRegistryOpt.isEmpty()) {
+            var service = cclDeployments.service(protocolParams);
+            var deployment = service.advanced().deployment();
+            var registryNode = service.advanced().getRegistryNode(policyId);
+            if (!registryNode.isSuccessful() || registryNode.getValue() == null) {
                 return TransactionContext.typedError("could not find registry entry for token");
             }
-            var progTokenRegistry = progTokenRegistryOpt.get();
-
-            var protocolParamsUtxoOpt = utxoProvider.findUtxo(protocolParams.protocolParams().utxo().txHash(), protocolParams.protocolParams().utxo().outputIndex());
-            if (protocolParamsUtxoOpt.isEmpty()) {
-                return TransactionContext.typedError("could not resolve protocol params");
-            }
-            var protocolParamsUtxo = protocolParamsUtxoOpt.get();
-
-            var senderProgrammableTokenAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
-                    senderAddress.getDelegationCredential().get(),
-                    network.getCardanoNetwork());
-
-            var recipientProgrammableTokenAddress = AddressProvider.getBaseAddress(
-                    Credential.fromScript(protocolParams.programmableLogicBase().scriptHash()),
-                    receiverAddress.getDelegationCredential().get(),
-                    network.getCardanoNetwork());
-
-            var senderProgTokensUtxos = utxoProvider.findUtxos(senderProgrammableTokenAddress.getAddress());
-
-            // A transfer loads the `transfer` delegate and neither of the other two:
-            // programmable_logic_base dispatches to exactly one delegate per input.
-            var coreTransfer = protocolScriptBuilderService.getParameterizedTransferScript(protocolParams);
-            var coreTransferAddress = AddressProvider.getRewardAddress(coreTransfer, network.getCardanoNetwork());
-            var coreTransferCredential = Credential.fromScript(coreTransfer.getScriptHash());
-            var dispatcher = protocolScriptBuilderService.getParameterizedProgrammableLogicGlobalScript(protocolParams);
-            var dispatcherAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
-            var dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
-            var programmableLogicBase = protocolScriptBuilderService.getParameterizedProgrammableLogicBaseScript(protocolParams);
-
-            var parameterisedTransferContract = kycExtendedScriptBuilder.buildTransferScript(
-                    protocolParams.programmableLogicBase().scriptHash(),
-                    globalStatePolicyId
-            );
-            var moduleTransferAddress = AddressProvider.getRewardAddress(parameterisedTransferContract, network.getCardanoNetwork());
-
-            // Fail early if the registry-recorded transfer hash no longer matches the
-            // current runtime hash — prog-logic-global would reject the transfer otherwise.
-            try {
-                var registryEntriesForCheck = utxoProvider.findUtxos(registryAddress.getAddress());
-                String runtimeTransferHash = HexUtil.encodeHexString(parameterisedTransferContract.getScriptHash());
-                String registeredTransferHash = null;
-                for (Utxo entry : registryEntriesForCheck) {
-                    var nodeOpt = registryNodeParser.parse(entry.getInlineDatum());
-                    if (nodeOpt.isPresent() && policyId.equalsIgnoreCase(nodeOpt.get().key())) {
-                        registeredTransferHash = PlutusCredentialCodec.hex(nodeOpt.get().transferLogicScript());
-                        break;
-                    }
-                }
-                if (registeredTransferHash != null && !registeredTransferHash.equalsIgnoreCase(runtimeTransferHash)) {
-                    return TransactionContext.typedError(
-                            "kyc-extended-transfer script hash mismatch with registry (" + registeredTransferHash +
-                            " on-chain vs " + runtimeTransferHash + " runtime). Re-register the token after rebuilding the Aiken contracts.");
-                }
-            } catch (Exception e) {
-                log.warn("kyc-extended transfer: script hash registry-check failed (continuing): {}", e.getMessage());
+            // Fail early if the registry-recorded transfer hash no longer matches the current
+            // runtime hash — prog-logic-global would reject the transfer otherwise.
+            var registeredTransferHash = HexUtil.encodeHexString(registryNode.getValue().getTransferLogicScript().getBytes());
+            var runtimeTransferHash = HexUtil.encodeHexString(moduleTransferContract.getScriptHash());
+            if (!registeredTransferHash.equalsIgnoreCase(runtimeTransferHash)) {
+                return TransactionContext.typedError(
+                        "kyc-extended-transfer script hash mismatch with registry (" + registeredTransferHash +
+                        " on-chain vs " + runtimeTransferHash + " runtime). Re-register the token after rebuilding the Aiken contracts.");
             }
 
-            var globalStateScripts = kycExtendedScriptBuilder.buildGlobalStateScripts(
-                    context.getGlobalStateInitTxInput(), context.getIssuerAdminPkh());
-            var globalStateSpendScript = globalStateScripts.second();
-            var globalStateSpendAddress = AddressProvider.getEntAddress(globalStateSpendScript, network.getCardanoNetwork());
-            var globalStateUtxo = findGlobalStateUtxo(globalStateSpendAddress.getAddress(), globalStatePolicyId);
-            if (globalStateUtxo == null) {
+            var globalState = globalStateUtxo(globalStatePolicyId);
+            if (globalState == null) {
                 return TransactionContext.typedError("could not find global state UTxO for global state");
             }
 
-            var valueToSend = Value.from(progToken.policyId(), "0x" + progToken.assetName(), amountToTransfer);
-
-            var inputUtxos = senderProgTokensUtxos.stream()
-                    .reduce(new Pair<List<Utxo>, Value>(List.of(), Value.builder().build()),
-                            (listValuePair, utxo) -> {
-                                if (listValuePair.second().subtract(valueToSend).isPositive()) {
-                                    return listValuePair;
-                                } else {
-                                    if (utxo.toValue().amountOf(progToken.policyId(), "0x" + progToken.assetName()).compareTo(BigInteger.ONE) > 0) {
-                                        var newUtxos = Stream.concat(Stream.of(utxo), listValuePair.first().stream());
-                                        return new Pair<>(newUtxos.toList(), listValuePair.second().add(utxo.toValue()));
-                                    } else {
-                                        return listValuePair;
-                                    }
-                                }
-                            }, (listValuePair, listValuePair2) -> {
-                                var newUtxos = Stream.concat(listValuePair.first().stream(), listValuePair.first().stream());
-                                return new Pair<>(newUtxos.toList(), listValuePair.second().add(listValuePair2.second()));
-                            })
-                    .first();
-
-            var senderProgTokensValue = inputUtxos.stream()
-                    .map(Utxo::toValue)
-                    .filter(value -> value.amountOf(progToken.policyId(), "0x" + progToken.assetName()).compareTo(BigInteger.ZERO) > 0)
-                    .reduce(Value::add)
-                    .orElse(Value.builder().build());
-
-            var returningValue = senderProgTokensValue.subtract(valueToSend);
-
-            var tokenAsset = Asset.builder()
-                    .name("0x" + progToken.assetName())
-                    .value(amountToTransfer)
-                    .build();
-
-            Value tokenValue = Value.builder()
-                    .coin(Amount.ada(1).getQuantity())
-                    .multiAssets(List.of(
-                            MultiAsset.builder()
-                                    .policyId(progToken.policyId())
-                                    .assets(List.of(tokenAsset))
-                                    .build()
-                    ))
-                    .build();
-
-            var progTokenAmount = senderProgTokensValue.amountOf(progToken.policyId(), "0x" + progToken.assetName());
-            if (progTokenAmount.compareTo(amountToTransfer) < 0) {
+            var senderWallet = CclWallets.smartWallet(deployment, request.senderAddress()).toBech32();
+            var held = utxoProvider.findUtxos(senderWallet).stream()
+                    .flatMap(utxo -> utxo.getAmount().stream())
+                    .filter(amount -> amount.getUnit().equals(request.unit()))
+                    .map(Amount::getQuantity)
+                    .reduce(BigInteger.ZERO, BigInteger::add);
+            if (held.compareTo(amountToTransfer) < 0) {
                 return TransactionContext.typedError("Not enough funds");
             }
 
-            var sortedInputUtxos = Stream.concat(adminUtxos.stream(), inputUtxos.stream())
-                    .sorted(new UtxoComparator())
-                    .toList();
-
-            var globalStateRefInput = TransactionInput.builder()
-                    .transactionId(globalStateUtxo.getTxHash())
-                    .index(globalStateUtxo.getOutputIndex())
-                    .build();
-
-            var sortedReferenceInputs = Stream.of(
-                            globalStateRefInput)
-                    .toList();
-
-            var protocolParamsRefInput = TransactionInput.builder()
-                    .transactionId(protocolParamsUtxo.getTxHash())
-                    .index(protocolParamsUtxo.getOutputIndex())
-                    .build();
-            var registryRefInput = TransactionInput.builder()
-                    .transactionId(progTokenRegistry.getTxHash())
-                    .index(progTokenRegistry.getOutputIndex())
-                    .build();
-
-            // Declared together, before any index is taken: wdrl_idx is a position over the
-            // WHOLE withdrawal map, so the module's own withdrawal has to be visible here.
-            var moduleTransferCredential = Credential.fromScript(parameterisedTransferContract.getScriptHash());
-            var layout = CoreLayout.builder()
-                    .referenceInput(globalStateRefInput)
-                    .referenceInput(protocolParamsRefInput)
-                    .referenceInput(registryRefInput)
-                    .withdrawal(coreTransferCredential)
-                    .withdrawal(dispatcherCredential)
-                    .withdrawal(moduleTransferCredential)
-                    .build();
-            sortedReferenceInputs = layout.referenceInputs();
-            var paramsIdx = layout.referenceInputIndex(protocolParamsRefInput);
-
-            var globalStateIdx = layout.referenceInputIndex(globalStateRefInput);
-            var vkeyIdx = request.kycVkeyIndex() != null ? request.kycVkeyIndex() : 0;
-
-            // SenderProof: Constr 0 = Attestation { kyc_proof }, Constr 1 = Membership { proof }.
-            ConstrPlutusData senderProofData;
-            if (hasMembership) {
-                ListPlutusData senderMpfProof = decodeProof(request.senderMpfProofCborHex());
-                ConstrPlutusData senderMembership = buildMembershipProof(senderPkh, request.senderMpfValidUntilMs(), senderMpfProof);
-                senderProofData = ConstrPlutusData.of(1, senderMembership);
-            } else {
-                var kycProof = ConstrPlutusData.of(0,
-                        BigIntPlutusData.of(globalStateIdx),
-                        BigIntPlutusData.of(vkeyIdx),
-                        BytesPlutusData.of(HexUtil.decodeHexString(request.kycPayload())),
-                        BytesPlutusData.of(HexUtil.decodeHexString(request.kycSignature()))
-                );
-                senderProofData = ConstrPlutusData.of(0, kycProof);
-            }
-
-            // One sender_proof entry per prog-base input — Aiken validator pairs them positionally.
-            var senderProofsList = ListPlutusData.of();
-            var progTokenBaseScriptHash = protocolParams.programmableLogicBase().scriptHash();
-            for (Utxo utxo : sortedInputUtxos) {
-                var addr = new Address(utxo.getAddress());
-                var addressPkh = addr.getPaymentCredentialHash().map(HexUtil::encodeHexString).orElse("");
-                if (progTokenBaseScriptHash.equals(addressPkh)) {
-                    senderProofsList.add(senderProofData);
-                }
-            }
-
-            // Validator filters sender pkhs out of receiver_witnesses, so a self-send needs zero
-            // receiver proofs and a normal transfer needs exactly one.
-            var receiverProofsList = ListPlutusData.of();
-            if (!java.util.Arrays.equals(recipientPkh, senderPkh)) {
-                receiverProofsList.add(recipientMembershipProof);
-            }
-
-            var transferRedeemer = ConstrPlutusData.of(0,
-                    BigIntPlutusData.of(globalStateIdx),
-                    senderProofsList,
-                    receiverProofsList);
-
-            var coreTransferRedeemer = CoreRedeemers.transferRedeemer(List.of(
-                    CoreRedeemers.tokenExists(layout.referenceInputIndex(registryRefInput))));
-
-            var baseSpendRedeemer = CoreRedeemers.baseSpend(
-                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
-
-            var tx = new Tx()
-                    .collectFrom(adminUtxos);
-
-            inputUtxos.forEach(utxo -> tx.collectFrom(utxo, baseSpendRedeemer));
-
-            // Added in LEDGER order: a withdrawal's redeemer is matched to its entry by position
-            // in the canonical map, so pre-sorting removes any dependence on the serialiser
-            // re-indexing them afterwards.
-            layout.inWithdrawalOrder(
-                            List.of(new CoreWithdrawal(moduleTransferCredential, moduleTransferAddress.getAddress(), transferRedeemer),
-                                    new CoreWithdrawal(dispatcherCredential, dispatcherAddress.getAddress(), CoreRedeemers.dispatchTransfer()),
-                                    new CoreWithdrawal(coreTransferCredential, coreTransferAddress.getAddress(), coreTransferRedeemer)),
-                            CoreWithdrawal::credential)
-                    .forEach(w -> tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer()));
-
-            tx.payToContract(senderProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(returningValue), CoreDatums.programmableTokenDatum())
-                    .payToContract(recipientProgrammableTokenAddress.getAddress(), ValueUtil.toAmountList(tokenValue), CoreDatums.programmableTokenDatum());
-
-            sortedReferenceInputs.forEach(tx::readFrom);
-
-            tx.attachRewardValidator(coreTransfer)
-                    .attachRewardValidator(dispatcher)
-                    .attachRewardValidator(parameterisedTransferContract)
-                    .attachSpendingValidator(programmableLogicBase)
-                    .withChangeAddress(senderAddress.getAddress());
-
             // TTL must not exceed any proof's validUntilMs — the validator enforces tx_upper_bound <= valid_until.
-            long ttlMs = Math.min(now + 15 * 60 * 1000L, request.mpfValidUntilMs());
+            long ttlMs = Math.min(now + transferValidityMs, request.mpfValidUntilMs());
             if (hasMembership) {
                 ttlMs = Math.min(ttlMs, request.senderMpfValidUntilMs());
             }
@@ -871,13 +759,63 @@ public class KycExtendedModuleHandler implements ModuleHandler, BasicOperations<
             if (hasMembership && ttlMs > request.senderMpfValidUntilMs()) {
                 return TransactionContext.typedError("sender Membership proof has already expired");
             }
-            LocalDateTime ttlTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(ttlMs), ZoneOffset.UTC);
-            long ttlSlot = cardanoConverters.time().toSlot(ttlTime);
+            long ttlSlot = cardanoConverters.time().toSlot(
+                    LocalDateTime.ofInstant(Instant.ofEpochMilli(ttlMs), ZoneOffset.UTC));
 
-            var transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(senderAddress.getDelegationCredentialHash().get())
+            CclDeployments.registerWitnesses(service, moduleTransferContract);
+
+            var vkeyIdx = request.kycVkeyIndex() != null ? request.kycVkeyIndex() : 0;
+            ListPlutusData senderMpfProof = hasMembership ? decodeProof(request.senderMpfProofCborHex()) : null;
+            // SenderProof: Constr 0 = Attestation { kyc_proof }, Constr 1 = Membership { proof }.
+            java.util.function.IntFunction<PlutusData> senderProof = globalStateIdx -> hasMembership
+                    ? ConstrPlutusData.of(1, buildMembershipProof(senderPkh, request.senderMpfValidUntilMs(), senderMpfProof))
+                    : ConstrPlutusData.of(0, ConstrPlutusData.of(0,
+                            BigIntPlutusData.of(globalStateIdx),
+                            BigIntPlutusData.of(vkeyIdx),
+                            BytesPlutusData.of(HexUtil.decodeHexString(request.kycPayload())),
+                            BytesPlutusData.of(HexUtil.decodeHexString(request.kycSignature()))));
+            // Validator filters sender pkhs out of receiver_witnesses, so a self-send needs zero
+            // receiver proofs and a normal transfer needs exactly one.
+            var receiverProofs = ListPlutusData.of();
+            if (!java.util.Arrays.equals(recipientPkh, senderPkh)) {
+                receiverProofs.add(recipientMembershipProof);
+            }
+
+            var tx = new ProgrammableTokenTx()
+                    .from(request.senderAddress())
+                    .transfer(CclWallets.smartWallet(deployment, request.recipientAddress()).toBech32(),
+                            Amount.asset(request.unit(), amountToTransfer),
+                            ConstrPlutusData.of(0, BigIntPlutusData.of(0), ListPlutusData.of(senderProof.apply(0)), receiverProofs),
+                            HOLDING);
+            tx.readFrom(globalState);
+
+            var redeemer = new SubstandardRedeemerExtension(
+                    Credential.fromScript(moduleTransferContract.getScriptHash()),
+                    (built, lookup) -> {
+                        var globalStateIdx = LedgerOrdering.indexOfReferenceInput(
+                                built, globalState.getTxHash(), globalState.getOutputIndex());
+                        if (globalStateIdx < 0) {
+                            throw new IllegalStateException("the global-state UTxO is not a reference input");
+                        }
+                        // One sender_proof entry per prog-base input — the validator pairs them positionally.
+                        var senderProofs = ListPlutusData.of();
+                        for (TransactionInput input : LedgerOrdering.sortedInputs(built)) {
+                            var spent = lookup.apply(input).orElseThrow(() -> new IllegalStateException(
+                                    "input " + input.getTransactionId() + "#" + input.getIndex() + " cannot be resolved"));
+                            var isBase = new Address(spent.getAddress()).getPaymentCredentialHash()
+                                    .map(HexUtil::encodeHexString).filter(plb::equalsIgnoreCase).isPresent();
+                            if (isBase) {
+                                senderProofs.add(senderProof.apply(globalStateIdx));
+                            }
+                        }
+                        return ConstrPlutusData.of(0, BigIntPlutusData.of(globalStateIdx), senderProofs, receiverProofs);
+                    });
+
+            var transaction = cclQuickTx.builder(service, redeemer)
+                    .compose(tx)
+                    .feePayer(request.senderAddress())
+                    // The stake key signs for the wallet besides the paying payment key: price it.
                     .additionalSignersCount(1)
-                    .feePayer(senderAddress.getAddress())
                     .mergeOutputs(false)
                     .validTo(ttlSlot)
                     .build();
@@ -1587,5 +1525,46 @@ public class KycExtendedModuleHandler implements ModuleHandler, BasicOperations<
         } catch (Exception e) {
             return -1L;
         }
+    }
+
+    /**
+     * The global-state UTxO. global_state is one validator with mint and spend handlers over the
+     * same parameters, so its policy id IS the spend script hash: the address follows from the
+     * policy alone, with no assumption about which admin initialised it.
+     */
+    private Utxo globalStateUtxo(String globalStatePolicyId) {
+        var address = AddressProvider.getEntAddress(Credential.fromScript(globalStatePolicyId),
+                network.getCardanoNetwork()).getAddress();
+        return utxoProvider.findUtxos(address).stream()
+                .filter(utxo -> utxo.getAmount().stream().anyMatch(a -> a.getUnit().startsWith(globalStatePolicyId)))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** The policy the platform derives, cross-checked against CCL's own derivation. */
+    private String policyIdOf(Cip113ProgrammableTokenService service, PlutusScript moduleIssueContract,
+                              ProtocolBootstrapParams protocolParams) throws Exception {
+        var platform = protocolScriptBuilderService
+                .getParameterizedIssuanceMintScript(protocolParams, moduleIssueContract).getPolicyId();
+        var ccl = service.advanced().derivePolicyId(Credential.fromScript(moduleIssueContract.getScriptHash()));
+        if (!ccl.isSuccessful() || !platform.equalsIgnoreCase(ccl.getValue())) {
+            throw new IllegalStateException("platform derives policy " + platform + " but CCL derives "
+                    + (ccl.isSuccessful() ? ccl.getValue() : ccl.getResponse()));
+        }
+        return platform;
+    }
+
+    /** The upper validity bound: now plus the configured window, as a slot. */
+    private long validToSlot() {
+        return cardanoConverters.time().toSlot(LocalDateTime.ofInstant(
+                Instant.ofEpochMilli(System.currentTimeMillis() + transferValidityMs), ZoneOffset.UTC));
+    }
+
+    private static ProgrammableTokenCredential scriptCredential(PlutusScript script) throws Exception {
+        return ProgrammableTokenCredential.from(Credential.fromScript(script.getScriptHash()));
+    }
+
+    private static Asset asset(String nameHex, BigInteger quantity) {
+        return Asset.builder().name("0x" + nameHex).value(quantity).build();
     }
 }

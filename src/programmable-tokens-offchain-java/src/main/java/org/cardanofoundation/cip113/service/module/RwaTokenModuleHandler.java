@@ -1,5 +1,14 @@
 package org.cardanofoundation.cip113.service.module;
 
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenCredential;
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenRegistryUpdate;
+import com.bloxbean.cardano.client.programmabletoken.ProgrammableTokenTx;
+import com.bloxbean.cardano.client.programmabletoken.ThirdPartyBurnAuthorization;
+import com.bloxbean.cardano.client.programmabletoken.cip113.LedgerOrdering;
+import org.cardanofoundation.cip113.ccl.CclDeployments;
+import org.cardanofoundation.cip113.ccl.CclQuickTx;
+import org.cardanofoundation.cip113.ccl.CclWallets;
+import org.cardanofoundation.cip113.ccl.SubstandardRedeemerExtension;
 import com.bloxbean.cardano.client.exception.CborDeserializationException;
 import com.bloxbean.cardano.client.address.AddressProvider;
 import com.easy1staking.cardano.comparator.TransactionInputComparator;
@@ -321,6 +330,12 @@ public class RwaTokenModuleHandler
     private final CustomStakeRegistrationRepository stakeRegistrationRepository;
     private final CardanoConverters cardanoConverters;
 
+    /** CCL's programmable-token service for the deployment each request names. */
+    private final CclDeployments cclDeployments;
+
+    /** A fresh CCL-extended builder per transaction, on the platform's suppliers. */
+    private final CclQuickTx cclQuickTx;
+
     @Setter
     private RwaTokenContext context;
 
@@ -414,7 +429,10 @@ public class RwaTokenModuleHandler
      *
      *  <p>Pre-condition for the chained call: every supplied {@link
      *  RegistrationChainInputs} UTxO carries its inline datum, so the evaluator can
-     *  see it. */
+     *  see it.
+     *
+     *  <p>Built by hand: CCL gap #17. The registration is one link of a chain whose earlier
+     *  transactions are not on chain yet. */
     public TransactionContext<RegistrationResult> buildRegistrationTransaction(
             RwaTokenRegisterRequest request,
             ProtocolBootstrapParams protocolParams,
@@ -1367,6 +1385,9 @@ public class RwaTokenModuleHandler
      *  attestations rather than on the allowlist is not served by this path — it
      *  will be refused up front with the "member_root_hash is empty" precondition.
      *  Deliberate scope narrowing, matching the transfer path.
+     *
+     *  <p>Built by CCL. The mint SPENDS GlobalState (MintSecurity enforces the supply cap);
+     *  CCL takes that spent UTxO as the token's global state instead of also referencing it.
      */
     @Override
     public TransactionContext<Void> buildMintTransaction(
@@ -1494,15 +1515,10 @@ public class RwaTokenModuleHandler
                 mintMpfValidUntilMs = m.validUntilMs();
             }
 
-            // ── 4. Compute redeemer indices ────────────────────────────────
-            // Cardano lex-sorts inputs and reference_inputs by (txHash, outIdx)
-            // at eval time; off-chain indices in our redeemers MUST match.
-            int gsInputIdx = lexIndex(List.of(gsUtxo, funding), gsUtxo);
-            // The denylist covering node proves each mint destination is NOT denylisted.
-            // Added at @e69c66a: verify_mint_destinations now runs the same per-destination
-            // gate the transfer path always had (minting_logic_script.ak:380-468), so a
-            // mint that omits this reference input traps. With an empty denylist the ROOT
-            // element covers every key (lib/denylist/absence.ak: covers_key(None, None, _)).
+            // ── 4. The denylist covering node and the published scripts ─────
+            // The denylist covering node proves the mint destination is NOT denylisted
+            // (minting_logic_script.ak verify_mint_destinations). With an empty denylist the
+            // ROOT element covers every key.
             Utxo denylistCoveringNode = findDenylistCoveringNode(reg, mintRecipientStakeHash);
 
             // The two published reference SCRIPTS are reference inputs too, and the ledger
@@ -1528,97 +1544,6 @@ public class RwaTokenModuleHandler
             TransactionInput mintGsSpendRefInput = TransactionInput.builder()
                     .transactionId(reg.getRefScriptsTxHash())
                     .index(reg.getGsSpendRefIndex()).build();
-            TransactionInput issuanceLogicRefInput = TransactionInput.builder()
-                    .transactionId(protocolParams.issuanceLogicRefInput().txHash())
-                    .index(protocolParams.issuanceLogicRefInput().outputIndex()).build();
-            PlutusScript issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
-            Credential issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
-            Address issuanceLogicRewardAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
-            Credential proxyCredential = Credential.fromScript(s.mintingLogic().getScriptHash());
-            Credential authorityCredential = Credential.fromScript(s.mintingAuthority().getScriptHash());
-            CoreLayout issuanceLayout = CoreLayout.builder()
-                    .referenceInput(txInputOf(directoryEntry)).referenceInput(txInputOf(puNode))
-                    .referenceInput(txInputOf(protocolParamsUtxo)).referenceInput(txInputOf(issuanceUtxo))
-                    .referenceInput(txInputOf(denylistCoveringNode))
-                    .referenceInput(mintAuthorityRefInput).referenceInput(mintGsSpendRefInput)
-                    .referenceInput(issuanceLogicRefInput)
-                    .withdrawal(proxyCredential).withdrawal(authorityCredential)
-                    .withdrawal(issuanceLogicCredential).build();
-            List<TransactionInput> mintRefInputsSorted = issuanceLayout.referenceInputs();
-            int directoryRefIdx = issuanceLayout.referenceInputIndex(txInputOf(directoryEntry));
-            int paramsRefIdx = issuanceLayout.referenceInputIndex(txInputOf(protocolParamsUtxo));
-            int puNodeRefIdx = issuanceLayout.referenceInputIndex(txInputOf(puNode));
-            int denylistRefIdx = issuanceLayout.referenceInputIndex(txInputOf(denylistCoveringNode));
-            // Tx has 1 Spend (GS), 1 Mint (issuance) and now 2 Rewards (the minting proxy
-            // and the authority). Redeemers are sorted by tag (Spend → Mint → Cert →
-            // Reward), so the second Reward APPENDS and shifts nothing: the issuance Mint
-            // still sits at global redeemer index 1.
-            int issuancePri = 1;
-
-            // ── 5. Build redeemers ─────────────────────────────────────────
-            // Issuance — "mint against existing directory entry" variant. In v0.4.0 the
-            // redeemer IS types.MintingRegistryProof: Constr 0 [directoryRefIdx] =
-            // RefInput { index }, telling the issuance contract to FIND the directory entry
-            // as a ref input (vs Constr 1 = OutputIndex, which is the registration flow).
-            PlutusData registryProof = CoreRedeemers.mintProofRefInput(directoryRefIdx);
-            PlutusData issuanceRedeemer = CoreRedeemers.issuanceRedeemer(paramsRefIdx);
-            PlutusData issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
-                    new CoreRedeemers.IssuanceEntry(request.tokenPolicyId(), registryProof)));
-            // mintingLogic.withdraw, MintBurn (constructor 0):
-            //   { registry_node_ref_input_index, global_state_input_index,
-            //     power_user_node_ref_input_index, minted_amount, destination_actions }
-            //
-            // Both the leading registry index and the trailing destination actions are
-            // new at @e69c66a. One action per UNIQUE destination stake credential among
-            // token-bearing outputs, in first-appearance order — this tx has exactly one
-            // such output (the recipient), so exactly one action. The KYC proof inside it
-            // is only evaluated when GS.requires_receiver_kyc is true AND the recipient
-            // is not the authorising power user; `needRecipientProof` (step 3c) is
-            // exactly that condition, and carries a real MPF membership proof when set.
-            PlutusData mintDestinationAction = buildDestinationAction(
-                    mintRecipientStakeHash, needRecipientProof,
-                    mintMpfProofCborHex, mintMpfValidUntilMs, denylistRefIdx);
-            // Proxy: GlobalState is SPENT here (MintSecurity enforces the cap), so the
-            // proxy is told where in `inputs` to find it. Authority: the full MintBurn
-            // decision. Both withdraw 0 below.
-            PlutusData proxyRedeemer = ConstrPlutusData.of(GS_LOCATION_SPENT,
-                    BigIntPlutusData.of(BigInteger.valueOf(gsInputIdx)));
-            PlutusData authorityRedeemer = ConstrPlutusData.of(AUTHORITY_MINT_BURN,
-                    // registry_node_ref_input_index is GONE as of the 2026-08-21
-                    // upstream: this validator no longer reads the CIP-113 registry
-                    // node at all. The base layer already authenticates whichever node
-                    // invoked the withdraw-0, and registry field 4 is a FREE field a
-                    // decoy node could name too, so the old identity assertion was
-                    // never load-bearing. The issuance policy is a compile-time
-                    // parameter now. (The directory entry stays in the reference-input
-                    // set — CIP-113's own prog-logic-global redeemer still indexes it.)
-                    BigIntPlutusData.of(BigInteger.valueOf(gsInputIdx)),
-                    BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)),
-                    BigIntPlutusData.of(mintQuantity),
-                    ListPlutusData.of(mintDestinationAction));
-            // GS spend MintSecurity action.
-            // gs_output_index = 1 (after the prog-token output at 0);
-            // issuance_policy_redeemer_index = position of issuance Mint redeemer.
-            int gsOutputIdx = 1;
-            // GlobalStateSpendRedeemer { global_state_output_index, action }. TWO fields
-            // at the current pin: the leading `config_ref_input_index` was removed along
-            // with the Config NFT. Leaving it in place would shift every field right and
-            // make the action unparseable.
-            PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
-                    BigIntPlutusData.of(BigInteger.valueOf(gsOutputIdx)),
-                    ConstrPlutusData.of(GS_ACTION_MINT_SECURITY,
-                            BigIntPlutusData.of(BigInteger.valueOf(issuancePri))));
-
-            // ── 6. Outputs ─────────────────────────────────────────────────
-            Asset programmableToken = Asset.builder()
-                    .name("0x" + request.assetName())
-                    .value(mintQuantity).build();
-            Value programmableTokenValue = Value.builder()
-                    .coin(Amount.ada(1).getQuantity())
-                    .multiAssets(List.of(MultiAsset.builder()
-                            .policyId(s.issuanceContract().getPolicyId())
-                            .assets(List.of(programmableToken)).build()))
-                    .build();
 
             // ── 6b. CIP-68 reference NFT: not here ─────────────────────────────────
             //
@@ -1650,53 +1575,76 @@ public class RwaTokenModuleHandler
                         + "cip68Metadata thereafter.");
             }
 
-            // Recipient/targetAddress were resolved in step 3b (the denylist covering
-            // node lookup needs the stake hash before the redeemer indices are computed).
             Value gsValue = buildPreservedGsValue(gsUtxo, reg.getGlobalStatePolicyId());
 
-            // ── 7. Compose tx ──────────────────────────────────────────────
-            // Exactly one asset name under the issuance policy. The authority's MintBurn
-            // branch admits no other — see step 6b.
-            List<Asset> mintedAssets = List.of(programmableToken);
-
-            Tx tx = new Tx()
-                    .collectFrom(List.of(funding))
-                    .collectFrom(gsUtxo, gsSpendRedeemer)
-                    .mintAsset(s.issuanceContract(), mintedAssets, issuanceRedeemer)
-                    .payToContract(targetAddress.getAddress(), ValueUtil.toAmountList(programmableTokenValue),
-                            ConstrPlutusData.of(0))                                                 // output 0
-                    .payToContract(s.gsSpendAddress().getAddress(), ValueUtil.toAmountList(gsValue),
-                            newGsDatum);                                                             // output 1
-
+            // ── 5. Build with CCL ──────────────────────────────────────────
+            // CCL mints under the issuance policy with its registry proof, withdraws-0 from
+            // issuance_logic and from the token's minting logic (the proxy), and reads the
+            // registry node and protocol params. GlobalState is SPENT here (MintSecurity enforces
+            // the supply cap), so CCL takes the spent UTxO as the token's global state and does
+            // not also reference it. This module adds the spend and its continuation, the
+            // authority's withdrawal, the power-user node and the denylist covering node, and
+            // reads the authority and GlobalState spend scripts from the published reference
+            // scripts: inline the four validators are 15 441 bytes and the transaction would
+            // exceed the 16 384-byte limit.
+            var service = cclDeployments.service(protocolParams);
+            CclDeployments.registerWitnesses(service, s.mintingLogic());
+            Asset programmableToken = Asset.builder()
+                    .name("0x" + request.assetName())
+                    .value(mintQuantity).build();
+            var tx = new ProgrammableTokenTx()
+                    .from(request.feePayerAddress())
+                    .mint(request.tokenPolicyId(), targetAddress.getAddress(), List.of(programmableToken),
+                            ConstrPlutusData.of(GS_LOCATION_SPENT, BigIntPlutusData.of(0)), ConstrPlutusData.of(0));
+            tx.collectFrom(gsUtxo, ConstrPlutusData.of(0, BigIntPlutusData.of(0),
+                    ConstrPlutusData.of(GS_ACTION_MINT_SECURITY, BigIntPlutusData.of(0))));
+            tx.payToContract(s.gsSpendAddress().getAddress(), ValueUtil.toAmountList(gsValue), newGsDatum);
+            tx.withdraw(s.mintingAuthorityRewardAddress().getAddress(), BigInteger.ZERO,
+                    ConstrPlutusData.of(AUTHORITY_MINT_BURN, BigIntPlutusData.of(0), BigIntPlutusData.of(0),
+                            BigIntPlutusData.of(mintQuantity), ListPlutusData.of()));
+            tx.readFrom(txInputOf(puNode), txInputOf(denylistCoveringNode), mintAuthorityRefInput, mintGsSpendRefInput);
             MintAttestationMetadata.attach(tx, request.attestation());
 
-            // ── Reference scripts ──────────────────────────────────────────
-            // The four validators this mint needs are 15 441 bytes inline:
-            //   8117 minting_authority + 4474 global_state spend
-            // + 1722 issuance_mint + 1128 minting_logic proxy
-            // and the whole transaction came to 17 561 — rejected by the ledger with
-            // MaxTxSizeUTxO 17670 16384. It fit before the proxy/authority split, when the
-            // minting logic was one 7 211-byte script and there was no second withdrawal.
-            //
-            // So the mint reads the two big ones from the reference scripts the registration
-            // published, exactly as the burn does, leaving issuance_mint and the 1 128-byte
-            // proxy inline: 2 850 bytes.
-            //
-            // Script evaluation cannot catch a size overrun — max-tx-size is a ledger rule,
-            // so the validators score perfectly and the transaction is rejected at submit,
-            // after the user has signed.
-            tx = tx
-                    .readFrom(mintRefInputsSorted.toArray(new TransactionInput[0]))
-                    .attachRewardValidator(s.mintingLogic())
-                    .withChangeAddress(request.feePayerAddress());
-
-            for (CoreWithdrawal withdrawal : issuanceLayout.inWithdrawalOrder(List.of(
-                    new CoreWithdrawal(proxyCredential, s.mintingLogicRewardAddress().getAddress(), proxyRedeemer),
-                    new CoreWithdrawal(authorityCredential, s.mintingAuthorityRewardAddress().getAddress(), authorityRedeemer),
-                    new CoreWithdrawal(issuanceLogicCredential, issuanceLogicRewardAddress.getAddress(), issuanceLogicRedeemer)),
-                    CoreWithdrawal::credential)) {
-                tx = tx.withdraw(withdrawal.rewardAddress(), BigInteger.ZERO, withdrawal.redeemer());
-            }
+            // ── 6. Redeemers on the finished transaction ───────────────────
+            // Every index below is a position the ledger fixes only once the transaction is
+            // finished: GlobalState's place among the inputs, its continuation's place among
+            // the outputs, the issuance Mint redeemer's place among all redeemers (Spend before
+            // Mint), and the power-user and denylist nodes' places among the reference inputs.
+            String issuancePolicy = request.tokenPolicyId();
+            String gsSpendAddress = s.gsSpendAddress().getAddress();
+            String gsUnit = gsUtxo.getAmount().stream().map(Amount::getUnit)
+                    .filter(u -> u.toLowerCase().startsWith(reg.getGlobalStatePolicyId().toLowerCase()))
+                    .findFirst().orElseThrow(() -> new BuildPreconditionException("the GlobalState UTxO holds no GS token"));
+            boolean destinationProof = needRecipientProof;
+            String mpfProof = mintMpfProofCborHex;
+            Long mpfValidUntil = mintMpfValidUntilMs;
+            var proxy = new SubstandardRedeemerExtension(
+                    Credential.fromScript(s.mintingLogic().getScriptHash()),
+                    (built, lookup) -> ConstrPlutusData.of(GS_LOCATION_SPENT,
+                            BigIntPlutusData.of(LedgerOrdering.indexOfInput(built, gsUtxo.getTxHash(), gsUtxo.getOutputIndex()))));
+            // MintBurn { global_state_input_index, power_user_node_ref_input_index, minted_amount,
+            //   destination_actions }: one action per unique destination stake credential among
+            // token-bearing outputs; this mint has exactly one such output, the recipient.
+            var authority = new SubstandardRedeemerExtension(
+                    Credential.fromScript(s.mintingAuthority().getScriptHash()),
+                    (built, lookup) -> {
+                        try {
+                            return ConstrPlutusData.of(AUTHORITY_MINT_BURN,
+                                    BigIntPlutusData.of(LedgerOrdering.indexOfInput(built, gsUtxo.getTxHash(), gsUtxo.getOutputIndex())),
+                                    BigIntPlutusData.of(referenceIndex(built, puNode)),
+                                    BigIntPlutusData.of(mintQuantity),
+                                    ListPlutusData.of(buildDestinationAction(mintRecipientStakeHash, destinationProof,
+                                            mpfProof, mpfValidUntil, referenceIndex(built, denylistCoveringNode))));
+                        } catch (Exception e) {
+                            throw new IllegalStateException("could not build the mint's destination action", e);
+                        }
+                    });
+            // GlobalStateSpendRedeemer { global_state_output_index, MintSecurity(issuance_policy_redeemer_index) }.
+            var gsSpend = SubstandardRedeemerExtension.forSpend(gsUtxo,
+                    (built, lookup) -> ConstrPlutusData.of(0,
+                            BigIntPlutusData.of(outputIndexOf(built, gsSpendAddress, gsUnit)),
+                            ConstrPlutusData.of(GS_ACTION_MINT_SECURITY,
+                                    BigIntPlutusData.of(mintRedeemerIndex(built, issuancePolicy)))));
 
             // Finite validity upper bound (D1). verify_membership_proof
             // (lib/kyc/verify.ak:137-142) returns False unless
@@ -1708,27 +1656,20 @@ public class RwaTokenModuleHandler
                     needRecipientProof ? mintMpfValidUntilMs : null,
                     mintRecipientStakeHash, "recipient", "mint");
 
-            String feePayerAddress = request.feePayerAddress();
-            Transaction transaction = quickTxBuilder.compose(tx)
-                    // D6: the signature the minting logic checks is the power-user
-                    // NODE key, i.e. the caller's — not the registration row's
-                    // genesis admin.
+            Transaction transaction = cclQuickTx.builder(service, proxy, authority, gsSpend)
+                    .compose(tx)
+                    // D6: the signature the minting logic checks is the power-user NODE key,
+                    // i.e. the caller's — not the registration row's genesis admin.
                     .withRequiredSigners(callerPkh)
-                    .feePayer(feePayerAddress)
+                    .feePayer(request.feePayerAddress())
                     .mergeOutputs(false)
-                    .withCollateralInputs(TransactionInput.builder()
-                            .transactionId(funding.getTxHash())
-                            .index(funding.getOutputIndex()).build())
                     .validTo(ttlSlot)
-                    // Declares what the reference inputs carry, so the Conway tiered
-                    // ref-script fee is charged and the cost-model languages are right;
-                    // removeDuplicateScriptWitnesses then drops exactly those hashes from the
-                    // witness set. Without the second flag both copies ship — over
-                    // max-tx-size, and rejected as ExtraneousScriptWitnessesUTXOW.
-                    .withReferenceScripts(s.mintingAuthority(), s.gsSpend(), issuanceLogic)
+                    // Declares what the reference inputs carry, so the tiered ref-script fee is
+                    // charged and removeDuplicateScriptWitnesses drops those copies from the
+                    // witness set (both copies would exceed max-tx-size and be rejected as
+                    // ExtraneousScriptWitnessesUTXOW).
+                    .withReferenceScripts(s.mintingAuthority(), s.gsSpend())
                     .removeDuplicateScriptWitnesses(true)
-                    .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
-                    .ignoreScriptCostEvaluationError(false)
                     .build();
 
             checkedTxSize("mint", transaction);
@@ -1850,26 +1791,22 @@ public class RwaTokenModuleHandler
                     network.getCardanoNetwork());
 
             // ── 4. Resolve UTxOs ───────────────────────────────────────────
-            // Sender's prog-token UTxOs (script address) — pick enough to cover
-            // amountToTransfer.
+            // CCL selects the sender's programmable inputs itself, so the token change is only
+            // known in the finished transaction. What can be known here is whether there CAN be
+            // change: none when the transfer takes the wallet's whole balance.
             String unit = policyId + assetNameHex;
             List<Utxo> senderProgTokenUtxos = utxoProvider.findUtxos(senderProgTokenAddress.getAddress());
-            List<Utxo> tokenInputs = new ArrayList<>();
-            BigInteger accumulated = BigInteger.ZERO;
-            for (Utxo u : senderProgTokenUtxos) {
-                BigInteger amt = u.getAmount().stream()
-                        .filter(a -> unit.equals(a.getUnit().replace("0x", "")))
-                        .map(Amount::getQuantity)
-                        .findFirst().orElse(BigInteger.ZERO);
-                if (amt.signum() == 0) continue;
-                tokenInputs.add(u);
-                accumulated = accumulated.add(amt);
-                if (accumulated.compareTo(amountToTransfer) >= 0) break;
-            }
+            BigInteger accumulated = senderProgTokenUtxos.stream()
+                    .flatMap(u -> u.getAmount().stream())
+                    .filter(a -> unit.equals(a.getUnit().replace("0x", "")))
+                    .map(Amount::getQuantity)
+                    .reduce(BigInteger.ZERO, BigInteger::add);
             if (accumulated.compareTo(amountToTransfer) < 0) {
                 return TransactionContext.typedError(
                         "insufficient sender balance: have " + accumulated + " want " + amountToTransfer);
             }
+            // The most token change this transfer can return: it decides, up front, whether a
+            // sender proof may be needed (see requiresTransferSenderProof).
             BigInteger changeAmount = accumulated.subtract(amountToTransfer);
 
             // Funding UTxO for fees + collateral (from sender's base wallet)
@@ -2016,182 +1953,59 @@ public class RwaTokenModuleHandler
                 return TransactionContext.typedError("could not resolve protocol or issuance params UTxOs");
             }
 
-            // ── 5. Compute ref-input indices (lex-sorted by txHash:idx) ───
-            TransactionInput tiGs = txInputOf(gsUtxo);
-            TransactionInput tiDirectory = txInputOf(directoryEntry);
-            TransactionInput tiSenderDenylist = txInputOf(senderDenylistCover);
-            TransactionInput tiRecipientDenylist = txInputOf(recipientDenylistCover);
-            TransactionInput tiProtocolParams = txInputOf(protocolParamsUtxoOpt.get());
-            TransactionInput tiIssuance = txInputOf(issuanceUtxoOpt.get());
-            TransactionInput tiProgBaseRef = TransactionInput.builder()
-                    .transactionId(protocolParams.programmableBaseRefInput().txHash())
-                    .index(protocolParams.programmableBaseRefInput().outputIndex()).build();
-            TransactionInput tiTransferRef = TransactionInput.builder()
-                    .transactionId(protocolParams.transferRefInput().txHash())
-                    .index(protocolParams.transferRefInput().outputIndex()).build();
-            TransactionInput tiDispatcherRef = TransactionInput.builder()
-                    .transactionId(protocolParams.programmableLogicGlobalRefInput().txHash())
-                    .index(protocolParams.programmableLogicGlobalRefInput().outputIndex()).build();
-
-            // Declared together, before any index is taken. The module's transfer-logic
-            // withdrawal belongs in here too: wdrl_idx is a position over the WHOLE withdrawal
-            // map, so a layout that saw only the framework's would be right in isolation and
-            // wrong in the transaction.
-            Credential transferLogicCredential = Credential.fromScript(transferLogicScript.getScriptHash());
-            CoreLayout layout = CoreLayout.builder()
-                    .referenceInput(tiGs)
-                    .referenceInput(tiDirectory)
-                    .referenceInput(tiSenderDenylist)
-                    .referenceInput(tiRecipientDenylist)
-                    .referenceInput(tiProtocolParams)
-                    .referenceInput(tiIssuance)
-                    .referenceInput(tiProgBaseRef)
-                    .referenceInput(tiTransferRef)
-                    .referenceInput(tiDispatcherRef)
-                    .withdrawal(coreTransferCredential)
-                    .withdrawal(dispatcherCredential)
-                    .withdrawal(transferLogicCredential)
-                    .build();
-            List<TransactionInput> refInputsSorted = layout.referenceInputs();
-            int paramsIdx = layout.referenceInputIndex(tiProtocolParams);
-            int gsRefIdx = layout.referenceInputIndex(tiGs);
-            int directoryRefIdx = layout.referenceInputIndex(tiDirectory);
-            int senderDenylistRefIdx = layout.referenceInputIndex(tiSenderDenylist);
-            int recipientDenylistRefIdx = layout.referenceInputIndex(tiRecipientDenylist);
-
-            // ── 6. Build redeemers ─────────────────────────────────────────
-            // One source action per UNIQUE sender stake credential among token
-            // inputs. v1: all token inputs are from the same wallet => 1 action.
-            PlutusData sourceAction = ConstrPlutusData.of(0,
-                    senderProof.data(),
-                    BigIntPlutusData.of(BigInteger.valueOf(senderDenylistRefIdx)));
-            ListPlutusData sourceActions = ListPlutusData.of(sourceAction);
-
-            // One destination action per UNIQUE destination stake credential
-            // among token outputs (in the validator's iteration order).
-            //
-            // The validator does:
-            //   outputs_user_stake_cred_hash =
-            //     list.unique(list.foldr(self.outputs, [], collect-stake-of-token-bearing))
-            //   list.indexed_foldr(outputs_user_stake_cred_hash, True, ..., safe_list_at(actions, i))
-            //
-            // foldr right-folds with push (prepend), so the resulting list is
-            // [stake-of-output[0], stake-of-output[1], ...] in TX OUTPUT ORDER
-            // (de-duped via list.unique, keeping first occurrence).
-            //
-            // Our outputs in TX order:
-            //   [0] recipient prog-token (always present)
-            //   [1] sender change prog-token (only if changeAmount > 0)
-            //
-            // So the validator iterates destinations as:
-            //   same-credential send:          [recipient]
-            //   no change (full transfer):     [recipient]
-            //   with change (partial transfer):[recipient, sender]
-            //
-            // We must emit a matching action per destination — emitting fewer
-            // causes safe_list_at to read past the end of actions[] and
-            // head_list on the empty tail throws EmptyList.
-            ListPlutusData destinationActions = buildTransferDestinationActions(
-                    recipientProof.data(), senderProof.data(), changeAmount,
-                    sameStakeCredential, recipientDenylistRefIdx, senderDenylistRefIdx);
-
-            // TransferLogicScriptWithdrawRedeemer { registry_node_ref_input_index,
-            //   global_state_location, actions_for_each_input, destination_actions }.
-            //
-            // registry_node_ref_input_index was ADDED at @e69c66a (defect B). The
-            // validator no longer searches reference inputs for "some UTxO holding a
-            // registry NFT" — every programmable token's node carries the same registry
-            // policy, so that search returned whichever node sorted first and then
-            // trapped on the identity assertion. It now addresses the node BY INDEX, so
-            // this must be our directory entry's position in the LEX-SORTED reference
-            // input list (which is what directoryRefIdx already is).
-            //
-            // global_state_location: GlobalStateReferenced. The transfer path only READS
-            // the datum (pause flag, TEL, denylist policy id), and this field used to be
-            // a bare reference index — which silently forbade every transfer that shared
-            // a transaction with a GlobalState SPEND, since Conway rejects a UTxO
-            // appearing in both lists. A transfer alone still references it; the location
-            // exists so a transfer chained with a mint, burn or admin action stays
-            // buildable.
-            PlutusData transferRedeemer = ConstrPlutusData.of(0,
-                    // registry_node_ref_input_index is GONE as of the 2026-08-21
-                    // upstream: this validator no longer reads the CIP-113 registry
-                    // node at all. The base layer already authenticates whichever node
-                    // invoked the withdraw-0, and registry field 4 is a FREE field a
-                    // decoy node could name too, so the old identity assertion was
-                    // never load-bearing. The issuance policy is a compile-time
-                    // parameter now. (The directory entry stays in the reference-input
-                    // set — CIP-113's own prog-logic-global redeemer still indexes it.)
-                    ConstrPlutusData.of(GS_LOCATION_REFERENCED,
-                            BigIntPlutusData.of(BigInteger.valueOf(gsRefIdx))),
-                    sourceActions,
-                    destinationActions);
-
-            PlutusData coreTransferRedeemer = CoreRedeemers.transferRedeemer(List.of(CoreRedeemers.tokenExists(directoryRefIdx)));
-
-            // programmable_logic_base runs once per spent programmable input. Its redeemer is no
-            // longer a passthrough: it picks the delegate arm and witnesses where that delegate
-            // sits in the withdrawal map.
-            PlutusData spendPassthrough = CoreRedeemers.baseSpend(
-                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
-
-            // ── 7. Build outputs ───────────────────────────────────────────
-            Asset transferAsset = Asset.builder()
-                    .name("0x" + assetNameHex)
-                    .value(amountToTransfer).build();
-            Value recipientTokenValue = Value.builder()
-                    .coin(Amount.ada(2).getQuantity())
-                    .multiAssets(List.of(MultiAsset.builder()
-                            .policyId(policyId)
-                            .assets(List.of(transferAsset)).build()))
-                    .build();
-
-            // ── 8. Assemble tx ─────────────────────────────────────────────
-            Tx tx = new Tx()
-                    .collectFrom(List.of(funding))
-                    .payToContract(recipientProgTokenAddress.getAddress(),
-                            ValueUtil.toAmountList(recipientTokenValue),
+            // ── 5. Build with CCL ──────────────────────────────────────────
+            // CCL spends the sender's wallet, pays the recipient, returns the token change,
+            // and adds the dispatcher, core transfer and transfer-logic withdrawals with the
+            // registry node and protocol params. This module adds what its own validator reads:
+            // GlobalState and the two denylist covering nodes.
+            var service = cclDeployments.service(protocolParams);
+            CclDeployments.registerWitnesses(service, transferLogicScript);
+            var tx = new ProgrammableTokenTx()
+                    .from(senderAddress.getAddress())
+                    .transfer(recipientProgTokenAddress.getAddress(), Amount.asset(unit, amountToTransfer),
+                            ConstrPlutusData.of(0, ConstrPlutusData.of(GS_LOCATION_REFERENCED, BigIntPlutusData.of(0)),
+                                    ListPlutusData.of(), ListPlutusData.of()),
                             ConstrPlutusData.of(0));
-            for (Utxo ti : tokenInputs) {
-                tx = tx.collectFrom(ti, spendPassthrough);
-            }
-            if (changeAmount.signum() > 0) {
-                Asset changeAsset = Asset.builder()
-                        .name("0x" + assetNameHex).value(changeAmount).build();
-                Value changeValue = Value.builder()
-                        .coin(Amount.ada(2).getQuantity())
-                        .multiAssets(List.of(MultiAsset.builder()
-                                .policyId(policyId)
-                                .assets(List.of(changeAsset)).build()))
-                        .build();
-                tx = tx.payToContract(senderProgTokenAddress.getAddress(),
-                        ValueUtil.toAmountList(changeValue),
-                        ConstrPlutusData.of(0));
-            }
-            tx = tx
-                    .readFrom(refInputsSorted.toArray(new TransactionInput[0]))
-                    .attachRewardValidator(transferLogicScript)
-                    // NOT attachRewardValidator(coreTransfer): the transfer delegate is READ from
-                    // the reference script the deployment published (tiTransferRef, in
-                    // refInputsSorted above), exactly as programmable_logic_base is. Attaching it
-                    // as well would put the same script in the witness set AND in a reference
-                    // input for the same credential -- rejected phase-1 as
-                    // ExtraneousScriptWitnessesUTXOW, and on the hot path, where the whole point
-                    // of referencing it is that every transfer would otherwise pay for its bytes.
-                    .withChangeAddress(senderAddress.getAddress());
+            tx.readFrom(txInputOf(gsUtxo), txInputOf(senderDenylistCover), txInputOf(recipientDenylistCover));
 
-            // Added in LEDGER order: a withdrawal's redeemer is matched to its entry by position
-            // in the canonical map.
-            for (CoreWithdrawal w : layout.inWithdrawalOrder(
-                    List.of(new CoreWithdrawal(transferLogicCredential,
-                                    transferLogicRewardAddress.getAddress(), transferRedeemer),
-                            new CoreWithdrawal(dispatcherCredential,
-                                    dispatcherRewardAddress.getAddress(), CoreRedeemers.dispatchTransfer()),
-                            new CoreWithdrawal(coreTransferCredential,
-                                    coreTransferRewardAddress.getAddress(), coreTransferRedeemer)),
-                    CoreWithdrawal::credential)) {
-                tx = tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer());
-            }
+            // ── 6. The transfer-logic redeemer, on the finished transaction ─
+            // TransferLogicScriptWithdrawRedeemer { global_state_location, source_actions,
+            // destination_actions }. GlobalStateReferenced: the transfer path only READS the
+            // datum. One source action per unique sender stake credential among token inputs
+            // (all inputs come from the one wallet). One destination action per unique
+            // destination stake credential among token-bearing outputs, in TX OUTPUT ORDER —
+            // emitting fewer makes safe_list_at read past the end of actions[].
+            String senderWallet = senderProgTokenAddress.getAddress();
+            String recipientWallet = recipientProgTokenAddress.getAddress();
+            var redeemer = new SubstandardRedeemerExtension(
+                    Credential.fromScript(transferLogicScript.getScriptHash()),
+                    (built, lookup) -> {
+                        int gsIdx = referenceIndex(built, gsUtxo);
+                        int senderDenylistIdx = referenceIndex(built, senderDenylistCover);
+                        int recipientDenylistIdx = referenceIndex(built, recipientDenylistCover);
+                        var outputs = built.getBody().getOutputs();
+                        String firstTokenOutput = null;
+                        BigInteger actualChange = BigInteger.ZERO;
+                        for (var output : outputs) {
+                            var held = output.getValue().amountOf(policyId, "0x" + assetNameHex);
+                            if (held.signum() <= 0) continue;
+                            if (firstTokenOutput == null) firstTokenOutput = output.getAddress();
+                            if (!sameStakeCredential && senderWallet.equals(output.getAddress())) {
+                                actualChange = actualChange.add(held);
+                            }
+                        }
+                        if (!recipientWallet.equals(firstTokenOutput)) {
+                            throw new IllegalStateException("the recipient's output is not the first token-bearing output");
+                        }
+                        var sourceActions = ListPlutusData.of(ConstrPlutusData.of(0,
+                                senderProof.data(), BigIntPlutusData.of(senderDenylistIdx)));
+                        var destinationActions = buildTransferDestinationActions(
+                                recipientProof.data(), senderProof.data(), actualChange,
+                                sameStakeCredential, recipientDenylistIdx, senderDenylistIdx);
+                        return ConstrPlutusData.of(0,
+                                ConstrPlutusData.of(GS_LOCATION_REFERENCED, BigIntPlutusData.of(gsIdx)),
+                                sourceActions, destinationActions);
+                    });
 
             Long earliestExpiry = null;
             if (needSenderProof)
@@ -2203,67 +2017,13 @@ public class RwaTokenModuleHandler
             long ttlSlot = kycClampedTtlSlot(earliestExpiry, senderStakeHash, "transfer", "transfer");
 
             String senderAddrBech32 = senderAddress.getAddress();
-            Transaction transaction = quickTxBuilder.compose(tx)
-                    .withRequiredSigners(senderStakeHash)
+            Transaction transaction = cclQuickTx.builder(service, redeemer)
+                    .compose(tx)
                     .feePayer(senderAddrBech32)
+                    // The stake key signs for the wallet besides the paying payment key: price it.
+                    .additionalSignersCount(1)
                     .mergeOutputs(false)
-                    .withCollateralInputs(TransactionInput.builder()
-                            .transactionId(funding.getTxHash())
-                            .index(funding.getOutputIndex()).build())
                     .validTo(ttlSlot)
-                    .postBalanceTx((bctx, txn) -> {
-                        // Conway's ledger rejected this with FeeTooSmallUTxO
-                        // (short by ~4 KB lovelace) — Bloxbean's fee computation
-                        // ran against a body that ended up slightly smaller
-                        // than what got serialised (likely from
-                        // redeemer-ExUnits or script-data-hash drift).
-                        // Add a small fee buffer, compensate the change output,
-                        // and re-derive the script-collateral fields (which
-                        // are required to be >= fee * collateralPercentage).
-                        // Overpaying is accepted by the ledger (the surplus is
-                        // burned); the buffer of 10000 lovelace (0.01 ADA) is
-                        // far less than the cost of a failed re-submission.
-                        TransactionBody body = txn.getBody();
-                        BigInteger feePadding = BigInteger.valueOf(10_000L);
-                        BigInteger oldFee = body.getFee() != null ? body.getFee() : BigInteger.ZERO;
-                        BigInteger newFee = oldFee.add(feePadding);
-                        body.setFee(newFee);
-                        // Subtract from the largest fee-payer-addressed output
-                        // (the change). Without this the tx would be
-                        // over-balanced (in - out - fee != 0) → ValueNotConservedUTxO.
-                        List<TransactionOutput> outputs = body.getOutputs();
-                        com.bloxbean.cardano.client.transaction.spec.TransactionOutput
-                                changeOut = null;
-                        BigInteger largestChange = BigInteger.ZERO;
-                        for (TransactionOutput o : outputs) {
-                            if (!senderAddrBech32.equals(o.getAddress())) continue;
-                            BigInteger coin = o.getValue().getCoin();
-                            if (coin.compareTo(largestChange) > 0) {
-                                largestChange = coin;
-                                changeOut = o;
-                            }
-                        }
-                        if (changeOut != null && largestChange.compareTo(feePadding) > 0) {
-                            changeOut.getValue().setCoin(largestChange.subtract(feePadding));
-                        }
-                        // Bump total_collateral by feePadding * 1.5 (the
-                        // collateral-percentage protocol param, typically 150%),
-                        // rounded up to 2× for safety against rounding. Reduce
-                        // collateral_return by the same amount so the
-                        // invariant inputs - return = total_collateral holds.
-                        if (body.getTotalCollateral() != null && body.getCollateralReturn() != null) {
-                            BigInteger collateralBump = feePadding.multiply(BigInteger.valueOf(2));
-                            body.setTotalCollateral(body.getTotalCollateral().add(collateralBump));
-                            TransactionOutput ret = body.getCollateralReturn();
-                            BigInteger newReturnCoin = ret.getValue().getCoin().subtract(collateralBump);
-                            if (newReturnCoin.signum() > 0) {
-                                ret.getValue().setCoin(newReturnCoin);
-                            } else {
-                                body.setCollateralReturn(null);
-                            }
-                        }
-                    })
-                    .ignoreScriptCostEvaluationError(false)
                     .build();
 
             log.info("rwa-token transfer: policy={} amount={} {} → {}",
@@ -5362,12 +5122,9 @@ public class RwaTokenModuleHandler
      *      requires the power user to have {@code can_burn}.
      *  </pre>
      *
-     *  <p>NB: this implementation assumes the token UTxO is spendable by the
-     *  admin signing the tx (its stake credential is the admin's payment PKH
-     *  per CIP-113 prog-logic-base). For tokens held by other wallets, an
-     *  admin-seizure flow (third-party transfer) would be required —
-     *  intentionally deferred until the upstream BaFin seizure validator is
-     *  wired through.
+     *  <p>The token UTxO may sit in any holder's wallet: the burn is a third-party action, so a
+     *  partial burn's continuation stays with that holder, and its destination checks (KYC proof,
+     *  denylist covering node) are the holder's, not the burner's.
      *
      *  <h3>Receiver KYC on a PARTIAL burn</h3>
      *  A partial burn leaves a token-bearing continuation output, which
@@ -5375,9 +5132,13 @@ public class RwaTokenModuleHandler
      *  subjects to {@code verify_kyc_proof} when {@code requires_receiver_kyc} is
      *  set. That branch has <em>no</em> self-exemption (contrast
      *  {@code minting_logic_script}, which lets a power user mint to itself), so
-     *  the burner must be an allowlisted member in their own right, and the
+     *  the HOLDER whose UTxO continues must be an allowlisted member, and the
      *  transaction must carry a Finite validity upper bound. Both are handled
      *  below. A FULL burn emits no token-bearing output and needs neither.
+     *
+     *  <p>Built by CCL as a third-party burn: a power user's ThirdPartyAct on any holder's UTxO.
+     *  It also spends GlobalState, which CCL then takes as the token's global state instead of
+     *  referencing it.
      */
     @Override
     public TransactionContext<Void> buildBurnTransaction(
@@ -5454,14 +5215,17 @@ public class RwaTokenModuleHandler
             Utxo issuanceUtxo = protoIssue.get(1);
             Utxo funding = findFunding(request.feePayerAddress(), 5_000_000L);
 
-            // Token UTxO being burned (caller-supplied). Distinct from the GS
-            // and PU lookups — its location depends on which wallet holds the
-            // tokens. The validator gates on the burner's stake cred so the
-            // UTxO's address is implicitly the burner's.
+            // Token UTxO being burned (caller-supplied), in whichever wallet holds the tokens.
             Utxo tokenUtxo = utxoProvider.findUtxo(
                     request.utxoTxHash(), request.utxoOutputIndex()
             ).orElseThrow(() -> new BuildPreconditionException(
                     "token UTxO not found: " + request.utxoTxHash() + ":" + request.utxoOutputIndex()));
+            // A partial burn's continuation stays in the holder's wallet, so its destination
+            // checks name the holder: the owner credential in the smart wallet's stake slot.
+            Address holder = new Address(tokenUtxo.getAddress());
+            byte[] holderStakeHash = holder.getDelegationCredentialHash()
+                    .orElseThrow(() -> new BuildPreconditionException(
+                            "token UTxO is not at a smart wallet (no owner credential): " + tokenUtxo.getAddress()));
 
             // Honour request.quantity; the continuation output keeps any
             // leftover balance of the burned policy (partial burn). The CIP-113
@@ -5520,44 +5284,17 @@ public class RwaTokenModuleHandler
             Long burnMpfValidUntilMs = null;
             if (needBurnDestinationProof) {
                 ResolvedMembership m = resolveMembershipProof(
-                        request.tokenPolicyId(), burnerStakeHash,
-                        stakeCredentialTypeOf(feePayer, "burn destination"), gsFields,
+                        request.tokenPolicyId(), holderStakeHash,
+                        stakeCredentialTypeOf(holder, "burn destination"), gsFields,
                         "burn destination", "burning");
                 burnMpfProofCborHex = m.proofCborHex();
                 burnMpfValidUntilMs = m.validUntilMs();
             }
 
-            // ── 5. Redeemer indices ────────────────────────────────────────
-            // The continuation output of a PARTIAL burn still carries the security
-            // token, so the third-party validator counts it as a destination and
-            // demands a denylist-absence covering node for it. A full burn leaves no
-            // token-bearing output and needs none — but we resolve one regardless, so
-            // the reference-input set (and therefore every index below) does not depend
-            // on the burn being partial or full.
-            Utxo denylistCoveringNodeForBurn = findDenylistCoveringNode(reg, burnerStakeHash);
-            // Inputs sorted lex by (txHash, outIdx): tokenUtxo, gsUtxo, funding.
-            int gsInputIdx = lexIndex(List.of(gsUtxo, tokenUtxo, funding), gsUtxo);
-            // Reference inputs MUST include the full set the tx actually has —
-            // the validator reads ref inputs by index against the lex-sorted
-            // FULL list. Omitting progBaseRef + progGlobalRef from this
-            // computation would make our directoryRefIdx + puNodeRefIdx point
-            // at the wrong entries at eval time.
-            TransactionInput progBaseRefInput = TransactionInput.builder()
-                    .transactionId(protocolParams.programmableBaseRefInput().txHash())
-                    .index(protocolParams.programmableBaseRefInput().outputIndex())
-                    .build();
-            // A burn or seizure is an ADMINISTRATIVE action, so the delegate it loads is
-            // `third_party` -- a different validator with its own published reference script,
-            // not a redeemer constructor on the transfer one.
-            TransactionInput coreThirdPartyRefInput = TransactionInput.builder()
-                    .transactionId(protocolParams.thirdPartyRefInput().txHash())
-                    .index(protocolParams.thirdPartyRefInput().outputIndex()).build();
-            TransactionInput progGlobalRefInput = TransactionInput.builder()
-                    .transactionId(protocolParams.programmableLogicGlobalRefInput().txHash())
-                    .index(protocolParams.programmableLogicGlobalRefInput().outputIndex()).build();
-            TransactionInput issuanceLogicRefInput = TransactionInput.builder()
-                    .transactionId(protocolParams.issuanceLogicRefInput().txHash())
-                    .index(protocolParams.issuanceLogicRefInput().outputIndex()).build();
+            // ── 5. Reference scripts and registrations the burn needs ──────
+            // The denylist covering node proves the partial-burn continuation's owner is not
+            // denylisted; resolved for full burns too (it costs one reference input).
+            Utxo denylistCoveringNodeForBurn = findDenylistCoveringNode(reg, holderStakeHash);
             // ── Reference scripts ──────────────────────────────────────────
             // The five validators this transaction needs come to 21 499 bytes inline:
             //   8117 minting_authority + 6658 third_party_transfer_logic
@@ -5599,153 +5336,8 @@ public class RwaTokenModuleHandler
             TransactionInput thirdPartyRefInput = TransactionInput.builder()
                     .transactionId(reg.getThirdPartyRefTxHash())
                     .index(reg.getThirdPartyTransferLogicRefIndex()).build();
-
-            // GlobalState is SPENT here and deliberately NOT also referenced.
-            //
-            // It has to be spent: only then does global_state.ak's MintSecurity branch
-            // run and credit the burned supply back to mintable_amount. It used to be
-            // referenced as well, because third_party_transfer_logic read it from
-            // self.reference_inputs — and the ledger rejected the result outright:
-            //
-            //     ConwayUtxowFailure (UtxoFailure (BabbageNonDisjointRefInputs ...))
-            //
-            // Conway forbids the same UTxO appearing in both lists, so no single
-            // transaction could satisfy both readers and the burn was unbuildable. The
-            // contract now takes a GlobalStateLocation on that redeemer (the same choice
-            // the minting proxy already had), so both readers are served by the ONE spent
-            // input and the reference list below no longer mentions GlobalState at all.
-            // The three reference-SCRIPT inputs belong in this list too. The validators read
-            // reference inputs by index against the lex-sorted FULL set, so an input that is
-            // present in the transaction but missing from this computation silently shifts
-            // every index below it — the same trap the progBase/progGlobal note above
-            // describes. indexOf() re-derives them, so nothing here needs hand-adjusting.
-            PlutusScript coreThirdParty = protocolScriptBuilderService
-                    .getParameterizedThirdPartyScript(protocolParams);
-            PlutusScript programmableLogicBase = protocolScriptBuilderService
-                    .getParameterizedProgrammableLogicBaseScript(protocolParams);
-            Address coreThirdPartyRewardAddress = AddressProvider.getRewardAddress(
-                    coreThirdParty, network.getCardanoNetwork());
-            Credential coreThirdPartyCredential = Credential.fromScript(coreThirdParty.getScriptHash());
-            PlutusScript dispatcher = protocolScriptBuilderService
-                    .getParameterizedProgrammableLogicGlobalScript(protocolParams);
-            Address dispatcherRewardAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
-            Credential dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
-            PlutusScript issuanceLogic = protocolScriptBuilderService.getParameterizedIssuanceLogicScript(protocolParams);
-            Address issuanceLogicRewardAddress = AddressProvider.getRewardAddress(issuanceLogic, network.getCardanoNetwork());
-            Credential issuanceLogicCredential = Credential.fromScript(issuanceLogic.getScriptHash());
-
-            // Every withdrawal the transaction carries has to be declared here, not just the
-            // framework's: wdrl_idx is a position over the whole map, and this burn carries four.
-            // Taken from `s` rather than re-resolving: MintLikeScripts.mintingLogic IS
-            // RwaTokenScripts.mintingLogicProxy (see buildMintLikeScripts), and resolving the set
-            // twice invites the two copies to drift if either call site is ever changed.
-            // Resolved here rather than at its first use further down, because the layout needs
-            // it: a withdrawal that is emitted but not declared shifts every index after it.
             PlutusScript thirdPartyTransferLogicScript =
                     resolveScripts(reg, protocolParams).thirdPartyTransferLogic();
-
-            CoreLayout layout = CoreLayout.builder()
-                    .referenceInput(txInputOf(directoryEntry))
-                    .referenceInput(txInputOf(puNode))
-                    .referenceInput(txInputOf(protocolParamsUtxo))
-                    .referenceInput(txInputOf(issuanceUtxo))
-                    .referenceInput(txInputOf(denylistCoveringNodeForBurn))
-                    .referenceInput(progBaseRefInput)
-                    .referenceInput(coreThirdPartyRefInput)
-                    .referenceInput(progGlobalRefInput)
-                    .referenceInput(issuanceLogicRefInput)
-                    .referenceInput(mintingAuthorityRefInput)
-                    .referenceInput(gsSpendRefInput)
-                    .referenceInput(thirdPartyRefInput)
-                    .withdrawal(coreThirdPartyCredential)
-                    .withdrawal(dispatcherCredential)
-                    .withdrawal(issuanceLogicCredential)
-                    .withdrawal(Credential.fromScript(s.mintingLogic().getScriptHash()))
-                    .withdrawal(Credential.fromScript(s.mintingAuthority().getScriptHash()))
-                    .withdrawal(Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()))
-                    .build();
-            List<TransactionInput> refInputsSorted = layout.referenceInputs();
-            int paramsIdx = layout.referenceInputIndex(txInputOf(protocolParamsUtxo));
-            int directoryRefIdx = layout.referenceInputIndex(txInputOf(directoryEntry));
-            int puNodeRefIdx = layout.referenceInputIndex(txInputOf(puNode));
-            int denylistRefIdxForBurn = layout.referenceInputIndex(txInputOf(denylistCoveringNodeForBurn));
-            // Tx has 2 Spends (gs + token), 1 Mint (issuance) and 4 Rewards (the minting
-            // proxy, the authority, third-party transfer logic and programmableLogicGlobal).
-            // Redeemers are sorted by tag (Spend → Mint → Cert → Reward), so every Reward
-            // sorts after the Mint and adding the authority shifts nothing: the issuance
-            // Mint still sits at global index 2.
-            int issuancePri = 2;
-
-            // ── 6. Build redeemers ─────────────────────────────────────────
-            // types.MintingRegistryProof directly (no SmartTokenMintingAction wrapper in v0.4.0):
-            // RefInput { index } = Constr 0 [Int].
-            PlutusData registryProof = CoreRedeemers.mintProofRefInput(directoryRefIdx);
-            PlutusData issuanceRedeemer = CoreRedeemers.issuanceRedeemer(paramsIdx);
-            PlutusData issuanceLogicRedeemer = CoreRedeemers.issuanceLogicRedeemer(List.of(
-                    new CoreRedeemers.IssuanceEntry(request.tokenPolicyId(), registryProof)));
-            // Proxy: GlobalState is SPENT (MintSecurity credits the burned supply back to
-            // mintable_amount), so the proxy is pointed at the input index.
-            PlutusData proxyRedeemer = ConstrPlutusData.of(GS_LOCATION_SPENT,
-                    BigIntPlutusData.of(BigInteger.valueOf(gsInputIdx)));
-            // Authority: MintBurn with a NEGATIVE minted_amount — the validator's
-            // else-branch requires can_burn. destination_actions is empty: burns have no
-            // destinations, and the destination checks are skipped when minted_amount <= 0.
-            PlutusData authorityRedeemer = ConstrPlutusData.of(AUTHORITY_MINT_BURN,
-                    // registry_node_ref_input_index is GONE as of the 2026-08-21
-                    // upstream: this validator no longer reads the CIP-113 registry
-                    // node at all. The base layer already authenticates whichever node
-                    // invoked the withdraw-0, and registry field 4 is a FREE field a
-                    // decoy node could name too, so the old identity assertion was
-                    // never load-bearing. The issuance policy is a compile-time
-                    // parameter now. (The directory entry stays in the reference-input
-                    // set — CIP-113's own prog-logic-global redeemer still indexes it.)
-                    BigIntPlutusData.of(BigInteger.valueOf(gsInputIdx)),
-                    BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)),
-                    BigIntPlutusData.of(mintFieldQuantity),
-                    ListPlutusData.of());
-            // Output ordering — continuation FIRST (matches FES; prog-logic-global
-            // ThirdPartyAct reads outputs from outputs_start_idx onward to verify
-            // the burned policy has been removed):
-            //   output 0: continuation of tokenUtxo (same address + datum,
-            //             burned policy stripped from value)
-            //   output 1: new GS UTxO (mintable_amount incremented)
-            //   output N: change to fee-payer (moved to end by preBalanceTx)
-            int continuationOutputIdx = 0;
-            int gsOutputIdx = 1;
-            // GlobalStateSpendRedeemer { global_state_output_index, action }. TWO fields
-            // at the current pin: the leading `config_ref_input_index` was removed along
-            // with the Config NFT. Leaving it in place would shift every field right and
-            // make the action unparseable.
-            PlutusData gsSpendRedeemer = ConstrPlutusData.of(0,
-                    BigIntPlutusData.of(BigInteger.valueOf(gsOutputIdx)),
-                    ConstrPlutusData.of(GS_ACTION_MINT_SECURITY,
-                            BigIntPlutusData.of(BigInteger.valueOf(issuancePri))));
-            // Token UTxO spend redeemer — passthrough. The prog-logic-base
-            // validator running against this input delegates authorisation to
-            // prog-logic-global's withdraw-0 below.
-            PlutusData tokenSpendRedeemer = CoreRedeemers.baseSpend(
-                    paramsIdx, layout.withdrawalIndex(dispatcherCredential));
-            // prog-logic-global — invoked via withdraw-0 to authorise the
-            // prog-token spend. Burns use the ThirdPartyAct branch (Constr 1)
-            // rather than TransferAct (Constr 0): the latter requires per-token
-            // proofs and a matching continuation-as-transfer shape that doesn't
-            // exist for a burn. ThirdPartyAct just needs the registry-entry
-            // index + the outputs_start_idx telling the validator where the
-            // continuation outputs begin (so it can verify the burned policy
-            // has been removed from them). See FreezeAndSeizeHandler.buildBurn
-            // for the same pattern.
-            PlutusData coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(directoryRefIdx, continuationOutputIdx);
-
-            // ThirdPartyAct requires a withdrawal keyed on whatever registry-node slot 4
-            // names. Commit 0ec401a put mintingLogic there, so the withdrawal the burn
-            // already needed satisfied it for free. Slot 4 now holds the module's
-            // real third_party_transfer_logic_validator (defect A is fixed), so the burn
-            // must withdraw from THAT too, and its reward account must be registered
-            // first — buildRegisterTransferLogicTransaction's counterpart.
-            //
-            // Note this tightens burn authority: the power user must now hold
-            // can_force_transfer IN ADDITION to can_burn, because the third-party
-            // validator gates on the former while minting_logic gates on the latter.
             Address thirdPartyRewardAddress = AddressProvider.getRewardAddress(
                     thirdPartyTransferLogicScript, network.getCardanoNetwork());
             // The withdrawal below requires this reward account to exist on chain.
@@ -5770,249 +5362,110 @@ public class RwaTokenModuleHandler
                         + "on registry-node slot 4, and an unregistered reward account is "
                         + "rejected at submit. Register it first, then retry the burn.");
             }
-            // ThirdPartyTransferLogicScriptWithdrawRedeemer { registry_node_ref_input_index,
-            //   global_state_location, power_user_node_ref_input_index,
-            //   destination_actions }. One action per unique destination stake credential
-            //   among token-bearing outputs — the partial-burn continuation is the only
-            //   one, and it returns to the burner.
-            //
-            // GlobalStateSpent, pointing at the same input index the proxy uses: this
-            // validator only reads requires_receiver_kyc and deactivated, so it does not
-            // care whether the GS spend validator ran, and asking for a reference input
-            // is what made the burn non-disjoint. See the reference-input note above.
-            PlutusData thirdPartyRedeemer = ConstrPlutusData.of(0,
-                    // registry_node_ref_input_index is GONE as of the 2026-08-21
-                    // upstream: this validator no longer reads the CIP-113 registry
-                    // node at all. The base layer already authenticates whichever node
-                    // invoked the withdraw-0, and registry field 4 is a FREE field a
-                    // decoy node could name too, so the old identity assertion was
-                    // never load-bearing. The issuance policy is a compile-time
-                    // parameter now. (The directory entry stays in the reference-input
-                    // set — CIP-113's own prog-logic-global redeemer still indexes it.)
-                    ConstrPlutusData.of(GS_LOCATION_SPENT,
-                            BigIntPlutusData.of(BigInteger.valueOf(gsInputIdx))),
-                    BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)),
-                    isPartialBurn
-                            ? ListPlutusData.of(buildDestinationAction(
-                                    burnerStakeHash, needBurnDestinationProof,
-                                    burnMpfProofCborHex, burnMpfValidUntilMs,
-                                    denylistRefIdxForBurn))
-                            : ListPlutusData.of());
 
-            // ── 7. Outputs ─────────────────────────────────────────────────
+            // ── 6. Build with CCL: a third-party burn of the pinned UTxO ───
+            // CCL spends the token UTxO under ThirdPartyAct, burns under the issuance policy,
+            // withdraws-0 from the third-party logic (registry slot 4), the minting logic (the
+            // proxy), issuance_logic, the third_party delegate and the dispatcher, and writes the
+            // continuation (address, datum and reference script unchanged, burnt amount removed).
+            // GlobalState is SPENT here (MintSecurity credits the burnt supply back to
+            // mintable_amount), so CCL takes the spent UTxO as the token's global state rather
+            // than also referencing it. This module adds the spend and its continuation, the
+            // authority's withdrawal, the power-user node, the denylist covering node, and the
+            // three big validators read from their published reference scripts (21 499 bytes
+            // inline against a 16 384-byte limit).
             Value gsValue = buildPreservedGsValue(gsUtxo, reg.getGlobalStatePolicyId());
-            Asset burnAsset = Asset.builder()
-                    .name("0x" + request.assetName())
-                    .value(mintFieldQuantity).build();
+            var service = cclDeployments.service(protocolParams);
+            CclDeployments.registerWitnesses(service, s.mintingLogic(), thirdPartyTransferLogicScript);
+            var tx = new ProgrammableTokenTx()
+                    .from(request.feePayerAddress())
+                    .thirdPartyBurn(request.utxoTxHash() + "#" + request.utxoOutputIndex(), request.tokenPolicyId(),
+                            List.of(Asset.builder().name("0x" + request.assetName()).value(burnQuantity).build()),
+                            ThirdPartyBurnAuthorization.of(
+                                    ConstrPlutusData.of(0, ConstrPlutusData.of(GS_LOCATION_SPENT, BigIntPlutusData.of(0)),
+                                            BigIntPlutusData.of(0), ListPlutusData.of()),
+                                    ConstrPlutusData.of(GS_LOCATION_SPENT, BigIntPlutusData.of(0))));
+            tx.collectFrom(gsUtxo, ConstrPlutusData.of(0, BigIntPlutusData.of(0),
+                    ConstrPlutusData.of(GS_ACTION_MINT_SECURITY, BigIntPlutusData.of(0))));
+            tx.payToContract(s.gsSpendAddress().getAddress(), ValueUtil.toAmountList(gsValue), newGsDatum);
+            tx.withdraw(s.mintingAuthorityRewardAddress().getAddress(), BigInteger.ZERO,
+                    ConstrPlutusData.of(AUTHORITY_MINT_BURN, BigIntPlutusData.of(0), BigIntPlutusData.of(0),
+                            BigIntPlutusData.of(mintFieldQuantity), ListPlutusData.of()));
+            tx.readFrom(txInputOf(puNode), txInputOf(denylistCoveringNodeForBurn),
+                    mintingAuthorityRefInput, gsSpendRefInput, thirdPartyRefInput);
 
-            // Continuation value — preserve the token UTxO's lovelace + every
-            // other multi-asset; for the burned policy, keep
-            // `remainingTokenInUtxo` of the burned asset (zero = full burn →
-            // policy entry omitted entirely so we don't emit a zero-quantity
-            // asset, which the ledger rejects).
-            Value tokenUtxoValue = tokenUtxo.toValue();
-            List<MultiAsset> continuationMultiAssets = new ArrayList<>();
-            if (tokenUtxoValue.getMultiAssets() != null) {
-                for (MultiAsset ma : tokenUtxoValue.getMultiAssets()) {
-                    if (!ma.getPolicyId().equals(request.tokenPolicyId())) {
-                        continuationMultiAssets.add(ma);
-                        continue;
-                    }
-                    // Keep all OTHER asset names under the same policy verbatim, and the
-                    // burned asset at the reduced quantity. A FULL burn drops only the
-                    // burned asset — skipping the whole policy entry would silently
-                    // discard any sibling asset names, and the balancer would sweep them
-                    // into the fee-payer's change output, moving programmable tokens out
-                    // of the prog-logic-base address.
-                    List<Asset> kept = new ArrayList<>();
-                    for (Asset a : ma.getAssets()) {
-                        String aHexName = a.getName().startsWith("0x")
-                                ? a.getName().substring(2) : a.getName();
-                        if (aHexName.equalsIgnoreCase(request.assetName())) {
-                            // Zero-quantity assets are rejected by the ledger, so on a
-                            // full burn the entry is omitted rather than set to 0.
-                            if (remainingTokenInUtxo.signum() > 0) {
-                                kept.add(Asset.builder()
-                                        .name("0x" + request.assetName())
-                                        .value(remainingTokenInUtxo).build());
-                            }
-                        } else {
-                            kept.add(a);
+            // ── 7. Redeemers on the finished transaction ───────────────────
+            // GlobalState's place among the inputs, its continuation's place among the outputs,
+            // the issuance Mint redeemer's place among all redeemers, and the power-user and
+            // denylist nodes' places among the reference inputs exist only once the transaction
+            // is finished.
+            String gsSpendAddress = s.gsSpendAddress().getAddress();
+            String gsUnit = gsUtxo.getAmount().stream().map(Amount::getUnit)
+                    .filter(u -> u.toLowerCase().startsWith(reg.getGlobalStatePolicyId().toLowerCase()))
+                    .findFirst().orElseThrow(() -> new BuildPreconditionException("the GlobalState UTxO holds no GS token"));
+            String issuancePolicy = request.tokenPolicyId();
+            boolean partial = isPartialBurn;
+            boolean destinationProof = needBurnDestinationProof;
+            String mpfProof = burnMpfProofCborHex;
+            Long mpfValidUntil = burnMpfValidUntilMs;
+            // Proxy: GlobalState is SPENT, so the proxy is pointed at its input index.
+            var proxy = new SubstandardRedeemerExtension(
+                    Credential.fromScript(s.mintingLogic().getScriptHash()),
+                    (built, lookup) -> ConstrPlutusData.of(GS_LOCATION_SPENT,
+                            BigIntPlutusData.of(LedgerOrdering.indexOfInput(built, gsUtxo.getTxHash(), gsUtxo.getOutputIndex()))));
+            // Authority: MintBurn with a NEGATIVE minted_amount (the can_burn branch); no
+            // destination actions, the destination checks are skipped when minted_amount <= 0.
+            var authority = new SubstandardRedeemerExtension(
+                    Credential.fromScript(s.mintingAuthority().getScriptHash()),
+                    (built, lookup) -> ConstrPlutusData.of(AUTHORITY_MINT_BURN,
+                            BigIntPlutusData.of(LedgerOrdering.indexOfInput(built, gsUtxo.getTxHash(), gsUtxo.getOutputIndex())),
+                            BigIntPlutusData.of(referenceIndex(built, puNode)),
+                            BigIntPlutusData.of(mintFieldQuantity),
+                            ListPlutusData.of()));
+            // Third-party transfer logic: GlobalStateSpent, the power-user node, and one destination
+            // action per unique destination stake credential among token-bearing outputs — the
+            // partial-burn continuation is the only one; a full burn has none.
+            var thirdParty = new SubstandardRedeemerExtension(
+                    Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()),
+                    (built, lookup) -> {
+                        try {
+                            return ConstrPlutusData.of(0,
+                                    ConstrPlutusData.of(GS_LOCATION_SPENT, BigIntPlutusData.of(
+                                            LedgerOrdering.indexOfInput(built, gsUtxo.getTxHash(), gsUtxo.getOutputIndex()))),
+                                    BigIntPlutusData.of(referenceIndex(built, puNode)),
+                                    partial
+                                            ? ListPlutusData.of(buildDestinationAction(holderStakeHash, destinationProof,
+                                                    mpfProof, mpfValidUntil, referenceIndex(built, denylistCoveringNodeForBurn)))
+                                            : ListPlutusData.of());
+                        } catch (Exception e) {
+                            throw new IllegalStateException("could not build the burn's destination action", e);
                         }
-                    }
-                    if (kept.isEmpty()) continue;
-                    continuationMultiAssets.add(MultiAsset.builder()
-                            .policyId(ma.getPolicyId())
-                            .assets(kept).build());
-                }
-            }
-            Value continuationValue = Value.builder()
-                    .coin(tokenUtxoValue.getCoin())
-                    .multiAssets(continuationMultiAssets)
-                    .build();
+                    });
+            // GlobalStateSpendRedeemer { global_state_output_index, MintSecurity(issuance_policy_redeemer_index) }.
+            var gsSpend = SubstandardRedeemerExtension.forSpend(gsUtxo,
+                    (built, lookup) -> ConstrPlutusData.of(0,
+                            BigIntPlutusData.of(outputIndexOf(built, gsSpendAddress, gsUnit)),
+                            ConstrPlutusData.of(GS_ACTION_MINT_SECURITY,
+                                    BigIntPlutusData.of(mintRedeemerIndex(built, issuancePolicy)))));
 
-            // ── 8. Compose tx ──────────────────────────────────────────────
-            // Script witnesses:
-            //   spending → gsSpend                (attached — BaFin, parameterised)
-            //   spending → programmableLogicBase  (REFERENCED via progBaseRefInput)
-            //   minting  → issuanceContract       (attached — wrapped per-token)
-            //   reward   → mintingLogic           (attached — BaFin, parameterised, can_burn)
-            //   reward   → thirdPartyTransferLogic (attached — BaFin, parameterised,
-            //                                       can_force_transfer)
-            //   reward   → programmableLogicGlobal (REFERENCED via progGlobalRefInput)
-            //
-            // The protocol scripts MUST be referenced (not attached) — attaching
-            // both inline pushes the tx over the 16 KB ledger size limit.
-            //
-            // SIZE: three of these four are REFERENCED, not carried. Attaching all four
-            // came to 19 385 bytes and the first real burn was rejected at 21 480 against
-            // the 16 384 limit. minting_logic, global_state spend and
-            // third_party_transfer_logic are read from the reference scripts the
-            // registration published (see the reference-script block above); only
-            // issuance_mint, at 1722 bytes, remains inline.
-            //
-            // transferLogic is intentionally NOT in the witness set. Registry
-            // node field 3 (transfer_logic_script) is only consulted by
-            // prog-logic-global's TransferAct branch; this tx takes the
-            // ThirdPartyAct branch, which instead requires a withdrawal keyed
-            // on registry node field 4 (third_party_transfer_logic_script) —
-            //   lib/registry_node.ak :: with_key_and_3rd_party_logic
-            //   validators/programmable_logic/third_party.ak ::
-            //     expect pairs.has_key_or_fail(self.withdrawals, third_party_logic)
-            // Slot 4 now holds the module's REAL
-            // third_party_transfer_logic_validator (that was the fix in 0ec401a), so
-            // this tx withdraws from that script's reward account — see the
-            // withdrawal below. Keeping transferLogic out still saves ~5952
-            // bytes of transferLogic script witness, keeping the tx under 16 KB.
-            Tx tx = new Tx()
-                    .collectFrom(List.of(funding))
-                    .collectFrom(tokenUtxo, tokenSpendRedeemer)
-                    .collectFrom(gsUtxo, gsSpendRedeemer)
-                    .mintAsset(s.issuanceContract(), burnAsset, issuanceRedeemer)
-                    .payToContract(tokenUtxo.getAddress(), ValueUtil.toAmountList(continuationValue),
-                            ConstrPlutusData.of(0))                                                  // output 0 (continuation)
-                    .payToContract(s.gsSpendAddress().getAddress(), ValueUtil.toAmountList(gsValue),
-                            newGsDatum)                                                              // output 1 (new GS)
-                    .readFrom(refInputsSorted.toArray(new TransactionInput[0]))
-                    .attachSpendingValidator(s.gsSpend())
-                    .attachRewardValidator(s.mintingLogic())
-                    .attachRewardValidator(s.mintingAuthority())
-                    .attachRewardValidator(thirdPartyTransferLogicScript)
-                    .withChangeAddress(request.feePayerAddress());
-
-            // All FOUR withdrawals, added in LEDGER order. This is the widest withdrawal set in
-            // the codebase, which is exactly where insertion order is most likely to differ from
-            // the canonical one -- and a withdrawal's redeemer is matched to its entry by
-            // position in that canonical map, not by the order it was added.
-            for (CoreWithdrawal w : layout.inWithdrawalOrder(
-                    List.of(new CoreWithdrawal(Credential.fromScript(s.mintingLogic().getScriptHash()),
-                                    s.mintingLogicRewardAddress().getAddress(), proxyRedeemer),
-                            new CoreWithdrawal(Credential.fromScript(s.mintingAuthority().getScriptHash()),
-                                    s.mintingAuthorityRewardAddress().getAddress(), authorityRedeemer),
-                            new CoreWithdrawal(Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()),
-                                    thirdPartyRewardAddress.getAddress(), thirdPartyRedeemer),
-                            new CoreWithdrawal(dispatcherCredential, dispatcherRewardAddress.getAddress(),
-                                    CoreRedeemers.dispatchThirdParty()),
-                            new CoreWithdrawal(issuanceLogicCredential, issuanceLogicRewardAddress.getAddress(),
-                                    issuanceLogicRedeemer),
-                            new CoreWithdrawal(coreThirdPartyCredential,
-                                    coreThirdPartyRewardAddress.getAddress(), coreThirdPartyRedeemer)),
-                    CoreWithdrawal::credential)) {
-                tx = tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer());
-            }
-
-            // ── 9. Build with burner signature + pinned collateral ─────────
-            // Required signers:
-            //   burnerKeyHash (PAYMENT) — needed by mintingLogic.withdraw's
-            //     can_burn check (matches the PU node's credential_hash field).
-            //   burnerStakeHash (STAKE) — needed by prog-logic-global's
-            //     collect_input_assets check on the prog-token UTxO's stake
-            //     credential. Wallets sign for BOTH payment and stake when
-            //     signing as themselves, so this just declares the requirement.
-            // Finite validity upper bound — same requirement as the mint: a
-            // Membership proof only verifies against a Finite upper bound that is
-            // <= proof.valid_until_ms. Set on every burn (harmless when no proof is
-            // verified) and clamped to the membership expiry when one is.
+            // ── 8. Build with the burner's signatures ──────────────────────
+            // burnerKeyHash (payment) is the power user the minting logic checks; burnerStakeHash
+            // is the holder's stake key the base layer checks on the token UTxO.
             long burnTtlSlot = kycClampedTtlSlot(
                     needBurnDestinationProof ? burnMpfValidUntilMs : null,
-                    burnerStakeHash, "burn destination", "burn");
+                    holderStakeHash, "burn destination", "burn");
 
-            String feePayerAddress = request.feePayerAddress();
-            Transaction transaction = quickTxBuilder.compose(tx)
+            Transaction transaction = cclQuickTx.builder(service, proxy, authority, thirdParty, gsSpend)
+                    .compose(tx)
                     .withRequiredSigners(burnerKeyHash, burnerStakeHash)
-                    // The three big validators stay ATTACHED above — attaching is how
-                    // cardano-client binds a redeemer to a script — and this pair then moves
-                    // them out of the witness set into the reference inputs added to
-                    // refInputsSorted. withReferenceScripts declares what those inputs carry,
-                    // so the Conway tiered ref-script fee is charged and the cost-model
-                    // languages are right; removeDuplicateScriptWitnesses drops exactly those
-                    // hashes from the witness set. It defaults to FALSE, and leaving it off
-                    // keeps BOTH copies — over max-tx-size, and rejected as
-                    // ExtraneousScriptWitnessesUTXOW. issuance_mint is deliberately absent:
-                    // it is not published, and at 1722 bytes it fits inline.
-                    //
-                    // The AUTHORITY, not the proxy. What is published — and therefore what
-                    // the reference inputs above actually carry — changed with the
-                    // proxy/authority split: the authority is 8 117 bytes and is published,
-                    // the proxy is 1 128 and rides inline. Declaring the proxy here while
-                    // referencing the authority made removeDuplicateScriptWitnesses strip the
-                    // PROXY from the witness set even though nothing referenced it, so its
-                    // withdrawal had no script at all.
-                    .withReferenceScripts(s.mintingAuthority(), s.gsSpend(),
-                            thirdPartyTransferLogicScript, programmableLogicBase,
-                            coreThirdParty, dispatcher, issuanceLogic)
-                    .removeDuplicateScriptWitnesses(true)
-                    .feePayer(feePayerAddress)
+                    .feePayer(request.feePayerAddress())
                     .mergeOutputs(false)
-                    .withCollateralInputs(TransactionInput.builder()
-                            .transactionId(funding.getTxHash())
-                            .index(funding.getOutputIndex()).build())
                     .validTo(burnTtlSlot)
-                    .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
-                    .postBalanceTx((bctx, txn) -> {
-                        // Same fee-too-small pattern we saw in transfer:
-                        // Bloxbean's fee calc comes up short by a few KB
-                        // lovelace (final body ends up slightly bigger due to
-                        // redeemer-ExUnits/script-data-hash drift). Overpay by
-                        // 10000 lovelace, compensate the change output, and
-                        // bump total_collateral + shrink collateral_return in
-                        // lockstep so the Conway invariants hold.
-                        TransactionBody body = txn.getBody();
-                        BigInteger feePadding = BigInteger.valueOf(10_000L);
-                        BigInteger oldFee = body.getFee() != null ? body.getFee() : BigInteger.ZERO;
-                        body.setFee(oldFee.add(feePadding));
-                        // Subtract from the largest fee-payer-addressed output (the change).
-                        List<TransactionOutput> outputs = body.getOutputs();
-                        com.bloxbean.cardano.client.transaction.spec.TransactionOutput
-                                changeOut = null;
-                        BigInteger largestChange = BigInteger.ZERO;
-                        for (TransactionOutput o : outputs) {
-                            if (!feePayerAddress.equals(o.getAddress())) continue;
-                            BigInteger coin = o.getValue().getCoin();
-                            if (coin.compareTo(largestChange) > 0) {
-                                largestChange = coin;
-                                changeOut = o;
-                            }
-                        }
-                        if (changeOut != null && largestChange.compareTo(feePadding) > 0) {
-                            changeOut.getValue().setCoin(largestChange.subtract(feePadding));
-                        }
-                        // Collateral keeps up with the bumped fee (Conway:
-                        // total_collateral >= fee * collateralPercentage,
-                        // typically 150% — 2x is safe).
-                        if (body.getTotalCollateral() != null && body.getCollateralReturn() != null) {
-                            BigInteger collateralBump = feePadding.multiply(BigInteger.valueOf(2));
-                            body.setTotalCollateral(body.getTotalCollateral().add(collateralBump));
-                            TransactionOutput ret = body.getCollateralReturn();
-                            BigInteger newReturnCoin = ret.getValue().getCoin().subtract(collateralBump);
-                            if (newReturnCoin.signum() > 0) {
-                                ret.getValue().setCoin(newReturnCoin);
-                            } else {
-                                body.setCollateralReturn(null);
-                            }
-                        }
-                    })
-                    .ignoreScriptCostEvaluationError(false)
+                    // Declares what the reference inputs carry, so the tiered ref-script fee is
+                    // charged and removeDuplicateScriptWitnesses drops those copies from the
+                    // witness set (both copies exceed max-tx-size: ExtraneousScriptWitnessesUTXOW).
+                    .withReferenceScripts(s.mintingAuthority(), s.gsSpend(), thirdPartyTransferLogicScript)
+                    .removeDuplicateScriptWitnesses(true)
                     .build();
 
             log.info("rwa-token burn: policy={} qty={} (mintable_amount {} → {})",
@@ -8104,81 +7557,59 @@ public class RwaTokenModuleHandler
             byte[] adminHash = gsAdminCredentialHash(
                     PlutusData.deserialize(HexUtil.decodeHexString(gsUtxo.getInlineDatum())));
 
-            List<Utxo> funding = accountService.findAdaOnlyUtxo(feePayerAddress, 5_000_000L);
-            if (funding.isEmpty()) {
+            if (accountService.findAdaOnlyUtxo(feePayerAddress, 5_000_000L).isEmpty()) {
                 return TransactionContext.typedError("no ADA-only UTxOs at " + feePayerAddress);
             }
-            Utxo fundingUtxo = funding.getFirst();
 
             // The continuing node: only the two transfer-logic fields move. Everything else
             // is reproduced verbatim — the base layer compares the frozen fields, and the
             // authority separately re-asserts unfracking and global_state_cs.
-            RegistryNode upgraded = currentNode.toBuilder()
-                    .transferLogicScript(Credential.fromScript(scripts.transferLogic().getScriptHash()))
-                    .thirdPartyTransferLogicScript(
-                            Credential.fromScript(scripts.thirdPartyTransferLogic().getScriptHash()))
-                    .unfrackingLogicScript(RegistryNode.EMPTY_VKEY)
-                    .globalStatePolicyId(reg.getGlobalStatePolicyId())
+            var service = cclDeployments.service(protocolParams);
+            var update = ProgrammableTokenRegistryUpdate.builder()
+                    .next(currentNode.next())
+                    .mintingLogicScript(ProgrammableTokenCredential.from(currentNode.mintingLogicScript()))
+                    .transferLogicScript(ProgrammableTokenCredential.from(
+                            Credential.fromScript(scripts.transferLogic().getScriptHash())))
+                    .thirdPartyTransferLogicScript(ProgrammableTokenCredential.from(
+                            Credential.fromScript(scripts.thirdPartyTransferLogic().getScriptHash())))
+                    .unfrackingLogicScript(ProgrammableTokenCredential.from(RegistryNode.EMPTY_VKEY))
+                    .globalStateCs(reg.getGlobalStatePolicyId())
                     .build();
+            CclDeployments.registerWitnesses(service, scripts.mintingLogicProxy());
 
-            PlutusScript directorySpendScript =
-                    protocolScriptBuilderService.getParameterizedRegistryScript(protocolParams);
-            Address directorySpendAddress =
-                    AddressProvider.getEntAddress(directorySpendScript, network.getCardanoNetwork());
-
-            // registry_spend resolves the registry-node policy id from the CIP-113
-            // protocol-params UTxO and requires it as a REFERENCE INPUT — it fails before
-            // reaching any of our checks without it. It is not optional and not ours.
-            Utxo protocolParamsUtxo = findProtocolAndIssuanceUtxos(protocolParams).getFirst();
-
-            // Cardano lex-sorts inputs and reference inputs before any script sees them, so
-            // the redeemer indices must be computed against the sorted lists, not insertion
-            // order — and adding the protocol-params reference input above moves the
-            // GlobalState index, which is why this is derived rather than hardcoded.
-            // GlobalState is REFERENCED here, never spent: an upgrade changes rules, not
-            // supply, so there is no cap to enforce and nothing for MintSecurity to do.
-            List<Utxo> upgradeRefInputs = List.of(gsUtxo, protocolParamsUtxo);
-            int nodeInputIdx = lexIndex(List.of(nodeUtxo, fundingUtxo), nodeUtxo);
-            int gsRefIdx = lexIndex(upgradeRefInputs, gsUtxo);
-            int nodeOutputIdx = 0;
-
-            PlutusData proxyRedeemer = ConstrPlutusData.of(GS_LOCATION_REFERENCED,
-                    BigIntPlutusData.of(BigInteger.valueOf(gsRefIdx)));
-            PlutusData authorityRedeemer = ConstrPlutusData.of(AUTHORITY_UPGRADE_REGISTRY_NODE,
-                    BigIntPlutusData.of(BigInteger.valueOf(nodeInputIdx)),
-                    BigIntPlutusData.of(BigInteger.valueOf(nodeOutputIdx)),
-                    // A location, as on every variant that merely reads the datum.
-                    ConstrPlutusData.of(GS_LOCATION_REFERENCED,
-                            BigIntPlutusData.of(BigInteger.valueOf(gsRefIdx))));
-
-            Tx tx = new Tx()
-                    .collectFrom(List.of(fundingUtxo))
-                    .collectFrom(nodeUtxo, ConstrPlutusData.of(0))   // registry_spend ignores its redeemer
-                    .withdraw(AddressProvider.getRewardAddress(
-                            scripts.mintingLogicProxy(), network.getCardanoNetwork()).getAddress(),
-                            BigInteger.ZERO, proxyRedeemer)
-                    .withdraw(AddressProvider.getRewardAddress(
-                            scripts.mintingAuthority(), network.getCardanoNetwork()).getAddress(),
-                            BigInteger.ZERO, authorityRedeemer)
-                    // Value preserved verbatim, registry NFT included — registry_spend requires
-                    // exactly one continuing registry-NFT output.
-                    .payToContract(directorySpendAddress.getAddress(),
-                            nodeUtxo.getAmount(), upgraded.toPlutusData())   // output 0
-                    .readFrom(txInputOf(gsUtxo), txInputOf(protocolParamsUtxo))
-                    .attachSpendingValidator(directorySpendScript)
-                    .attachRewardValidator(scripts.mintingLogicProxy())
+            // CCL spends the node, writes its continuation, reads the protocol params and
+            // withdraws-0 from the node's minting logic (the proxy). The authority's own
+            // withdrawal and the GlobalState read are this module's. GlobalState is REFERENCED
+            // here, never spent: an upgrade changes rules, not supply.
+            var tx = new ProgrammableTokenTx()
+                    .from(feePayerAddress)
+                    .updateRegistry(policyId, update, ConstrPlutusData.of(GS_LOCATION_REFERENCED, BigIntPlutusData.of(0)));
+            tx.withdraw(AddressProvider.getRewardAddress(scripts.mintingAuthority(), network.getCardanoNetwork()).getAddress(),
+                            BigInteger.ZERO, ConstrPlutusData.of(AUTHORITY_UPGRADE_REGISTRY_NODE,
+                                    BigIntPlutusData.of(0), BigIntPlutusData.of(0),
+                                    ConstrPlutusData.of(GS_LOCATION_REFERENCED, BigIntPlutusData.of(0))))
                     .attachRewardValidator(scripts.mintingAuthority())
-                    .withChangeAddress(feePayerAddress);
+                    .readFrom(txInputOf(gsUtxo));
+            // The redeemers name the node's input, its continuing output and the GlobalState
+            // reference by position in the finished transaction, so they are written after
+            // balancing.
+            var proxy = new SubstandardRedeemerExtension(
+                    Credential.fromScript(scripts.mintingLogicProxy().getScriptHash()),
+                    (built, lookup) -> ConstrPlutusData.of(GS_LOCATION_REFERENCED,
+                            BigIntPlutusData.of(referenceIndex(built, gsUtxo))));
+            var authority = new SubstandardRedeemerExtension(
+                    Credential.fromScript(scripts.mintingAuthority().getScriptHash()),
+                    (built, lookup) -> ConstrPlutusData.of(AUTHORITY_UPGRADE_REGISTRY_NODE,
+                            BigIntPlutusData.of(LedgerOrdering.indexOfInput(built, nodeUtxo.getTxHash(), nodeUtxo.getOutputIndex())),
+                            BigIntPlutusData.of(outputIndexHolding(built, nodeUtxo)),
+                            // A location, as on every variant that merely reads the datum.
+                            ConstrPlutusData.of(GS_LOCATION_REFERENCED, BigIntPlutusData.of(referenceIndex(built, gsUtxo)))));
 
-            Transaction transaction = quickTxBuilder.compose(tx)
+            Transaction transaction = cclQuickTx.builder(service, proxy, authority)
+                    .compose(tx)
                     .feePayer(feePayerAddress)
                     .withRequiredSigners(adminHash)
                     .mergeOutputs(false)
-                    .preBalanceTx(moveLeadingChangeOutputToEnd(feePayerAddress))
-                    .ignoreScriptCostEvaluationError(false)
-                    .withCollateralInputs(TransactionInput.builder()
-                            .transactionId(fundingUtxo.getTxHash())
-                            .index(fundingUtxo.getOutputIndex()).build())
                     .build();
 
             checkedTxSize("upgradeRegistryNode", transaction);
@@ -8193,6 +7624,61 @@ public class RwaTokenModuleHandler
             log.error("rwa-token registry-node upgrade failed for policy={}", policyId, e);
             return TransactionContext.typedError("registry-node upgrade failed: " + e.getMessage());
         }
+    }
+
+    /** The finished transaction's output at {@code address} carrying {@code unit}. */
+    private static int outputIndexOf(Transaction built, String address, String unit) {
+        var outputs = built.getBody().getOutputs();
+        for (int i = 0; i < outputs.size(); i++) {
+            var output = outputs.get(i);
+            if (address.equals(output.getAddress()) && output.getValue().getMultiAssets() != null
+                && output.getValue().amountOf(unit.substring(0, 56), "0x" + unit.substring(56)).signum() > 0) {
+                return i;
+            }
+        }
+        throw new IllegalStateException("no output at " + address + " carries " + unit);
+    }
+
+    /**
+     * The global index of {@code policyId}'s Mint redeemer: redeemers are ordered by purpose
+     * (every Spend before any Mint), and Mint redeemers by policy id.
+     */
+    private static int mintRedeemerIndex(Transaction built, String policyId) {
+        long spends = built.getWitnessSet().getRedeemers().stream()
+                .filter(r -> r.getTag() == com.bloxbean.cardano.client.plutus.spec.RedeemerTag.Spend)
+                .count();
+        List<String> policies = new ArrayList<>();
+        built.getBody().getMint().forEach(ma -> policies.add(ma.getPolicyId().toLowerCase()));
+        policies.sort(com.bloxbean.cardano.client.programmabletoken.cip113.PolicyOrdering.COMPARATOR);
+        int rank = policies.indexOf(policyId.toLowerCase());
+        if (rank < 0) throw new IllegalStateException("policy " + policyId + " is not minted by this transaction");
+        return (int) spends + rank;
+    }
+
+    /** {@code utxo}'s position among the finished transaction's (sorted) reference inputs. */
+    private static int referenceIndex(Transaction built, Utxo utxo) {
+        int index = LedgerOrdering.indexOfReferenceInput(built, utxo.getTxHash(), utxo.getOutputIndex());
+        if (index < 0) {
+            throw new IllegalStateException(utxo.getTxHash() + "#" + utxo.getOutputIndex() + " is not a reference input");
+        }
+        return index;
+    }
+
+    /** The output of the finished transaction carrying {@code spent}'s non-ADA token (its continuation). */
+    private static int outputIndexHolding(Transaction built, Utxo spent) {
+        var unit = spent.getAmount().stream()
+                .map(com.bloxbean.cardano.client.api.model.Amount::getUnit)
+                .filter(u -> !"lovelace".equals(u))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("the spent UTxO carries no token to follow"));
+        var outputs = built.getBody().getOutputs();
+        for (int i = 0; i < outputs.size(); i++) {
+            var value = outputs.get(i).getValue();
+            if (value.getMultiAssets() != null && value.amountOf(unit.substring(0, 56), "0x" + unit.substring(56)).signum() > 0) {
+                return i;
+            }
+        }
+        throw new IllegalStateException("no output carries " + unit);
     }
 
     /** Script/key hash of a {@link Credential} as lower-case hex. */
@@ -8442,10 +7928,9 @@ public class RwaTokenModuleHandler
                         + "actually carry the RWA token.");
             }
 
-            // ThirdPartyAct compares the continuing output's address, datum and reference
-            // script against the input it continues. Both of the below would have to be
-            // reproduced on that output and this builder cannot do it, so refuse rather
-            // than emit a transaction that fails at evaluation.
+            // ThirdPartyAct compares the continuing output's address, datum and reference script
+            // against the input it continues. CCL carries the datum forward as it is (or none, as
+            // on CCL's own change outputs), but it does not re-attach a reference script.
             if (tokenUtxo.getReferenceScriptHash() != null
                     && !tokenUtxo.getReferenceScriptHash().isBlank()) {
                 return TransactionContext.typedError(
@@ -8453,22 +7938,6 @@ public class RwaTokenModuleHandler
                         + "requires the continuing output to preserve it and this builder cannot "
                         + "re-attach it. utxo=" + request.utxoTxHash() + "#"
                         + request.utxoOutputIndex());
-            }
-            if (tokenUtxo.getInlineDatum() == null || tokenUtxo.getInlineDatum().isBlank()) {
-                return TransactionContext.typedError(
-                        "refusing to seize a UTxO with no inline datum: ThirdPartyAct requires the "
-                        + "continuing output's datum to match the input's, and there is nothing to "
-                        + "carry forward. utxo=" + request.utxoTxHash() + "#"
-                        + request.utxoOutputIndex());
-            }
-            PlutusData continuingDatum;
-            try {
-                continuingDatum = PlutusData.deserialize(
-                        HexUtil.decodeHexString(tokenUtxo.getInlineDatum()));
-            } catch (Exception e) {
-                return TransactionContext.typedError(
-                        "could not decode the seized UTxO's inline datum, so it cannot be "
-                        + "preserved on the continuing output: " + e.getMessage());
             }
 
             // The destination has to be a programmable-token address, exactly as for an
@@ -8548,121 +8017,45 @@ public class RwaTokenModuleHandler
                     .transactionId(reg.getThirdPartyRefTxHash())
                     .index(reg.getThirdPartyTransferLogicRefIndex()).build();
 
-            PlutusScript coreThirdParty = protocolScriptBuilderService
-                    .getParameterizedThirdPartyScript(protocolParams);
-            Address coreThirdPartyRewardAddress = AddressProvider.getRewardAddress(
-                    coreThirdParty, network.getCardanoNetwork());
-            Credential coreThirdPartyCredential = Credential.fromScript(coreThirdParty.getScriptHash());
-            PlutusScript programmableLogicBase = protocolScriptBuilderService
-                    .getParameterizedProgrammableLogicBaseScript(protocolParams);
-
-            Utxo directoryEntry = findDirectoryEntry(policyId, protocolParams);
-            List<Utxo> protoIssue = findProtocolAndIssuanceUtxos(protocolParams);
-            Utxo protocolParamsUtxo = protoIssue.get(0);
-            Utxo issuanceUtxo = protoIssue.get(1);
             Utxo denylistCoveringNode = findDenylistCoveringNode(reg, destStakeHash);
-            Utxo funding = findFunding(request.feePayerAddress(), 5_000_000L);
+            var service = cclDeployments.service(protocolParams);
+            CclDeployments.registerWitnesses(service, thirdPartyTransferLogicScript);
 
-            // ── Reference inputs ───────────────────────────────────────────
-            // The validators address these BY INDEX against the LEX-SORTED set, so every
-            // input the transaction actually carries has to be in this computation or the
-            // indices below silently point at the wrong entry.
-            TransactionInput progBaseRefInput = TransactionInput.builder()
-                    .transactionId(protocolParams.programmableBaseRefInput().txHash())
-                    .index(protocolParams.programmableBaseRefInput().outputIndex()).build();
-            // A burn or seizure is an ADMINISTRATIVE action, so the delegate it loads is
-            // `third_party` -- a different validator with its own published reference script,
-            // not a redeemer constructor on the transfer one.
-            TransactionInput coreThirdPartyRefInput = TransactionInput.builder()
-                    .transactionId(protocolParams.thirdPartyRefInput().txHash())
-                    .index(protocolParams.thirdPartyRefInput().outputIndex()).build();
-            TransactionInput dispatcherRefInput = TransactionInput.builder()
-                    .transactionId(protocolParams.programmableLogicGlobalRefInput().txHash())
-                    .index(protocolParams.programmableLogicGlobalRefInput().outputIndex()).build();
-            PlutusScript dispatcher = protocolScriptBuilderService
-                    .getParameterizedProgrammableLogicGlobalScript(protocolParams);
-            Address dispatcherRewardAddress = AddressProvider.getRewardAddress(dispatcher, network.getCardanoNetwork());
-            Credential dispatcherCredential = Credential.fromScript(dispatcher.getScriptHash());
-            CoreLayout layout = CoreLayout.builder()
-                    .referenceInput(txInputOf(directoryEntry))
-                    .referenceInput(txInputOf(puNode))
-                    .referenceInput(txInputOf(protocolParamsUtxo))
-                    .referenceInput(txInputOf(issuanceUtxo))
-                    .referenceInput(txInputOf(gsUtxo))
-                    .referenceInput(txInputOf(denylistCoveringNode))
-                    .referenceInput(progBaseRefInput)
-                    .referenceInput(coreThirdPartyRefInput)
-                    .referenceInput(dispatcherRefInput)
-                    .referenceInput(thirdPartyRefInput)
-                    .withdrawal(coreThirdPartyCredential)
-                    .withdrawal(dispatcherCredential)
-                    .withdrawal(Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()))
-                    .build();
-            List<TransactionInput> refInputsSorted = layout.referenceInputs();
-            int paramsIdx = layout.referenceInputIndex(txInputOf(protocolParamsUtxo));
-            int directoryRefIdx = layout.referenceInputIndex(txInputOf(directoryEntry));
-            int puNodeRefIdx = layout.referenceInputIndex(txInputOf(puNode));
-            int gsRefIdx = layout.referenceInputIndex(txInputOf(gsUtxo));
-            int denylistRefIdx = layout.referenceInputIndex(txInputOf(denylistCoveringNode));
+            // CCL spends the holder's UTxO under ThirdPartyAct, adds the core third-party and
+            // dispatcher withdrawals, the registry node and the protocol params, and keeps the
+            // continuing output. This module adds what its own validator reads: the power-user
+            // node (the authorisation), GlobalState, the destination's denylist covering node,
+            // and the published third_party_transfer_logic (6 658 bytes would not fit inline).
+            String finalDestMpfProofCborHex = destMpfProofCborHex;
+            Long finalDestMpfValidUntilMs = destMpfValidUntilMs;
+            var tx = new ProgrammableTokenTx()
+                    .from(request.feePayerAddress())
+                    .thirdPartyTransfer(tokenUtxo.getAddress(), destProgAddress.getAddress(),
+                            Amount.asset(unit, seizedQuantity),
+                            ConstrPlutusData.of(0, ConstrPlutusData.of(GS_LOCATION_REFERENCED, BigIntPlutusData.of(0)),
+                                    BigIntPlutusData.of(0), ListPlutusData.of()));
+            tx.readFrom(txInputOf(puNode), txInputOf(gsUtxo), txInputOf(denylistCoveringNode), thirdPartyRefInput);
 
-            // ── Redeemers ──────────────────────────────────────────────────
-            // GlobalStateReferenced: a seizure changes no supply, so there is no cap to
-            // enforce and no reason to spend GlobalState.
-            //
-            // Exactly ONE destination action. The validator collects unique destination
-            // stake credentials from outputs carrying the RWA token, in output order;
-            // the continuing output has the token removed, so the destination is the only
-            // one. Emitting a different number would make safe_list_at read past the end.
-            ListPlutusData destinationActions = ListPlutusData.of(buildDestinationAction(
-                    destStakeHash, requiresReceiverKyc,
-                    destMpfProofCborHex, destMpfValidUntilMs, denylistRefIdx));
-            PlutusData thirdPartyRedeemer = ConstrPlutusData.of(0,
-                    // registry_node_ref_input_index is GONE as of the 2026-08-21
-                    // upstream: this validator no longer reads the CIP-113 registry
-                    // node at all. The base layer already authenticates whichever node
-                    // invoked the withdraw-0, and registry field 4 is a FREE field a
-                    // decoy node could name too, so the old identity assertion was
-                    // never load-bearing. The issuance policy is a compile-time
-                    // parameter now. (The directory entry stays in the reference-input
-                    // set — CIP-113's own prog-logic-global redeemer still indexes it.)
-                    ConstrPlutusData.of(GS_LOCATION_REFERENCED,
-                            BigIntPlutusData.of(BigInteger.valueOf(gsRefIdx))),
-                    BigIntPlutusData.of(BigInteger.valueOf(puNodeRefIdx)),
-                    destinationActions);
-
-            // ThirdPartyAct { registry_node_ref_input_index, outputs_start_idx }. Output 0
-            // is the destination and output 1 the continuation, so the scan starts at 1 —
-            // the same shape the freeze-and-seize module uses.
-            PlutusData coreThirdPartyRedeemer = CoreRedeemers.thirdPartyRedeemer(directoryRefIdx, 1);
-
-            // ── Outputs ────────────────────────────────────────────────────
-            Value seizedValue = Value.from(policyId, "0x" + assetNameHex, seizedQuantity);
-            Value continuationValue = tokenUtxo.toValue().subtract(seizedValue);
-
-            Tx tx = new Tx()
-                    .collectFrom(List.of(funding))
-                    .collectFrom(tokenUtxo, CoreRedeemers.baseSpend(
-                            paramsIdx, layout.withdrawalIndex(dispatcherCredential)))
-                    .payToContract(destProgAddress.getAddress(),
-                            ValueUtil.toAmountList(seizedValue), CoreDatums.programmableTokenDatum())   // output 0
-                    .payToContract(tokenUtxo.getAddress(),
-                            ValueUtil.toAmountList(continuationValue), continuingDatum)    // output 1
-                    .readFrom(refInputsSorted.toArray(new TransactionInput[0]))
-                    .attachRewardValidator(thirdPartyTransferLogicScript)
-                    .withChangeAddress(request.feePayerAddress());
-
-            // Withdrawals in LEDGER order: their redeemers are matched to entries by position in
-            // the canonical map.
-            for (CoreWithdrawal w : layout.inWithdrawalOrder(
-                    List.of(new CoreWithdrawal(Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()),
-                                    thirdPartyRewardAddress.getAddress(), thirdPartyRedeemer),
-                            new CoreWithdrawal(coreThirdPartyCredential,
-                                    coreThirdPartyRewardAddress.getAddress(), coreThirdPartyRedeemer),
-                            new CoreWithdrawal(dispatcherCredential,
-                                    dispatcherRewardAddress.getAddress(), CoreRedeemers.dispatchThirdParty())),
-                    CoreWithdrawal::credential)) {
-                tx = tx.withdraw(w.rewardAddress(), BigInteger.ZERO, w.redeemer());
-            }
+            // GlobalStateReferenced: a seizure changes no supply. Exactly ONE destination action:
+            // the validator collects unique destination stake credentials from outputs carrying
+            // the RWA token, in output order, and the continuing output has the token removed.
+            // Every index is a position in the finished transaction, so it is written after
+            // balancing.
+            var redeemer = new SubstandardRedeemerExtension(
+                    Credential.fromScript(thirdPartyTransferLogicScript.getScriptHash()),
+                    (built, lookup) -> {
+                        try {
+                            return ConstrPlutusData.of(0,
+                                    ConstrPlutusData.of(GS_LOCATION_REFERENCED,
+                                            BigIntPlutusData.of(referenceIndex(built, gsUtxo))),
+                                    BigIntPlutusData.of(referenceIndex(built, puNode)),
+                                    ListPlutusData.of(buildDestinationAction(destStakeHash, requiresReceiverKyc,
+                                            finalDestMpfProofCborHex, finalDestMpfValidUntilMs,
+                                            referenceIndex(built, denylistCoveringNode))));
+                        } catch (Exception e) {
+                            throw new IllegalStateException("could not build the seizure's destination action", e);
+                        }
+                    });
 
             // A Membership proof only verifies against a FINITE upper bound that is
             // <= proof.valid_until_ms, so the seizure carries one whenever a proof is
@@ -8670,25 +8063,43 @@ public class RwaTokenModuleHandler
             long ttlSlot = kycClampedTtlSlot(destMpfValidUntilMs, destStakeHash,
                     "seize destination", "seize");
 
-            Transaction transaction = quickTxBuilder.compose(tx)
+            Transaction transaction = cclQuickTx.builder(service, redeemer)
+                    .compose(tx)
                     // The power user's PAYMENT key authorises the seizure
                     // (must_be_signed_by_credential against the PU node's credential_hash).
                     .withRequiredSigners(seizerKeyHash)
-                    // third_party_transfer_logic is ATTACHED above so cardano-client can bind
-                    // its redeemer, then moved into the reference inputs here — attached it
-                    // would put 6 658 bytes in the witness set on top of the two protocol
-                    // scripts.
-                    .withReferenceScripts(thirdPartyTransferLogicScript,
-                            programmableLogicBase, coreThirdParty, dispatcher)
+                    .withReferenceScripts(thirdPartyTransferLogicScript)
                     .removeDuplicateScriptWitnesses(true)
                     .feePayer(request.feePayerAddress())
                     .mergeOutputs(false)
-                    .withCollateralInputs(TransactionInput.builder()
-                            .transactionId(funding.getTxHash())
-                            .index(funding.getOutputIndex()).build())
                     .validTo(ttlSlot)
-                    .preBalanceTx(moveLeadingChangeOutputToEnd(request.feePayerAddress()))
                     .build();
+
+            // CCL picks the holder's UTxOs itself. A seizure acts on the UTxO the operator chose,
+            // so refuse unless exactly that one is the base-script input (CCL gap #9).
+            String plb = protocolParams.programmableLogicBase().scriptHash();
+            // Inputs are resolved through the builder's own supplier (it sees pending outputs the
+            // indexer may not yet), and an input that cannot be resolved is not assumed harmless.
+            var unresolved = transaction.getBody().getInputs().stream()
+                    .filter(in -> cclQuickTx.utxoSupplier().getTxOutput(in.getTransactionId(), in.getIndex()).isEmpty())
+                    .toList();
+            if (!unresolved.isEmpty()) {
+                return TransactionContext.typedError("seize: cannot resolve input(s) " + unresolved
+                        + " of the built transaction; refusing to seize without knowing what it spends");
+            }
+            var baseInputs = transaction.getBody().getInputs().stream()
+                    .filter(in -> cclQuickTx.utxoSupplier().getTxOutput(in.getTransactionId(), in.getIndex())
+                            .map(u -> new Address(u.getAddress()).getPaymentCredentialHash()
+                                    .map(HexUtil::encodeHexString).filter(plb::equalsIgnoreCase).isPresent())
+                            .orElse(false))
+                    .toList();
+            if (baseInputs.size() != 1
+                || !baseInputs.getFirst().getTransactionId().equals(request.utxoTxHash())
+                || baseInputs.getFirst().getIndex() != request.utxoOutputIndex()) {
+                return TransactionContext.typedError("seize: CCL selected " + baseInputs.size()
+                        + " base-script input(s) other than exactly the named UTxO " + request.utxoTxHash()
+                        + "#" + request.utxoOutputIndex() + "; refusing to seize from a UTxO the operator did not choose");
+            }
 
             log.info("rwa-token seize built: policy={} qty={} from={}#{} to={} seizer={}",
                     policyId, seizedQuantity, request.utxoTxHash(), request.utxoOutputIndex(),

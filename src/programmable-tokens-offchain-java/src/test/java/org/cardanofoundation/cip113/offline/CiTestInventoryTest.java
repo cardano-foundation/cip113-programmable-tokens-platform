@@ -45,7 +45,12 @@ class CiTestInventoryTest {
     private static final Path TEST_ROOT = Path.of("src/test/java");
 
     /** Every test class in the tree, as of 2026-10-01 (counted, not guessed). Bump deliberately, never reflexively. */
-    private static final int EXPECTED_TEST_CLASS_COUNT = 102;
+    // +3 2026-10-23 (CCL programmable-token plan, approved): DevnetProtocolGenesisTest — not in
+    // CI, it submits transactions to a devnet; DeploymentMapperTest and CclWiringTest — in CI via
+    // the offline package.
+    // 2026-10-24 (handlers built on CCL, approved): -2 DummyCclEquivalenceTest, CclRouterTest (the
+    // router and legacy bodies they compared are gone), +1 HandlersOnCclTest (offline, in CI).
+    private static final int EXPECTED_TEST_CLASS_COUNT = 107; // +1 DevnetCclPathsTest (not in CI, submits)
 
     /** Why the rest are out: they submit transactions, need a database, or need a live backend. */
     private static final String NOT_IN_CI_REASON =

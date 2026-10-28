@@ -624,6 +624,48 @@ public class OfflineCip68EvalTest {
         Assertions.assertTrue(size < 16384,
                 "burn exceeds the 16384-byte ledger limit at " + size + " bytes");
     }
+
+    /** A full burn leaves no token-bearing continuation, so the destination-action list is empty. */
+    @Test
+    public void rwaTokenFullBurnEvaluates() throws Exception {
+        rwaBurnFromRegistrationMint("rwa-token/full-burn", BootstrapFixture.ADMIN.baseAddress(), true, false);
+    }
+
+    /**
+     * A power user burns part of ANOTHER holder's UTxO: the continuation stays in the holder's
+     * wallet, so its destination action (denylist covering node, KYC proof) is the holder's, not
+     * the burner's.
+     */
+    @Test
+    public void rwaTokenPartialBurnOfAnotherHoldersUtxoEvaluates() throws Exception {
+        // Receiver KYC on, and only Alice is a member: a destination action naming the burner fails.
+        rwaBurnFromRegistrationMint("rwa-token/foreign-burn", BootstrapFixture.ALICE.baseAddress(), false, true);
+    }
+
+    private void rwaBurnFromRegistrationMint(String label, String holder, boolean full, boolean receiverKyc)
+            throws Exception {
+        var st = receiverKyc
+                ? rwaTokenChain(METADATA, 1_000_000L, "1000", holder, true, true)
+                : rwaTokenChain(METADATA, 1_000_000L, "1000", holder);
+        var built = st.built();
+        var reg = st.registrations().get(built.programmableTokenPolicyId());
+        var policyId = built.programmableTokenPolicyId();
+        var regTx = Transaction.deserialize(HexUtil.decodeHexString(built.registrationCborHex()));
+        var regTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil.getTxHash(regTx.serialize());
+        var userToken = Cip68Evidence.tokensOfPolicy(regTx, policyId).stream()
+                .filter(t -> !Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("the registration minted no user token"));
+
+        // The burner is always the admin, the bootstrap power user (can_burn + can_force_transfer).
+        var burnResult = st.handler().buildBurnTransaction(new org.cardanofoundation.cip113.model.BurnTokenRequest(
+                        BootstrapFixture.ADMIN.baseAddress(), policyId, reg.getSecurityAssetNameHex(),
+                        full ? userToken.quantity().toString() : "400", regTxHash, userToken.outputIndex()),
+                st.boot().params());
+        Assertions.assertTrue(burnResult.isSuccessful(), "burn build failed: " + burnResult.error());
+        var burnTx = Transaction.deserialize(HexUtil.decodeHexString(burnResult.unsignedCborTx()));
+        Assertions.assertTrue(st.chain().reportAndCheckRedeemers(label, burnTx) > 0, "no redeemer was evaluated");
+    }
     /**
      * An ordinary transfer validates.
      *
@@ -1957,7 +1999,9 @@ public class OfflineCip68EvalTest {
                 Mockito.mock(CustomStakeRegistrationRepository.class),
                 registrationsAllRegistered(),
                 utxoProvider,
-                Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class));
+                Mockito.mock(com.bloxbean.cardano.client.backend.blockfrost.service.BFBackendService.class),
+                CclTestWiring.deployments(chain),
+                CclTestWiring.quickTx(chain));
 
         var adminPkh = new Address(BootstrapFixture.ADMIN.baseAddress())
                 .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
@@ -2068,6 +2112,94 @@ public class OfflineCip68EvalTest {
 
         Assertions.assertTrue(tx.serialize().length < 16384,
                 "upgrade tx exceeds the ledger limit at " + tx.serialize().length + " bytes");
+    }
+
+    /**
+     * Every RWA path CCL builds declares the module's own reference scripts, which switches off
+     * QuickTx's resolver; the core scripts CCL references (base, dispatcher, issuance logic,
+     * third_party) must still leave the witness set. Preprod rejected the third-party burn with
+     * ExtraneousScriptWitnessesUTXOW, which the Aiken evaluator does not check.
+     */
+    @Test
+    public void rwaTokenCclPathsCarryNoExtraneousScriptWitnesses() throws Exception {
+        var st = rwaTokenChain(METADATA, 1_000_000L, "1000", BootstrapFixture.ALICE.baseAddress());
+        var handler = st.handler();
+        var params = st.boot().params();
+        var built = st.built();
+        var policyId = built.programmableTokenPolicyId();
+        var reg = st.registrations().get(policyId);
+        var regTx = Transaction.deserialize(HexUtil.decodeHexString(built.registrationCborHex()));
+        var regTxHash = com.bloxbean.cardano.client.transaction.util.TransactionUtil.getTxHash(regTx.serialize());
+        var userToken = Cip68Evidence.tokensOfPolicy(regTx, policyId).stream()
+                .filter(t -> !Integer.valueOf(Cip68.LABEL_REFERENCE).equals(t.label()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("the registration minted no user token"));
+
+        var mint = handler.buildMintTransaction(
+                mintTokenRequest(policyId, reg.getSecurityAssetNameHex(), "250", null), params);
+        var burn = handler.buildBurnTransaction(new org.cardanofoundation.cip113.model.BurnTokenRequest(
+                BootstrapFixture.ADMIN.baseAddress(), policyId, reg.getSecurityAssetNameHex(),
+                "400", regTxHash, userToken.outputIndex()), params);
+        var seize = handler.buildSeizeTransaction(new org.cardanofoundation.cip113.service.module.capabilities
+                .Seizeable.SeizeRequest(BootstrapFixture.ADMIN.baseAddress(), policyId + reg.getSecurityAssetNameHex(),
+                regTxHash, userToken.outputIndex(), BootstrapFixture.ADMIN.baseAddress()), params);
+        var upgrade = handler.buildUpgradeRegistryNodeTransaction(
+                policyId, BootstrapFixture.ADMIN.baseAddress(), params, true);
+        var built4 = new java.util.LinkedHashMap<String, org.cardanofoundation.cip113.model.TransactionContext<?>>();
+        built4.put("mint", mint);
+        built4.put("burn", burn);
+        built4.put("seize", seize);
+        built4.put("upgrade", upgrade);
+        var referenced = new java.util.HashMap<String, Integer>();
+        for (var entry : built4.entrySet()) {
+            Assertions.assertTrue(entry.getValue().isSuccessful(),
+                    entry.getKey() + " build failed: " + entry.getValue().error());
+            referenced.put(entry.getKey(), assertNoExtraneousScriptWitnesses(st.chain(), "rwa-token/" + entry.getKey(),
+                    Transaction.deserialize(HexUtil.decodeHexString(entry.getValue().unsignedCborTx()))));
+        }
+        Assertions.assertTrue(referenced.get("burn") > 0,
+                "precondition: the burn reads published scripts, else this proves nothing");
+
+        var transferChain = rwaTokenChain(METADATA, 1_000_000L, "1000",
+                BootstrapFixture.ALICE.baseAddress(), /*rewardAccountsRegistered=*/ true);
+        transferChain.chain().seedAda("offline-witness-alice-funding", BootstrapFixture.ALICE.baseAddress(), 7, 100);
+        var transferPolicy = transferChain.built().programmableTokenPolicyId();
+        var transfer = transferChain.handler().buildTransferTransaction(
+                new org.cardanofoundation.cip113.model.TransferTokenRequest(BootstrapFixture.ALICE.baseAddress(),
+                        transferPolicy + transferChain.registrations().get(transferPolicy).getSecurityAssetNameHex(),
+                        "400", BootstrapFixture.ADMIN.baseAddress(), null, null, null, null, null, null, null),
+                transferChain.boot().params());
+        Assertions.assertTrue(transfer.isSuccessful(), "transfer build failed: " + transfer.error());
+        assertNoExtraneousScriptWitnesses(transferChain.chain(), "rwa-token/transfer",
+                Transaction.deserialize(HexUtil.decodeHexString(transfer.unsignedCborTx())));
+    }
+
+    /**
+     * The ledger's ExtraneousScriptWitnessesUTXOW: a script that a spent or reference input
+     * already carries must not also sit in the witness set.
+     *
+     * @return how many scripts the transaction's inputs supply
+     */
+    private static int assertNoExtraneousScriptWitnesses(OfflineChain chain, String label, Transaction tx)
+            throws Exception {
+        var inputs = new java.util.ArrayList<>(tx.getBody().getInputs());
+        if (tx.getBody().getReferenceInputs() != null) inputs.addAll(tx.getBody().getReferenceInputs());
+        var supplied = new java.util.HashSet<String>();
+        for (var in : inputs) {
+            chain.utxoSupplier().getTxOutput(in.getTransactionId(), in.getIndex())
+                    .map(com.bloxbean.cardano.client.api.model.Utxo::getReferenceScriptHash)
+                    .ifPresent(supplied::add);
+        }
+        var witnessed = new java.util.ArrayList<String>();
+        var ws = tx.getWitnessSet();
+        for (var scripts : java.util.Arrays.asList(ws.getPlutusV1Scripts(), ws.getPlutusV2Scripts(), ws.getPlutusV3Scripts())) {
+            if (scripts == null) continue;
+            for (var script : scripts) witnessed.add(HexUtil.encodeHexString(script.getScriptHash()));
+        }
+        witnessed.retainAll(supplied);
+        Assertions.assertTrue(witnessed.isEmpty(),
+                label + ": scripts both referenced and witnessed (ExtraneousScriptWitnessesUTXOW): " + witnessed);
+        return supplied.size();
     }
 
     /**
@@ -2468,7 +2600,9 @@ public class OfflineCip68EvalTest {
                 // exact slot is immaterial here — validTo does not affect what the evaluator
                 // scores or what the outputs decode to.
                 org.cardanofoundation.conversions.ClasspathConversionsFactory.createConverters(
-                        org.cardanofoundation.conversions.domain.NetworkType.PREVIEW));
+                        org.cardanofoundation.conversions.domain.NetworkType.PREVIEW),
+                CclTestWiring.deployments(chain),
+                CclTestWiring.quickTx(chain, hybridUtxoSupplier));
 
         var adminPkh = new Address(BootstrapFixture.ADMIN.baseAddress())
                 .getPaymentCredentialHash().map(HexUtil::encodeHexString).orElseThrow();
@@ -2737,7 +2871,9 @@ public class OfflineCip68EvalTest {
                 chain.protocolParamsSupplier(),
                 registry,
                 Mockito.mock(CustomStakeRegistrationRepository.class),
-                registrationsAllRegistered());
+                registrationsAllRegistered(),
+                CclTestWiring.deployments(chain),
+                CclTestWiring.quickTx(chain));
     }
 
     /**
